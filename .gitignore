@@ -107,7 +107,11 @@ venv.bak/
 # User Data & Local Config
 profiles/*.db
 profiles/*.json
+profiles/*.db-shm
+profiles/*.db-wal
 repertoires/*.db
+repertoires/*.db-shm
+repertoires/*.db-wal
 config.json
 
 # IDEs
