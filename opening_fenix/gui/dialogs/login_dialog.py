@@ -8,8 +8,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
 from PyQt6.QtCore import Qt, QSize
-from opening_fenix.core.data_tools import get_base_path, get_user_dir
-from opening_fenix.gui.styles import COLORS, LOGIN_DIALOG_STYLE
+from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
+from opening_fenix.gui.styles import get_login_dialog_style, COLORS
+from opening_fenix.gui.scaling import scale
+
 
 class RepertoireButton(QPushButton):
     def __init__(self, name, parent=None):
@@ -17,8 +19,9 @@ class RepertoireButton(QPushButton):
         self.repo_name = name
         self.setCheckable(True)
         self.setChecked(False)
-        self.setFixedHeight(50)
+        self.setFixedHeight(scale(50))
         self.update_style()
+
         self.toggled.connect(self.update_style)
 
     def update_style(self):
@@ -28,10 +31,11 @@ class RepertoireButton(QPushButton):
                     background-color: {COLORS['burnt_orange']};
                     color: white;
                     border: 2px solid #e67e22;
-                    border-radius: 12px;
-                    font-size: 16px;
+                    border-radius: {scale(12)}px;
+                    font-size: {scale(16)}px;
                     font-weight: bold;
                 }}
+
             """)
         else:
             self.setStyleSheet(f"""
@@ -39,10 +43,11 @@ class RepertoireButton(QPushButton):
                     background-color: rgba(255, 255, 255, 0.1);
                     color: white;
                     border: 1px solid rgba(255, 255, 255, 0.2);
-                    border-radius: 12px;
-                    font-size: 16px;
+                    border-radius: {scale(12)}px;
+                    font-size: {scale(16)}px;
                     font-weight: bold;
                 }}
+
                 QPushButton:hover {{
                     background-color: rgba(255, 255, 255, 0.2);
                 }}
@@ -52,26 +57,31 @@ class RepertoireSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Repertoires wählen")
-        self.setMinimumSize(450, 500)
+        self.setMinimumSize(scale(450), scale(500))
         self.selected_repos = []
+
         self.repo_buttons = []
         
         # Reuse Login Style for consistency
-        self.setStyleSheet(LOGIN_DIALOG_STYLE)
+        self.setStyleSheet(get_login_dialog_style())
+        
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
+
         
         lbl_title = QLabel("Repertoires auswählen")
         lbl_title.setObjectName("LoginTitle")
-        lbl_title.setStyleSheet("font-size: 24px;")
+        lbl_title.setStyleSheet(f"font-size: {scale(24)}px;")
         layout.addWidget(lbl_title)
+
         
         lbl_sub = QLabel("Wähle die Repertoires für dein neues Profil:")
         lbl_sub.setObjectName("LoginSubtitle")
         layout.addWidget(lbl_sub)
         
-        layout.addSpacing(20)
+        layout.addSpacing(scale(20))
+
 
         # Scroll Area for Buttons
         self.scroll_area = QScrollArea()
@@ -81,7 +91,8 @@ class RepertoireSelectionDialog(QDialog):
         scroll_widget = QWidget()
         scroll_widget.setStyleSheet("background: transparent;")
         self.grid_layout = QGridLayout(scroll_widget)
-        self.grid_layout.setSpacing(15)
+        self.grid_layout.setSpacing(scale(15))
+
         
         repo_dir = os.path.join(get_user_dir(), "repertoires")
         if os.path.exists(repo_dir):
@@ -101,7 +112,8 @@ class RepertoireSelectionDialog(QDialog):
         self.scroll_area.setWidget(scroll_widget)
         layout.addWidget(self.scroll_area)
         
-        layout.addSpacing(20)
+        layout.addSpacing(scale(20))
+
 
         btn_ok = QPushButton("✔ Profil erstellen")
         btn_ok.setObjectName("PrimaryAction")
@@ -122,35 +134,39 @@ class ProfileGridButton(QPushButton):
         self.profile_name = name
         self.setProperty("class", "ProfileGridButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumHeight(50)
+        self.setMinimumHeight(scale(50))
+
 
 class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Opening Fenix - Login")
-        self.setMinimumSize(700, 520)
+        self.setMinimumSize(scale(700), scale(520))
         self.selected_profile = None
+
         self.open_creator_requested = False
 
-        # Apply the refined beige glassmorphism style
-        self.setStyleSheet(LOGIN_DIALOG_STYLE)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setStyleSheet(get_login_dialog_style())
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 30, 30, 30)
+        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
         layout.setSpacing(0)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Header Section (Tightened)
         header_layout = QVBoxLayout()
         header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.setSpacing(5)
+        header_layout.setSpacing(scale(5))
+
 
         logo_label = QLabel()
         logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
         if os.path.exists(logo_path):
             pixmap = QPixmap(logo_path)
-            logo_label.setPixmap(pixmap.scaledToWidth(80, Qt.TransformationMode.SmoothTransformation))
+            logo_label.setPixmap(pixmap.scaledToWidth(scale(80), Qt.TransformationMode.SmoothTransformation))
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         header_layout.addWidget(logo_label)
 
         title_label = QLabel("OPENING FENIX")
@@ -164,13 +180,15 @@ class LoginDialog(QDialog):
         header_layout.addWidget(subtitle_label)
 
         layout.addLayout(header_layout)
-        layout.addSpacing(25)
+        layout.addSpacing(scale(25))
+
 
         # Profile Grid Container
         self.grid_container = QFrame()
         self.grid_container.setObjectName("ProfileGridContainer")
         grid_container_layout = QVBoxLayout(self.grid_container)
-        grid_container_layout.setContentsMargins(20, 20, 20, 20)
+        grid_container_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+
 
         # Scroll Area for the Grid
         self.scroll_area = QScrollArea()
@@ -180,33 +198,37 @@ class LoginDialog(QDialog):
         self.scroll_content = QWidget()
         self.scroll_content.setStyleSheet("background: transparent;")
         self.profile_grid = QGridLayout(self.scroll_content)
-        self.profile_grid.setSpacing(15)
+        self.profile_grid.setSpacing(scale(15))
         self.profile_grid.setContentsMargins(0, 0, 0, 0)
+
         
         self.scroll_area.setWidget(self.scroll_content)
         grid_container_layout.addWidget(self.scroll_area)
         
         layout.addWidget(self.grid_container, 1)
 
-        layout.addSpacing(25)
+        layout.addSpacing(scale(25))
 
         # Buttons in a horizontal layout at the bottom
         bottom_button_layout = QHBoxLayout()
-        bottom_button_layout.setSpacing(15)
+        bottom_button_layout.setSpacing(scale(15))
+
         
         # Primary Action: Repertoire Creator
         self.btn_creator = QPushButton("🛠  REPERTOIRE CREATOR")
         self.btn_creator.setObjectName("PrimaryAction")
         self.btn_creator.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_creator.setFixedHeight(60)
+        self.btn_creator.setFixedHeight(scale(60))
         self.btn_creator.clicked.connect(self.request_creator)
+
         bottom_button_layout.addWidget(self.btn_creator, 1)
 
         # Secondary Action: New Profile
         self.btn_new = QPushButton("+  NEUES PROFIL ERSTELLEN")
         self.btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_new.setFixedHeight(60)
+        self.btn_new.setFixedHeight(scale(60))
         self.btn_new.clicked.connect(self.create_new_profile)
+
         bottom_button_layout.addWidget(self.btn_new, 1)
 
         layout.addLayout(bottom_button_layout)
@@ -267,7 +289,24 @@ class LoginDialog(QDialog):
         # Sort by timestamp descending (most recent first)
         profile_data.sort(key=lambda x: x[1], reverse=True)
 
-        row, col = 0, 0
+        # 1. Add special "Freies Training" button first
+        free_btn = ProfileGridButton("Freies Training")
+        # Special styling for the free training button
+        free_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                border: 2px solid #e67e22;
+                font-weight: bold;
+                color: white;
+            }}
+            QPushButton:hover {{
+                background-color: #e67e22;
+            }}
+        """)
+        free_btn.clicked.connect(lambda: self.select_profile("Freies Training"))
+        self.profile_grid.addWidget(free_btn, 0, 0)
+
+        row, col = 0, 1
         for name, ts in profile_data:
             btn = ProfileGridButton(name)
             btn.clicked.connect(lambda checked, n=name: self.select_profile(n))

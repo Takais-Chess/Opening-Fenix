@@ -3,7 +3,7 @@ from typing import Type
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.decl_api import DeclarativeMeta
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import NullPool, StaticPool
 from opening_fenix.core.db.models import Base, UserBase
 
 class DatabaseManager:
@@ -23,8 +23,11 @@ class DatabaseManager:
             db_filename: The file path to the SQLite database.
             base: The declarative base class containing the metadata to create tables.
         """
-        os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
-        self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 15}, poolclass=NullPool)
+        if db_filename == ":memory:":
+            self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
+        else:
+            os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
+            self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 15}, poolclass=NullPool)
         
         @event.listens_for(self.engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
