@@ -79,3 +79,12 @@ Build a rock-solid foundation for the application by ensuring all core services 
 * **Robust Cleanup:** Implemented resilient temporary directory management in `conftest.py` to handle Windows-specific file locks.
 * **Input Validation:** Added comprehensive validation for PGN imports, priority calculations, and engine analysis.
 * **Move Integrity:** Enforced legal move checks in the `CreatorBackend` to prevent database corruption.
+
+## 10. Lichess API Token Interface
+**Concept:**
+Provide a user-friendly way to input and manage the Lichess API token within the application, rather than requiring manual editing of `config.json`.
+
+**Implementation Ideas:**
+* **Settings Dialog:** A new tab in the settings window where the user can paste their token.
+* **Token Validation:** A "Test Connection" button that verifies the token by making a simple request to the Lichess API.
+* **Startup Check:** If the application starts and no token is found in `config.json`, prompt the user with a setup wizard to provide one.

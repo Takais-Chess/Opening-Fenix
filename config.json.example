@@ -1,0 +1,9 @@
+{
+    "engine_path": "path/to/your/stockfish.exe",
+    "lichess_delay": 0.8,
+    "last_profile": "Default",
+    "theme": "Blau (Turnier)",
+    "master_volume": 50,
+    "last_active_repertoire": "",
+    "lichess_token": "YOUR_LICHESS_TOKEN_HERE"
+}
