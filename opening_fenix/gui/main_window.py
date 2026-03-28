@@ -34,8 +34,12 @@ from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
 from opening_fenix.creator.creator_window import CreatorWindow
 
 # Import centralized styles
-from opening_fenix.gui.styles import MAIN_WINDOW_STYLE, COLORS
+from opening_fenix.gui.styles import get_main_window_style, COLORS
+
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
+from opening_fenix.gui.scaling import scale
+from opening_fenix.core.logger import logger
+
 
 class MainWindow(QMainWindow):
     switch_requested = False
@@ -49,8 +53,9 @@ class MainWindow(QMainWindow):
         if os.path.exists(win_icon_path):
             self.setWindowIcon(QIcon(win_icon_path))
 
-        self.setMinimumSize(1000, 700)
-        self.resize(1400, 850)
+        self.setMinimumSize(scale(1000), scale(700))
+        self.resize(scale(1400), scale(850))
+
         
         self.repertoire_manager = RepertoireManager(profile_name=profile_name)
         self.training_manager = TrainingManager(profile_name=profile_name, repertoire_manager=self.repertoire_manager)
@@ -86,8 +91,10 @@ class MainWindow(QMainWindow):
             self.change_repertoire(None)
         
         self.set_button_state('start')
+        self.setStyleSheet(get_main_window_style())
 
     def showEvent(self, event):
+
         super().showEvent(event)
         QTimer.singleShot(0, self.trigger_board_adjust)
         QTimer.singleShot(100, self.trigger_board_adjust)
@@ -102,7 +109,8 @@ class MainWindow(QMainWindow):
             self.board_widget.update()
 
     def init_ui(self):
-        self.setStyleSheet(MAIN_WINDOW_STYLE)
+        self.setStyleSheet(get_main_window_style())
+
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -112,22 +120,25 @@ class MainWindow(QMainWindow):
 
         # --- 0. CUSTOM TITLE BAR (MERGED) ---
         self.custom_title_bar = CustomTitleBar(self, title=f" {self.profile_name}")
-        self.custom_title_bar.setFixedHeight(65)
+        self.custom_title_bar.setFixedHeight(scale(65))
         main_layout.addWidget(self.custom_title_bar)
+
 
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(10, 6, 20, 6)
         top_layout.setSpacing(0)
 
         self.btn_scroll_left = QPushButton("◄")
-        self.btn_scroll_left.setFixedSize(30, 40)
-        self.btn_scroll_left.setStyleSheet("border: none; background: transparent; color: #8d6e63; font-size: 18px;")
+        self.btn_scroll_left.setFixedSize(scale(30), scale(40))
+        self.btn_scroll_left.setStyleSheet(f"border: none; background: transparent; color: #8d6e63; font-size: {scale(18)}px;")
+
         self.btn_scroll_left.clicked.connect(self.scroll_tabs_left)
         self.btn_scroll_left.hide()
 
         self.btn_scroll_right = QPushButton("►")
-        self.btn_scroll_right.setFixedSize(30, 40)
-        self.btn_scroll_right.setStyleSheet("border: none; background: transparent; color: #8d6e63; font-size: 18px;")
+        self.btn_scroll_right.setFixedSize(scale(30), scale(40))
+        self.btn_scroll_right.setStyleSheet(f"border: none; background: transparent; color: #8d6e63; font-size: {scale(18)}px;")
+
         self.btn_scroll_right.clicked.connect(self.scroll_tabs_right)
         self.btn_scroll_right.hide()
 
@@ -162,26 +173,30 @@ class MainWindow(QMainWindow):
         self.btn_filter.setFlat(True)
         # Added subtle hover styling for the top bar flat buttons
         self.btn_filter.setStyleSheet(f"""
-            QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: 14px; border-radius: 18px; }}
+            QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
             QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
         """)
+
         self.btn_filter.clicked.connect(self.show_filter_menu)
 
         self.lbl_elo = QLabel("🎓 800")
-        self.lbl_elo.setStyleSheet(f"font-size: 20px; color: {COLORS['burnt_orange']}; font-weight: bold;")
+        self.lbl_elo.setStyleSheet(f"font-size: {scale(20)}px; color: {COLORS['burnt_orange']}; font-weight: bold;")
+
         self.btn_switch_profile = QPushButton(self.profile_name)
         self.btn_switch_profile.setFlat(True)
         self.btn_switch_profile.setStyleSheet(f"""
-            QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: 14px; border-radius: 18px; }}
+            QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
             QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
         """)
+
         self.btn_switch_profile.clicked.connect(self.switch_profile)
         self.btn_settings = QPushButton("⚙")
-        self.btn_settings.setFixedSize(40, 40)
+        self.btn_settings.setFixedSize(scale(40), scale(40))
         self.btn_settings.setStyleSheet(f"""
-            QPushButton {{ font-size: 24px; border: none; background: transparent; border-radius: 20px; }}
+            QPushButton {{ font-size: {scale(24)}px; border: none; background: transparent; border-radius: {scale(20)}px; }}
             QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
         """)
+
         self.btn_settings.clicked.connect(self.open_settings)
 
         top_right_layout.addWidget(self.btn_filter)
@@ -193,6 +208,7 @@ class MainWindow(QMainWindow):
         # Apply GlassPill classes and small drop shadows to the top elements
         for pill in [self.repo_scroll, top_right_container]:
             pill.setProperty("class", "GlassPill")
+            self.repolish(pill)
             shadow = QGraphicsDropShadowEffect()
             shadow.setBlurRadius(10)
             shadow.setColor(QColor(0, 0, 0, 30))
@@ -237,8 +253,9 @@ class MainWindow(QMainWindow):
         stats_actions_row = QHBoxLayout()
         stats_actions_row.setSpacing(15)
         self.progress_bar = PieChartWidget()
-        self.progress_bar.setMinimumSize(160, 160)
+        self.progress_bar.setMinimumSize(scale(160), scale(160))
         stats_actions_row.addWidget(self.progress_bar, 1)
+
 
         actions_grid = QGridLayout()
         actions_grid.setSpacing(8)
@@ -262,8 +279,9 @@ class MainWindow(QMainWindow):
         lichess_icon_path = os.path.join(get_base_path(), "assets", "Icons", "lichess.png")
         if os.path.exists(lichess_icon_path):
             self.btn_lichess.setIcon(QIcon(lichess_icon_path))
-            self.btn_lichess.setIconSize(QSize(24, 24))
+            self.btn_lichess.setIconSize(QSize(scale(24), scale(24)))
         else:
+
             self.btn_lichess.setText("🔬")
         self.btn_lichess.clicked.connect(self.open_lichess_analysis)
         self.btn_lichess.setToolTip("<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse.")
@@ -299,11 +317,13 @@ class MainWindow(QMainWindow):
 
     def scroll_tabs_left(self):
         sb = self.repo_scroll.horizontalScrollBar()
-        sb.setValue(sb.value() - 100)
+        sb.setValue(sb.value() - scale(100))
+
 
     def scroll_tabs_right(self):
         sb = self.repo_scroll.horizontalScrollBar()
-        sb.setValue(sb.value() + 100)
+        sb.setValue(sb.value() + scale(100))
+
 
     def update_tab_scroll_arrows(self):
         sb = self.repo_scroll.horizontalScrollBar()
@@ -414,8 +434,9 @@ class MainWindow(QMainWindow):
             layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(5)
 
             mini_donut = PieChartWidget(parent=container, show_text=False)
-            mini_donut.setFixedSize(24, 24)
+            mini_donut.setFixedSize(scale(24), scale(24))
             mini_donut.update_stats(new, due, dist)
+
 
             btn = QPushButton(repo_name)
             btn.setObjectName("RepoTab"); btn.setCheckable(True); btn.setProperty("repo_name", repo_name)
@@ -432,10 +453,13 @@ class MainWindow(QMainWindow):
     def update_stats_display(self):
         """
         Schedules an update for the large statistics chart.
-        Uses a short timer to avoid blocking the main thread during fast move inputs.
+        Uses a timer to avoid blocking the main thread during fast move inputs.
+        Longer delay during active training for less DB overhead.
         """
         if not self.stats_update_timer.isActive():
-            self.stats_update_timer.start(50) # 50ms delay
+            # Use longer debounce during active training for less overhead
+            delay = 150 if self.button_state in ('waiting_for_move', 'correct') else 50
+            self.stats_update_timer.start(delay)
             
     def _do_update_stats_display(self):
         if not self.repertoire_manager.active_repertoire_name:
@@ -564,7 +588,10 @@ class MainWindow(QMainWindow):
             if item.get('comment'): html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{item['comment']}</p>"
         html += "</body>"
         self.txt_notation.setHtml(html)
-        self.txt_notation.verticalScrollBar().setValue(self.txt_notation.verticalScrollBar().maximum())
+        # Use a singleShot timer to ensure the layout is complete before scrolling
+        QTimer.singleShot(10, lambda: self.txt_notation.verticalScrollBar().setValue(
+            self.txt_notation.verticalScrollBar().maximum()
+        ))
 
     def open_settings(self):
         SettingsDialog(self).exec()
@@ -605,6 +632,7 @@ class MainWindow(QMainWindow):
 
     def init_animation(self):
         self.board_widget.piece_slide_finished.connect(self.animation_step)
+        self.board_widget.skip_all_animations_requested.connect(self.skip_all_animations)
 
     def start_animation(self, path_to_animate):
         if path_to_animate:
@@ -625,10 +653,16 @@ class MainWindow(QMainWindow):
                 if clean_fen(item['fen']) == current_fen: match_idx = i; break
         if match_idx != -1 or current_fen == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -":
             self.animation_moves = full_moves[match_idx + 1:]
+            logger.debug(f"Animation: starting from match_idx {match_idx}, {len(self.animation_moves)} moves remaining.")
         else:
-            self.board_widget.set_fen(chess.STARTING_FEN); self.animation_moves = full_moves
-        if not self.animation_moves: self.finalize_animation_state()
-        else: self._advance_animation_sequence()
+            logger.info("Animation: current board position not found in history. Resetting to STARTING_FEN.")
+            self.board_widget.set_fen(chess.STARTING_FEN)
+            self.animation_moves = full_moves
+
+        if not self.animation_moves:
+            self.finalize_animation_state()
+        else:
+            self._advance_animation_sequence()
 
     def _advance_animation_sequence(self):
         if not self.animation_moves: self.finalize_animation_state(); return
@@ -636,12 +670,46 @@ class MainWindow(QMainWindow):
         try:
             move = self.board_widget.board.parse_san(move_san)
             piece = self.board_widget.board.piece_at(move.from_square)
+            if not piece:
+                logger.error(f"Animation: No piece found at {chess.square_name(move.from_square)} for move {move_san}")
+                self.finalize_animation_state()
+                return
             self.board_widget.start_piece_slide(piece, move.from_square, move.to_square, move)
-        except: self.finalize_animation_state()
+        except Exception as e:
+            logger.error(f"Animation: Failed to parse or play move '{move_san}': {e}")
+            self.finalize_animation_state()
 
     def animation_step(self):
         self.play_sound("move")
         self._advance_animation_sequence()
+
+    def skip_all_animations(self):
+        """Instantly finishes all pending moves in the current animation sequence."""
+        if not (self.board_widget.is_animating or self.animation_moves):
+            return
+
+        self.play_sound("move")
+        
+        # 1. Handle currently sliding piece
+        if self.board_widget.is_animating:
+            if self.board_widget.animating_piece_data:
+                move = self.board_widget.animating_piece_data['move']
+                self.board_widget.board.push(move)
+                self.board_widget.last_move = move
+            self.board_widget.abort_piece_slide()
+            
+        # 2. Handle all remaining moves in the sequence
+        while self.animation_moves:
+            move_san = self.animation_moves.pop(0)
+            try:
+                move = self.board_widget.board.parse_san(move_san)
+                self.board_widget.board.push(move)
+                self.board_widget.last_move = move
+            except:
+                pass
+                
+        # 3. Finalize UI state
+        self.finalize_animation_state()
 
     def finalize_animation_state(self):
         self.set_button_state('waiting_for_move')
@@ -667,6 +735,11 @@ class MainWindow(QMainWindow):
             self.change_repertoire(visible_repos[0])
         else:
             self.change_repertoire(None)
+
+    def repolish(self, widget):
+        if widget:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def closeEvent(self, event):
         """Clean up resources before closing."""

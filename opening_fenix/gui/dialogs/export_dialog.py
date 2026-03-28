@@ -3,31 +3,38 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QLabel, QPushButton, QGroupBox, QFormLayout
 )
 from PyQt6.QtCore import Qt
-from opening_fenix.gui.styles import EXPORT_DIALOG_STYLE, COLORS
+from opening_fenix.gui.styles import get_export_dialog_style, COLORS
+from opening_fenix.gui.scaling import scale
+
+
 
 class ExportDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Exportieren")
-        self.setMinimumWidth(350)
+        self.setMinimumWidth(scale(350))
         self.result_data = None
+
         self.backend = backend
-        self.setStyleSheet(EXPORT_DIALOG_STYLE)
+        self.setStyleSheet(get_export_dialog_style())
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
         
+        
         lbl_title = QLabel("Repertoire Exportieren")
-        lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['brown_text']}; margin-bottom: 10px;")
+        lbl_title.setStyleSheet(f"font-size: {scale(20)}px; font-weight: bold; color: {COLORS['brown_text']}; margin-bottom: {scale(10)}px;")
         lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         layout.addWidget(lbl_title)
 
         # Format Selection
         g_fmt = QGroupBox("1. Format")
         l_fmt = QVBoxLayout(g_fmt)
-        l_fmt.setSpacing(10)
+        l_fmt.setSpacing(scale(10))
         self.bg_fmt = QButtonGroup(self)
+
         self.r_pgn = QRadioButton("PGN (Textdatei für andere Programme)")
         self.r_db = QRadioButton("Datenbank (.db Datei für Backup)")
         self.r_pgn.setChecked(True)
@@ -44,8 +51,9 @@ class ExportDialog(QDialog):
         # Scope Selection
         g_scope = QGroupBox("2. Umfang")
         l_scope = QVBoxLayout(g_scope)
-        l_scope.setSpacing(10)
+        l_scope.setSpacing(scale(10))
         self.bg_scope = QButtonGroup(self)
+
         self.r_all = QRadioButton("Ganzes Repertoire")
         self.r_curr = QRadioButton("Nur ab aktueller Position auf dem Brett")
         self.r_all.setChecked(True)
@@ -58,7 +66,8 @@ class ExportDialog(QDialog):
         # Options
         self.g_opt = QGroupBox("3. Zusätzliche PGN Optionen")
         l_opt = QFormLayout(self.g_opt)
-        l_opt.setVerticalSpacing(15)
+        l_opt.setVerticalSpacing(scale(15))
+
         
         # Transpositions handling
         self.combo_transpos = QComboBox()
@@ -94,7 +103,7 @@ class ExportDialog(QDialog):
         l_opt.addRow(h_l)
         layout.addWidget(self.g_opt)
 
-        layout.addSpacing(10)
+        layout.addSpacing(scale(10))
 
         # Buttons
         h_btn = QHBoxLayout()

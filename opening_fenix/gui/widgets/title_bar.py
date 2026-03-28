@@ -3,18 +3,22 @@ from PyQt6.QtCore import Qt, QPoint
 from PyQt6.QtGui import QIcon
 
 from opening_fenix.gui.styles import COLORS
+from opening_fenix.gui.scaling import scale
+
 
 class CustomTitleBar(QWidget):
     def __init__(self, parent=None, title="Opening Fenix"):
         super().__init__(parent)
         self.parent_window = parent
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(10, 2, 10, 0)
-        self.layout.setSpacing(5)
+        self.layout.setContentsMargins(scale(10), 0, scale(10), 0)
+        self.layout.setSpacing(scale(5))
+
         
         # We give the title bar a slightly darker beige or semi-transparent background later in QSS
         self.setObjectName("CustomTitleBar")
-        self.setFixedHeight(35)
+        self.setFixedHeight(scale(35))
+
         
         # Profile title label removed (Phase 7 top bar polish)
         
@@ -25,32 +29,36 @@ class CustomTitleBar(QWidget):
                 border: none;
                 background: transparent;
                 color: {COLORS['brown_text']};
-                font-size: 14px;
+                font-size: {scale(14)}px;
                 font-weight: bold;
-                border-radius: 4px;
+                border-radius: {scale(4)}px;
             }}
+
             QPushButton:hover {{
                 background-color: rgba(200, 200, 200, 0.5);
             }}
         """
         
         self.btn_minimize = QPushButton("—")
-        self.btn_minimize.setFixedSize(40, 25)
+        self.btn_minimize.setFixedSize(scale(40), scale(25))
         self.btn_minimize.setStyleSheet(btn_style)
+
         self.btn_minimize.clicked.connect(self.minimize_window)
-        self.layout.addWidget(self.btn_minimize)
+        self.layout.addWidget(self.btn_minimize, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.btn_maximize = QPushButton("🗖")
-        self.btn_maximize.setFixedSize(40, 25)
+        self.btn_maximize.setFixedSize(scale(40), scale(25))
         self.btn_maximize.setStyleSheet(btn_style)
+
         self.btn_maximize.clicked.connect(self.maximize_window)
-        self.layout.addWidget(self.btn_maximize)
+        self.layout.addWidget(self.btn_maximize, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(40, 25)
+        self.btn_close.setFixedSize(scale(40), scale(25))
         self.btn_close.setStyleSheet(btn_style + f"QPushButton:hover {{ background-color: {COLORS['burnt_orange']}; color: white; }}")
+
         self.btn_close.clicked.connect(self.close_window)
-        self.layout.addWidget(self.btn_close)
+        self.layout.addWidget(self.btn_close, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.start_pos = None
 

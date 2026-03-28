@@ -80,11 +80,21 @@ Build a rock-solid foundation for the application by ensuring all core services 
 * **Input Validation:** Added comprehensive validation for PGN imports, priority calculations, and engine analysis.
 * **Move Integrity:** Enforced legal move checks in the `CreatorBackend` to prevent database corruption.
 
-## 10. Lichess API Token Interface
+## ~~10. Lichess API Token Interface~~ (COMPLETED)
 **Concept:**
 Provide a user-friendly way to input and manage the Lichess API token within the application, rather than requiring manual editing of `config.json`.
 
-**Implementation Ideas:**
-* **Settings Dialog:** A new tab in the settings window where the user can paste their token.
-* **Token Validation:** A "Test Connection" button that verifies the token by making a simple request to the Lichess API.
-* **Startup Check:** If the application starts and no token is found in `config.json`, prompt the user with a setup wizard to provide one.
+**Implementation Details:**
+* **Settings Integration:** Added a dedicated section in the Creator Repertoire Settings for token management.
+* **Token Validation:** Implemented a "Verbindung testen" button that verifies the token against the Lichess API and displays the account username.
+* **Visibility Control:** Added a show/hide toggle for the token field to protect user privacy.
+* **Automatic Config Sync:** The application now automatically saves and loads the token from `config.json` without manual intervention.
+
+## ~~11. Prioritätsbasierte Level-Herabstufung~~ (COMPLETED)
+**Konzept:**
+Eine Funktion in den Repertoire-Einstellungen des Creators, mit der man Züge basierend auf ihrer Priorität (Häufigkeit) herabstufen oder umkategorisieren kann.
+
+**Umsetzungsideen:**
+* **Massenbearbeitung:** Ein Tool in den Einstellungen, das z.B. alle Züge mit einer Priorität > 1% automatisch auf Level 1 (oder ein anderes wählbares Level) setzt.
+* **Batch-Reorganisation:** Ermöglicht die schnelle Strukturierung eines großen Repertoires, indem wichtige (häufige) Züge priorisiert werden.
+* **Sicherheitsabfrage:** Anzeige der Anzahl der betroffenen Züge vor der Durchführung der Änderung.

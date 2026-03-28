@@ -1,4 +1,7 @@
+from opening_fenix.gui.scaling import scale
+
 # Centralized Color Palette
+
 COLORS = {
     "burnt_orange": "#d35400",
     "beige": "#fdf6e3",
@@ -16,9 +19,10 @@ COLORS = {
 }
 
 # Stylesheet for the MainWindow (Training Hub)
-MAIN_WINDOW_STYLE = f"""
+def get_main_window_style():
+    return f"""
     QMainWindow {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['beige']}, stop:1 #d1bfae); }}
-    QWidget {{ font-family: 'Segoe UI', 'Arial'; color: {COLORS['brown_text']}; }}
+    QWidget {{ font-family: 'Segoe UI', 'Arial'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     #CustomTitleBar {{ 
         background-color: transparent; 
@@ -30,50 +34,50 @@ MAIN_WINDOW_STYLE = f"""
         border: none; 
     }}
     
-    .GlassPill {{
+    *[class="GlassPill"] {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 18px;
-        padding: 5px 15px;
+        border-radius: {scale(15)}px;
+        padding: {scale(5)}px {scale(20)}px;
     }}
-    .GlassPill:hover {{
+    *[class="GlassPill"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
     }}
     
     QPushButton#RepoTab {{ 
         background-color: transparent; 
         border: none; 
-        padding: 10px 10px; 
-        font-size: 14px; 
+        padding: {scale(10)}px {scale(10)}px; 
+        font-size: {scale(14)}px; 
         font-weight: bold; 
         color: {COLORS['light_text']}; 
     }}
-    QPushButton#RepoTab:hover {{ color: {COLORS['burnt_orange']}; background-color: {COLORS['glass_bg']}; border-radius: 5px; }}
+    QPushButton#RepoTab:hover {{ color: {COLORS['burnt_orange']}; background-color: {COLORS['glass_bg']}; border-radius: {scale(5)}px; }}
     QPushButton#RepoTab:checked {{ 
         color: {COLORS['burnt_orange']}; 
-        border-bottom: 3px solid {COLORS['burnt_orange']}; 
+        border-bottom: {scale(3)}px solid {COLORS['burnt_orange']}; 
     }}
     
     #BoardPanel, #SidePanel {{ 
         background-color: {COLORS['glass_bg']}; 
-        border-radius: 15px; 
+        border-radius: {scale(15)}px; 
         border: 1px solid {COLORS['glass_border']}; 
     }}
     
     QTextBrowser#NotationView {{ 
         background-color: transparent; 
         border: none; 
-        font-size: 18px; 
+        font-size: {scale(18)}px; 
         line-height: 1.5; 
     }}
     
     QPushButton#ActionButton {{ 
         background-color: {COLORS['dark_beige']}; 
         border: 1px solid {COLORS['border']}; 
-        border-radius: 8px; 
-        padding: 5px; 
-        font-size: 18px; 
-        min-height: 40px; 
+        border-radius: {scale(25)}px; 
+        padding: {scale(5)}px {scale(15)}px; 
+        font-size: {scale(18)}px; 
+        min-height: {scale(40)}px; 
     }}
     QPushButton#ActionButton:hover {{ background-color: {COLORS['button_hover']}; }}
     QPushButton#ActionButton:checked {{ 
@@ -85,10 +89,10 @@ MAIN_WINDOW_STYLE = f"""
     QPushButton#StartButton {{ 
         background-color: {COLORS['burnt_orange']}; 
         color: white; 
-        border-radius: 25px; 
-        font-size: 18px; 
+        border-radius: {scale(25)}px; 
+        font-size: {scale(18)}px; 
         font-weight: bold; 
-        padding: 15px; 
+        padding: {scale(15)}px; 
     }}
     QPushButton#StartButton:hover {{ background-color: #e67e22; }}
     QPushButton#StartButton:disabled {{ background-color: #bdc3c7; }}
@@ -97,15 +101,18 @@ MAIN_WINDOW_STYLE = f"""
         background-color: {COLORS['white']}; 
         color: {COLORS['brown_text']}; 
         border: 1px solid {COLORS['border']}; 
-        padding: 5px; 
-        border-radius: 4px; 
+        padding: {scale(5)}px; 
+        border-radius: {scale(4)}px; 
     }}
-"""
+    """
+
+
 
 # Stylesheet for the CreatorWindow
-CREATOR_WINDOW_STYLE = f"""
+def get_creator_window_style():
+    return f"""
     QMainWindow {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['beige']}, stop:1 #d1bfae); }}
-    QWidget {{ font-family: 'Segoe UI'; color: {COLORS['brown_text']}; }}
+    QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     #CustomTitleBar {{ 
         background-color: transparent; 
@@ -114,33 +121,34 @@ CREATOR_WINDOW_STYLE = f"""
     
     #BoardPanel, #SidePanel {{ 
         background-color: {COLORS['glass_bg']}; 
-        border-radius: 15px; 
+        border-radius: {scale(15)}px; 
         border: 1px solid {COLORS['glass_border']}; 
     }}
 
-    .GlassPill {{
+    *[class="GlassPill"] {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 18px;
-        padding: 5px 15px;
+        border-radius: {scale(15)}px;
+        padding: {scale(4)}px {scale(20)}px;
+        min-height: {scale(32)}px;
     }}
-    .GlassPill:hover {{
+    *[class="GlassPill"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
     }}
     
     QGroupBox {{ 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 12px; 
+        border-radius: {scale(12)}px; 
         margin-top: 1.5em; 
         font-weight: bold; 
-        font-size: 13px;
+        font-size: {scale(13)}px;
         background-color: rgba(255, 255, 255, 0.1); 
-        padding: 15px; 
+        padding: {scale(15)}px; 
     }}
     QGroupBox::title {{ 
         subcontrol-origin: margin; 
-        left: 10px; 
-        padding: 0 5px; 
+        left: {scale(10)}px; 
+        padding: 0 {scale(5)}px; 
         color: {COLORS['brown_text']};
     }}
     
@@ -151,7 +159,7 @@ CREATOR_WINDOW_STYLE = f"""
     }}
     QTreeWidget::item, QTableWidget::item {{
         border-bottom: 1px solid rgba(0, 0, 0, 0.05);
-        padding: 4px;
+        padding: {scale(4)}px;
     }}
     QTreeWidget::item:hover, QTableWidget::item:hover {{
         background-color: rgba(211, 84, 0, 0.2);
@@ -159,7 +167,7 @@ CREATOR_WINDOW_STYLE = f"""
     QTreeWidget::item:selected, QTableWidget::item:selected {{
         background-color: {COLORS['burnt_orange']};
         color: white;
-        border-radius: 4px;
+        border-radius: {scale(4)}px;
     }}
 
     QTabWidget::pane {{
@@ -169,9 +177,9 @@ CREATOR_WINDOW_STYLE = f"""
     QTabBar::tab {{
         background: transparent;
         color: {COLORS['brown_text']};
-        padding: 8px 16px;
-        margin-right: 4px;
-        border-radius: 12px;
+        padding: {scale(8)}px {scale(16)}px;
+        margin-right: {scale(4)}px;
+        border-radius: {scale(12)}px;
         font-weight: bold;
     }}
     QTabBar::tab:selected {{
@@ -183,15 +191,15 @@ CREATOR_WINDOW_STYLE = f"""
         background: rgba(255, 255, 255, 0.3);
     }}
 
-    .SymbolButton {{
+    *[class="SymbolButton"] {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 4px;
+        border-radius: {scale(4)}px;
         font-weight: bold;
-        font-size: 16px;
+        font-size: {scale(16)}px;
         padding: 0px;
     }}
-    .SymbolButton:hover {{
+    *[class="SymbolButton"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
     }}
 
@@ -199,9 +207,9 @@ CREATOR_WINDOW_STYLE = f"""
         background-color: transparent;
         color: {COLORS['brown_text']};
         font-weight: bold;
-        padding: 5px;
+        padding: {scale(5)}px;
         border: none;
-        border-bottom: 2px solid {COLORS['glass_border']};
+        border-bottom: {scale(2)}px solid {COLORS['glass_border']};
     }}
     QTreeWidget::item:selected, QTableWidget::item:selected {{
         background-color: {COLORS['burnt_orange']};
@@ -216,20 +224,24 @@ CREATOR_WINDOW_STYLE = f"""
     QComboBox {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 12px;
-        padding: 5px 15px;
-        min-height: 25px;
+        border-radius: {scale(15)}px;
+        padding-left: {scale(10)}px;
+        padding-right: {scale(10)}px;
+        min-height: {scale(32)}px;
+    }}
+    *[class="SmallCombo"] {{
+        border-radius: {scale(10)}px;
+        padding-right: {scale(8)}px;
+        padding-left: {scale(8)}px;
     }}
     QComboBox::drop-down {{
         border: none;
-        width: 30px;
+        width: 0px;
     }}
     QComboBox::down-arrow {{
         image: none;
-        border-left: 5px solid transparent;
-        border-right: 5px solid transparent;
-        border-top: 5px solid {COLORS['brown_text']};
-        margin-right: 10px;
+        width: 0;
+        height: 0;
     }}
     QComboBox QAbstractItemView {{
         background-color: {COLORS['beige']};
@@ -239,13 +251,31 @@ CREATOR_WINDOW_STYLE = f"""
         outline: none;
     }}
 
-    QLineEdit, QPlainTextEdit, QSpinBox {{
+    QLineEdit, QSpinBox {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 8px;
-        padding: 5px;
+        border-radius: {scale(15)}px;
+        padding-left: {scale(12)}px;
+        padding-right: {scale(12)}px;
+        min-height: {scale(32)}px;
         color: {COLORS['brown_text']};
         selection-background-color: rgba(211, 84, 0, 0.3);
+    }}
+    
+    QSpinBox::up-button, QSpinBox::down-button {{
+        width: {scale(30)}px;
+        background: transparent;
+        border: none;
+        subcontrol-origin: padding;
+        padding-right: {scale(10)}px;
+    }}
+    
+    QPlainTextEdit {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(12)}px;
+        padding: {scale(8)}px;
+        color: {COLORS['brown_text']};
     }}
     QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
         border: 1px solid {COLORS['burnt_orange']};
@@ -261,31 +291,38 @@ CREATOR_WINDOW_STYLE = f"""
     QSplitter::handle {{ background-color: transparent; }}
 """
 
+
+
 # Stylesheet for the Main Toolbar in CreatorWindow
-CREATOR_TOOLBAR_STYLE = f"""
+def get_creator_toolbar_style():
+    return f"""
     QToolBar {{ 
         background: transparent; 
         border: none; 
-        spacing: 10px; 
-        padding: 5px; 
+        spacing: {scale(10)}px; 
+        padding: {scale(5)}px; 
     }}
     QToolButton {{ 
-        background: {COLORS['glass_bg']}; 
+        background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
         font-weight: bold; 
         color: {COLORS['brown_text']}; 
-        padding: 5px 15px;
-        border-radius: 15px;
+        padding: {scale(8)}px {scale(24)}px;
+        border-radius: {scale(25)}px;
+        margin: {scale(2)}px;
     }}
     QToolButton:hover {{ 
-        background: rgba(255, 255, 255, 0.7); 
+        background-color: rgba(255, 255, 255, 0.7); 
     }}
 """
 
+
+
 # Stylesheet for RepoSettingsDialog
-REPO_SETTINGS_STYLE = f"""
+def get_repo_settings_style():
+    return f"""
     QDialog {{ background-color: {COLORS['beige']}; }}
-    QWidget {{ font-family: 'Segoe UI'; color: {COLORS['brown_text']}; }}
+    QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     QListWidget#Sidebar {{ 
         background-color: {COLORS['glass_bg']}; 
@@ -293,7 +330,7 @@ REPO_SETTINGS_STYLE = f"""
         border-right: 1px solid {COLORS['glass_border']}; 
         outline: none; 
     }}
-    QListWidget#Sidebar::item {{ padding: 15px; font-weight: bold; border-bottom: 1px solid {COLORS['glass_border']}; }}
+    QListWidget#Sidebar::item {{ padding: {scale(15)}px; font-weight: bold; border-bottom: 1px solid {COLORS['glass_border']}; }}
     QListWidget#Sidebar::item:selected {{ 
         background-color: {COLORS['glass_bg']}; 
         color: {COLORS['burnt_orange']}; 
@@ -301,19 +338,19 @@ REPO_SETTINGS_STYLE = f"""
     
     QGroupBox {{ 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 10px; 
+        border-radius: {scale(10)}px; 
         margin-top: 1.5em; 
         font-weight: bold; 
         background-color: {COLORS['glass_bg']}; 
-        padding: 15px; 
+        padding: {scale(15)}px; 
     }}
-    QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
+    QGroupBox::title {{ subcontrol-origin: margin; left: {scale(10)}px; padding: 0 {scale(5)}px; }}
     
     QPushButton {{ 
         background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 6px; 
-        padding: 8px 15px; 
+        border-radius: {scale(20)}px; 
+        padding: {scale(8)}px {scale(15)}px; 
         font-weight: bold; 
     }}
     QPushButton:hover {{ 
@@ -324,33 +361,35 @@ REPO_SETTINGS_STYLE = f"""
     QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {{ 
         background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 4px; 
-        padding: 5px; 
+        border-radius: {scale(15)}px; 
+        padding: {scale(5)}px; 
     }}
     
     QSplitter::handle {{ background-color: transparent; }}
 """
 
+
 # Stylesheet for ExportDialog
-EXPORT_DIALOG_STYLE = f"""
+def get_export_dialog_style():
+    return f"""
     QDialog {{ background-color: {COLORS['beige']}; }}
-    QWidget {{ font-family: 'Segoe UI'; color: {COLORS['brown_text']}; }}
+    QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     QGroupBox {{ 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 8px; 
+        border-radius: {scale(15)}px; 
         margin-top: 1.5em; 
         font-weight: bold; 
         background-color: {COLORS['glass_bg']}; 
-        padding: 15px; 
+        padding: {scale(15)}px; 
     }}
-    QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
+    QGroupBox::title {{ subcontrol-origin: margin; left: {scale(10)}px; padding: 0 {scale(5)}px; }}
     
     QPushButton {{ 
         background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 6px; 
-        padding: 8px 15px; 
+        border-radius: {scale(20)}px; 
+        padding: {scale(8)}px {scale(15)}px; 
         font-weight: bold; 
     }}
     QPushButton:hover {{ 
@@ -370,13 +409,15 @@ EXPORT_DIALOG_STYLE = f"""
     QSpinBox {{ 
         background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
-        border-radius: 4px; 
-        padding: 5px; 
+        border-radius: {scale(15)}px; 
+        padding: {scale(5)}px; 
     }}
 """
 
+
 # Stylesheet for LoginDialog
-LOGIN_DIALOG_STYLE = f"""
+def get_login_dialog_style():
+    return f"""
     QDialog {{ 
         background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['beige']}, stop:1 #d1bfae); 
     }}
@@ -387,14 +428,14 @@ LOGIN_DIALOG_STYLE = f"""
     }}
     
     #LoginTitle {{
-        font-size: 36px;
+        font-size: {scale(36)}px;
         font-weight: 900;
         color: {COLORS['brown_text']};
-        letter-spacing: 2px;
+        letter-spacing: {scale(2)}px;
     }}
     
     #LoginSubtitle {{
-        font-size: 16px;
+        font-size: {scale(16)}px;
         font-weight: 500;
         color: {COLORS['light_text']};
     }}
@@ -402,28 +443,28 @@ LOGIN_DIALOG_STYLE = f"""
     #ProfileGridContainer {{
         background-color: rgba(255, 255, 255, 0.3);
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 25px;
+        border-radius: {scale(25)}px;
     }}
     
-    QPushButton.ProfileGridButton {{
+    QPushButton[class="ProfileGridButton"] {{
         background-color: rgba(255, 255, 255, 0.5);
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 12px;
-        padding: 12px;
+        border-radius: {scale(12)}px;
+        padding: {scale(12)}px;
         color: {COLORS['brown_text']};
-        font-size: 14px;
+        font-size: {scale(14)}px;
         font-weight: 700;
         text-align: center;
-        min-width: 160px;
+        min-width: {scale(160)}px;
     }}
     
-    QPushButton.ProfileGridButton:hover {{
+    QPushButton[class="ProfileGridButton"]:hover {{
         background-color: rgba(255, 255, 255, 0.9);
         border-color: {COLORS['burnt_orange']};
         color: {COLORS['burnt_orange']};
     }}
     
-    QPushButton.ProfileGridButton:pressed {{
+    QPushButton[class="ProfileGridButton"]:pressed {{
         background-color: {COLORS['burnt_orange']};
         color: white;
     }}
@@ -431,10 +472,10 @@ LOGIN_DIALOG_STYLE = f"""
     QPushButton {{
         background-color: rgba(255, 255, 255, 0.4);
         border: 1px solid {COLORS['glass_border']};
-        border-radius: 15px;
-        padding: 15px;
+        border-radius: {scale(20)}px;
+        padding: {scale(15)}px;
         color: {COLORS['brown_text']};
-        font-size: 15px;
+        font-size: {scale(15)}px;
         font-weight: bold;
     }}
     
@@ -461,13 +502,13 @@ LOGIN_DIALOG_STYLE = f"""
     QScrollBar:vertical {{
         border: none;
         background: transparent;
-        width: 8px;
+        width: {scale(8)}px;
         margin: 0px;
     }}
     QScrollBar::handle:vertical {{
         background: rgba(0, 0, 0, 0.1);
-        min-height: 20px;
-        border-radius: 4px;
+        min-height: {scale(20)}px;
+        border-radius: {scale(4)}px;
     }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
         height: 0px;

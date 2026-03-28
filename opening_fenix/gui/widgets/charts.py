@@ -1,12 +1,15 @@
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush
 from PyQt6.QtCore import Qt, QRectF
+from opening_fenix.gui.scaling import scale
 
 class PieChartWidget(QWidget):
+
     def __init__(self, parent=None, show_text=True):
         super().__init__(parent)
         self.show_text = show_text
-        self.setMinimumSize(30, 30)
+        self.setMinimumSize(scale(30), scale(30))
+
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.data = {}
 

@@ -1,6 +1,11 @@
 # Opening Fenix V2 - Project Features
 
-Opening Fenix V2 is a chess repertoire management and training application. It allows users to build, analyze, and train their chess openings using local databases, stockfish engine analysis, and Lichess explorer data.
+Opening Fenix V2 is a chess repertoire management and training application. It allows users to build, analyze, and train their chess openings using local databases, stockfish engine analysis, and Lichess explorer data. The application features a premium Glassmorphism UI with full 4K support and smooth animations.
+
+## 1. User Interface & Aesthetics
+*   **Glassmorphism Design:** A modern, premium aesthetic with semi-transparent backgrounds, vibrant gradients, and sleek dark modes.
+*   **Resolution-Relative Scaling:** Fully responsive UI designed for High-DPI and 4K monitors. All fonts, buttons, and layouts scale proportionally to the screen resolution.
+*   **Premium Animations:** Native Qt-based piece movement animations featuring cubic easing for a natural feel, including piece "lifting" and shadow effects during moves.
 
 ## 1. Repertoire Creator (Creator Window)
 The core module for building and editing opening repertoires.
@@ -54,6 +59,10 @@ The core module for building and editing opening repertoires.
 *   **Probability Flow:** Complex algorithm to cascade move probabilities down the repertoire tree, handling both user turns (repertoire choices) and opponent turns (statistical likelihood).
 
 ## 3. Training Module (Main Window)
-*(Brief overview based on file context, assumes presence of standard training features)*
-*   **Spaced Repetition / Flashcards:** Train the repertoire positions against the computer.
-*   **Profile Management:** Supports different user profiles to track individual progress.
+The main module for practicing and mastering opening repertoires.
+
+*   **Spaced Repetition System (SRS):** Advanced training logic that schedules move reviews based on mastery levels (Level 0 to 5), ensuring efficient memory retention.
+*   **Adaptive Training:** Automatically presents moves that are "due" for training, while allowing manual selection of specific repertoires.
+*   **"Freies Training" (Free Training):** A stateless profile for immediate, progress-free practice. It uses an in-memory database to allow training without persisting progress to disk.
+*   **Profile Management:** Comprehensive profile system to track individual training progress, mastery levels, and SRS schedules across multiple repertoires.
+*   **Real-time Feedback:** Visual indicators for correct/incorrect moves and immediate repertoire tree navigation during practice.

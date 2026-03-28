@@ -65,13 +65,13 @@ def test_stats_update_after_training_move(window, sample_repertoire):
     window.button_state = 'waiting_for_move'
     window.check_user_move(chess.Move.from_uci(window.current_move_obj.uci))
     
-    # The update_stats_display method uses a 50ms QTimer. 
+    # The update_stats_display method uses a 150ms QTimer during active training. 
     # We must process events to let the timer fire.
     QApplication.processEvents()
     
     # Note: QTimer might need explicit sleeping in a test environment to trigger
     import time
-    time.sleep(0.1)
+    time.sleep(0.2)
     QApplication.processEvents()
 
     assert len(updates) > 0, "Big donut chart was not updated after executing a training move"

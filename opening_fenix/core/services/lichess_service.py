@@ -80,7 +80,8 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 params = {
                     'variant': 'standard',
                     'fen': pos.fen, 
-                    'ratings': ",".join(lichess_ratings)
+                    'ratings': ",".join(lichess_ratings),
+                    'speeds': 'rapid,classical'
                 }
                 query_string = urllib.parse.urlencode(params)
                 url = f"https://explorer.lichess.org/lichess?{query_string}"
@@ -249,3 +250,37 @@ def delete_lichess_data(repo_name: str, elo_category: str) -> Tuple[bool, str]:
     finally:
         session.close()
         db.close()
+
+
+def verify_lichess_token(token: str) -> Tuple[bool, str]:
+    """
+    Verifies a Lichess API token by making a request to the /api/account endpoint.
+    Returns (Success: bool, Message: str).
+    """
+    if not token or token == "YOUR_TOKEN_HERE":
+        return False, "Kein Token angegeben."
+
+    url = "https://lichess.org/api/account"
+    headers = {
+        'User-Agent': 'OpeningFenix/1.0',
+        'Authorization': f'Bearer {token}'
+    }
+
+    try:
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            if response.status == 200:
+                data = json.loads(response.read().decode('utf-8'))
+                username = data.get('username', 'Unbekannt')
+                return True, f"Verbindung erfolgreich! (Hallo {username})"
+            else:
+                return False, f"Fehler {response.status}: {response.reason}"
+    except urllib.error.HTTPError as e:
+        if e.code == 401:
+            return False, "Fehler 401: Ungültiges oder abgelaufenes Token."
+        elif e.code == 429:
+            return False, "Fehler 429: Zu viele Anfragen. Bitte warte einen Moment."
+        else:
+            return False, f"HTTP Fehler {e.code}: {e.reason}"
+    except Exception as e:
+        return False, f"Netzwerkfehler: {str(e)}"

@@ -177,7 +177,7 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                 if elo_category == 'masters':
                     url = f"https://explorer.lichess.org/masters?variant=standard&fen={urllib.parse.quote(p_clean)}"
                 else:
-                    url = f"https://explorer.lichess.org/lichess?variant=standard&fen={urllib.parse.quote(p_clean)}&ratings={','.join(ratings)}"
+                    url = f"https://explorer.lichess.org/lichess?variant=standard&fen={urllib.parse.quote(p_clean)}&ratings={','.join(ratings)}&speeds=rapid,classical"
                 
                 try:
                     headers = {'User-Agent': 'OpeningFenix/1.0'}

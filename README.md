@@ -4,11 +4,12 @@ Opening Fenix V2 is a powerful chess repertoire management and training applicat
 
 ## Features
 
-- **Premium Glassmorphism UI**: Modern, high-contrast interface for both the Login and Repertoire Creator windows.
+- **Premium Glassmorphism UI**: Modern, high-contrast interface with native Qt animations for smooth piece movement and interactions.
+- **High-DPI & 4K Support**: Fully responsive design with resolution-relative scaling for a sharp experience on any monitor.
 - **Robust Repertoire Creator**: Interactive chess board with move validation, hierarchical variation naming, and automated name propagation.
 - **Engine Integration**: Live position evaluation using UCI engines (e.g., Stockfish). Bulk analysis tools to automatically evaluate entire databases.
 - **Lichess Data Integration**: Statistical win rates and move frequencies across multiple ELO categories.
-- **Spaced Repetition Training**: Advanced SRS training schedules based on mastery levels.
+- **Spaced Repetition Training**: Advanced SRS training schedules based on mastery levels. Includes a stateless **"Freies Training"** (Free Training) profile for immediate, progress-free practice.
 - **Secure Input Handling**: Comprehensive validation for PGN imports and database operations to ensure repertoire integrity.
 - **Flexible Import/Export**: Import from PGN files or export your repertoire (entirely or specific branches) for use in other software.
 - **Profile Management**: Support for multiple user profiles to track individual progress and settings.
@@ -89,14 +90,14 @@ Tests are managed via `pytest`. The suite includes robust cleanup logic for Wind
   - `core/`: Application backend logic.
     - `services/`: Modular services for training (SRS), Lichess API integration, engine analysis, and repertoire tree logic.
     - `db/`: Database management, connection pooling, and SQLAlchemy models.
-  - `gui/`: Main training interface and UI components.
+  - `gui/`: Main training interface and UI components (Glassmorphism, Scaling).
   - `creator/`: UI for the repertoire editing and management tool.
-- `assets/`: Icons, Logos, Piece Sets, and Sounds.
-- `engines/`: Folder for UCI chess engine executables.
+- `assets/`: Icons, Logos, Piece Sets (SVG/PNG), and Sounds.
+- `engines/`: Folder for UCI chess engine executables (e.g., Stockfish).
 - `profiles/`: User-specific profiles and SRS training data (`.db` files).
 - `repertoires/`: Stores opening repertoires as SQLite databases.
-- `tests/`: Automated test suite.
-- `Opening Fenix.spec`: PyInstaller configuration for building the app.
+- `tests/`: Automated test suite with unit and integration tests.
+- `Opening Fenix.spec`: PyInstaller configuration for building the application.
 
 ## License
 

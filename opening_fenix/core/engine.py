@@ -3,7 +3,8 @@ import chess.engine
 import subprocess
 import sys
 import time
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QThread, pyqtSignal, QElapsedTimer
+from opening_fenix.core.logger import logger
 
 class EngineThread(QThread):
     info_signal = pyqtSignal(object) # Can be list of strings (status) or list of dicts (analysis)
@@ -27,8 +28,9 @@ class EngineThread(QThread):
         self._is_analyzing = False
         
         # Throttling
-        self._last_emit_time = 0
-        self._emit_interval = 0.1  # Only emit UI updates 10 times per second (100ms)
+        self._throttle_timer = QElapsedTimer()
+        self._throttle_timer.start()
+        self._emit_interval = 100  # ms
 
     def start_engine(self):
         if not self.engine:
@@ -42,10 +44,12 @@ class EngineThread(QThread):
                 try:
                     self.engine.configure({"Threads": self.threads, "MultiPV": self.multipv})
                 except Exception as e:
+                    logger.warning(f"Engine configuration warning: {e}")
                     self.info_signal.emit([f"Config Warning: {e}"])
                 self.running = True
                 self.info_signal.emit(["Engine geladen."])
             except Exception as e:
+                logger.error(f"Failed to start engine: {e}")
                 self.info_signal.emit([f"Engine Fehler: {e}"])
 
     def stop_engine(self):
@@ -87,6 +91,7 @@ class EngineThread(QThread):
             try:
                 self.engine.configure({"Threads": self.threads, "MultiPV": self.multipv})
             except Exception as e:
+                logger.warning(f"Error updating engine configuration: {e}")
                 self.info_signal.emit([f"Update Config Error: {e}"])
 
     def run(self):
@@ -142,6 +147,7 @@ class EngineThread(QThread):
                         
                     except Exception as e:
                         self._is_analyzing = False
+                        logger.error(f"Analysis error at {current_board_fen}: {e}")
                         self.info_signal.emit([f"Analysis Error: {e}"])
                         self.msleep(1000)
                 else:
@@ -161,10 +167,10 @@ class EngineThread(QThread):
             self.lines_cache[1] = info.copy()
             
         # THROTTLING: Only do the heavy string building and UI emitting every 100ms
-        current_time = time.time()
-        if current_time - self._last_emit_time > self._emit_interval:
+        # THROTTLING: Only do the heavy string building and UI emitting every 100ms
+        if self._throttle_timer.hasExpired(self._emit_interval):
             self._emit_current_cache(board)
-            self._last_emit_time = current_time
+            self._throttle_timer.restart()
 
     def _emit_current_cache(self, board):
         """Builds strings and emits to UI. Separated from process_info to allow throttling."""
@@ -199,7 +205,7 @@ class EngineThread(QThread):
         
         if score:
             if score.is_mate():
-                mate = score.mate()
+                mate = score.white().mate()
                 score_str = f"M{mate:+d}"
                 cp_val = 10000 if mate > 0 else -10000
             else:

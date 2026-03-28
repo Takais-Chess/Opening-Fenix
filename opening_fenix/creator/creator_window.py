@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QFileDialog, QMessageBox, QSplitter, QFrame,
     QComboBox, QInputDialog, QCheckBox, QGroupBox, QFormLayout,
     QDialog, QTextEdit, QHeaderView, QMenu, QGridLayout,
-    QScrollArea, QSlider, QSpinBox, QRadioButton, QButtonGroup,
+    QScrollArea, QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QTabWidget, QProgressBar, QProgressDialog, QListWidget,
     QTableWidget, QTableWidgetItem, QApplication, QToolBar, QStyle, QListWidgetItem, QStackedWidget, QPlainTextEdit,
     QGraphicsDropShadowEffect
@@ -37,8 +37,10 @@ from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
 
 # Import centralized styles
-from opening_fenix.gui.styles import COLORS, CREATOR_WINDOW_STYLE, CREATOR_TOOLBAR_STYLE, REPO_SETTINGS_STYLE
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
+from opening_fenix.gui.scaling import scale
+
 
 # --- BACKEND ---
 class CreatorBackend:
@@ -401,6 +403,14 @@ class CreatorBackend:
         self._update_level_recursive(move.to_position_id, set(), level_order)
         self.session.commit()
         self.clear_cache()
+
+    def move_all_to_level(self, level: int) -> int:
+        if not self.session: return 0
+        from opening_fenix.core.models import RepertoireMove
+        updated_count = self.session.query(RepertoireMove).update({"level": level})
+        self.session.commit()
+        self.clear_cache()
+        return updated_count
 
     def toggle_move_active(self, move_id):
         if not self.session: return False
@@ -968,6 +978,49 @@ class CreatorBackend:
             self.session.rollback()
             return False, str(e)
 
+    def get_priority_level_impact(self, threshold_pct, target_level):
+        """Returns the number of moves that would be updated."""
+        if not self.session: return 0
+        threshold = threshold_pct / 100.0
+        
+        # Count moves where:
+        # 1. Priority >= threshold
+        # 2. They are RepertoireMoves (have a level)
+        # 3. Current Level is numerically HIGHER (less important) than target_level
+        count = self.session.query(RepertoireMove)\
+            .join(Move, RepertoireMove.move_id == Move.id)\
+            .filter(Move.priority_score >= threshold)\
+            .filter(RepertoireMove.level > target_level)\
+            .count()
+        return count
+
+    def apply_priority_level_update(self, threshold_pct, target_level):
+        """Updates qualifying moves and returns the number of modified moves."""
+        if not self.session: return 0
+        threshold = threshold_pct / 100.0
+        
+        # 1. Find RM entries that need update
+        q_moves = self.session.query(RepertoireMove)\
+            .join(Move, RepertoireMove.move_id == Move.id)\
+            .filter(Move.priority_score >= threshold)\
+            .filter(RepertoireMove.level > target_level)\
+            .all()
+            
+        modified = len(q_moves)
+        if modified == 0:
+            return 0
+            
+        # 2. Update levels and propagate changes downstream
+        for rm in q_moves:
+            rm.level = target_level
+            self.session.flush()
+            # Ensure branch consistency
+            self._update_level_recursive(rm.move.to_position_id, set(), target_level)
+            
+        self.session.commit()
+        self.clear_cache()
+        return modified
+
     def _update_profiles_level_shift(self, repo_name, threshold, delta):
         from opening_fenix.core.models import UserBase, UserRepertoireSettings
         profiles_dir = os.path.join(get_user_dir(), "profiles")
@@ -1309,12 +1362,16 @@ class DiagnosticDialog(QDialog):
 class RepoSettingsDialog(QDialog):
     def __init__(self, parent=None, backend=None):
         super().__init__(parent)
-        self.setWindowTitle("Repertoire Einstellungen")
-        self.setMinimumSize(800, 600)
-        self.backend = backend
         self.main_window = parent
-        self.setStyleSheet(REPO_SETTINGS_STYLE)
+        self.setWindowTitle("Repertoire Einstellungen")
+        self.setMinimumSize(scale(800), scale(600))
+        self.backend = backend
+        self.resize(scale(1500), scale(900))
+        self.setStyleSheet(get_creator_window_style())
+
+
         self.init_ui()
+
         self.refresh_info()
 
     def init_ui(self):
@@ -1323,7 +1380,8 @@ class RepoSettingsDialog(QDialog):
         layout.setSpacing(0)
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(200)
+        self.sidebar.setFixedWidth(scale(200))
+
         self.sidebar.currentRowChanged.connect(self.display_page)
         for t in ["Repertoire-Daten", "Darstellung & Audio", "Import & Export", "Analyse & Werkzeuge"]:
             item = QListWidgetItem(t)
@@ -1357,17 +1415,19 @@ class RepoSettingsDialog(QDialog):
         h_n = QHBoxLayout()
         h_n.addWidget(self.l_n)
         b_edit_name = QPushButton("✎")
-        b_edit_name.setFixedSize(30, 30)
+        b_edit_name.setFixedSize(scale(30), scale(30))
         b_edit_name.clicked.connect(self.rename_repertoire)
         h_n.addWidget(b_edit_name)
+
         f_i.addRow("Name:", h_n)
 
         # Description Field
         self.txt_description = QPlainTextEdit()
         self.txt_description.setPlaceholderText("Beschreibe dein Repertoire...")
-        self.txt_description.setMinimumHeight(100)
+        self.txt_description.setMinimumHeight(scale(100))
         self.txt_description.textChanged.connect(self.save_description)
         f_i.addRow("Beschreibung:", self.txt_description)
+
 
         f_i.addRow("Analyse:", self.l_d)
         f_i.addRow("Elo:", self.l_e)
@@ -1376,8 +1436,9 @@ class RepoSettingsDialog(QDialog):
         self.tbl_levels.setColumnCount(3)
         self.tbl_levels.setHorizontalHeaderLabels(["Lvl", "Name", "Ziel-Elo"])
         self.tbl_levels.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl_levels.setMaximumHeight(150)
+        self.tbl_levels.setMaximumHeight(scale(150))
         self.tbl_levels.verticalHeader().setVisible(False)
+
         self.tbl_levels.itemDoubleClicked.connect(self.rename_level)
         
         b_a_l = QPushButton("Level hinzufügen")
@@ -1515,6 +1576,30 @@ class RepoSettingsDialog(QDialog):
         l.addWidget(self.pb_eng)
         g_lich = QGroupBox("2. Lichess Daten & Prio Scores")
         v_lich = QVBoxLayout(g_lich)
+        
+        # --- Lichess API Token (NEW) ---
+        h_token = QHBoxLayout()
+        h_token.addWidget(QLabel("Lichess API Token:"))
+        self.txt_lichess_token = QLineEdit()
+        self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.txt_lichess_token.setPlaceholderText("lip_...")
+        current_token = self.main_window.config.get("lichess_token", "")
+        self.txt_lichess_token.setText(current_token)
+        self.txt_lichess_token.textChanged.connect(self.on_token_changed)
+        
+        btn_test_token = QPushButton("Verbindung testen")
+        btn_test_token.clicked.connect(self.test_lichess_token)
+
+        self.chk_show_token = QCheckBox("Anzeigen")
+        self.chk_show_token.toggled.connect(lambda checked: self.txt_lichess_token.setEchoMode(
+            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password))
+
+        h_token.addWidget(self.txt_lichess_token)
+        h_token.addWidget(self.chk_show_token)
+        h_token.addWidget(btn_test_token)
+        v_lich.addLayout(h_token)
+        # -----------------------------
+
         self.bg_e = QButtonGroup(self)
         r1 = QRadioButton("Low (<1400)")
         r2 = QRadioButton("Mid (1400-2000)")
@@ -1544,6 +1629,37 @@ class RepoSettingsDialog(QDialog):
         l.addWidget(self.l_lich_status)
         l.addWidget(self.pb_lich)
 
+        # --- Group 4: Priority-Based Level Management (NEW) ---
+        g_prio_levels = QGroupBox("4. Prioritäts-basierte Level-Anpassung")
+        v_prio = QVBoxLayout(g_prio_levels)
+        lbl_prio_info = QLabel("Versetzt alle Züge, deren Priorität über einem Schwellenwert liegt, in ein wichtigeres Level (z.B. Level 1). Es werden nur Züge 'befördert', niemals herabgestuft.")
+        lbl_prio_info.setWordWrap(True)
+        lbl_prio_info.setStyleSheet("color: #666; font-size: 11px;")
+        v_prio.addWidget(lbl_prio_info)
+
+        f_prio = QFormLayout()
+        self.spin_prio_threshold = QDoubleSpinBox()
+        self.spin_prio_threshold.setRange(0.0, 100.0)
+        self.spin_prio_threshold.setSuffix(" %")
+        self.spin_prio_threshold.setValue(1.0)
+        self.spin_prio_threshold.setSingleStep(0.1)
+        f_prio.addRow("Prioritäts-Schwellenwert:", self.spin_prio_threshold)
+
+        self.combo_prio_target_level = QComboBox()
+        f_prio.addRow("Ziel-Level (Wichtigkeit):", self.combo_prio_target_level)
+        v_prio.addLayout(f_prio)
+
+        h_prio_btns = QHBoxLayout()
+        btn_prio_preview = QPushButton("🔎 Vorschau der Änderungen")
+        btn_prio_preview.clicked.connect(self.update_priority_level_impact_preview)
+        btn_prio_apply = QPushButton("🚀 Level anpassen (Nur Upgrade)")
+        btn_prio_apply.clicked.connect(self.apply_priority_level_change)
+        h_prio_btns.addWidget(btn_prio_preview)
+        h_prio_btns.addWidget(btn_prio_apply)
+        v_prio.addLayout(h_prio_btns)
+
+        l.addWidget(g_prio_levels)
+
         # Kommentare bereinigen (Duplikate innerhalb einzelner Kommentare entfernen)
         g_comm = QGroupBox("Kommentare bereinigen")
         v_comm = QVBoxLayout(g_comm)
@@ -1562,8 +1678,64 @@ class RepoSettingsDialog(QDialog):
         v_comm.addWidget(b_brackets)
 
         l.addWidget(g_comm)
+        
+        # --- Group 5: Bulk Level Change (NEW) ---
+        g_bulk = QGroupBox("5. Massen-Aktionen (Alle Züge)")
+        v_bulk = QVBoxLayout(g_bulk)
+        lbl_bulk_info = QLabel("Setzt das Level ALLER Züge in diesem Repertoire auf das gewählte Ziel-Level. Nützlich für schnelle Reorganisationen.")
+        lbl_bulk_info.setWordWrap(True)
+        lbl_bulk_info.setStyleSheet("color: #666; font-size: 11px;")
+        v_bulk.addWidget(lbl_bulk_info)
+        
+        f_bulk = QFormLayout()
+        self.combo_bulk_level = QComboBox()
+        f_bulk.addRow("Ziel-Level:", self.combo_bulk_level)
+        v_bulk.addLayout(f_bulk)
+        
+        btn_bulk_apply = QPushButton("🚀 Alle Züge verschieben")
+        btn_bulk_apply.clicked.connect(self.apply_bulk_level_move)
+        v_bulk.addWidget(btn_bulk_apply)
+        l.addWidget(g_bulk)
 
         l.addStretch()
+
+    def update_priority_level_impact_preview(self):
+        threshold = self.spin_prio_threshold.value()
+        target_lvl = self.combo_prio_target_level.currentData()
+        if target_lvl is None: return
+        
+        count = self.backend.get_priority_level_impact(threshold, target_lvl)
+        QMessageBox.information(self, "Vorschau", f"Es wurden {count} Züge gefunden, die eine Priorität von ≥ {threshold}% haben und aktuell in einem weniger wichtigen Level als {target_lvl} sind.")
+
+    def apply_priority_level_change(self):
+        threshold = self.spin_prio_threshold.value()
+        target_lvl = self.combo_prio_target_level.currentData()
+        if target_lvl is None: return
+        
+        count = self.backend.get_priority_level_impact(threshold, target_lvl)
+        if count == 0:
+            QMessageBox.information(self, "Keine Änderungen", "Es wurden keine Züge gefunden, die den Kriterien entsprechen.")
+            return
+            
+        if QMessageBox.question(self, "Bestätigen", f"Möchtest du wirklich {count} Züge auf Level {target_lvl} hochstufen?\n\nHinweis: Bestehende Level 1 Züge bleiben Level 1.") == QMessageBox.StandardButton.Yes:
+            modified = self.backend.apply_priority_level_update(threshold, target_lvl)
+            QMessageBox.information(self, "Erfolg", f"{modified} Züge wurden erfolgreich auf Level {target_lvl} angepasst.")
+            self.refresh_info()
+            if hasattr(self.main_window, 'update_ui_from_fen'):
+                self.main_window.update_ui_from_fen()
+
+    def apply_bulk_level_move(self):
+        target_lvl = self.combo_bulk_level.currentData()
+        level_name = self.combo_bulk_level.currentText()
+        if target_lvl is None: return
+        
+        msg = f"Möchtest du wirklich ALLE Züge dieses Repertoires auf '{level_name}' setzen?"
+        if QMessageBox.question(self, "Bestätigung", msg) == QMessageBox.StandardButton.Yes:
+            count = self.backend.move_all_to_level(target_lvl)
+            QMessageBox.information(self, "Erfolg", f"{count} Züge wurden erfolgreich auf {level_name} gesetzt.")
+            self.refresh_info()
+            if hasattr(self.main_window, 'update_ui_from_fen'):
+                self.main_window.update_ui_from_fen()
 
     def run_structure_repair(self):
         dialog = DiagnosticDialog(self.backend, self)
@@ -1634,6 +1806,32 @@ class RepoSettingsDialog(QDialog):
                     if current_sel not in vals:
                         self.combo_lichess_cat.setCurrentText(vals[0])
 
+        # Updated current priority target level combo
+        current_data = self.combo_prio_target_level.currentData()
+        bulk_data = self.combo_bulk_level.currentData()
+        
+        self.combo_prio_target_level.blockSignals(True)
+        self.combo_bulk_level.blockSignals(True)
+        
+        self.combo_prio_target_level.clear()
+        self.combo_bulk_level.clear()
+        
+        for lvl in levels:
+            txt = f"Level {lvl['order']} ({lvl['name']})"
+            self.combo_prio_target_level.addItem(txt, userData=lvl['order'])
+            self.combo_bulk_level.addItem(txt, userData=lvl['order'])
+            
+        idx = self.combo_prio_target_level.findData(current_data)
+        if idx >= 0: self.combo_prio_target_level.setCurrentIndex(idx)
+        else: self.combo_prio_target_level.setCurrentIndex(0)
+        
+        idx_bulk = self.combo_bulk_level.findData(bulk_data)
+        if idx_bulk >= 0: self.combo_bulk_level.setCurrentIndex(idx_bulk)
+        else: self.combo_bulk_level.setCurrentIndex(0)
+        
+        self.combo_prio_target_level.blockSignals(False)
+        self.combo_bulk_level.blockSignals(False)
+
     def delete_lichess_data(self):
         cat = {1: 'low', 2: 'mid', 3: 'high', 4: 'masters'}[self.bg_e.checkedId()]
         if QMessageBox.question(self, "Lichess-Daten löschen", f"ELO-Bereich '{cat}' löschen?") == QMessageBox.StandardButton.Yes:
@@ -1669,6 +1867,30 @@ class RepoSettingsDialog(QDialog):
         self.w_lich.progress_signal.connect(self.pb_lich.setValue)
         self.w_lich.finished_signal.connect(self.on_fetch_finished)
         self.w_lich.start()
+
+    def on_token_changed(self, text):
+        self.main_window.config["lichess_token"] = text
+        self.save_config()
+
+    def test_lichess_token(self):
+        token = self.txt_lichess_token.text().strip()
+        if not token:
+            QMessageBox.warning(self, "Fehler", "Bitte gib zuerst ein Lichess API Token ein.")
+            return
+            
+        from opening_fenix.core.services.lichess_service import verify_lichess_token
+        
+        # Show a "Testing..." status or just execute (it's fast)
+        self.l_lich_status.setText("Teste Token...")
+        QApplication.processEvents()
+        
+        success, msg = verify_lichess_token(token)
+        self.l_lich_status.setText("Bereit")
+        
+        if success:
+            QMessageBox.information(self, "Erfolg", msg)
+        else:
+            QMessageBox.warning(self, "Fehler", msg)
 
     def on_fetch_finished(self, success, msg):
         self.l_lich_status.setText(msg)
@@ -1860,7 +2082,8 @@ class CreatorWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Opening Fenix - Repertoire Creator")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
-        self.resize(1400, 900)
+        self.resize(scale(1400), scale(900))
+
         self.backend = CreatorBackend()
         self._processing_event = False  # Re-entrancy guard for eventFilter
         self.engine_thread = None
@@ -1912,7 +2135,7 @@ class CreatorWindow(QMainWindow):
             QTimer.singleShot(100, self.new_repertoire_dialog)
 
     def init_ui(self):
-        self.setStyleSheet(CREATOR_WINDOW_STYLE)
+        self.setStyleSheet(get_creator_window_style())
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1923,57 +2146,71 @@ class CreatorWindow(QMainWindow):
         # Custom Title Bar
         rtl = self.config.get("last_active_repertoire", "") if getattr(self, "config", None) else ""
         self.custom_title_bar = CustomTitleBar(self, title=f" {rtl}" if rtl else " Kein Rep")
-        self.custom_title_bar.setFixedHeight(65)
+        self.custom_title_bar.setFixedHeight(scale(65))
         main_layout_v.addWidget(self.custom_title_bar)
 
+
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(10, 6, 20, 6)
+        top_layout.setContentsMargins(scale(10), scale(6), scale(20), scale(6))
         top_layout.setSpacing(0)
 
+
         # Toolbar Container
-        toolbar = QToolBar("Main Toolbar")
-        toolbar.setMovable(False)
-        toolbar.setStyleSheet(CREATOR_TOOLBAR_STYLE)
+        self.toolbar = self.addToolBar("Main Toolbar")
+        self.toolbar.setMovable(False)
+        self.toolbar.setStyleSheet(get_creator_toolbar_style())
 
-        act_load = QAction("📂 Laden", self)
-        act_load.setToolTip("Ein anderes Repertoire laden")
-        act_load.triggered.connect(self.load_repertoire_dialog)
-        toolbar.addAction(act_load)
+        # Toolbar Buttons using QPushButtons for reliable CSS rounding
+        btn_load = QPushButton("📂 Laden")
+        btn_load.setProperty("class", "GlassPill")
+        self.repolish(btn_load)
+        btn_load.setToolTip("Ein anderes Repertoire laden")
+        btn_load.clicked.connect(self.load_repertoire_dialog)
+        self.toolbar.addWidget(btn_load)
 
-        act_new = QAction("➕ Neu", self)
-        act_new.setToolTip("Ein neues, leeres Repertoire erstellen")
-        act_new.triggered.connect(self.new_repertoire_dialog)
-        toolbar.addAction(act_new)
+        btn_new = QPushButton("➕ Neu")
+        btn_new.setProperty("class", "GlassPill")
+        self.repolish(btn_new)
+        btn_new.setToolTip("Ein neues, leeres Repertoire erstellen")
+        btn_new.clicked.connect(self.new_repertoire_dialog)
+        self.toolbar.addWidget(btn_new)
 
-        act_repo = QAction("⚙ Settings", self)
-        act_repo.setToolTip("Repertoire-Einstellungen öffnen")
-        act_repo.triggered.connect(self.open_repo_settings)
-        toolbar.addAction(act_repo)
+        btn_repo = QPushButton("⚙ Settings")
+        btn_repo.setProperty("class", "GlassPill")
+        self.repolish(btn_repo)
+        btn_repo.setToolTip("Repertoire-Einstellungen öffnen")
+        btn_repo.clicked.connect(self.open_repo_settings)
+        self.toolbar.addWidget(btn_repo)
 
         self.combo_structure = QComboBox()
-        self.combo_structure.setMinimumWidth(220)
+        self.combo_structure.setMinimumWidth(scale(220))
         self.combo_structure.addItem("🧩 Struktur Explorer")
+        self.combo_structure.setProperty("class", "GlassPill")
+        self.repolish(self.combo_structure)
         self.combo_structure.currentIndexChanged.connect(self.on_structure_combo_changed)
-        toolbar.addWidget(self.combo_structure)
+        self.toolbar.addWidget(self.combo_structure)
 
-        top_layout.addWidget(toolbar)
+        top_layout.addWidget(self.toolbar)
+
         top_layout.addStretch()
 
         self.custom_title_bar.layout.insertLayout(1, top_layout, 1)
 
         inner_widget = QWidget()
         l = QHBoxLayout(inner_widget)
-        l.setContentsMargins(10, 10, 10, 10) # Uniform 10px margins on all sides
-        l.setSpacing(10)
+        l.setContentsMargins(scale(10), scale(10), scale(10), scale(10)) # Uniform 10px margins on all sides
+        l.setSpacing(scale(10))
         main_layout_v.addWidget(inner_widget, 1)
+
 
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Board Container
         cc = QWidget()
         cl = QVBoxLayout(cc)
-        cl.setContentsMargins(0, 0, 10, 10) # 0 left (inner_widget provides 10px), 10 right gap to splitter, 10 bottom
-        cl.setSpacing(10)
+        cl.setContentsMargins(0, 0, scale(10), scale(10)) # 0 left (inner_widget provides 10px), 10 right gap to splitter, 10 bottom
+        cl.setSpacing(scale(10))
+
         self.board_panel = AspectRatioFrame()
         self.board_panel.setObjectName("BoardPanel")
         board_layout = QVBoxLayout(self.board_panel)
@@ -1994,8 +2231,9 @@ class CreatorWindow(QMainWindow):
         self.tree_group = QWidget()
         self.tree_group.setProperty("class", "GlassPill")
         t_layout = QVBoxLayout(self.tree_group)
-        t_layout.setContentsMargins(10, 10, 10, 10) # Reverted to 10px in previous step
-        t_layout.setSpacing(10)
+        t_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10)) # Reverted to 10px in previous step
+        t_layout.setSpacing(scale(10))
+
         h_header = QHBoxLayout()
         h_header.setContentsMargins(0, 0, 0, 0) # Margins handled by parent layout
         lbl_title = QLabel("KANDIDATENZÜGE")
@@ -2004,6 +2242,7 @@ class CreatorWindow(QMainWindow):
         self.chk_a = QPushButton("Zug-Pfeile anzeigen")
         self.chk_a.setCheckable(True)
         self.chk_a.setProperty("class", "GlassPill")
+        self.repolish(self.chk_a)
         self.chk_a.toggled.connect(self.update_board_arrows)
         
         h_header.addWidget(lbl_title)
@@ -2032,24 +2271,27 @@ class CreatorWindow(QMainWindow):
         # Tab 1: Stellungs Details
         td = QWidget()
         dl = QVBoxLayout(td)
-        dl.setContentsMargins(0, 5, 0, 0) # Use 0 horizontal margin to align with parent tab width
+        dl.setContentsMargins(0, scale(5), 0, 0) # Use 0 horizontal margin to align with parent tab width
+
 
         # Combined Glass Container for Details & Variants
         self.details_panel = QFrame()
         self.details_panel.setObjectName("SidePanel")
         dv = QVBoxLayout(self.details_panel)
-        dv.setContentsMargins(10, 10, 10, 10) # Standard internal padding for the glass pill
-        dv.setSpacing(10)
+        dv.setContentsMargins(scale(10), scale(10), scale(10), scale(10)) # Standard internal padding for the glass pill
+        dv.setSpacing(scale(10))
+
 
         # Kommentar Section
         self.txt_c = QPlainTextEdit()
         self.txt_c.setPlaceholderText("Stellungs-Kommentar hier eingeben...")
-        self.txt_c.setMinimumHeight(150)
+        self.txt_c.setMinimumHeight(scale(150))
         self.txt_c.textChanged.connect(self.on_details_changed)
+
         dv.addWidget(self.txt_c)
 
         sym_layout = QHBoxLayout()
-        sym_layout.setSpacing(8)
+        sym_layout.setSpacing(scale(8))
         syms = [("+−", "Weiß steht deutlich besser"),
                 ("±", "Weiß steht besser"),
                 ("⩲", "Weiß steht etwas besser"),
@@ -2061,9 +2303,11 @@ class CreatorWindow(QMainWindow):
                 ("−+", "Schwarz steht deutlich besser")]
         for s, tooltip in syms:
             btn = QPushButton(s)
-            btn.setFixedSize(30, 30)
+            btn.setFixedSize(scale(30), scale(30))
             btn.setToolTip(tooltip)
+
             btn.setProperty("class", "SymbolButton")
+            self.repolish(btn)
             btn.clicked.connect(lambda _, x=s: self.insert_symbol(x))
             sym_layout.addWidget(btn)
         sym_layout.addStretch()
@@ -2071,7 +2315,8 @@ class CreatorWindow(QMainWindow):
 
         # Variant Name Section (Dynamic)
         self.variant_layout = QFormLayout()
-        self.variant_layout.setSpacing(10)
+        self.variant_layout.setSpacing(scale(10))
+
         self.i_v1 = QLineEdit()
         self.i_v2 = QLineEdit()
         self.i_v3 = QLineEdit()
@@ -2095,81 +2340,114 @@ class CreatorWindow(QMainWindow):
         dl.addWidget(self.details_panel)
         
 
-        # Engine Tab
-        te = QWidget()
-        el = QVBoxLayout(te)
-        h_settings = QHBoxLayout()
-        h_settings.setSpacing(15)
-        self.spin_depth = QSpinBox()
-        self.spin_depth.setRange(1, 99)
-        self.spin_depth.setValue(20)
-        self.spin_depth.setPrefix("Tiefe: ")
-        self.spin_threads = QSpinBox()
-        max_threads = multiprocessing.cpu_count()
-        self.spin_threads.setRange(1, max_threads)
-        self.spin_threads.setValue(max(1, min(4, max_threads)))
-        self.spin_threads.setPrefix("Threads: ")
-        self.spin_lines = QSpinBox()
-        self.spin_lines.setRange(1, 20)
-        self.spin_lines.setValue(5)
-        self.spin_lines.setPrefix("Linien: ")
-        h_settings.addWidget(self.spin_depth)
-        h_settings.addWidget(self.spin_threads)
-        h_settings.addWidget(self.spin_lines)
-        el.addLayout(h_settings)
-        el.addSpacing(5)
+        # Analysis Tab (Merged Engine & Common Moves)
+        ta = QWidget()
+        al = QHBoxLayout(ta)
+        al.setContentsMargins(0, scale(5), 0, 0)
+        al.setSpacing(scale(15))
 
+        # Left Column: Engine (GlassPill)
+        engine_container = QFrame()
+        engine_container.setProperty("class", "GlassPill")
+        self.repolish(engine_container)
+        evl = QVBoxLayout(engine_container)
+        
+        # Engine Settings (Dropdowns)
+        h_eng_settings = QHBoxLayout()
+        h_eng_settings.setSpacing(scale(10))
+        
+        self.combo_depth = QComboBox()
+        self.combo_depth.setEditable(True)
+        self.combo_depth.lineEdit().setReadOnly(True)
+        self.combo_depth.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_depth.addItems([str(i) for i in range(10, 51, 2)])
+        self.combo_depth.setCurrentText("20")
+        self.combo_depth.setFixedWidth(scale(55))
+        self.combo_depth.setProperty("class", "SmallCombo")
+        self.repolish(self.combo_depth)
+        
+        self.combo_threads = QComboBox()
+        self.combo_threads.setEditable(True)
+        self.combo_threads.lineEdit().setReadOnly(True)
+        self.combo_threads.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        max_threads = multiprocessing.cpu_count()
+        self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
+        self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
+        self.combo_threads.setFixedWidth(scale(55))
+        self.combo_threads.setProperty("class", "SmallCombo")
+        self.repolish(self.combo_threads)
+        
+        self.combo_lines = QComboBox()
+        self.combo_lines.setEditable(True)
+        self.combo_lines.lineEdit().setReadOnly(True)
+        self.combo_lines.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_lines.addItems([str(i) for i in range(1, 11)])
+        self.combo_lines.setCurrentText("5")
+        self.combo_lines.setFixedWidth(scale(55))
+        self.combo_lines.setProperty("class", "SmallCombo")
+        self.repolish(self.combo_lines)
+        
+        lbl_depth = QLabel("Depth:")
+        lbl_threads = QLabel("Threads:")
+        lbl_lines = QLabel("Lines:")
+        
+        h_eng_settings.addWidget(lbl_depth)
+        h_eng_settings.addWidget(self.combo_depth)
+        h_eng_settings.addWidget(lbl_threads)
+        h_eng_settings.addWidget(self.combo_threads)
+        h_eng_settings.addWidget(lbl_lines)
+        h_eng_settings.addWidget(self.combo_lines)
+        h_eng_settings.addStretch()
+        evl.addLayout(h_eng_settings)
+        
         self.btn_engine_toggle = QPushButton("▶ Analyse Starten")
         self.btn_engine_toggle.setCheckable(True)
-        self.btn_engine_toggle.setMinimumHeight(40)
+        self.btn_engine_toggle.setMinimumHeight(scale(40))
         self.btn_engine_toggle.setProperty("class", "GlassPill")
-        # Dynamic style for toggle state
+        self.repolish(self.btn_engine_toggle)
         self.btn_engine_toggle.toggled.connect(self._on_engine_toggle_toggled)
-        el.addWidget(self.btn_engine_toggle)
-
+        evl.addWidget(self.btn_engine_toggle)
+        
         self.table_engine = QTableWidget(0, 3)
         self.table_engine.setHorizontalHeaderLabels(["Eval", "Depth", "Move"])
         self.table_engine.verticalHeader().setVisible(False)
         self.table_engine.setAlternatingRowColors(True)
         self.table_engine.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_engine.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        header = self.table_engine.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        el.addWidget(self.table_engine)
-        self.tabs.addTab(te, "ENGINE")
+        header_e = self.table_engine.horizontalHeader()
+        header_e.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        evl.addWidget(self.table_engine)
+        al.addWidget(engine_container, 2) # Engine part now more compact
 
-        # Lichess Common Moves Tab
-        tc = QWidget()
-        cl_layout = QVBoxLayout(tc)
+        # Right Column: Common Moves (GlassPill)
+        common_container = QFrame()
+        common_container.setProperty("class", "GlassPill")
+        self.repolish(common_container)
+        cvl = QVBoxLayout(common_container)
         
         h_cat = QHBoxLayout()
-        h_cat.addWidget(QLabel("Datenbank:"))
+        h_cat.addWidget(QLabel("Database:"))
         self.combo_lichess_cat = QComboBox()
         self.combo_lichess_cat.addItems(["low", "mid", "high", "masters"])
-        
-        # POLISH: Add Tooltip explaining the different categories
         self.combo_lichess_cat.setToolTip("<b>Lichess ELO-Kategorien:</b><br>"
                                           "• <b>low</b>: Spieler <1400 ELO<br>"
                                           "• <b>mid</b>: Spieler 1400-2000 ELO<br>"
                                           "• <b>high</b>: Spieler >2000 ELO<br>"
                                           "• <b>masters</b>: Lichess Masters Datenbank (Titelträger)")
+        self.combo_lichess_cat.setCurrentText("high")
+        self.combo_lichess_cat.currentTextChanged.connect(self.update_ui_from_fen)
         
-        # Add a helper icon
         lbl_helper = QLabel("(?)")
         lbl_helper.setStyleSheet(f"color: {COLORS['light_text']}; font-weight: bold;")
         lbl_helper.setToolTip(self.combo_lichess_cat.toolTip())
-
-        # NOTE: Initial setting of the combobox is now done in _load_saved_elo_or_autoselect()
-        # AFTER the backend is loaded. Default to high for now.
-        self.combo_lichess_cat.setCurrentText("high")
-        self.combo_lichess_cat.currentTextChanged.connect(self.update_ui_from_fen)
+        
         h_cat.addWidget(self.combo_lichess_cat)
         h_cat.addWidget(lbl_helper)
         h_cat.addStretch()
-        cl_layout.addLayout(h_cat)
-
+        cvl.addLayout(h_cat)
+        
         self.table_common_moves = QTableWidget(0, 5)
         self.table_common_moves.setHorizontalHeaderLabels(["Move", "White %", "Draw %", "Black %", "Played"])
         self.table_common_moves.verticalHeader().setVisible(False)
@@ -2178,13 +2456,13 @@ class CreatorWindow(QMainWindow):
         self.table_common_moves.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table_common_moves.cellDoubleClicked.connect(self.on_common_move_double_click)
         header_cm = self.table_common_moves.horizontalHeader()
-        header_cm.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header_cm.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header_cm.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header_cm.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header_cm.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        cl_layout.addWidget(self.table_common_moves)
-        self.tabs.addTab(tc, "COMMON MOVES")
+        header_cm.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        cvl.addWidget(self.table_common_moves)
+        al.addWidget(common_container, 5) # Common moves now significantly wider
+        
+        self.tabs.addTab(ta, "ANALYSIS")
+        self.tabs.addTab(QWidget(), "LOCH FINDER")
+        self.tabs.addTab(QWidget(), "KONTROLLE")
         
         # Restore the missing Stellungs-Details tab
         self.tabs.insertTab(0, td, "DETAILS")
@@ -2652,7 +2930,7 @@ class CreatorWindow(QMainWindow):
 
     def toggle_engine(self, active):
         if self.engine_thread:
-            self.engine_thread.update_config(self.spin_threads.value(), self.spin_depth.value(), True, self.spin_lines.value())
+            self.engine_thread.update_config(int(self.combo_threads.currentText()), int(self.combo_depth.currentText()), True, int(self.combo_lines.currentText()))
             self.engine_thread.toggle_analysis(active)
             if active: 
                 self.engine_thread.set_position(self.board_widget.board.fen())
@@ -2752,7 +3030,7 @@ class CreatorWindow(QMainWindow):
     def init_engine(self):
         ep = self.config.get("engine_path", "")
         if ep and os.path.exists(ep):
-            self.engine_thread = EngineThread(ep, multipv=self.spin_lines.value())
+            self.engine_thread = EngineThread(ep, multipv=int(self.combo_lines.currentText()))
             self.engine_thread.info_signal.connect(self.update_engine_output)
             self.engine_thread.db_update_signal.connect(self.on_db_update)
             self.engine_thread.start()
@@ -2797,6 +3075,11 @@ class CreatorWindow(QMainWindow):
                 self.go_forward()
                 return True
         return super().eventFilter(obj, event)
+
+    def repolish(self, widget):
+        if widget:
+            widget.style().unpolish(widget)
+            widget.style().polish(widget)
 
     def closeEvent(self, event):
         """Clean up resources before closing."""

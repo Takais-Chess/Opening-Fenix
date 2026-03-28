@@ -13,22 +13,27 @@ from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_reper
 from opening_fenix.gui.widgets.board_widget import THEMES
 
 # Import centralized styles
-from opening_fenix.gui.styles import COLORS, REPO_SETTINGS_STYLE
+from opening_fenix.gui.styles import COLORS, get_repo_settings_style
+from opening_fenix.gui.scaling import scale
+
+
 
 class RepoLoadButton(QPushButton):
     def __init__(self, name, parent=None):
         super().__init__(name, parent)
         self.repo_name = name
-        self.setFixedHeight(50)
+        self.setFixedHeight(scale(50))
         self.setStyleSheet(f"""
+
             QPushButton {{
                 background-color: {COLORS['white']};
                 color: {COLORS['brown_text']};
                 border: 2px solid {COLORS['border']};
-                border-radius: 8px;
-                font-size: 16px;
+                border-radius: {scale(8)}px;
+                font-size: {scale(16)}px;
                 font-weight: bold;
             }}
+
             QPushButton:hover {{
                 background-color: {COLORS['burnt_orange']};
                 color: white;
@@ -40,14 +45,16 @@ class LoadRepertoireDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Repertoire Laden")
-        self.setMinimumSize(450, 400)
+        self.setMinimumSize(scale(450), scale(400))
         self.selected_repo = None
+
         
         self.setStyleSheet(f"""
             QDialog {{ background-color: {COLORS['beige']}; }}
-            QLabel {{ font-family: 'Segoe UI'; color: {COLORS['brown_text']}; font-size: 20px; font-weight: bold; margin-bottom: 10px; }}
+            QLabel {{ font-family: 'Segoe UI'; color: {COLORS['brown_text']}; font-size: {scale(20)}px; font-weight: bold; margin-bottom: {scale(10)}px; }}
             QScrollArea {{ border: none; background: transparent; }}
         """)
+
         self.init_ui()
 
     def init_ui(self):
@@ -64,9 +71,10 @@ class LoadRepertoireDialog(QDialog):
         scroll_widget = QWidget()
         scroll_widget.setStyleSheet("background: transparent;")
         self.grid_layout = QGridLayout(scroll_widget)
-        self.grid_layout.setSpacing(10)
+        self.grid_layout.setSpacing(scale(10))
         
         repo_dir = os.path.join(get_user_dir(), "repertoires")
+
         if os.path.exists(repo_dir):
             row, col = 0, 0
             for f in os.listdir(repo_dir):
@@ -91,10 +99,11 @@ class LoadRepertoireDialog(QDialog):
         b_cancel = QPushButton("Abbrechen")
         b_cancel.setStyleSheet(f"""
             QPushButton {{ 
-                font-family: 'Segoe UI'; font-size: 14px; padding: 10px 15px; border-radius: 8px; 
+                font-family: 'Segoe UI'; font-size: {scale(14)}px; padding: {scale(10)}px {scale(15)}px; border-radius: {scale(8)}px; 
                 background-color: {COLORS['dark_beige']}; color: {COLORS['brown_text']}; font-weight: bold; 
                 border: 1px solid {COLORS['border']};
             }}
+
             QPushButton:hover {{ background-color: {COLORS['button_hover']}; }}
         """)
         b_cancel.clicked.connect(self.reject)
@@ -112,9 +121,12 @@ class SettingsDialog(QDialog):
         super().__init__(main_window)
         self.main_window = main_window
         self.setWindowTitle("Einstellungen")
-        self.resize(800, 600)
+        self.resize(scale(800), scale(600))
         
-        self.setStyleSheet(REPO_SETTINGS_STYLE)
+        self.setStyleSheet(get_repo_settings_style())
+
+
+
         self.init_ui()
 
     def init_ui(self):
@@ -125,8 +137,9 @@ class SettingsDialog(QDialog):
         # 1. SIDEBAR
         self.sidebar = QListWidget()
         self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(200)
+        self.sidebar.setFixedWidth(scale(200))
         self.sidebar.currentRowChanged.connect(self.display_page)
+
         
         items = ["Darstellung & Audio", "Training & Verhalten", "Repertoires"]
         for text in items:
@@ -215,15 +228,17 @@ class SettingsDialog(QDialog):
     def init_page_repo(self, page):
         self.selected_repo = None
         layout = QVBoxLayout(page)
-        layout.setSpacing(15)
+        layout.setSpacing(scale(15))
+
 
         # Dropdown for selecting the Repertoire to edit
         h_select = QHBoxLayout()
         h_select.addWidget(QLabel("<b>Repertoire auswählen:</b>"))
         
         self.combo_select_repo = QComboBox()
-        self.combo_select_repo.setMinimumWidth(250)
+        self.combo_select_repo.setMinimumWidth(scale(250))
         repos = self.main_window.repertoire_manager.get_all_repertoires()
+
         self.combo_select_repo.addItems(repos)
         self.combo_select_repo.currentTextChanged.connect(self.on_repo_selected)
         h_select.addWidget(self.combo_select_repo)
@@ -263,9 +278,10 @@ class SettingsDialog(QDialog):
         self.lbl_moves = QLabel("-")
         self.txt_description = QTextEdit()
         self.txt_description.setReadOnly(True)
-        self.txt_description.setMaximumHeight(80)
+        self.txt_description.setMaximumHeight(scale(80))
         
         self.info_form.addRow("Name:", self.lbl_name)
+
         self.info_form.addRow("Farbe:", self.lbl_color)
         self.info_form.addRow("Levels:", self.lbl_levels)
         self.info_form.addRow("Analyse-Status:", self.lbl_depth)
@@ -274,17 +290,23 @@ class SettingsDialog(QDialog):
         self.info_form.addRow("Beschreibung:", self.txt_description)
         self.details_layout.addWidget(self.grp_info)
 
-        # 3. Danger Zone
-        self.grp_danger = QGroupBox("Gefahrenzone")
-        self.danger_layout = QVBoxLayout(self.grp_danger)
-        
-        self.btn_reset = QPushButton("Trainings-Fortschritt zurücksetzen")
-        self.btn_reset.setStyleSheet(f"color: {COLORS['error_red']};")
-        self.btn_reset.clicked.connect(self.reset_repo_progress)
-        self.btn_reset.setToolTip("Dies löscht alle gespeicherten Lern-Stati (SRS Boxen) für dieses Repertoire in diesem Profil. Die Züge selbst bleiben erhalten.")
         self.danger_layout.addWidget(self.btn_reset)
         self.details_layout.addWidget(self.grp_danger)
         
+        # 4. Bulk Actions
+        self.grp_bulk = QGroupBox("Massen-Aktionen")
+        self.bulk_form = QFormLayout(self.grp_bulk)
+        
+        self.combo_bulk_level = QComboBox()
+        self.bulk_form.addRow("Ziel-Level:", self.combo_bulk_level)
+        
+        self.btn_bulk_move = QPushButton("Alle Züge auf dieses Level setzen")
+        self.btn_bulk_move.clicked.connect(self.move_all_moves_to_level)
+        self.btn_bulk_move.setToolTip("Setzt das Level ALLER Züge in diesem Repertoire auf das oben ausgewählte Level.")
+        self.bulk_form.addRow("", self.btn_bulk_move)
+        
+        self.details_layout.addWidget(self.grp_bulk)
+
         self.details_layout.addStretch()
         scroll_area.setWidget(scroll_widget)
         layout.addWidget(scroll_area)
@@ -319,9 +341,12 @@ class SettingsDialog(QDialog):
         
         self.combo_repo_level.blockSignals(True)
         self.combo_repo_level.clear()
+        self.combo_bulk_level.clear()
         levels = self.main_window.repertoire_manager.get_repertoire_levels()
         for lvl in levels:
-            self.combo_repo_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
+            lvl_text = f"Level {lvl['order']} ({lvl['name']})"
+            self.combo_repo_level.addItem(lvl_text, userData=lvl['order'])
+            self.combo_bulk_level.addItem(lvl_text, userData=lvl['order'])
         
         active_lvl = self.main_window.training_manager.get_active_level()
         idx = self.combo_repo_level.findData(active_lvl)
@@ -366,3 +391,25 @@ class SettingsDialog(QDialog):
                 
             QMessageBox.information(self, "Erfolg", "Fortschritt zurückgesetzt.")
             self.main_window.refresh_repertoire_buttons()
+
+    def move_all_moves_to_level(self):
+        if not self.selected_repo: return
+        
+        target_level = self.combo_bulk_level.currentData()
+        level_name = self.combo_bulk_level.currentText()
+        
+        if target_level is None: return
+        
+        msg = f"Möchten Sie wirklich ALLE Züge des Repertoires '{self.selected_repo}' auf '{level_name}' setzen?"
+        if QMessageBox.question(self, "Bestätigung", msg) == QMessageBox.StandardButton.Yes:
+            # Temporarily switch to the selected repo
+            original_repo = self.main_window.repertoire_manager.active_repertoire_name
+            self.main_window.repertoire_manager.set_active_repertoire(self.selected_repo)
+            
+            count = self.main_window.repertoire_manager.move_all_to_level(target_level)
+            
+            # Restore
+            if original_repo and original_repo != self.selected_repo:
+                self.main_window.repertoire_manager.set_active_repertoire(original_repo)
+                
+            QMessageBox.information(self, "Erfolg", f"{count} Züge wurden auf {level_name} gesetzt.")
