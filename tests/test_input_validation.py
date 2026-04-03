@@ -1,3 +1,4 @@
+from opening_fenix.core.utils import get_repertoire_db_path
 import pytest
 import os
 import chess
@@ -45,7 +46,7 @@ def test_calculate_priority_empty_db(mock_user_dir):
     from opening_fenix.core.db.models import Base
     
     repo_name = "EmptyRepo"
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path, base=Base)
     db.close()
     
@@ -70,7 +71,7 @@ def test_detect_islands_empty_repo(mock_user_dir):
     from opening_fenix.core.db.models import Base
     
     repo_name = "IslandEmpty"
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path, base=Base)
     db.close()
     

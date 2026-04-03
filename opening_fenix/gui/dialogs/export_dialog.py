@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QCheckBox, QComboBox, QLabel, QPushButton, QGroupBox, QFormLayout
 )
 from PyQt6.QtCore import Qt
-from opening_fenix.gui.styles import get_export_dialog_style, COLORS
+from opening_fenix.gui.styles import get_export_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 
 
@@ -11,6 +11,7 @@ from opening_fenix.gui.scaling import scale
 class ExportDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
+        set_consistent_icon(self)
         self.setWindowTitle("Exportieren")
         self.setMinimumWidth(scale(350))
         self.result_data = None

@@ -1,3 +1,4 @@
+from opening_fenix.core.utils import get_repertoire_db_path
 import os
 import pytest
 from sqlalchemy.orm import Session
@@ -9,7 +10,7 @@ from opening_fenix.core.db.meta_utils import (
 )
 
 def test_meta_get_set(mock_user_dir, sample_repertoire):
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     
@@ -35,7 +36,7 @@ def test_delete_repertoire_db(mock_user_dir, sample_repertoire):
     # Test successful deletion
     success, msg = delete_repertoire_db(sample_repertoire)
     assert success is True
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     assert not os.path.exists(db_path)
     
     # Test non-existent
@@ -50,7 +51,7 @@ def test_check_integrity(mock_user_dir, sample_repertoire):
     assert "OK" in result
     
     # Now add a variation without cache
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     pos = session.query(Position).first()
@@ -65,7 +66,7 @@ def test_check_integrity(mock_user_dir, sample_repertoire):
 
 def test_repair_cache(mock_user_dir, sample_repertoire):
     # Setup corrupted cache
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     

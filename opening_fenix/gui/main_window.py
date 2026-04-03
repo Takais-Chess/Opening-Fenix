@@ -1,5 +1,6 @@
 import sys
 import os
+from PyQt6 import sip
 import json
 import chess
 import chess.pgn
@@ -14,7 +15,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QFormLayout,
     QLineEdit, QFileDialog, QListWidget, QProgressBar, 
     QComboBox, QSpinBox, QGroupBox, QFrame, QButtonGroup,
-    QGridLayout, QListWidgetItem, QSlider, QScroller, QMenu, QSizePolicy,
+    QGridLayout, QListWidgetItem, QSlider, QScroller, QMenu, QSizePolicy, QSplitter,
     QTabBar, QStackedWidget, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import (
@@ -31,10 +32,11 @@ from opening_fenix.gui.widgets.board_widget import ChessBoardWidget
 from opening_fenix.gui.widgets.charts import PieChartWidget
 from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame
 from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
+from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
 from opening_fenix.creator.creator_window import CreatorWindow
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_main_window_style, COLORS
+from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon
 
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
@@ -49,9 +51,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"Opening Fenix - {profile_name}")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         
-        win_icon_path = os.path.join(get_base_path(), "assets", "Logo", "favicon.ico")
-        if os.path.exists(win_icon_path):
-            self.setWindowIcon(QIcon(win_icon_path))
+        set_consistent_icon(self)
 
         self.setMinimumSize(scale(1000), scale(700))
         self.resize(scale(1400), scale(850))
@@ -67,11 +67,13 @@ class MainWindow(QMainWindow):
         self.training_mode = 'due' 
         self.button_state = 'start' 
         self.active_variation_filter = None 
+        self.active_variation_entry_fen = None # Cache for start_animation efficiency
         
         self.creator_window = None
         self.sounds = {}
         self.animation_moves = []
         self.sorted_repo_names = None
+        self._auto_size_board = True
         
         # Debounce timer for updating the large stats pie chart
         self.stats_update_timer = QTimer()
@@ -94,15 +96,27 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(get_main_window_style())
 
     def showEvent(self, event):
-
         super().showEvent(event)
+        # Re-apply icon after native handle is created (needed for FramelessWindowHint on Windows)
+        QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
         QTimer.singleShot(100, self.trigger_board_adjust)
 
     def trigger_board_adjust(self):
-        if hasattr(self, 'board_panel'):
+        if hasattr(self, 'board_panel') and hasattr(self, 'main_splitter'):
+            # Allow board to shrink/expand freely
             self.board_panel.setMinimumWidth(0)
             self.board_panel.setMaximumWidth(16777215)
+            
+            # Auto-suggest a square width based on current height
+            if getattr(self, '_auto_size_board', True):
+                h = self.board_panel.height()
+                if h > 0:
+                    total_w = self.main_splitter.width()
+                    # Only suggest if we have enough space for tools too
+                    if total_w > h + scale(350):
+                        self.main_splitter.setSizes([h, total_w - h])
+            
             self.board_panel.adjust_size()
             if self.centralWidget() and self.centralWidget().layout():
                 self.centralWidget().layout().activate()
@@ -218,11 +232,14 @@ class MainWindow(QMainWindow):
         # Inject merged top bar into the custom title bar before the stretch and window controls
         self.custom_title_bar.layout.insertLayout(1, top_layout, 1)
 
-        # --- 2. CONTENT AREA ---
-        content_container = QWidget()
-        content_layout = QHBoxLayout(content_container)
-        content_layout.setContentsMargins(20, 20, 20, 20)
-        content_layout.setSpacing(20)
+        # --- 2. CONTENT AREA (Now with Splitter) ---
+        content_wrapper = QWidget()
+        content_layout = QVBoxLayout(content_wrapper)
+        content_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        content_layout.setSpacing(0)
+        
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        content_layout.addWidget(self.main_splitter)
 
         self.board_panel = AspectRatioFrame()
         self.board_panel.setObjectName("BoardPanel")
@@ -231,7 +248,7 @@ class MainWindow(QMainWindow):
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.check_user_move)
         board_inner_layout.addWidget(self.board_widget)
-        content_layout.addWidget(self.board_panel, 3)
+        self.main_splitter.addWidget(self.board_panel)
 
         self.side_panel = QFrame()
         self.side_panel.setObjectName("SidePanel")
@@ -242,6 +259,7 @@ class MainWindow(QMainWindow):
         side_layout.addWidget(QLabel("NOTATION"), 0, Qt.AlignmentFlag.AlignLeft)
         self.txt_notation = ZoomableTextBrowser()
         self.txt_notation.setObjectName("NotationView")
+        self.txt_notation.setOpenLinks(False)
         self.txt_notation.anchorClicked.connect(self.on_notation_click)
         side_layout.addWidget(self.txt_notation, 1)
 
@@ -304,8 +322,14 @@ class MainWindow(QMainWindow):
         hub_layout.addWidget(self.btn_smart)
 
         side_layout.addWidget(training_hub)
-        content_layout.addWidget(self.side_panel, 2)
-        main_layout.addWidget(content_container, 1)
+        self.main_splitter.addWidget(self.side_panel)
+        
+        # Initial proportions: 3:2
+        self.main_splitter.setStretchFactor(0, 3)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.splitterMoved.connect(lambda: setattr(self, '_auto_size_board', False))
+        
+        main_layout.addWidget(content_wrapper, 1)
 
         # Apply Drop Shadows for glass depth
         for panel in [self.board_panel, self.side_panel]:
@@ -333,7 +357,7 @@ class MainWindow(QMainWindow):
     def on_repertoire_button_clicked(self, button):
         self.change_repertoire(button.property("repo_name"))
 
-    def change_repertoire(self, repo_name):
+    def change_repertoire(self, repo_name, reset_filter=True):
         # Cancel any ongoing animations before switching
         self.animation_moves = []
         if hasattr(self.board_widget, 'abort_piece_slide'):
@@ -346,8 +370,9 @@ class MainWindow(QMainWindow):
         self.repertoire_manager.set_active_repertoire(repo_name)
         self.training_manager.on_repertoire_changed()
         
-        self.active_variation_filter = None
-        self.btn_filter.setText("Filter ▾")
+        if reset_filter:
+            self.active_variation_filter = None
+            self.btn_filter.setText("Filter ▾")
         
         if repo_name:
             is_player_white = self.repertoire_manager.get_repertoire_color() == 'w'
@@ -363,13 +388,34 @@ class MainWindow(QMainWindow):
         self.current_move_obj = None
         self.refresh_repertoire_buttons()
 
-        # Auto-activate "Neue lernen" when repertoire has no due or learned moves yet
+        # Handle Course Intro and Learning Modes
         if self.repertoire_manager.repo_session:
             new, due, done_dist = self.training_manager.get_stats()
             learned = sum(done_dist.values()) if isinstance(done_dist, dict) else 0
-            if due == 0 and learned == 0:
+            
+            # Show Course Intro Splash if no moves have been learned yet and not free training
+            if learned == 0 and repo_name and self.profile_name != "Freies Training":
+                repo_info = self.repertoire_manager.get_repertoire_info()
+                self._current_intro = CourseIntroDialog(self, repo_info)
+                self._current_intro.setWindowModality(Qt.WindowModality.NonModal)
+                
+                # Connect the dialog acceptance to start learning
+                self._current_intro.accepted.connect(self._start_learning_from_intro)
+                self._current_intro.show()
+            
+            # Auto-activate "Neue lernen" when repertoire has no due or learned moves yet
+            elif due == 0 and learned == 0:
                 self.btn_learn_new.setChecked(True)
                 self.training_mode = 'new'
+
+    def _start_learning_from_intro(self):
+        """Callback from Course Intro dialog to immediately start learning."""
+        self.btn_learn_new.setChecked(True)
+        self.training_mode = 'new'
+        # Emulate a click on the STARTEN button
+        if self.button_state == 'start':
+            # Use singleShot to let the dialog close cleanly first
+            QTimer.singleShot(100, self.on_smart_click)
 
     def show_filter_menu(self):
         if not self.repertoire_manager.active_repertoire_name: return
@@ -390,8 +436,22 @@ class MainWindow(QMainWindow):
 
     def set_variation_filter(self, var_name):
         self.active_variation_filter = var_name
+        self.active_variation_entry_fen = None # Reset cache
         self.btn_filter.setText(f"{var_name[:12]}.. ▾" if var_name and len(var_name) > 12 else (var_name or "Filter") + " ▾")
-        self.current_move_obj = None; self.load_next_challenge(); self.update_stats_display()
+        
+        # If a filter is selected, jump the board to the start of that variation
+        if var_name:
+            entry_fen = self.repertoire_manager.get_variation_entry_point_fen(var_name)
+            if entry_fen:
+                self.active_variation_entry_fen = entry_fen # Cache for start_animation
+                self.board_widget.set_fen(entry_fen)
+                hist = self.repertoire_manager.get_history_for_fen(entry_fen)
+                # Ensure the last move is highlighted in notation if we jumped to a specific FEN
+                self.update_notation_display(temp_hist=hist, reveal_move=True)
+                
+        self.current_move_obj = None
+        self.load_next_challenge()
+        self.update_stats_display()
 
     def refresh_repertoire_buttons(self):
         scroll_pos = self.repo_scroll.horizontalScrollBar().value()
@@ -508,15 +568,28 @@ class MainWindow(QMainWindow):
             self.btn_smart.setEnabled(False)
 
     def on_notation_click(self, url):
-        fen = url.toString().replace("fen:", "")
-        self.open_creator_at_current_position(fen)
+        # Extract the FEN from the URL and properly decode percent-encoding (e.g., %20 -> " ")
+        raw_fen = url.toString().replace("fen:", "")
+        decoded_fen = QUrl.fromPercentEncoding(raw_fen.encode('utf-8'))
+        self.open_creator_at_current_position(decoded_fen)
 
     def open_creator_at_current_position(self, fen=None):
         if not self.repertoire_manager.active_repertoire_name: return
         target_fen = fen or self.board_widget.board.fen()
-        if self.creator_window and self.creator_window.isVisible():
+        
+        # Check if window exists and is not deleted
+        if self.creator_window and not sip.isdeleted(self.creator_window):
+            # 1. Restore if minimized
+            if self.creator_window.isMinimized():
+                self.creator_window.showNormal()
+            
+            # 2. Update FEN
             self.creator_window.set_board_to_fen(target_fen)
-            self.creator_window.raise_(); self.creator_window.activateWindow()
+            
+            # 3. Ensure it's visible, on top, and active
+            self.creator_window.show()
+            self.creator_window.raise_()
+            self.creator_window.activateWindow()
         else:
             self.creator_window = CreatorWindow(repertoire_name=self.repertoire_manager.active_repertoire_name, initial_fen=target_fen)
             self.creator_window.showMaximized()
@@ -612,7 +685,7 @@ class MainWindow(QMainWindow):
 
     def toggle_learning_mode(self):
         self.training_mode = 'new' if self.btn_learn_new.isChecked() else 'due'
-        self.change_repertoire(self.repertoire_manager.active_repertoire_name)
+        self.change_repertoire(self.repertoire_manager.active_repertoire_name, reset_filter=False)
 
     def toggle_auto_continue_btn(self):
         self.training_manager.set_setting("stop_at_variation_end", not self.btn_auto_continue.isChecked())
@@ -643,20 +716,49 @@ class MainWindow(QMainWindow):
         history = self.repertoire_manager.get_history_for_move(self.current_move_obj)
         full_moves = [h['san'] for h in history[:-1]]
         def clean_fen(f): return " ".join(f.split(" ")[:4])
+        
+        # ── VARIATION FILTER TRUNCATION ──
+        reset_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+        if self.active_variation_filter:
+            # Use cached entry FEN for performance
+            entry_fen = self.active_variation_entry_fen
+            if entry_fen:
+                reset_fen = entry_fen
+                # Identify where the variation starts in the history
+                c_entry = clean_fen(entry_fen)
+                boundary_idx = -1
+                for i, item in enumerate(history[:-1]):
+                    if clean_fen(item['fen']) == c_entry:
+                        boundary_idx = i; break
+                
+                # Truncate to start only from variation boundary
+                if boundary_idx != -1:
+                    full_moves = full_moves[boundary_idx + 1:]
+                    history = history[boundary_idx + 1:]
+                elif clean_fen(chess.STARTING_FEN) != c_entry:
+                    # Variation starts at a position NOT in history (shouldn't happen with correct CTE)
+                    # or history is already shorter. We'll just reset board if mismatch later.
+                    pass
+
         current_fen = clean_fen(self.board_widget.board.fen())
         target_fen = clean_fen(self.current_move_obj.from_position.fen)
         if current_fen == target_fen: self.finalize_animation_state(); return
+        
         match_idx = -1
-        if current_fen == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -": match_idx = -1
+        # Check against reset point (STARTING_FEN or VARIATION_ENTRY_FEN)
+        if current_fen == clean_fen(reset_fen):
+            match_idx = -1
         else:
             for i, item in enumerate(history[:-1]):
-                if clean_fen(item['fen']) == current_fen: match_idx = i; break
-        if match_idx != -1 or current_fen == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -":
+                if clean_fen(item['fen']) == current_fen:
+                    match_idx = i; break
+        
+        if match_idx != -1 or current_fen == clean_fen(reset_fen):
             self.animation_moves = full_moves[match_idx + 1:]
             logger.debug(f"Animation: starting from match_idx {match_idx}, {len(self.animation_moves)} moves remaining.")
         else:
-            logger.info("Animation: current board position not found in history. Resetting to STARTING_FEN.")
-            self.board_widget.set_fen(chess.STARTING_FEN)
+            logger.info(f"Animation: current board position not found in history. Resetting to {reset_fen}.")
+            self.board_widget.set_fen(reset_fen)
             self.animation_moves = full_moves
 
         if not self.animation_moves:
@@ -743,6 +845,11 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
+        if hasattr(self, 'creator_window') and self.creator_window:
+            try:
+                self.creator_window.close()
+            except: pass
+
         if self.training_manager:
             self.training_manager.close()
         if self.repertoire_manager:

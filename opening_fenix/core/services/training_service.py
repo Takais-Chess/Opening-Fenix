@@ -259,35 +259,94 @@ class TrainingManager:
 
         self._ensure_forward_cache()
 
-        # 1. Find all positions explicitly named
+        # 1. Find all positions explicitly named (V1, V2, or V3)
         roots = self.repertoire_manager.repo_session.query(Position.id).filter(
-            or_(Position.variation_1 == variation_name, Position.variation_2 == variation_name)
+            or_(
+                Position.variation_1 == variation_name, 
+                Position.variation_2 == variation_name,
+                Position.variation_3 == variation_name
+            )
         ).all()
         root_ids = {r.id for r in roots}
 
         # 2. Find all lead-up moves (to reach the variation)
+        # RESTRICTED: Only follow the most played (highest priority) path back.
         queue = deque(root_ids)
         visited = set(root_ids)
         while queue:
             curr_id = queue.popleft()
             parents = self._move_parent_cache.get(curr_id, [])
-            for m in parents:
+            if parents:
+                # Take only the first (best) parent move
+                m = parents[0]
                 self._variation_move_ids.add(m.id)
                 if m.from_position_id not in visited:
                     visited.add(m.from_position_id)
                     queue.append(m.from_position_id)
 
         # 3. Find all descendant moves (inside the variation)
-        queue = deque(root_ids)
-        visited = set(root_ids)
+        # We run a BFS with root-specific context to ensure that filtering a lower level 
+        # (e.g., V2) doesn't pollute the context of a higher level filter (e.g., V1).
+        queue = deque()
+        # visited: (position_id, (filter_v1, filter_v2, filter_v3))
+        visited = set()
+
+        for rid in root_ids:
+            p = self._pos_cache.get(rid)
+            if not p: continue
+            
+            # Determine the filter context for this root
+            f = {1: None, 2: None, 3: None}
+            if p.variation_1 == variation_name: f[1] = variation_name
+            if p.variation_2 == variation_name: f[2] = variation_name
+            if p.variation_3 == variation_name: f[3] = variation_name
+            
+            # Anchor parents: if filtering for V2, also lock the V1 parent opening.
+            if f[2] or f[3]: f[1] = p.variation_1 or p.cached_v1
+            if f[3]: f[2] = p.variation_2 or p.cached_v2
+            
+            f_tuple = (f[1], f[2], f[3])
+            queue.append((rid, f))
+            visited.add((rid, f_tuple))
+
         while queue:
-            curr_id = queue.popleft()
+            curr_id, f = queue.popleft()
             children = self._forward_moves_cache.get(curr_id, [])
             for m in children:
+                child_pos = self._pos_cache.get(m.to_position_id)
+                if child_pos:
+                    v = [child_pos.variation_1, child_pos.variation_2, child_pos.variation_3]
+                    cv = [child_pos.cached_v1, child_pos.cached_v2, child_pos.cached_v3]
+                    
+                    pruned = False
+                    for i in [1, 2, 3]:
+                        f_name = f[i]
+                        child_v = v[i-1]
+                        child_cv = cv[i-1]
+                        
+                        if f_name:
+                            # Prune if the level we are filtering for changes to a DIFFERENT name.
+                            if (child_v and child_v != f_name) or (not child_v and child_cv and child_cv != f_name):
+                                pruned = True; break
+                        else:
+                            # If this level has no filter, we only prune if an EXPLICIT name appears 
+                            # that belongs to a level HIGHER than our finest current filter.
+                            # Example: Filtering for V2, but child suddenly has a new V1.
+                            if child_v:
+                                has_lower_filter = False
+                                for j in range(i + 1, 4):
+                                    if f[j]:
+                                        has_lower_filter = True; break
+                                if has_lower_filter:
+                                    pruned = True; break
+                    
+                    if pruned: continue
+
                 self._variation_move_ids.add(m.id)
-                if m.to_position_id not in visited:
-                    visited.add(m.to_position_id)
-                    queue.append(m.to_position_id)
+                f_state = (f[1], f[2], f[3])
+                if (m.to_position_id, f_state) not in visited:
+                    visited.add((m.to_position_id, f_state))
+                    queue.append((m.to_position_id, f))
 
         return self._variation_move_ids
 
@@ -388,7 +447,7 @@ class TrainingManager:
                 rep_move = self._rep_move_cache.get(found_move.id)
                 if not rep_move or rep_move.level > max_lvl: continue
                 
-                return self._get_ancestor(found_move, check_due=True), []
+                return self._get_ancestor(found_move, check_due=True, variation_filter=variation_filter), []
 
             if self.profile_name == "Freies Training":
                 # In free training, we only pick moves not yet successfully trained in this session
@@ -405,7 +464,7 @@ class TrainingManager:
                             candidates.append(m)
                 if candidates:
                     candidates.sort(key=lambda x: x.priority_score, reverse=True)
-                    return self._get_ancestor(candidates[0], check_due=False), []
+                    return self._get_ancestor(candidates[0], check_due=False, variation_filter=variation_filter), []
                 return None, [] # All moves trained
 
         # 3. New Mode
@@ -431,22 +490,42 @@ class TrainingManager:
                 top_prio = candidates[0].priority_score
                 # Pick among those that share the absolute highest priority score
                 best = [m for m in candidates if m.priority_score == top_prio]
-                return self._get_ancestor(random.choice(best), check_due=False), []
+                return self._get_ancestor(random.choice(best), check_due=False, variation_filter=variation_filter), []
         
         return None, []
 
-    def _get_ancestor(self, move_obj, check_due=False):
+    def _get_ancestor(self, move_obj, check_due=False, variation_filter=None):
         """Iterative ancestor search to find the entry point of a sequence."""
         curr_move = move_obj
         self._ensure_forward_cache()
         self._ensure_td_cache()
             
+        # If filtering, find the entry point FEN for the variation
+        entry_fen = None
+        if variation_filter:
+            entry_fen = self.repertoire_manager.get_variation_entry_point_fen(variation_filter)
+            
+        def clean_fen(f): return " ".join(f.split(" ")[:4])
+        target_entry_fen = clean_fen(entry_fen) if entry_fen else None
+
         for _ in range(50): # Safety limit
+            # Stop if we are already at the variation entry point
+            if target_entry_fen:
+                curr_fen = clean_fen(self._pos_cache[curr_move.from_position_id].fen)
+                if curr_fen == target_entry_fen:
+                    break
+
             # Parent cache is pre-sorted by priority_score descending
             parents = self._move_parent_cache.get(curr_move.from_position_id, [])
             if not parents: break
             parent_move = parents[0]
             
+            # Check if parent_move is at the boundary
+            if target_entry_fen:
+                parent_fen = clean_fen(self._pos_cache[parent_move.from_position_id].fen)
+                if parent_fen == target_entry_fen:
+                    break
+
             grandparents = self._move_parent_cache.get(parent_move.from_position_id, [])
             if not grandparents: break
             grandparent_move = grandparents[0]

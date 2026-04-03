@@ -81,6 +81,9 @@ class RepertoireManager:
     def get_repertoire_info(self) -> Dict[str, Any]:
         return self.core.get_repertoire_info()
 
+    def set_repertoire_description(self, description: str) -> None:
+        self.core.set_repertoire_description(description)
+
     def get_repertoire_color(self) -> str:
         return self.core.get_repertoire_color()
 
@@ -100,6 +103,10 @@ class RepertoireManager:
         """Internal helper for training_manager and tests."""
         if not self.nav: return {"roots": set(), "lead_up": set()}
         return self.nav.get_variation_filter_info(variation_name)
+
+    def get_variation_entry_point_fen(self, variation_name: str) -> Optional[str]:
+        if not self.nav: return None
+        return self.nav.get_variation_entry_point_fen(variation_name)
 
     def get_history_for_move(self, move_obj, root_fen=None):
         if not self.nav or not move_obj: return []

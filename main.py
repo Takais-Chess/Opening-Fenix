@@ -12,8 +12,7 @@ from opening_fenix.core.data_tools import get_base_path, get_user_dir
 from opening_fenix.core.migration import migrate_legacy_profiles
 from opening_fenix.gui.dialogs.login_dialog import LoginDialog
 from opening_fenix.gui.main_window import MainWindow
-from opening_fenix.creator.creator_window import CreatorWindow
-
+from opening_fenix.gui.styles import set_consistent_icon
 from opening_fenix.gui.window_manager import WindowManager
 from opening_fenix.core.logger import logger
 
@@ -74,26 +73,37 @@ def ensure_default_engine_path():
                     break
 
 if __name__ == "__main__":
+    if sys.platform == 'win32':
+        import ctypes
+        # More unique and descriptive ID to ensure correct taskbar grouping/caching
+        myappid = 'OpeningFenix.Lab.RepertoireTrainer.1.0' 
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+        except (AttributeError, OSError):
+             pass
+
     try:
         logger.info("Opening Fenix starting...")
-        if sys.platform == 'win32':
-            import ctypes
-            myappid = 'OpeningFenix.OpeningFenix.1.0' 
-            try:
-                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            except (AttributeError, OSError) as e:
-                logger.debug(f"Could not set AppUserModelID: {e}")
 
         # Enable High DPI scaling and rounding policies for sharp UI
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
         
         QApplication.setStyle("Fusion")
         app = QApplication(sys.argv)
+        
+        # Explicitly set application identity for Windows taskbar grouping
+        app.setApplicationName("OpeningFenix")
+        app.setOrganizationName("OpeningFenixLab")
+        app.setApplicationVersion("2.1.0")
+        app.setApplicationDisplayName("Opening Fenix")
+        
+        # Set icon on the app instance immediately
+        set_consistent_icon(app)
 
-        icon_path = os.path.join(get_base_path(), "assets", "Logo", "favicon.ico")
-        if os.path.exists(icon_path):
-            app.setWindowIcon(QIcon(icon_path))
+        logger.info("Application initialized, setting up services...")
 
+        from opening_fenix.core.utils import migrate_repertoire_storage
+        migrate_repertoire_storage()
         migrate_legacy_profiles()
         ensure_default_engine_path()
 

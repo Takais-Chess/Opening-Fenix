@@ -27,10 +27,11 @@ class AspectRatioFrame(QFrame):
         self.adjust_size()
 
     def adjust_size(self):
-        # Force the width to match the height to keep it square
-        h = self.height()
-        if h > 0 and self.width() != h:
-            self.setFixedWidth(h)
+        # We no longer force a fixed width here. 
+        # The ChessBoardWidget inside already handles its own square aspect ratio
+        # during painting, and forcing a fixed width on the container breaks 
+        # responsiveness in splitters (causing the right panel to be cut off).
+        pass
             
     def sizeHint(self):
         # Default size hint

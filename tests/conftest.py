@@ -87,7 +87,8 @@ def sample_repertoire(mock_user_dir):
 def _create_sample_repertoire(user_dir):
     """Helper to create sample repo data."""
     repo_name = "TestRepo"
-    db_path = os.path.join(user_dir, "repertoires", f"{repo_name}.db")
+    from opening_fenix.core.utils import get_repertoire_db_path
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path, base=Base)
     session = db.get_session()
     

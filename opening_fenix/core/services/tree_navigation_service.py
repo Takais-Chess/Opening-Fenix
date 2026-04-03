@@ -1,7 +1,7 @@
 import chess
 from collections import deque
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text, func
 from typing import List, Dict, Set, Optional, Any
 from opening_fenix.core.db.models import Position, Move, RepertoireMove
 from opening_fenix.core.logger import logger
@@ -10,8 +10,8 @@ class TreeNavigationService:
     def __init__(self, session: Session):
         self.repo_session = session
         self._move_parent_cache = None 
-        self._variation_structure_cache = None
-        self._variation_filter_cache = {}
+        self._variation_structure_cache: Optional[Dict[str, List[str]]] = None
+        self._variation_filter_cache: Dict[str, Any] = {}
 
     def get_history_for_move_recursive(self, move_id: int) -> List[Dict[str, Any]]:
         """
@@ -23,12 +23,12 @@ class TreeNavigationService:
         # Recursive CTE to find all ancestor moves
         # We start from move_id and work backwards
         query = text("""
-            WITH RECURSIVE ancestors(id, from_id, to_id, uci, san, level) AS (
-                SELECT id, from_position_id, to_position_id, uci, san, 0
+            WITH RECURSIVE ancestors(id, from_id, to_id, uci, san, level, nag) AS (
+                SELECT id, from_position_id, to_position_id, uci, san, 0, nag
                 FROM moves
                 WHERE id = :move_id
                 UNION ALL
-                SELECT m.id, m.from_position_id, m.to_position_id, m.uci, m.san, a.level + 1
+                SELECT m.id, m.from_position_id, m.to_position_id, m.uci, m.san, a.level + 1, m.nag
                 FROM moves m
                 JOIN ancestors a ON m.to_position_id = a.from_id
                 WHERE m.id = (SELECT id FROM moves WHERE to_position_id = a.from_id ORDER BY priority_score DESC LIMIT 1)
@@ -49,7 +49,7 @@ class TreeNavigationService:
                     'uci': r.uci, 
                     'fen': r.fen, 
                     'comment': r.comment,
-                    'nag': 0 # Default if not in CTE but can be added
+                    'nag': r.nag
                 })
             return history
         except Exception as e:
@@ -105,60 +105,84 @@ class TreeNavigationService:
             return self._variation_structure_cache
         
         # 1. Fetch all positions that have ANY variation tag
-        tagged_positions = self.repo_session.query(
-            Position.id, Position.variation_1, Position.variation_2, Position.variation_3
+        # Join with moves to get the max incoming priority for each position
+        results = self.repo_session.query(
+            Position.id, Position.variation_1, Position.variation_2, Position.variation_3,
+            Position.cached_v1, Position.cached_v2,
+            func.max(Move.priority_score).label('max_prio')
+        ).outerjoin(
+            Move, Move.to_position_id == Position.id
         ).filter(
             (Position.variation_1 != None) | 
             (Position.variation_2 != None) | 
-            (Position.variation_3 != None)
-        ).all()
-        
-        structure = {}
-        
-        for pos_id, v1, v2, v3 in tagged_positions:
-            # If inheritance is needed (missing v1 or v2)
-            if not v1 or (v1 and not v2 and v3): 
-                # Walk up to find the missing levels
-                ancestors = self.get_history_for_move_recursive(self.repo_session.query(Move.id).filter_by(to_position_id=pos_id).first()[0] if self.repo_session.query(Move.id).filter_by(to_position_id=pos_id).first() else None)
-                # Note: get_history_for_move_recursive doesn't return variation tags. 
-                # We need to query them.
-                
-                if not v1:
-                    # Find first ancestor with v1
-                    query = text("""
-                        WITH RECURSIVE ancestors(from_id) AS (
-                            SELECT from_position_id FROM moves WHERE to_position_id = :pos_id
-                            UNION ALL
-                            SELECT m.from_position_id FROM moves m JOIN ancestors a ON m.to_position_id = a.from_id
-                            LIMIT 100
-                        )
-                        SELECT p.variation_1 FROM ancestors a JOIN positions p ON a.from_id = p.id WHERE p.variation_1 IS NOT NULL LIMIT 1
-                    """)
-                    row = self.repo_session.execute(query, {"pos_id": pos_id}).fetchone()
-                    if row: v1 = row[0]
-                
-                if not v2:
-                    # Find first ancestor with v2
-                    query = text("""
-                        WITH RECURSIVE ancestors(from_id) AS (
-                            SELECT from_position_id FROM moves WHERE to_position_id = :pos_id
-                            UNION ALL
-                            SELECT m.from_position_id FROM moves m JOIN ancestors a ON m.to_position_id = a.from_id
-                            LIMIT 100
-                        )
-                        SELECT p.variation_2 FROM ancestors a JOIN positions p ON a.from_id = p.id WHERE p.variation_2 IS NOT NULL LIMIT 1
-                    """)
-                    row = self.repo_session.execute(query, {"pos_id": pos_id}).fetchone()
-                    if row: v2 = row[0]
+            (Position.variation_3 != None) |
+            (Position.cached_v1 != None) |
+            (Position.cached_v2 != None) |
+            (Position.cached_v3 != None)
+        ).group_by(Position.id).all()
 
+        structure = {} # V1 -> set(V2)
+        v1_prios = {}  # V1 -> max_prio
+        v2_prios = {}  # (V1, V2) -> max_prio
+
+        for pos_id, v1, v2, v3, cv1, cv2, prio in results:
+            prio = prio if prio is not None else 0.0
+
+            # Use cached inheritance if variation tags are missing on the position itself
+            if not v1: v1 = cv1
+            if not v2: v2 = cv2
+
+            # Final fallbacks for robustness
+            if not v1 or (v1 and not v2 and v3): 
+                if not v1:
+                    v1 = self._find_ancestor_variation(pos_id, 1)
+                if not v2:
+                    v2 = self._find_ancestor_variation(pos_id, 2)
+                
             if not v1: v1 = "Sonstiges"
-            if v1 not in structure: structure[v1] = set()
-            if v2: structure[v1].add(v2)
+            
+            v1_prios[v1] = max(v1_prios.get(v1, 0.0), prio)
+            if v1 not in structure:
+                structure[v1] = set()
+            
+            if v2:
+                structure[v1].add(v2)
+                key = (v1, v2)
+                v2_prios[key] = max(v2_prios.get(key, 0.0), prio)
+
+        # Sort V1s by priority descending, but keep "Sonstiges" at the bottom
+        # Use a very low priority for "Sonstiges" to push it down
+        def v1_sort_key(name):
+            if name == "Sonstiges": return -1.0
+            return v1_prios.get(name, 0.0)
+
+        sorted_v1s = sorted(structure.keys(), key=v1_sort_key, reverse=True)
         
-        # Convert sets to sorted lists for the UI menu
-        res = {k: sorted(list(v)) for k, v in structure.items()}
+        # Build final result with sorted V2s
+        res = {}
+        for v1 in sorted_v1s:
+            v2s = list(structure[v1])
+            # Sort V2s by their priority within this V1, also putting "Sonstiges" children at the bottom if any
+            sorted_v2s = sorted(v2s, key=lambda v2: (-1.0 if v2 == "Sonstiges" else v2_prios.get((v1, v2), 0.0)), reverse=True)
+            res[v1] = sorted_v2s
+
         self._variation_structure_cache = res
         return res
+
+    def _find_ancestor_variation(self, pos_id: int, level: int) -> Optional[str]:
+        """Helper to find the nearest ancestor variation name if not present on current position."""
+        col = "variation_1" if level == 1 else "variation_2"
+        query = text(f"""
+            WITH RECURSIVE ancestors(from_id) AS (
+                SELECT from_position_id FROM moves WHERE to_position_id = :pos_id
+                UNION ALL
+                SELECT m.from_position_id FROM moves m JOIN ancestors a ON m.to_position_id = a.from_id
+                LIMIT 100
+            )
+            SELECT p.{col} FROM ancestors a JOIN positions p ON a.from_id = p.id WHERE p.{col} IS NOT NULL LIMIT 1
+        """)
+        row = self.repo_session.execute(query, {"pos_id": pos_id}).fetchone()
+        return row[0] if row else None
 
     def get_variation_filter_info(self, variation_name: str) -> Dict[str, Set[int]]:
         """
@@ -208,3 +232,59 @@ class TreeNavigationService:
         }
         self._variation_filter_cache[variation_name] = res
         return res
+
+    def get_variation_entry_point_fen(self, variation_name: str) -> Optional[str]:
+        """
+        Finds the FEN of the earliest position (shortest path from root) tagged with this variation.
+        """
+        if not self.repo_session: return None
+        
+        # 1. Find all positions explicitly tagged
+        roots = self.repo_session.query(Position.id, Position.fen).filter(
+            (Position.variation_1 == variation_name) | 
+            (Position.variation_2 == variation_name) |
+            (Position.variation_3 == variation_name)
+        ).all()
+        
+        if not roots:
+            return None
+            
+        if len(roots) == 1:
+            return roots[0].fen
+
+        # 2. If multiple, find the one with shortest path from the absolute starting position
+        root_pos_ids = [r.id for r in roots]
+        
+        # We start from known starting positions (no incoming moves)
+        start_positions = self.repo_session.query(Position.id).filter(
+            ~Position.id.in_(self.repo_session.query(Move.to_position_id))
+        ).all()
+        start_ids = [s.id for s in start_positions]
+        if not start_ids: 
+             # Fallback: take the position with the lowest ID (usually initial)
+             first_pos = self.repo_session.query(Position.id).order_by(Position.id).first()
+             if first_pos: start_ids = [first_pos.id]
+             else: return None
+
+        queue = deque([(sid, 0) for sid in start_ids])
+        visited = set(start_ids)
+        
+        while queue:
+            curr_id, depth = queue.popleft()
+            
+            # Check if this is one of our target roots
+            for r in roots:
+                if r.id == curr_id:
+                    return r.fen
+            
+            if depth > 100: continue # Safety limit
+            
+            # Find children moves
+            children = self.repo_session.query(Move.to_position_id).filter_by(from_position_id=curr_id).all()
+            for c in children:
+                if c[0] not in visited:
+                    visited.add(c[0])
+                    queue.append((c[0], depth + 1))
+                    
+        # Fallback: just return the first one found if BFS failed
+        return roots[0].fen

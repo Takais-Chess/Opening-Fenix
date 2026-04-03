@@ -64,9 +64,14 @@ class DatabaseManager:
                     result = conn.execute(text("PRAGMA table_info(positions)"))
                     pos_columns = [row[1] for row in result.fetchall()]
                     
-                    for col in ['variation_3', 'cached_v1', 'cached_v2', 'cached_v3']:
+                    for col in ['variation_3', 'cached_v1', 'cached_v2', 'cached_v3', 'last_overhaul_review', 'is_hole_exempt']:
                         if col not in pos_columns:
-                            conn.execute(text(f"ALTER TABLE positions ADD COLUMN {col} VARCHAR"))
+                            type_map = {
+                                'last_overhaul_review': "DATETIME",
+                                'is_hole_exempt': "BOOLEAN DEFAULT 0"
+                            }
+                            type_str = type_map.get(col, "VARCHAR")
+                            conn.execute(text(f"ALTER TABLE positions ADD COLUMN {col} {type_str}"))
                             conn.commit()
 
                     # Check for new RepertoireLevel columns
@@ -103,7 +108,7 @@ class DatabaseManager:
         Returns:
             A new SQLAlchemy Session instance.
         """
-        return sessionmaker(bind=self.engine)()
+        return sessionmaker(bind=self.engine, autoflush=False)()
 
     def close(self) -> None:
         """Disposes the underlying SQLAlchemy engine and connection pool."""

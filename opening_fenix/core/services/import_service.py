@@ -5,11 +5,11 @@ from typing import Tuple, Optional, Callable
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
-from opening_fenix.core.utils import get_user_dir
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets
 
 def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None) -> Tuple[bool, str]:
     """Imports a PGN file into a new or existing repertoire database using bulk operations."""
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     is_new_db = not os.path.exists(db_path)
     
     db = DatabaseManager(db_path)
@@ -28,6 +28,9 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                 session.add(start_pos)
             set_meta(session, "name", repo_name)
             set_meta(session, "color", side)
+            
+            # Initialize PGN assets and Tactics folder
+            initialize_repertoire_assets(os.path.dirname(db_path))
         
         session.flush()
 
@@ -125,7 +128,7 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                     move_id = max_move_id
                     move_cache[(from_pos_id, uci_str)] = move_id
                     new_moves_to_insert.append(
-                        Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san())
+                        Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=list(current_node.nags)[0] if current_node.nags else 0)
                     )
                 
                 turn = 'w' if board.turn == chess.BLACK else 'b'

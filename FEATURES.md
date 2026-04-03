@@ -46,6 +46,11 @@ The core module for building and editing opening repertoires.
 *   **Database Export:** Backup the raw SQLite `.db` repertoire file.
 
 ### Repertoire Settings & Management
+*   **Directory-Based Storage (New in V2.1):** Repertoires are now organized into dedicated subfolders, making it easier to manage associated files and exports.
+*   **Automatic Asset Initialization:** New repertoires are automatically provisioned with standard assets:
+    - **Model Games.pgn:** For collecting instructive games.
+    - **Typical Motives.pgn:** For documenting strategic patterns.
+    - **Tactics/Tactics.pgn:** For opening-specific tactical puzzles.
 *   **Metadata:** View repertoire stats (number of moves, analysis depth, associated ELO).
 *   **Levels Management:** Add, rename, and organize Repertoire Levels (e.g., "Core", "Sidelines", "Tricks").
 *   **Themes:** Change the visual theme of the chess board (e.g., "Blau (Turnier)").
@@ -64,5 +69,8 @@ The main module for practicing and mastering opening repertoires.
 *   **Spaced Repetition System (SRS):** Advanced training logic that schedules move reviews based on mastery levels (Level 0 to 5), ensuring efficient memory retention.
 *   **Adaptive Training:** Automatically presents moves that are "due" for training, while allowing manual selection of specific repertoires.
 *   **"Freies Training" (Free Training):** A stateless profile for immediate, progress-free practice. It uses an in-memory database to allow training without persisting progress to disk.
+*   **Course Introduction & Onboarding:** A beautiful, responsive splash screen that welcomes users to a new repertoire before they start learning their first moves, pulling metadata from the Creator.
 *   **Profile Management:** Comprehensive profile system to track individual training progress, mastery levels, and SRS schedules across multiple repertoires.
 *   **Real-time Feedback:** Visual indicators for correct/incorrect moves and immediate repertoire tree navigation during practice.
+*   **Smart Variation Filtering:** Dropdown menu to filter training by specific variations. Selecting a parent variation automatically includes all its sub-variations to ensure comprehensive practice.
+*   **Quick Tools:** Integrated toolbar for instant access to the Creator, Lichess Analysis, and Autoplay toggles directly from the training position.

@@ -1,10 +1,11 @@
+from opening_fenix.core.utils import get_repertoire_db_path
 import pytest
 import os
 import opening_fenix.core.data_tools as dt
 from opening_fenix.core.models import DatabaseManager, Metadata
 
 def test_set_and_get_meta(mock_user_dir, sample_repertoire):
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     

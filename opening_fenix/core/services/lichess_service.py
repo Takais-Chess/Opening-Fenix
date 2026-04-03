@@ -8,18 +8,18 @@ from typing import Tuple, Callable, Optional, Dict, List
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
-from opening_fenix.core.utils import get_user_dir, _update_lichess_delay_config
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, _update_lichess_delay_config
 
 ELO_MAPPING: Dict[str, List[str]] = {
-    'low': ['1600'],
-    'mid': ['1800', '2000'],
+    'low': ['400', '1000', '1200'],
+    'mid': ['1600'],
     'high': ['2200', '2500'],
     'masters': []
 }
 
 def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
     from opening_fenix.core.db.models import LichessData # local import if needed
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
     
@@ -33,17 +33,16 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 pass
     
     current_delay = config.get("lichess_delay", 0.5)
-    lichess_token = config.get("lichess_token", "")
+    # Support LICHESS_TOKEN from environment for CI/CD
+    lichess_token = os.environ.get("LICHESS_TOKEN") or config.get("lichess_token", "")
     
     print(f"INFO: Starting Lichess import with a delay of {current_delay:.3f}s")
 
     try:
-        opponent_turn_char = 'b' if get_meta(session, "color", "w") == 'w' else 'w'
-        
         existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
         
+        # Now querying all positions that don't have Lichess data yet, regardless of turn
         positions_to_query = session.query(Position).filter(
-            Position.fen.like(f'% {opponent_turn_char} %'),
             ~Position.fen.in_(existing_fens_query)
         ).distinct().all()
 
@@ -103,9 +102,9 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     if moves_data:
                         moves_dict = {
                             move['uci']: {
-                                'wins': move.get('wins', 0),
+                                'white': move.get('white', 0),
                                 'draws': move.get('draws', 0),
-                                'losses': move.get('losses', 0),
+                                'black': move.get('black', 0),
                                 'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
                             } for move in moves_data if 'uci' in move
                         }
@@ -164,7 +163,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
 
             i += 1
             
-            if new_data_points_added > 0 and new_data_points_added % 20 == 0:
+            if new_data_points_added > 0 and new_data_points_added % 10 == 0:
                 session.commit()
 
             if progress_callback:
@@ -222,7 +221,7 @@ def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, p
     return True, "Lichess import und Prioritäts-Scores erfolgreich abgeschlossen."
 
 def delete_lichess_data(repo_name: str, elo_category: str) -> Tuple[bool, str]:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return False, "Repertoire-Datenbank nicht gefunden."
 

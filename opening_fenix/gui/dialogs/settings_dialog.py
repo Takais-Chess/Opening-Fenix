@@ -13,7 +13,7 @@ from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_reper
 from opening_fenix.gui.widgets.board_widget import THEMES
 
 # Import centralized styles
-from opening_fenix.gui.styles import COLORS, get_repo_settings_style
+from opening_fenix.gui.styles import COLORS, get_repo_settings_style, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 
 
@@ -44,6 +44,7 @@ class RepoLoadButton(QPushButton):
 class LoadRepertoireDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        set_consistent_icon(self)
         self.setWindowTitle("Repertoire Laden")
         self.setMinimumSize(scale(450), scale(400))
         self.selected_repo = None
@@ -73,20 +74,18 @@ class LoadRepertoireDialog(QDialog):
         self.grid_layout = QGridLayout(scroll_widget)
         self.grid_layout.setSpacing(scale(10))
         
-        repo_dir = os.path.join(get_user_dir(), "repertoires")
+        from opening_fenix.core.services.repertoire_core_service import RepertoireService
+        repo_names = RepertoireService().get_all_repertoires()
 
-        if os.path.exists(repo_dir):
-            row, col = 0, 0
-            for f in os.listdir(repo_dir):
-                if f.endswith(".db"):
-                    name = f[:-3]
-                    btn = RepoLoadButton(name)
-                    btn.clicked.connect(lambda checked, n=name: self.on_repo_click(n))
-                    self.grid_layout.addWidget(btn, row, col)
-                    col += 1
-                    if col > 1:  # 2 columns max
-                        col = 0
-                        row += 1
+        row, col = 0, 0
+        for name in sorted(repo_names):
+            btn = RepoLoadButton(name)
+            btn.clicked.connect(lambda checked, n=name: self.on_repo_click(n))
+            self.grid_layout.addWidget(btn, row, col)
+            col += 1
+            if col > 1:  # 2 columns max
+                col = 0
+                row += 1
                         
         # Add stretch to push buttons to top
         self.grid_layout.setRowStretch(self.grid_layout.rowCount(), 1)
@@ -119,6 +118,7 @@ class LoadRepertoireDialog(QDialog):
 class SettingsDialog(QDialog):
     def __init__(self, main_window):
         super().__init__(main_window)
+        set_consistent_icon(self)
         self.main_window = main_window
         self.setWindowTitle("Einstellungen")
         self.resize(scale(800), scale(600))
@@ -290,7 +290,15 @@ class SettingsDialog(QDialog):
         self.info_form.addRow("Beschreibung:", self.txt_description)
         self.details_layout.addWidget(self.grp_info)
 
+        # 3. Danger Zone
+        self.grp_danger = QGroupBox("Gefahrenzone")
+        self.danger_layout = QVBoxLayout(self.grp_danger)
+        
+        self.btn_reset = QPushButton("Fortschritt dieses Repertoires zurücksetzen")
+        self.btn_reset.setObjectName("DangerButton")
+        self.btn_reset.clicked.connect(self.reset_repo_progress)
         self.danger_layout.addWidget(self.btn_reset)
+        
         self.details_layout.addWidget(self.grp_danger)
         
         # 4. Bulk Actions
@@ -335,7 +343,15 @@ class SettingsDialog(QDialog):
         self.lbl_color.setText("Weiß" if self.main_window.repertoire_manager.get_repertoire_color() == 'w' else "Schwarz")
         self.lbl_levels.setText(", ".join(info.get("levels", [])) or "-")
         self.lbl_depth.setText(analysis_status)
-        self.lbl_elo.setText(info.get("elo", "-"))
+        elo_key = info.get("elo", "-")
+        elo_map = {
+            "low": "800 - 1400 ELO (Hobby)",
+            "mid": "1600 - 1800 ELO (Club)",
+            "high": "2000 - 2500 ELO (Exper)",
+            "masters": "Lichess Masters (Pro)"
+        }
+        self.lbl_elo.setText(elo_map.get(elo_key, elo_key))
+        
         self.lbl_moves.setText(str(info.get("moves", "0")))
         self.txt_description.setPlainText(info.get("description", ""))
         

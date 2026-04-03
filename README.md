@@ -6,10 +6,11 @@ Opening Fenix V2 is a powerful chess repertoire management and training applicat
 
 - **Premium Glassmorphism UI**: Modern, high-contrast interface with native Qt animations for smooth piece movement and interactions.
 - **High-DPI & 4K Support**: Fully responsive design with resolution-relative scaling for a sharp experience on any monitor.
-- **Robust Repertoire Creator**: Interactive chess board with move validation, hierarchical variation naming, and automated name propagation.
+- **Robust Repertoire Creator**: Interactive chess board with move validation, hierarchical variation naming, and automated name propagation. Includes a **Lichess Analysis Shortcut** to instantly open the current position on lichess.org.
 - **Engine Integration**: Live position evaluation using UCI engines (e.g., Stockfish). Bulk analysis tools to automatically evaluate entire databases.
 - **Lichess Data Integration**: Statistical win rates and move frequencies across multiple ELO categories.
 - **Spaced Repetition Training**: Advanced SRS training schedules based on mastery levels. Includes a stateless **"Freies Training"** (Free Training) profile for immediate, progress-free practice.
+- **Course Introduction Onboarding**: A welcoming splash screen that introduces new repertoires to the user before they start learning.
 - **Secure Input Handling**: Comprehensive validation for PGN imports and database operations to ensure repertoire integrity.
 - **Flexible Import/Export**: Import from PGN files or export your repertoire (entirely or specific branches) for use in other software.
 - **Profile Management**: Support for multiple user profiles to track individual progress and settings.
@@ -43,6 +44,12 @@ Opening Fenix V2 is a powerful chess repertoire management and training applicat
    - Place your chess engine executable (e.g., `stockfish.exe`) in the `engines/` directory.
    - The application looks for `stockfish*.exe` by default, but you can configure the exact path in `config.json`.
 
+## Documentation
+
+For a detailed guide on how to use the application and its underlying logic, refer to:
+- [**Quick Start Guide**](QUICKSTART.md): Learn how to set up profiles, import repertoires, and start training.
+- [**Technical Deep Dive**](TECHNICAL_DEEP_DIVE.md): Understand the mathematics behind priority scores, level reachability, and architecture internals.
+
 ## Usage
 
 ### Running from Source
@@ -70,18 +77,26 @@ Use the provided batch script to create a standalone Windows application:
 ```
 The output will be generated in `dist\Opening Fenix`.
 
-## Testing
+## Testing & Coverage
 
-Tests are managed via `pytest`. The suite includes robust cleanup logic for Windows and comprehensive input validation tests.
+Tests are managed via `pytest` with `pytest-cov` for coverage analysis. The suite includes robust cleanup logic for Windows and covers critical UI and backend services.
 
+### Running Tests
 ```powershell
-# Run all tests using the project's virtual environment
+# Run all tests
 .\.venv\Scripts\python.exe -m pytest
 
-# Run specific test suites
-.\.venv\Scripts\python.exe -m pytest tests/test_input_validation.py -v
-.\.venv\Scripts\python.exe -m pytest tests/test_inheritance.py -v
+# Run tests with coverage report
+.\.venv\Scripts\python.exe -m pytest --cov=opening_fenix
 ```
+
+### Current Status
+- **Overall Coverage**: ~65%
+- **Critical Modules**:
+  - `MainWindow`: 78%
+  - `BoardWidget`: 69%
+  - `CreatorWindow`: 43%
+- **Total Tests**: 147 passing
 
 ## Project Structure
 
@@ -95,7 +110,7 @@ Tests are managed via `pytest`. The suite includes robust cleanup logic for Wind
 - `assets/`: Icons, Logos, Piece Sets (SVG/PNG), and Sounds.
 - `engines/`: Folder for UCI chess engine executables (e.g., Stockfish).
 - `profiles/`: User-specific profiles and SRS training data (`.db` files).
-- `repertoires/`: Stores opening repertoires as SQLite databases.
+- `repertoires/`: Stores opening repertoires. Each repertoire has its own subfolder containing the SQLite `.db` database and its associated assets (`.pgn` files, specialized folders).
 - `tests/`: Automated test suite with unit and integration tests.
 - `Opening Fenix.spec`: PyInstaller configuration for building the application.
 

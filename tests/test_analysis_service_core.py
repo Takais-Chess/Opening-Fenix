@@ -4,6 +4,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from opening_fenix.core.db.models import Position, Move, RepertoireMove
 from opening_fenix.core.db.database import DatabaseManager
+from opening_fenix.core.utils import get_repertoire_db_path
 from opening_fenix.core.services.analysis_service import (
     get_repertoire_analysis_status, run_db_analysis, enrich_position
 )
@@ -20,7 +21,7 @@ def test_get_repertoire_analysis_status_no_positions(mock_user_dir, sample_reper
         assert status == "Keine Spielerzüge"
 
 def test_get_repertoire_analysis_status_depths(mock_user_dir, sample_repertoire):
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     
@@ -55,7 +56,8 @@ def test_run_db_analysis_basic(mock_popen, mock_user_dir, sample_repertoire):
     assert "abgeschlossen" in msg
     
     # Verify DB was updated
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    from opening_fenix.core.utils import get_repertoire_db_path
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     pos = session.query(Position).filter(Position.analysis_depth == 10).first()
@@ -85,7 +87,7 @@ def test_enrich_position_lichess(mock_urlopen, mock_user_dir, sample_repertoire)
     assert "complete" in msg
     
     # Check LichessData was added
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     from opening_fenix.core.services.lichess_service import LichessData

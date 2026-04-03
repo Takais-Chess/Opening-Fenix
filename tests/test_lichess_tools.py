@@ -1,3 +1,4 @@
+from opening_fenix.core.utils import get_repertoire_db_path
 import pytest
 import json
 import io
@@ -35,7 +36,7 @@ def test_run_lichess_import(mock_user_dir, sample_repertoire, mock_lichess_respo
     # Check if data was saved to DB
     from opening_fenix.core.models import DatabaseManager
     import os
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     
@@ -50,7 +51,7 @@ def test_calculate_priority_scores(mock_user_dir, sample_repertoire):
     # Setup: 1. e4 is in repertoire. We add Lichess data for 1. e4
     from opening_fenix.core.models import DatabaseManager
     import os
-    db_path = os.path.join(mock_user_dir, "repertoires", f"{sample_repertoire}.db")
+    db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
     session = db.get_session()
     

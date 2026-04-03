@@ -9,7 +9,8 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
 from PyQt6.QtCore import Qt, QSize
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
-from opening_fenix.gui.styles import get_login_dialog_style, COLORS
+# Import centralized styles
+from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 
 
@@ -56,6 +57,7 @@ class RepertoireButton(QPushButton):
 class RepertoireSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
+        set_consistent_icon(self)
         self.setWindowTitle("Repertoires wählen")
         self.setMinimumSize(scale(450), scale(500))
         self.selected_repos = []
@@ -94,19 +96,18 @@ class RepertoireSelectionDialog(QDialog):
         self.grid_layout.setSpacing(scale(15))
 
         
-        repo_dir = os.path.join(get_user_dir(), "repertoires")
-        if os.path.exists(repo_dir):
-            row, col = 0, 0
-            for f in sorted(os.listdir(repo_dir)):
-                if f.endswith(".db"):
-                    name = f[:-3]
-                    btn = RepertoireButton(name)
-                    self.repo_buttons.append(btn)
-                    self.grid_layout.addWidget(btn, row, col)
-                    col += 1
-                    if col > 1:
-                        col = 0
-                        row += 1
+        from opening_fenix.core.services.repertoire_core_service import RepertoireService
+        repo_names = RepertoireService().get_all_repertoires()
+        
+        row, col = 0, 0
+        for name in sorted(repo_names):
+            btn = RepertoireButton(name)
+            self.repo_buttons.append(btn)
+            self.grid_layout.addWidget(btn, row, col)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
                         
         self.grid_layout.setRowStretch(self.grid_layout.rowCount(), 1)
         self.scroll_area.setWidget(scroll_widget)
@@ -141,6 +142,7 @@ class LoginDialog(QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Opening Fenix - Login")
+        set_consistent_icon(self)
         self.setMinimumSize(scale(700), scale(520))
         self.selected_profile = None
 

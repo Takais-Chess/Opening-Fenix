@@ -35,6 +35,10 @@ class Position(Base):
     popularity = Column(Integer, default=0) 
     popularity_elo = Column(String, nullable=True) 
     engine_eval = Column(Integer, nullable=True)
+    
+    # Overhaul & Hole tracking
+    last_overhaul_review = Column(DateTime, nullable=True)
+    is_hole_exempt = Column(Boolean, default=False)
 
 class Move(Base):
     __tablename__ = 'moves'

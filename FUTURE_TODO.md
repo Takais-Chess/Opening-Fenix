@@ -9,20 +9,18 @@ Make the application accessible to an international audience by supporting multi
 * **Bilingual Comments:** The database schema for `Position` needs to be extended. Instead of a single `comment` column, we could have `comment_de` and `comment_en`.
 * **Language Toggle:** A setting in the profile configuration that dictates which language is currently active. If a user switches to English, the UI updates, and the Candidate Moves table pulls from the `comment_en` column.
 
-## 2. "Repertoire Overhaul" Mode (Position Checklist)
+## ~~2. "Repertoire Overhaul" Mode (Position Checklist)~~ (BASIC IMPLEMENTATION V1 - 2026-03-30)
 **Concept:**  
-When users want to completely review and update an old repertoire, it is impossible to manually keep track of which variations and transpositions have already been checked. This feature introduces a guided "Review Mode".
-To start this mode it should be somewhere in the settings
+Introductes a guided "Review Mode" to track which variations have been checked.
 
-**Implementation Ideas:**
-* **Tracking Table:** A new temporary table or state file that stores `(fen, reviewed_boolean)` for the current session.
-* **Floating Widget/Panel:** A small, non-intrusive floating window that only appears if this mode is active, that displays the progress (e.g., "Positions Reviewed: 45 / 320").
-* **Navigation Buttons:** 
-  * "Mark as Reviewed" (automatically moves to the next position).
-  * "Go to Next Unseen" (jumps the board to the unseen position with the lowest depth/move number, ensuring a top-down review).
-  * "Reset Progress".
-* **Visual Cues:** In the Creator, moves leading to already reviewed positions could have a small checkmark (✅) next to them in the tree but only if also all descendants have already been seen.
-* this should only reset 
+**Current State:**
+* **Tab Integrated**: "Rep. KONTROLLE" tab added to the Creator.
+* **Basic Tracking**: Basic progress tracking implementation started.
+* **Navigation**: Basic "Next Unseen" logic in place.
+
+**Next Steps (V2):**
+* **Visual Cues**: Add checkmarks (✅) in the tree view for fully reviewed branches.
+* **Session Persistence**: Ensure review state is saved across application restarts.
 
 ## 4. Tactic & Endgame Trainer (Prebuilt Scenarios)
 **Concept:**  
@@ -50,14 +48,18 @@ Revisit the codebase to ensure it runs smoothly and is structured in a way that 
 * **Refactoring for AI:** Improve code readability, add comprehensive docstrings, and ensure modularity to help AI agents (like Junie) understand and modify the project more effectively.
 * **Code Consistency:** Ensure all modules follow the same architectural patterns and naming conventions.
 
-## 7. Repertoire Hole Finder (Lichess Data Integration)
+## ~~7. Repertoire Hole Finder (Lichess Data Integration)~~ (BASIC IMPLEMENTATION V1 - 2026-03-30)
 **Concept:**  
-A way to identify "holes" in the repertoire—moves or positions that are not currently covered but should be based on their popularity and success in online play (Lichess).
+Identify "holes" in the repertoire—moves or positions not covered based on Lichess popularity.
 
-**Implementation Ideas:**
-* **Priority-Based Discovery:** Search for moves in the Lichess database that are not in the current repertoire but would have a "Potential Priority Score" of >1 if they were included.
-* **Coverage Analysis:** Compare the current repertoire tree against a configurable "depth" or "mastery" level from the Lichess Cloud Eval or opening explorer.
-* **Direct Integration:** A button in the Creator or a separate "Audit" tool that lists these missing moves and allows the user to quickly add them with a single click.
+**Current State:**
+* **Tab Integrated**: "Rep. Loch Finder" tab added to the Creator.
+* **Lichess Query**: Integrated backend logic to fetch common moves and probabilities.
+* **Basic UI**: Results table with "Jump to position" functionality implemented.
+
+**Next Steps (V2):**
+* **Priority Matching**: Filter results by potential priority score impact.
+* **Bulk Enrichment**: Add a feature to "Cover all high-priority holes" in a single batch.
 
 ## 9. User Documentation & Guides
 **Concept:**  
@@ -71,16 +73,18 @@ Create comprehensive documentation to help both new and experienced users get th
   * **ELO Categories:** How the application selects relevant data based on the user's targeted ELO.
   * **Move Processing:** What happens under the hood when a new move is added or a PGN is imported.
 
-## ~~8. Robustness & Testing Suite~~ (COMPLETED)
+## ~~8. Robustness & Testing Suite~~ (COMPLETED - 2026-03-29)
 **Concept:**  
-Build a rock-solid foundation for the application by ensuring all core services are heavily tested against edge cases and malformed inputs.
+Build a rock-solid foundation for the application by ensuring all core services are heavily tested.
 
-**Implementation Details:**
-* **Robust Cleanup:** Implemented resilient temporary directory management in `conftest.py` to handle Windows-specific file locks.
-* **Input Validation:** Added comprehensive validation for PGN imports, priority calculations, and engine analysis.
-* **Move Integrity:** Enforced legal move checks in the `CreatorBackend` to prevent database corruption.
+**Achievements:**
+* **Overall Coverage**: Reached **65%** milestone with 147 passing tests.
+* **Core Stability**: Reached **78%** on `MainWindow` and **69%** on `BoardWidget`.
+* **UI Lifecycle**: Automated verification of all window transitions (Trainer, Creator, Settings).
+* **Input Validation**: Hardened PGN imports and database migrations against malformed data.
+* **Windows Cleanup**: Solved persistent file-lock issues during automated testing.
 
-## ~~10. Lichess API Token Interface~~ (COMPLETED)
+## ~~10. Lichess API Token Interface~~ (COMPLETED - 2026-04-02)
 **Concept:**
 Provide a user-friendly way to input and manage the Lichess API token within the application, rather than requiring manual editing of `config.json`.
 
@@ -89,8 +93,27 @@ Provide a user-friendly way to input and manage the Lichess API token within the
 * **Token Validation:** Implemented a "Verbindung testen" button that verifies the token against the Lichess API and displays the account username.
 * **Visibility Control:** Added a show/hide toggle for the token field to protect user privacy.
 * **Automatic Config Sync:** The application now automatically saves and loads the token from `config.json` without manual intervention.
+* **Analysis Shortcut:** Integrated a "Microscope" Lichess button to instantly open the current board position in the browser.
 
-## ~~11. Prioritätsbasierte Level-Herabstufung~~ (COMPLETED)
+## 11. CI/CD Integration & High Coverage (80%+)
+**Concept:**  
+Automate testing on every push and reach the elusive 80% coverage target, especially for the complex `CreatorWindow`.
+
+**Implementation Ideas:**
+* **GitHub Actions**: Set up a pipeline to run `pytest` on Windows runners for every Pull Request.
+* **Creator Deep Dive**: Add granular tests for the Creator's specific sub-tabs (Analysis, Kontrolle) and its internal state-machine.
+* **Screenshot Comparison**: Implement visual regression tests for the board and glassmorphism UI.
+
+## ~~12. Dynamic Rating System (Opening Elo)~~ (COMPLETED - 2026-03-30)
+**Concept:**  
+Assign a "Strength" score to the user's mastery of specific opening lines.
+
+**Achievements:**
+* **Elo Tracking**: Integrated into the `MainWindow` and `TrainingManager`.
+* **Level Mapping**: Tied mastery levels to target Elo ranges (e.g., Level 1 = 1500 Elo).
+* **Live Display**: User's estimated Opening Elo is displayed and updated in real-time during training.
+
+## ~~13. Prioritätsbasierte Level-Herabstufung~~ (COMPLETED)
 **Konzept:**
 Eine Funktion in den Repertoire-Einstellungen des Creators, mit der man Züge basierend auf ihrer Priorität (Häufigkeit) herabstufen oder umkategorisieren kann.
 
@@ -98,3 +121,49 @@ Eine Funktion in den Repertoire-Einstellungen des Creators, mit der man Züge ba
 * **Massenbearbeitung:** Ein Tool in den Einstellungen, das z.B. alle Züge mit einer Priorität > 1% automatisch auf Level 1 (oder ein anderes wählbares Level) setzt.
 * **Batch-Reorganisation:** Ermöglicht die schnelle Strukturierung eines großen Repertoires, indem wichtige (häufige) Züge priorisiert werden.
 * **Sicherheitsabfrage:** Anzeige der Anzahl der betroffenen Züge vor der Durchführung der Änderung.
+
+## 14. Full Course Export
+**Concept:**  
+Create a comprehensive "Course Export" feature that generates a structured folder containing everything needed to share or backup a complete opening course.
+
+**Export Package Contents:**
+* **README.md:** Automatically generated file containing the course description and technical instructions on how to import the course into Opening Fenix (e.g., target directories).
+* **Repertoire Database:** The actual `.db` file of the repertoire.
+* **Level-Specific PGNs:** Separate PGN files for each level (Level 1, Level 2, etc.) with transpositions marked and no duplicates.
+* **Instruction PGN:** A dedicated PGN file for verbal/textual instructions (Future Idea).
+* **Typical Ideas PGN:** PGN files illustrating strategic themes and typical plans (Future Idea).
+* **Model Games PGN:** A collection of high-level games illustrating the repertoire in practice (Future Idea).
+* **Tactical Motifs PGN:** A PGN file focusing on common tactical patterns specific to the opening (Future Idea).
+
+**Implementation Ideas:**
+* **Export Wizard:** A UI dialog to select which components (DB, PGNs, Ideas, Games) to include in the export.
+* **Folder Structure:** Clean organization (e.g., `/PGN/Levels/`, `/Games/`, `/Tactics/`).
+* **Zip Export:** Create a `.zip` archive of the entire repertoire folder for easy sharing.
+
+## 16. Custom Repertoire Cover Images
+**Concept:**
+Since repertoires now live in dedicated subfolders, allow users to place a `cover.png` or `cover.jpg` inside the folder.
+The `RepertoireSelectionDialog` and Main Window can display these images in a visual grid instead of plain buttons, making the app feel much more premium and personalized.
+
+## ~~15. Course Introduction & First-Time User Experience~~ (COMPLETED - 2026-04-02)
+**Concept:**  
+Provide a welcoming and informative experience when a user opens a course or repertoire for the first time (i.e., no moves have been learned yet).
+
+**Implementation Details:**
+* **Welcome Window:** A special splash screen or modal that triggers automatically if the "learned moves" count for the current repertoire is zero.
+* **Course Introduction:** Display high-level information about the course, its goals, and key strategic themes based on the description entered in the Creator settings.
+* **"Start Learning" Button:** A clear call-to-action to lead the user directly into their first lesson without additional clicks.
+* **First-Time Trigger:** Backend logic dynamically checks the repertoire's state to conditionally display the splash window, ensuring it doesn't interrupt daily training.
+
+## ~~17. Repertoire Storage Reorganization~~ (COMPLETED - 2026-04-03)
+**Concept:**  
+Transition from a flat `.db` structure to dedicated repertoire subfolders to allow for better organization and multi-file asset management.
+
+**Achievements:**
+* **Folder Hierarchy:** Each repertoire now resides in `repertoires/{name}/`.
+* **Asset Provisioning:** Automatic creation of `Model Games.pgn`, `Typical Motives.pgn`, and `Tactics/` on initialization.
+* **Migration Script:** Integrated logic to transparently upgrade existing databases to the new structure.
+
+## 18. Create Example Repertoire(s)
+**Concept:**
+Provide users with one or two high-quality example repertoires (e.g., "The Italian Game - Core Variations") to showcase how to use the Creator, and to provide immediate training content for new users.

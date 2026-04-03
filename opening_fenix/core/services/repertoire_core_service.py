@@ -1,3 +1,4 @@
+from opening_fenix.core.utils import get_repertoire_db_path
 import os
 import sqlite3
 import gc
@@ -6,6 +7,7 @@ from typing import List, Dict, Any, Optional
 from opening_fenix.core.db.models import RepertoireLevel, Base, Move, RepertoireMove
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.data_tools import get_user_dir, get_meta, set_meta, delete_repertoire_db
+from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path
 from opening_fenix.core.logger import logger
 
 class RepertoireService:
@@ -15,22 +17,39 @@ class RepertoireService:
         self.repo_session = None
 
     def get_all_repertoires(self) -> List[str]:
-        repo_dir = os.path.join(get_user_dir(), "repertoires")
-        if not os.path.exists(repo_dir): 
+        repo_base = os.path.join(get_user_dir(), "repertoires")
+        if not os.path.exists(repo_base):
             return []
         
         files = []
-        for f in os.listdir(repo_dir):
-            if f.endswith(".db"):
+        
+        # Scan normally
+        for f in os.listdir(repo_base):
+            if f != "test" and os.path.isdir(os.path.join(repo_base, f)):
+                files.append(f)
+                
+        # Scan test layer
+        test_base = os.path.join(repo_base, "test")
+        if os.path.exists(test_base):
+            for f in os.listdir(test_base):
+                if os.path.isdir(os.path.join(test_base, f)):
+                    files.append(f)
+                    
+        # Filter only those that actually have a database
+        valid_repos = []
+        for repo_name in files:
+            db_path = get_repertoire_db_path(repo_name)
+            if os.path.exists(db_path):
+                # Verify SQLite header just in case
                 try:
-                    db_path = os.path.join(repo_dir, f)
                     conn = sqlite3.connect(db_path)
                     conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'")
                     conn.close()
-                    files.append(f[:-3])
+                    valid_repos.append(repo_name)
                 except sqlite3.DatabaseError as e:
-                    logger.debug(f"Skipping {f} due to database error: {e}")
-        return files
+                    logger.debug(f"Skipping {repo_name} due to database error: {e}")
+                    
+        return valid_repos
 
     def set_active_repertoire(self, repo_name: Optional[str]) -> None:
         self.close()
@@ -39,7 +58,7 @@ class RepertoireService:
         if not repo_name: 
             return
 
-        db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+        db_path = get_repertoire_db_path(repo_name)
         self.repo_db = DatabaseManager(db_path, base=Base)
         self.repo_session = self.repo_db.get_session()
 
@@ -78,20 +97,37 @@ class RepertoireService:
 
     def get_repertoire_info(self) -> Dict[str, Any]:
         if not self.repo_session:
-            return {"name": self.active_repertoire_name, "levels": [], "moves": "N/A"}
+            return {"name": self.active_repertoire_name, "levels": [], "moves": "N/A", "level_details": []}
 
         from opening_fenix.core.db.models import RepertoireMove
         levels = self.get_repertoire_levels()
-        moves_count = self.repo_session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True).distinct().count()
+        
+        level_details = []
+        for lvl in levels:
+            count = self.repo_session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True, RepertoireMove.level <= lvl['order']).distinct().count()
+            level_details.append({
+                "name": lvl['name'],
+                "order": lvl['order'],
+                "target_elo": lvl['target_elo'],
+                "moves": count
+            })
+
+        total_moves = self.repo_session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True).distinct().count()
 
         return {
             "name": get_meta(self.repo_session, "name", self.active_repertoire_name),
             "levels": [lvl['name'] for lvl in levels],
+            "level_details": level_details,
             "depth": get_meta(self.repo_session, "analysis_depth", "N/A"),
             "elo": get_meta(self.repo_session, "lichess_elo", "N/A"),
-            "moves": moves_count,
+            "moves": total_moves,
             "description": get_meta(self.repo_session, "description", "")
         }
+
+    def set_repertoire_description(self, description: str) -> None:
+        if not self.repo_session: return
+        set_meta(self.repo_session, "description", description)
+        self.repo_session.commit()
 
     def get_repertoire_color(self) -> str:
         if not self.repo_session: return 'w'

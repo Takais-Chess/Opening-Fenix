@@ -8,11 +8,11 @@ from sqlalchemy.orm import Session
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta
-from opening_fenix.core.utils import get_user_dir
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.lichess_service import ELO_MAPPING
 
 def calculate_priority_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
 
@@ -122,66 +122,53 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                     if not all_outgoing_moves:
                         continue
     
-                    lichess_move_data = lichess_data_cache.get(clean_pos_fen)
+                    # LICESS DATA & TOTAL GAMES LOGIC
+                    lichess_move_data = lichess_data_cache.get(clean_pos_fen) or {}
+                    total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
                     
-                    valid_moves_with_stats = []
-                    if lichess_move_data:
-                        for move in all_outgoing_moves:
-                            lichess_info = lichess_move_data.get(move.uci) or lichess_move_data.get(move.san)
-                            
-                            if not lichess_info:
-                                alt_uci = None
-                                if move.uci == 'e1c1': alt_uci = 'e1a1'
-                                elif move.uci == 'e1g1': alt_uci = 'e1h1'
-                                elif move.uci == 'e8c8': alt_uci = 'e8a8'
-                                elif move.uci == 'e8g8': alt_uci = 'e8h8'
-                                
-                                if alt_uci:
-                                    lichess_info = lichess_move_data.get(alt_uci)
+                    moves_with_stats = []
+                    rare_moves = []
+                    
+                    for move in all_outgoing_moves:
+                        lichess_info = lichess_move_data.get(move.uci) or lichess_move_data.get(move.san)
+                        if not lichess_info:
+                            alt_uci = None
+                            if move.uci == 'e1c1': alt_uci = 'e1a1'
+                            elif move.uci == 'e1g1': alt_uci = 'e1h1'
+                            elif move.uci == 'e8c8': alt_uci = 'e8a8'
+                            elif move.uci == 'e8g8': alt_uci = 'e8h8'
+                            if alt_uci:
+                                lichess_info = lichess_move_data.get(alt_uci)
 
-                            if lichess_info and 'total' in lichess_info:
-                                valid_moves_with_stats.append((move, lichess_info))
-
-                    if valid_moves_with_stats:
-                        total_valid_games = sum(info.get('total', 0) for _, info in valid_moves_with_stats)
+                        if lichess_info and lichess_info.get('total', 0) > 0:
+                            moves_with_stats.append((move, lichess_info))
+                        else:
+                            rare_moves.append(move)
+                    
+                    # TOTAL GAMES = SUM(LICHESS) + COUNT(RARE MOVES)
+                    effective_total = total_from_lichess + len(rare_moves)
+                    
+                    if effective_total > 0:
+                        for move, stats in moves_with_stats:
+                            share = stats['total'] / effective_total
+                            next_prob = current_prob * share
+                            move.priority_score = next_prob
+                            if move.to_position_id:
+                                id_probabilities[move.to_position_id] += next_prob
                         
-                        if total_valid_games > 0:
-                            moves_without_stats = [m for m in all_outgoing_moves if m not in [vm[0] for vm in valid_moves_with_stats]]
-                            
-                            unknown_prob_pool = 0.0
-                            known_prob_pool = current_prob
-                            
-                            if moves_without_stats:
-                                unknown_prob_pool = current_prob * 0.01
-                                known_prob_pool = current_prob * 0.99
-                            
-                            for move, stats in valid_moves_with_stats:
-                                move_share = stats.get('total', 0) / total_valid_games
-                                next_prob = known_prob_pool * move_share
-                                
-                                move.priority_score = next_prob
-                                
-                                if move.to_position_id:
-                                    id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + next_prob
-                            
-                            if moves_without_stats:
-                                split_unknown = unknown_prob_pool / len(moves_without_stats)
-                                for move in moves_without_stats:
-                                    move.priority_score = split_unknown
-                                    
-                                    if move.to_position_id:
-                                        id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + split_unknown
-                            
-                            continue
-    
-                    num_moves = len(all_outgoing_moves)
-                    if num_moves > 0:
-                        split_prob = current_prob / num_moves
+                        for move in rare_moves:
+                            share = 1 / effective_total
+                            next_prob = current_prob * share
+                            move.priority_score = next_prob
+                            if move.to_position_id:
+                                id_probabilities[move.to_position_id] += next_prob
+                    else:
+                        # Fallback for no data
+                        split_prob = current_prob / len(all_outgoing_moves)
                         for move in all_outgoing_moves:
                             move.priority_score = split_prob
-                            
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + split_prob
+                                id_probabilities[move.to_position_id] += split_prob
     
             if progress_callback:
                 progress_callback(int((depth + 1) * 100 / total_depths))
@@ -291,47 +278,54 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                                 id_probabilities[m.to_position_id] += split_prob
                     # No else needed as all were reset to 0.0 above
                 else:
-                    lichess_move_data = lichess_data_cache.get(clean_fen)
-                    valid_moves_with_stats = []
-                    if lichess_move_data:
-                        for m in out_moves:
-                            info = lichess_move_data.get(m.uci) or lichess_move_data.get(m.san)
-                            if not info:
-                                alt_uci = None
-                                if m.uci == 'e1c1': alt_uci = 'e1a1'
-                                elif m.uci == 'e1g1': alt_uci = 'e1h1'
-                                elif m.uci == 'e8c8': alt_uci = 'e8a8'
-                                elif m.uci == 'e8g8': alt_uci = 'e8h8'
-                                if alt_uci: info = lichess_move_data.get(alt_uci)
-                            if info and 'total' in info:
-                                valid_moves_with_stats.append((m, info))
+                    # LICESS DATA & TOTAL GAMES LOGIC
+                    lichess_move_data = lichess_data_cache.get(clean_fen) or {}
+                    total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
                     
-                    if valid_moves_with_stats:
-                        total_games = sum(i.get('total', 0) for _, i in valid_moves_with_stats)
-                        if total_games > 0:
-                            moves_without_stats = [m for m in out_moves if m not in [vm[0] for vm in valid_moves_with_stats]]
-                            unknown_pool = current_prob * 0.01 if moves_without_stats else 0.0
-                            known_pool = current_prob - unknown_pool
-                            
-                            for m, stats in valid_moves_with_stats:
-                                next_p = known_pool * (stats.get('total', 0) / total_games)
-                                m.priority_score = next_p
-                                if m.to_position_id in id_probabilities:
-                                    id_probabilities[m.to_position_id] += next_p
-                            
-                            if moves_without_stats:
-                                split_unkn = unknown_pool / len(moves_without_stats)
-                                for m in moves_without_stats:
-                                    m.priority_score = split_unkn
-                                    if m.to_position_id in id_probabilities:
-                                        id_probabilities[m.to_position_id] += split_unkn
-                            continue
-
-                    split_prob = current_prob / len(out_moves)
+                    moves_with_stats = []
+                    rare_moves = []
+                    
                     for m in out_moves:
-                        m.priority_score = split_prob
-                        if m.to_position_id in id_probabilities:
-                            id_probabilities[m.to_position_id] += split_prob
+                        info = lichess_move_data.get(m.uci) or lichess_move_data.get(m.san)
+                        if not info:
+                            alt_uci = None
+                            if m.uci == 'e1c1': alt_uci = 'e1a1'
+                            elif m.uci == 'e1g1': alt_uci = 'e1h1'
+                            elif m.uci == 'e8c8': alt_uci = 'e8a8'
+                            elif m.uci == 'e8g8': alt_uci = 'e8h8'
+                            if alt_uci: info = lichess_move_data.get(alt_uci)
+                        
+                        if info and info.get('total', 0) > 0:
+                            moves_with_stats.append((m, info))
+                        else:
+                            rare_moves.append(m)
+                    
+                    # TOTAL GAMES = SUM(LICHESS) + COUNT(RARE MOVES)
+                    effective_total = total_from_lichess + len(rare_moves)
+                    
+                    if effective_total > 0:
+                        for m, stats in moves_with_stats:
+                            share = stats['total'] / effective_total
+                            next_p = current_prob * share
+                            m.priority_score = next_p
+                            if m.to_position_id in id_probabilities:
+                                id_probabilities[m.to_position_id] += next_p
+                        
+                        for m in rare_moves:
+                            share = 1 / effective_total
+                            next_p = current_prob * share
+                            m.priority_score = next_p
+                            if m.to_position_id in id_probabilities:
+                                id_probabilities[m.to_position_id] += next_p
+                        continue
+
+                    # Fallback for no data
+                    if out_moves:
+                        split_prob = current_prob / len(out_moves)
+                        for m in out_moves:
+                            m.priority_score = split_prob
+                            if m.to_position_id in id_probabilities:
+                                id_probabilities[m.to_position_id] += split_prob
 
         session.flush()
         return True, "Local priority scores updated."
@@ -343,7 +337,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         return False, str(e)
 
 def detect_islands(repo_name: str) -> Tuple[bool, str]:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
 

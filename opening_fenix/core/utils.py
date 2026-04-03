@@ -41,3 +41,87 @@ def _update_lichess_delay_config(delay_value):
 
 def normalize_fen(board):
     return " ".join(board.fen().split(" ")[:4])
+
+def get_repertoire_dir(repo_name, is_test=None):
+    """Returns the path to the repertoire's specific folder."""
+    repo_base = os.path.join(get_user_dir(), "repertoires")
+    
+    # If is_test is None, we check if the name starts with "test"
+    if is_test is None:
+        is_test = repo_name.lower().startswith("test")
+        
+    if is_test:
+        return os.path.join(repo_base, "test", repo_name)
+    else:
+        return os.path.join(repo_base, repo_name)
+
+def get_repertoire_db_path(repo_name, is_test=None):
+    """Returns the path to the repertoire's .db file."""
+    return os.path.join(get_repertoire_dir(repo_name, is_test), f"{repo_name}.db")
+
+def initialize_repertoire_assets(repo_dir):
+    """Creates the default PGN files and Tactics folder for a new repertoire."""
+    if not os.path.exists(repo_dir):
+        os.makedirs(repo_dir)
+        
+    assets = [
+        "Model Games.pgn",
+        "Typical Motives.pgn"
+    ]
+    
+    for asset in assets:
+        path = os.path.join(repo_dir, asset)
+        if not os.path.exists(path):
+            with open(path, "w") as f:
+                f.write("") # Create empty file
+                
+    tactics_dir = os.path.join(repo_dir, "Tactics")
+    if not os.path.exists(tactics_dir):
+        os.makedirs(tactics_dir)
+        tactics_pgn = os.path.join(tactics_dir, "Tactics.pgn")
+        with open(tactics_pgn, "w") as f:
+            f.write("")
+
+def migrate_repertoire_storage():
+    """Migrates existing .db files in the repertoires/ directory to their own subfolders."""
+    repo_base = os.path.join(get_user_dir(), "repertoires")
+    if not os.path.exists(repo_base):
+        return
+        
+    # Get all .db files directly in the repertoires folder
+    legacy_files = [f for f in os.listdir(repo_base) if f.endswith(".db") and os.path.isfile(os.path.join(repo_base, f))]
+    
+    if not legacy_files:
+        return # Nothing to migrate
+        
+    print(f"INFO: Migrating {len(legacy_files)} legacy repertoires to new folder structure...")
+    
+    import shutil
+    
+    for f in legacy_files:
+        repo_name = f[:-3]
+        old_db_path = os.path.join(repo_base, f)
+        
+        is_test = repo_name.lower().startswith("test")
+        new_dir = get_repertoire_dir(repo_name, is_test)
+        new_db_path = get_repertoire_db_path(repo_name, is_test)
+        
+        try:
+            if not os.path.exists(new_dir):
+                os.makedirs(new_dir)
+                
+            shutil.move(old_db_path, new_db_path)
+            
+            # Check for auxiliary files (WAL, SHM)
+            for ext in [".db-wal", ".db-shm"]:
+                old_aux = os.path.join(repo_base, f"{repo_name}{ext}")
+                new_aux = os.path.join(new_dir, f"{repo_name}{ext}")
+                if os.path.exists(old_aux):
+                    shutil.move(old_aux, new_aux)
+                    
+            # Initialize assets
+            initialize_repertoire_assets(new_dir)
+            
+        except Exception as e:
+            print(f"ERROR: Failed to migrate repertoire {repo_name}: {e}")
+

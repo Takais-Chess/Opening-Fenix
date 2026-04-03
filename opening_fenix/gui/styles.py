@@ -1,4 +1,45 @@
+import os
+from PyQt6.QtGui import QIcon
+from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.gui.scaling import scale
+
+
+from opening_fenix.core.logger import logger
+
+_cached_icon = None
+
+def set_consistent_icon(window):
+    """Sets the application icon for a window or app instance from centralized assets."""
+    global _cached_icon
+    if _cached_icon is not None:
+        if not _cached_icon.isNull():
+            window.setWindowIcon(_cached_icon)
+        return
+
+    icon = QIcon()
+    base_path = get_base_path()
+    
+    # Path to ICO (Standard for Windows)
+    ico_path = os.path.join(base_path, "assets", "Logo", "favicon.ico")
+    if os.path.exists(ico_path):
+        icon.addFile(ico_path)
+        logger.debug(f"Loaded ICO icon from {ico_path}")
+    else:
+        logger.warning(f"ICO icon not found at {ico_path}")
+        
+    # Path to PNG (Fallback/Secondary for better scaling)
+    png_path = os.path.join(base_path, "assets", "Logo", "Logo.png")
+    if os.path.exists(png_path):
+        icon.addFile(png_path)
+        logger.debug(f"Loaded PNG icon from {png_path}")
+    else:
+        logger.warning(f"PNG icon not found at {png_path}")
+    
+    if not icon.isNull():
+        _cached_icon = icon
+        window.setWindowIcon(icon)
+    else:
+        logger.error("Failed to load any application icon!")
 
 # Centralized Color Palette
 
@@ -236,12 +277,14 @@ def get_creator_window_style():
     }}
     QComboBox::drop-down {{
         border: none;
-        width: 0px;
+        width: {scale(20)}px;
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
     }}
     QComboBox::down-arrow {{
-        image: none;
-        width: 0;
-        height: 0;
+        /* Remove image: none to allow default arrow */
+        width: {scale(12)}px;
+        height: {scale(12)}px;
     }}
     QComboBox QAbstractItemView {{
         background-color: {COLORS['beige']};

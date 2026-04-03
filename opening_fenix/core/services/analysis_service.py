@@ -10,14 +10,14 @@ from sqlalchemy import or_
 from opening_fenix.core.db.models import Position, Move, RepertoireMove
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta
-from opening_fenix.core.utils import get_user_dir
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
 from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
 import urllib.request
 import urllib.parse
 
 def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
 
@@ -54,7 +54,9 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             repertoire_uci = repertoire_move.uci if repertoire_move else None
 
             try:
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=20)
+                # Check if engine supports MultiPV
+                analyze_kwargs = {"multipv": 20} if "MultiPV" in engine.options else {}
+                result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
                 
                 if not result:
                     continue
@@ -98,7 +100,7 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         db.close()
 
 def get_repertoire_analysis_status(repo_name: str) -> str:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return "Repertoire nicht gefunden"
 
@@ -141,7 +143,7 @@ def get_repertoire_analysis_status(repo_name: str) -> str:
         db.close()
 
 def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: str, depth: int = 10) -> Tuple[bool, str]:
-    db_path = os.path.join(get_user_dir(), "repertoires", f"{repo_name}.db")
+    db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
     
@@ -158,21 +160,22 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
         positions_to_check.extend(parents)
         
         user_color = get_meta(session, "color", "w")
-        config_path = os.path.join(get_user_dir(), "config.json")
-        lichess_token = None
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    conf = json.load(f)
-                    lichess_token = conf.get("lichess_token")
-            except: pass
+        # Support LICHESS_TOKEN from environment for CI/CD
+        lichess_token = os.environ.get("LICHESS_TOKEN")
+        if not lichess_token:
+            config_path = os.path.join(get_user_dir(), "config.json")
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r") as f:
+                        conf = json.load(f)
+                        lichess_token = conf.get("lichess_token")
+                except: pass
 
         for p_obj in positions_to_check:
             p_clean = " ".join(p_obj.fen.split(" ")[:4])
-            is_opponent_turn = p_clean.split(" ")[1] != user_color
             
             existing_lichess = session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first()
-            if not existing_lichess and (is_opponent_turn or p_clean == "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"):
+            if not existing_lichess:
                 ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
                 if elo_category == 'masters':
                     url = f"https://explorer.lichess.org/masters?variant=standard&fen={urllib.parse.quote(p_clean)}"
@@ -191,9 +194,9 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                         if moves_data:
                             moves_dict = {
                                 move['uci']: {
-                                    'wins': move.get('wins', 0),
+                                    'white': move.get('white', 0),
                                     'draws': move.get('draws', 0),
-                                    'losses': move.get('losses', 0),
+                                    'black': move.get('black', 0),
                                     'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
                                 } for move in moves_data if 'uci' in move
                             }
@@ -211,7 +214,10 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                 engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
                 engine.configure({"Threads": 1})
                 board = chess.Board(pos.fen) 
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=10)
+                
+                # Check if engine supports MultiPV
+                analyze_kwargs = {"multipv": 10} if "MultiPV" in engine.options else {}
+                result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
                 
                 if result:
                     best_score_info = result[0]['score'].white()
