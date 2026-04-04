@@ -21,10 +21,16 @@ def set_consistent_icon(window):
     
     # Path to ICO (Standard for Windows)
     ico_path = os.path.join(base_path, "assets", "Logo", "favicon.ico")
+    print(f"DEBUG: Looking for ICO at {ico_path}")
     if os.path.exists(ico_path):
-        icon.addFile(ico_path)
-        logger.debug(f"Loaded ICO icon from {ico_path}")
+        icon = QIcon(ico_path)
+        if not icon.isNull():
+            print(f"DEBUG: Successfully loaded ICO. Available sizes: {icon.availableSizes()}")
+            logger.debug(f"Loaded ICO icon from {ico_path}")
+        else:
+            print("DEBUG: ICO loaded but isNull() is True!")
     else:
+        print(f"DEBUG: ICO NOT FOUND at {ico_path}")
         logger.warning(f"ICO icon not found at {ico_path}")
         
     # Path to PNG (Fallback/Secondary for better scaling)
@@ -37,7 +43,41 @@ def set_consistent_icon(window):
     
     if not icon.isNull():
         _cached_icon = icon
-        window.setWindowIcon(icon)
+        from PyQt6.QtWidgets import QApplication
+        
+        # 1. Set on the specific window if one was provided
+        if hasattr(window, 'setWindowIcon'):
+            window.setWindowIcon(icon)
+        
+        # 2. Set globally for the entire application to ensure correct taskbar representation
+        #    This is crucial for Windows taskbar grouping.
+        if QApplication.instance():
+            QApplication.instance().setWindowIcon(icon)
+        
+        # 3. Aggressive Native Windows Handle Icon Assignment
+        if os.name == 'nt' and hasattr(window, 'winId'):
+            try:
+                import ctypes
+                from PyQt6.QtGui import QPixmap
+                
+                hwnd = int(window.winId())
+                # Extract the 32x32 pixmap for small icon (taskbar)
+                # and 48x48 or 128x128 for large icons
+                pixmap_sm = icon.pixmap(32, 32)
+                pixmap_lg = icon.pixmap(256, 256) # High-DPI preferred
+                
+                hicon_sm = pixmap_sm.toWinHICON()
+                hicon_lg = pixmap_lg.toWinHICON()
+                
+                WM_SETICON = 0x0080
+                ICON_SMALL = 0
+                ICON_BIG = 1
+                
+                # Use SendMessageW to force the icon onto the window handle
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon_sm)
+                ctypes.windll.user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon_lg)
+            except Exception as e:
+                logger.debug(f"Failed to set native HWND icon: {e}")
     else:
         logger.error("Failed to load any application icon!")
 
@@ -175,6 +215,9 @@ def get_creator_window_style():
     }}
     *[class="GlassPill"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
+    }}
+    #OverhaulStatsCard:hover {{
+        background-color: rgba(255, 255, 255, 0.4);
     }}
     
     QGroupBox {{ 

@@ -5,3 +5,4 @@ chess==1.11.2
 python-chess==1.999
 SQLAlchemy==2.0.35
 pytest==9.0.2
+pytest-qt==4.5.0

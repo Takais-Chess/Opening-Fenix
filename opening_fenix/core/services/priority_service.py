@@ -127,7 +127,7 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                     total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
                     
                     moves_with_stats = []
-                    rare_moves = []
+                    rare_moves_with_weights = []
                     
                     for move in all_outgoing_moves:
                         lichess_info = lichess_move_data.get(move.uci) or lichess_move_data.get(move.san)
@@ -143,10 +143,21 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                         if lichess_info and lichess_info.get('total', 0) > 0:
                             moves_with_stats.append((move, lichess_info))
                         else:
-                            rare_moves.append(move)
+                            # BACK-PROPAGATION: Check if child position has Lichess data
+                            weight = 1
+                            if move.to_position_id:
+                                child_fen = id_to_fen.get(move.to_position_id)
+                                if child_fen:
+                                    clean_child_fen = " ".join(child_fen.split(" ")[:4])
+                                    child_data = lichess_data_cache.get(clean_child_fen)
+                                    if child_data:
+                                        weight = sum(m_info.get('total', 0) for m_info in child_data.values())
+                                        if weight < 1: weight = 1
+                            rare_moves_with_weights.append((move, weight))
                     
-                    # TOTAL GAMES = SUM(LICHESS) + COUNT(RARE MOVES)
-                    effective_total = total_from_lichess + len(rare_moves)
+                    # TOTAL GAMES = SUM(LICHESS TOP 12) + SUM(PROPAGATED RARE WEIGHTS)
+                    total_rare_weight = sum(w for m, w in rare_moves_with_weights)
+                    effective_total = total_from_lichess + total_rare_weight
                     
                     if effective_total > 0:
                         for move, stats in moves_with_stats:
@@ -154,14 +165,14 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                             next_prob = current_prob * share
                             move.priority_score = next_prob
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] += next_prob
+                                id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + next_prob
                         
-                        for move in rare_moves:
-                            share = 1 / effective_total
+                        for move, weight in rare_moves_with_weights:
+                            share = weight / effective_total
                             next_prob = current_prob * share
                             move.priority_score = next_prob
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] += next_prob
+                                id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + next_prob
                     else:
                         # Fallback for no data
                         split_prob = current_prob / len(all_outgoing_moves)
@@ -283,7 +294,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                     total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
                     
                     moves_with_stats = []
-                    rare_moves = []
+                    rare_moves_with_weights = []
                     
                     for m in out_moves:
                         info = lichess_move_data.get(m.uci) or lichess_move_data.get(m.san)
@@ -298,10 +309,21 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                         if info and info.get('total', 0) > 0:
                             moves_with_stats.append((m, info))
                         else:
-                            rare_moves.append(m)
+                            # BACK-PROPAGATION: Check if child position has Lichess data
+                            weight = 1
+                            if m.to_position_id:
+                                child_fen = id_to_fen_dict.get(m.to_position_id)
+                                if child_fen:
+                                    clean_child_fen = " ".join(child_fen.split(" ")[:4])
+                                    child_data = lichess_data_cache.get(clean_child_fen)
+                                    if child_data:
+                                        weight = sum(m_info.get('total', 0) for m_info in child_data.values())
+                                        if weight < 1: weight = 1
+                            rare_moves_with_weights.append((m, weight))
                     
-                    # TOTAL GAMES = SUM(LICHESS) + COUNT(RARE MOVES)
-                    effective_total = total_from_lichess + len(rare_moves)
+                    # TOTAL GAMES = SUM(LICHESS TOP 12) + SUM(PROPAGATED RARE WEIGHTS)
+                    total_rare_weight = sum(w for m, w in rare_moves_with_weights)
+                    effective_total = total_from_lichess + total_rare_weight
                     
                     if effective_total > 0:
                         for m, stats in moves_with_stats:
@@ -311,8 +333,8 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                             if m.to_position_id in id_probabilities:
                                 id_probabilities[m.to_position_id] += next_p
                         
-                        for m in rare_moves:
-                            share = 1 / effective_total
+                        for m, weight in rare_moves_with_weights:
+                            share = weight / effective_total
                             next_p = current_prob * share
                             m.priority_score = next_p
                             if m.to_position_id in id_probabilities:

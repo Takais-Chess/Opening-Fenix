@@ -75,11 +75,24 @@ def ensure_default_engine_path():
 if __name__ == "__main__":
     if sys.platform == 'win32':
         import ctypes
-        # More unique and descriptive ID to ensure correct taskbar grouping/caching
-        myappid = 'OpeningFenix.Lab.RepertoireTrainer.1.0' 
+        import winreg
+        # Aggressive Shell Notification Update
+        # Force the shell to forget about the python executable caching
+        try:
+            SHCNE_ASSOCCHANGED = 0x08000000
+            SHCNF_IDLIST = 0x0000
+            ctypes.windll.shell32.SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None)
+        except Exception:
+            pass
+            
+        # More unique and descriptive ID to ensure Windows taskbar grouping matches the logo.
+        # This string should be unique to the app (including version if needed).
+        myappid = 'OpeningFenix.Lab.V2.1.0' 
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except (AttributeError, OSError):
+            print(f"DEBUG: SetCurrentProcessExplicitAppUserModelID set to: {myappid}")
+        except (AttributeError, OSError) as e:
+             print(f"DEBUG: Failed to set AppUserModelID: {e}")
              pass
 
     try:

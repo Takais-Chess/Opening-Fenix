@@ -61,8 +61,13 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         
         i = 0
         while i < len(positions_to_query):
-            pos = positions_to_query[i]
-            
+            # Refresh position state before querying to avoid ObjectDeletedError using a new query to fetch it fresh if needed
+            pos_id = positions_to_query[i].id
+            pos = session.get(Position, pos_id)
+            if pos is None:
+                i += 1
+                continue
+                
             if check_cancel and check_cancel():
                 session.commit()
                 _update_lichess_delay_config(current_delay)

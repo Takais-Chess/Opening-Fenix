@@ -68,10 +68,12 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                     good_moves.append(repertoire_uci)
 
                 for info in result:
+                    if 'pv' not in info or not info['pv']: continue
                     move = info['pv'][0]
                     score = info['score'].white()
-                    
-                    if abs(best_score.score(mate_score=100000) - score.score(mate_score=100000)) <= 30:
+                    # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
+                    threshold = 50 if depth <= 17 else 30
+                    if abs(best_score.score(mate_score=100000) - score.score(mate_score=100000)) <= threshold:
                         if move.uci() not in good_moves:
                             good_moves.append(move.uci())
 
@@ -233,8 +235,9 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                         move = info['pv'][0]
                         score = info['score'].white()
                         score_val = score.score(mate_score=100000)
-                        
-                        if abs(best_score_val - score_val) <= 50:
+                        # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
+                        threshold = 50 if depth <= 17 else 30
+                        if abs(best_score_val - score_val) <= threshold:
                             good_moves.append(move.uci())
                     
                     pos.good_moves = json.dumps(list(set(good_moves)))

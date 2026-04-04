@@ -43,21 +43,43 @@ def normalize_fen(board):
     return " ".join(board.fen().split(" ")[:4])
 
 def get_repertoire_dir(repo_name, is_test=None):
-    """Returns the path to the repertoire's specific folder."""
+    """
+    Returns the path to the repertoire's specific folder.
+    Now more robust: if is_test is None, it checks both the regular and test subfolders.
+    """
     repo_base = os.path.join(get_user_dir(), "repertoires")
     
-    # If is_test is None, we check if the name starts with "test"
-    if is_test is None:
-        is_test = repo_name.lower().startswith("test")
-        
-    if is_test:
+    # If is_test is explicitly provided, respect it
+    if is_test is True:
         return os.path.join(repo_base, "test", repo_name)
-    else:
+    elif is_test is False:
         return os.path.join(repo_base, repo_name)
+        
+    # If is_test is None, we probe both locations
+    regular_path = os.path.join(repo_base, repo_name)
+    test_path = os.path.join(repo_base, "test", repo_name)
+    
+    if os.path.exists(regular_path) and os.path.isdir(regular_path):
+        return regular_path
+    elif os.path.exists(test_path) and os.path.isdir(test_path):
+        return test_path
+        
+    # Default fallback if neither exists (using the "test" prefix heuristic for new creations)
+    is_test_by_name = repo_name.lower().startswith("test")
+    if is_test_by_name:
+        return test_path
+    else:
+        return regular_path
 
 def get_repertoire_db_path(repo_name, is_test=None):
-    """Returns the path to the repertoire's .db file."""
-    return os.path.join(get_repertoire_dir(repo_name, is_test), f"{repo_name}.db")
+    """
+    Returns the path to the repertoire's .db file.
+    Uses the robust get_repertoire_dir for lookups.
+    """
+    # Probing for the directory first
+    repo_dir = get_repertoire_dir(repo_name, is_test)
+    return os.path.join(repo_dir, f"{repo_name}.db")
+
 
 def initialize_repertoire_assets(repo_dir):
     """Creates the default PGN files and Tactics folder for a new repertoire."""

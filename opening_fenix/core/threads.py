@@ -109,3 +109,33 @@ class PGNImportThread(QThread):
             progress_callback=self.progress_signal.emit
         )
         self.finished_signal.emit(success, msg)
+
+from opening_fenix.core.services.maintenance_service import run_group_maintenance
+
+class MaintenanceThread(QThread):
+    # Overall summary: (current_repo_index, total_repos, last_completed_name)
+    overall_progress_signal = pyqtSignal(int, int, str)
+    # Granular status: (repo_name, task_type, percentage, status_text)
+    repo_status_signal = pyqtSignal(str, str, int, str)
+    finished_signal = pyqtSignal(bool, str)
+
+    def __init__(self, repo_configs, tasks, engine_settings=None):
+        super().__init__()
+        self.repo_configs = repo_configs
+        self.tasks = tasks
+        self.engine_settings = engine_settings
+        self._is_canceled = False
+
+    def run(self):
+        success, msg = run_group_maintenance(
+            self.repo_configs,
+            self.tasks,
+            self.engine_settings,
+            overall_progress_callback=self.overall_progress_signal.emit,
+            repo_status_callback=self.repo_status_signal.emit,
+            check_cancel=lambda: self._is_canceled
+        )
+        self.finished_signal.emit(success, msg)
+
+    def cancel(self):
+        self._is_canceled = True

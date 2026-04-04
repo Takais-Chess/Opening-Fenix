@@ -33,7 +33,8 @@ from sqlalchemy.orm import joinedload
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
 from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets
-from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread
+from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread
+from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.engine import EngineThread
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
@@ -59,6 +60,9 @@ class CreatorBackend:
         
         # DEBUG TRACE
         self._last_cascade_trace = []
+        
+        # Overhaul Session State
+        self.overhaul_session_start = None
 
     def get_meta(self, key, default=None):
         if not self.session: return default
@@ -71,6 +75,9 @@ class CreatorBackend:
         db_path = get_repertoire_db_path(name)
         repo_dir = get_repertoire_dir(name)
         
+        from opening_fenix.core.logger import logger
+        logger.info(f"CreatorBackend: Loading repertoire '{name}' from {db_path}")
+        
         # Ensure directory and assets exist
         initialize_repertoire_assets(repo_dir)
         
@@ -79,6 +86,7 @@ class CreatorBackend:
         self.clear_cache()
 
         self._cached_start_move = self.get_repertoire_start_move(force_refresh=True)
+
 
     def close(self):
         if self.session:
@@ -235,8 +243,10 @@ class CreatorBackend:
         self.session.commit()
         self.clear_cache()
 
-    def _get_reachable_position_ids(self, level=None):
-        """Helper to find all position IDs reachable via active repertoire moves <= level."""
+    def _get_reachable_position_ids(self, level=None, variation_filter=None):
+        """Helper to find all position IDs reachable via active repertoire moves <= level.
+        If variation_filter is provided, returns only the subset that matches.
+        """
         if not self.session: return set()
         if level is None: level = 99 # Default to all levels
         
@@ -247,28 +257,101 @@ class CreatorBackend:
         
         reachable = {start_pos.id}
         queue = collections.deque([start_pos.id])
+        
+        # 1. Structure Analysis (Build DAG of all active moves at appropriate level)
         all_rep_moves = self.session.query(Move.from_position_id, Move.to_position_id).join(RepertoireMove).filter(
             RepertoireMove.is_active == True,
             RepertoireMove.level <= level
         ).all()
         graph = collections.defaultdict(list)
         for f_id, t_id in all_rep_moves: graph[f_id].append(t_id)
+
+        # 2. BFS for full reachability (NO filtering while moving)
         while queue:
             curr = queue.popleft()
             for nxt in graph.get(curr, []):
                 if nxt not in reachable:
                     reachable.add(nxt)
                     queue.append(nxt)
+        
+        # 3. Post-Filtering: If variation_filter is set, only keep matching positions
+        if variation_filter:
+            # Query the names for all reachable IDs
+            p_data = self.session.query(Position.id, Position.variation_1, Position.variation_2, Position.variation_3, 
+                                      Position.cached_v1, Position.cached_v2, Position.cached_v3).filter(
+                Position.id.in_(list(reachable))
+            ).all()
+            
+            filtered_ids = set()
+            for pid, v1, v2, v3, cv1, cv2, cv3 in p_data:
+                # v_set contains all naming variation tags for this position
+                v_set = {v1, v2, v3, cv1, cv2, cv3}
+                
+                if isinstance(variation_filter, (list, tuple)):
+                    fv1, fv2 = variation_filter
+                    # Hierarchical filter must match ALL specified levels
+                    if fv1 and fv1 not in v_set: continue
+                    if fv2 and fv2 not in v_set: continue
+                else:
+                    if variation_filter not in v_set: continue
+                
+                filtered_ids.add(pid)
+                
+            return filtered_ids
+            
         return reachable
 
-    def get_overhaul_stats(self, level=None, session_start=None):
-        """Returns (checked_count, total_count) for positions at or above the given level."""
+    def get_variation_structure(self):
+        """
+        Builds a hierarchical dictionary mapping V1 variation names to a list of V2 names.
+        Modified version of the trainer's logic for the Creator context.
+        """
+        if not self.session: return {}
+        
+        # 1. Fetch all positions that have ANY variation tag
+        # Use simple distinct queries to find pairings
+        results = self.session.query(
+            Position.variation_1, Position.variation_2, 
+            Position.cached_v1, Position.cached_v2
+        ).filter(
+            (Position.variation_1 != None) | 
+            (Position.variation_2 != None) | 
+            (Position.cached_v1 != None) |
+            (Position.cached_v2 != None)
+        ).distinct().all()
+
+        structure = {} # V1 -> set(V2)
+        for v1, v2, cv1, cv2 in results:
+            # Use cached inheritance if variation tags are missing on the position itself
+            final_v1 = v1 if v1 else cv1
+            final_v2 = v2 if v2 else cv2
+
+            if not final_v1: final_v1 = "Sonstiges"
+            
+            if final_v1 not in structure:
+                structure[final_v1] = set()
+            
+            if final_v2:
+                structure[final_v1].add(final_v2)
+
+        # Build final result with sorted V2s
+        res = {}
+        for v1 in sorted(structure.keys()):
+            v2s = sorted(list(structure[v1]))
+            res[v1] = v2s
+
+        return res
+
+    def get_overhaul_stats(self, level=None, variation_filter=None, session_start=None):
+        """Returns (checked_count, total_count) for positions at or above the given level within the variation."""
         if not self.session: return 0, 0
         if level is None: level = 99
         
         # Reachable positions at or below this level
-        total_ids = self._get_reachable_position_ids(level)
+        total_ids = self._get_reachable_position_ids(level, variation_filter)
         total_count = len(total_ids)
+        
+        if total_count == 0: return 0, 0
         
         query = self.session.query(Position).filter(Position.id.in_(total_ids))
         if session_start:
@@ -277,28 +360,102 @@ class CreatorBackend:
             query = query.filter(Position.last_overhaul_review != None)
             
         checked_count = query.count()
-        
         return checked_count, total_count
 
-    def find_nearest_unreviewed(self, current_fen, level=None, session_start=None):
-        """Finds the nearest unchecked position in the repertoire tree."""
-        if not self.session: return None
+    def get_overhaul_session_start(self):
+        """Loads the overhaul session start time from metadata."""
+        val = self.get_meta("overhaul_session_start")
+        if val:
+            try:
+                return datetime.datetime.fromisoformat(val)
+            except:
+                return None
+        return None
+
+    def save_overhaul_session_start(self, dt):
+        """Saves the overhaul session start time to metadata."""
+        if dt:
+            self.set_meta("overhaul_session_start", dt.isoformat())
+        else:
+            self.set_meta("overhaul_session_start", None)
+        self.session.commit()
+
+    def set_meta(self, key, value):
+        """Helper to set metadata value."""
+        if not self.session: return
+        m = self.session.query(Metadata).filter_by(key=key).first()
+        if value is None:
+            if m: self.session.delete(m)
+        else:
+            if m: m.value = str(value)
+            else: self.session.add(Metadata(key=key, value=str(value)))
+        self.session.commit()
+
+    def is_branch_fully_reviewed(self, pos_id, session_start):
+        """
+        Uses a Recursive CTE to check if a position and all its reachable
+        repertoire descendants have been reviewed in the current session.
+        Performance optimization: Returns True/False efficiently.
+        """
+        if not self.session or not session_start: return False
         
-        # If level is not provided, use a high default to check all levels
+        # SQLite Recursive CTE to find all descendant positions in the active repertoire
+        # and check if any of them have last_overhaul_review < session_start OR NULL.
+        sql = text("""
+            WITH RECURSIVE descendants(id) AS (
+                SELECT :pos_id
+                UNION
+                SELECT m.to_position_id
+                FROM moves m
+                INNER JOIN descendants d ON m.from_position_id = d.id
+                INNER JOIN repertoire_moves rm ON m.id = rm.move_id
+                WHERE rm.is_active = 1
+            )
+            SELECT COUNT(*)
+            FROM descendants d
+            LEFT JOIN positions p ON d.id = p.id
+            WHERE p.last_overhaul_review IS NULL OR p.last_overhaul_review < :session_start
+        """)
+        
+        try:
+            result = self.session.execute(sql, {"pos_id": pos_id, "session_start": session_start.isoformat()}).scalar()
+            return result == 0
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Error in is_branch_fully_reviewed: {e}")
+            return False
+
+    def get_unique_variation_names(self):
+        """Returns a sorted list of all unique variation names in the repertoire."""
+        if not self.session: return []
+        
+        v1 = self.session.query(Position.variation_1).filter(Position.variation_1 != None).distinct()
+        v2 = self.session.query(Position.variation_2).filter(Position.variation_2 != None).distinct()
+        v3 = self.session.query(Position.variation_3).filter(Position.variation_3 != None).distinct()
+        
+        names = set()
+        for r in v1.all(): names.add(r[0])
+        for r in v2.all(): names.add(r[0])
+        for r in v3.all(): names.add(r[0])
+        
+        return sorted(list(names))
+
+    def find_nearest_unreviewed(self, current_fen, level=None, variation_filter=None, session_start=None):
+        """Finds the nearest unchecked position in the repertoire tree, strictly filtered by variation."""
+        if not self.session: return None
         if level is None: level = 99
         
         clean_curr = " ".join(current_fen.split(" ")[:4])
         start_pos = self.session.query(Position).filter_by(fen=clean_curr).first()
         if not start_pos: 
-            # Fallback to absolute root if current POS is weird
             start_pos = self.session.query(Position).filter_by(fen=chess.STARTING_FEN).first()
             if not start_pos: return None
 
-        # BFS to find nearest unchecked
         queue = collections.deque([start_pos.id])
         visited = {start_pos.id}
         
-        reachable_ids = self._get_reachable_position_ids(level)
+        # Scope the search to the reachable set for THIS variation/level
+        reachable_ids = self._get_reachable_position_ids(level, variation_filter)
         
         while queue:
             curr_id = queue.popleft()
@@ -323,7 +480,7 @@ class CreatorBackend:
                     visited.add(c_id)
                     queue.append(c_id)
                     
-            # Add neighbors (parents) - also allow going "up" to find other branches
+            # Add neighbors (parents)
             parents = self.session.query(Move.from_position_id).filter_by(to_position_id=curr_id).all()
             for (p_id,) in parents:
                 if p_id not in visited:
@@ -334,127 +491,252 @@ class CreatorBackend:
 
     def find_repertoire_holes(self, threshold, elo_range):
         """
-        Finds opponent moves that are popular but not covered in the repertoire (Opponent Holes),
-        OR positions where the user has no move (User Holes).
-        Returns a list of dicts: {path: str, fen: str, move_san: str, type: str, popularity: float}
+        Finds moves that are popular (per Lichess) but not covered in the repertoire (Opponent
+        Holes), or positions where the user has no repertoire move defined (User Holes).
+
+        Uses the same probability-propagation algorithm as priority_service.py for accuracy.
+        threshold: raw % value, e.g. 1.0 means 1 %.
+        """
+        if not self.session: return []
+
+        threshold_val = threshold / 100.0          # 1.0 % → 0.01
+        user_turn_char = self.get_repertoire_color()  # 'w' or 'b'
+
+        # ── 1. Pre-fetch everything we need ──────────────────────────────────────
+        all_moves_db = self.session.query(Move).all()
+        rep_move_ids = {
+            rm.move_id
+            for rm in self.session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
+        }
+
+        # all_moves_from – keyed by from_position_id (every move in the DB)
+        # rep_moves_from – keyed by from_position_id (only active rep moves)
+        all_moves_from = collections.defaultdict(list)
+        rep_moves_from = collections.defaultdict(list)
+        for m in all_moves_db:
+            all_moves_from[m.from_position_id].append(m)
+            if m.id in rep_move_ids:
+                rep_moves_from[m.from_position_id].append(m)
+
+        id_to_fen = dict(self.session.query(Position.id, Position.fen).all())
+
+        # Pre-fetch all Lichess data for this ELO range into a dict keyed by clean FEN
+        lichess_cache: dict = {}
+        for ld in self.session.query(LichessData).filter_by(elo_range=elo_range).all():
+            clean = " ".join(ld.fen.split(" ")[:4])
+            try:
+                lichess_cache[clean] = json.loads(ld.moves_json)
+            except Exception:
+                pass
+
+        # Pre-fetch exempt positions
+        exempt_fens = {
+            " ".join(row[0].split(" ")[:4])
+            for row in self.session.query(Position.fen).filter(Position.is_hole_exempt == True).all()
+        }
+
+        # Castling alternative UCI pairs
+        CASTLING_ALT = {
+            'e1g1': 'e1h1', 'e1h1': 'e1g1',
+            'e1c1': 'e1a1', 'e1a1': 'e1c1',
+            'e8g8': 'e8h8', 'e8h8': 'e8g8',
+            'e8c8': 'e8a8', 'e8a8': 'e8c8',
+        }
+
+        def covered_ucis_for(pid):
+            """Normalized UCI set for the active rep moves leaving position pid."""
+            ucis: set = set()
+            for m in rep_moves_from.get(pid, []):
+                u = m.uci.strip().lower()
+                ucis.add(u)
+                alt = CASTLING_ALT.get(u)
+                if alt:
+                    ucis.add(alt)
+            return ucis
+
+        # ── 2. Root position ─────────────────────────────────────────────────────
+        sp = self.session.query(Position.id).filter(
+            Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+        ).first()
+        if not sp:
+            return []
+        root_id = sp[0]
+
+        # ── 3. BFS – build depth-ordered list of reachable positions ─────────────
+        # On USER  turn: only follow active rep moves (probability stops here otherwise)
+        # On OPP   turn: follow all DB moves so child positions receive probability
+        reach_probs: dict = {root_id: 1.0}
+        pos_by_depth: list = []
+        bfs_queue = collections.deque([(root_id, 0)])
+        bfs_visited: set = set()
+
+        while bfs_queue:
+            pid, d = bfs_queue.popleft()
+            if pid in bfs_visited:
+                continue
+            bfs_visited.add(pid)
+            if d > 150:
+                continue
+
+            while len(pos_by_depth) <= d:
+                pos_by_depth.append([])
+            pos_by_depth[d].append(pid)
+
+            fen = id_to_fen.get(pid, "")
+            parts = fen.split(" ")
+            is_user = len(parts) > 1 and parts[1] == user_turn_char
+
+            nexts = rep_moves_from.get(pid, []) if is_user else all_moves_from.get(pid, [])
+            for m in nexts:
+                if m.to_position_id and m.to_position_id not in bfs_visited:
+                    bfs_queue.append((m.to_position_id, d + 1))
+
+        # ── 4. Depth-ordered propagation; collect holes inline ───────────────────
+        holes: list = []
+
+        for depth_list in pos_by_depth:
+            for pid in depth_list:
+                p_reach = reach_probs.get(pid, 0.0)
+                if p_reach < threshold_val:
+                    continue  # Prune: no descendant can exceed threshold
+
+                fen = id_to_fen.get(pid)
+                if not fen:
+                    continue
+                clean_fen = " ".join(fen.split(" ")[:4])
+                # NOTE: exempt positions still propagate probability – they just
+                # don't get reported as holes themselves.
+                is_exempt = clean_fen in exempt_fens
+
+                parts = clean_fen.split(" ")
+                is_user = len(parts) > 1 and parts[1] == user_turn_char
+                rep_moves = rep_moves_from.get(pid, [])
+
+                if is_user:
+                    if not rep_moves:
+                        # ── User hole: reachable position with no rep move ──
+                        if not is_exempt:
+                            lichess_moves = lichess_cache.get(clean_fen, {})
+                            total_games = sum(v.get('total', 0) for v in lichess_moves.values())
+                            
+                            if total_games > 0:
+                                # Report individual popular moves as holes
+                                for uci, stats in lichess_moves.items():
+                                    move_total = stats.get('total', 0)
+                                    p_move = move_total / total_games
+                                    p_total = p_reach * p_move
+                                    if p_total >= threshold_val:
+                                        san = stats.get('san', uci)
+                                        holes.append({
+                                            "fen": clean_fen,
+                                            "move_san": san,
+                                            "type": "user",
+                                            "popularity": p_total * 100,
+                                        })
+                            else:
+                                # Fallback if no Lichess data
+                                holes.append({
+                                    "fen": clean_fen,
+                                    "move_san": "—",
+                                    "type": "user",
+                                    "popularity": p_reach * 100,
+                                })
+                        # No probability propagates from here either way
+                    else:
+                        # Split probability evenly among rep moves
+                        p_next = p_reach / len(rep_moves)
+                        for m in rep_moves:
+                            if m.to_position_id:
+                                reach_probs[m.to_position_id] = (
+                                    reach_probs.get(m.to_position_id, 0.0) + p_next
+                                )
+                else:
+                    # ── Opponent turn: distribute probability via Lichess data ──
+                    lichess_moves = lichess_cache.get(clean_fen, {})
+                    total_games = sum(v.get('total', 0) for v in lichess_moves.values())
+
+                    if total_games == 0:
+                        # No Lichess data – even split among DB moves as fallback
+                        out_moves = all_moves_from.get(pid, [])
+                        if out_moves:
+                            p_next = p_reach / len(out_moves)
+                            for m in out_moves:
+                                if m.to_position_id:
+                                    reach_probs[m.to_position_id] = (
+                                        reach_probs.get(m.to_position_id, 0.0) + p_next
+                                    )
+                        continue
+
+                    covered = covered_ucis_for(pid)
+
+                    for uci, stats in lichess_moves.items():
+                        move_total = stats.get('total', 0)
+                        if move_total == 0:
+                            continue
+                        norm_uci = uci.strip().lower()
+                        p_move = move_total / total_games
+                        p_total = p_reach * p_move
+
+                        is_covered = (
+                            norm_uci in covered
+                            or CASTLING_ALT.get(norm_uci, '') in covered
+                        )
+
+                        if is_covered:
+                            # Propagate probability forward through the matching rep move
+                            for m in rep_moves:
+                                m_uci = m.uci.strip().lower()
+                                if m_uci == norm_uci or CASTLING_ALT.get(m_uci, '') == norm_uci:
+                                    if m.to_position_id:
+                                        reach_probs[m.to_position_id] = (
+                                            reach_probs.get(m.to_position_id, 0.0) + p_total
+                                        )
+                                    break
+                        else:
+                            # Uncovered popular Lichess move → opponent hole
+                            if p_total >= threshold_val and not is_exempt:
+                                san = stats.get('san', uci)
+                                holes.append({
+                                    "fen": clean_fen,
+                                    "move_san": san,
+                                    "type": "opponent",
+                                    "popularity": p_total * 100,
+                                })
+
+        holes.sort(key=lambda x: x['popularity'], reverse=True)
+        return holes
+
+
+    def find_priority_mismatches(self, level_order, threshold):
+        """
+        Finds moves in the repertoire that are assigned to a specific level
+        but have a priority score (frequency) above the threshold.
         """
         if not self.session: return []
         
-        repo_color = self.get_meta("color", "w")
-        threshold_val = threshold
+        # Query for RepertoireMoves joined with Moves
+        # We also need basic Move info 
+        mismatches = self.session.query(Move).join(RepertoireMove).filter(
+            RepertoireMove.level == level_order,
+            Move.priority_score >= (threshold / 100.0)
+        ).all()
         
-        # 1. Reachability analysis
-        start_fen_clean = " ".join(chess.STARTING_FEN.split(" ")[:4])
-        reach_probs = {start_fen_clean: 1.0}
-        queue = collections.deque([chess.STARTING_FEN])
-        visited = {start_fen_clean}
-        
-        all_active_moves = self.session.query(Move).join(RepertoireMove).filter(RepertoireMove.is_active == True).all()
-        move_map = collections.defaultdict(list)
-        for m in all_active_moves:
-            clean_f = " ".join(m.from_position.fen.split(" ")[:4])
-            move_map[clean_f].append(m)
+        results = []
+        for move in mismatches:
+            from_pos = self.session.get(Position, move.from_position_id)
+            if not from_pos: continue
             
-        while queue:
-            curr_fen = queue.popleft()
-            clean_f = " ".join(curr_fen.split(" ")[:4])
-            p_reach = reach_probs[clean_f]
+            _, path = self.get_path_to_fen(from_pos.fen)
+            results.append({
+                "fen": from_pos.fen,
+                "path": " > ".join(path) if path else "Start",
+                "move_san": move.san,
+                "type": "priority_check",
+                "popularity": move.priority_score * 100
+            })
             
-            board = chess.Board(curr_fen)
-            is_user_turn = (board.turn == chess.WHITE and repo_color == 'w') or (board.turn == chess.BLACK and repo_color == 'b')
-            
-            moves = move_map.get(clean_f, [])
-            if not moves: continue
-            
-            if is_user_turn:
-                # Distribute probability among preparation lines
-                p_next = p_reach / len(moves)
-                for m in moves:
-                    n_fen = " ".join(m.to_position.fen.split(" ")[:4])
-                    if n_fen not in reach_probs:
-                        reach_probs[n_fen] = p_next
-                        if n_fen not in visited:
-                            visited.add(n_fen)
-                            queue.append(m.to_position.fen)
-                    else:
-                        reach_probs[n_fen] += p_next
-            else:
-                # Distribute by Lichess popularity
-                l_moves = self.get_lichess_common_moves(curr_fen, elo_range)
-                total_plays = sum(lm['total'] for lm in l_moves)
-                
-                for m in moves:
-                    lm = next((x for x in l_moves if x['uci'] == m.uci), None)
-                    p_move = (lm['total'] / total_plays) if (lm and total_plays > 0) else (1.0 / len(moves))
-                    p_next = p_reach * p_move
-                    
-                    n_fen = " ".join(m.to_position.fen.split(" ")[:4])
-                    if n_fen not in reach_probs:
-                        reach_probs[n_fen] = p_next
-                        if n_fen not in visited:
-                            visited.add(n_fen)
-                            queue.append(m.to_position.fen)
-                    else:
-                        reach_probs[n_fen] += p_next
-
-        holes = []
-        for fen_clean, p_reach in reach_probs.items():
-            # Check for exemptions
-            pos_id = self.session.query(Position.id).filter(Position.fen.like(fen_clean + "%")).first()
-            if pos_id:
-                pos = self.session.get(Position, pos_id[0])
-                if pos.is_hole_exempt: continue
-            
-            board = chess.Board(fen_clean)
-            is_user_turn = (board.turn == chess.WHITE and repo_color == 'w') or (board.turn == chess.BLACK and repo_color == 'b')
-            moves = move_map.get(fen_clean, [])
-            l_moves = self.get_lichess_common_moves(fen_clean, elo_range)
-            
-            total_plays = sum(lm['total'] for lm in l_moves)
-            our_ucis = {m.uci.strip().lower() for m in moves}
-            
-            if is_user_turn:
-                if not moves:
-                    # User hole: report popular moves or the position itself if no data
-                    if not l_moves and p_reach >= threshold_val:
-                        _, path = self.get_path_to_fen(fen_clean)
-                        holes.append({
-                            "fen": fen_clean,
-                            "path": " > ".join(path) if path else "Start",
-                            "move_san": "N/A",
-                            "type": "user",
-                            "popularity": p_reach * 100
-                        })
-                    else:
-                        for lm in l_moves:
-                            p_move = lm['total'] / total_plays if total_plays > 0 else 0
-                            p_total = p_reach * p_move
-                            if p_total >= threshold_val:
-                                _, path = self.get_path_to_fen(fen_clean)
-                                holes.append({
-                                    "fen": fen_clean,
-                                    "path": " > ".join(path) if path else "Start",
-                                    "move_san": lm['san'],
-                                    "type": "user",
-                                    "popularity": p_total * 100
-                                })
-            else:
-                # Opponent turn: report moves not covered by user
-                for lm in l_moves:
-                    p_move = lm['total'] / total_plays if total_plays > 0 else 0
-                    p_total = p_reach * p_move
-                    if p_total >= threshold_val and lm['uci'].strip().lower() not in our_ucis:
-                        _, path = self.get_path_to_fen(fen_clean)
-                        holes.append({
-                            "fen": fen_clean,
-                            "path": " > ".join(path) if path else "Start",
-                            "move_san": lm['san'],
-                            "type": "opponent",
-                            "popularity": p_total * 100
-                        })
-                            
-        holes.sort(key=lambda x: x['popularity'], reverse=True)
-        return holes
+        results.sort(key=lambda x: x['popularity'], reverse=True)
+        return results
 
     def reset_hole_exemptions(self):
         if not self.session: return
@@ -594,7 +876,8 @@ class CreatorBackend:
             results.append({
                 "id": m.id, "uci": m.uci, "san": m.san, "is_repo": is_repo, "level": level, "is_active": is_active,
                 "comment": next_pos.comment if next_pos else "", "priority": m.priority_score,
-                "nag": m.nag, "eval": next_pos.engine_eval if next_pos else None
+                "nag": m.nag, "eval": next_pos.engine_eval if next_pos else None,
+                "to_pos_id": m.to_position_id
             })
             
         # Enforce LRU bounds (keep max 100 entries to save RAM)
@@ -687,6 +970,86 @@ class CreatorBackend:
         self._update_level_recursive(move.to_position_id, set(), level_order)
         self.session.commit()
         self.clear_cache()
+
+    def get_strong_level_impact(self, move_id):
+        """
+        Calculates the impact of a strong level change.
+        Returns (move_count, unique_variation_names)
+        """
+        if not self.session: return 0, []
+        move = self.session.get(Move, move_id)
+        if not move: return 0, []
+        
+        move_count = 0
+        variation_names = set()
+        visited_pos = set()
+        queue = collections.deque([move.to_position_id])
+        
+        # Initial move counts as 1 if it's in repertoire
+        rep_move = self.session.query(RepertoireMove).filter_by(move_id=move.id).first()
+        if rep_move:
+            move_count += 1
+            
+        while queue:
+            pos_id = queue.popleft()
+            if pos_id in visited_pos:
+                continue
+            visited_pos.add(pos_id)
+            
+            pos = self.session.get(Position, pos_id)
+            if pos:
+                if pos.cached_v1: variation_names.add(pos.cached_v1)
+                elif pos.variation_1: variation_names.add(pos.variation_1)
+                if pos.cached_v2: variation_names.add(pos.cached_v2)
+                elif pos.variation_2: variation_names.add(pos.variation_2)
+                if pos.cached_v3: variation_names.add(pos.cached_v3)
+                elif pos.variation_3: variation_names.add(pos.variation_3)
+            
+            # Find all outgoing repertoire moves
+            out_moves = self.session.query(Move).join(RepertoireMove, Move.id == RepertoireMove.move_id).filter(Move.from_position_id == pos_id).all()
+            for m in out_moves:
+                move_count += 1
+                queue.append(m.to_position_id)
+                
+        return move_count, sorted([v for v in variation_names if v])
+
+    def update_move_level_strong(self, move_id, level_order):
+        """
+        Forcefully sets the level of a move and all its descendants.
+        """
+        if not self.session: return
+        move = self.session.get(Move, move_id)
+        if not move: return
+        
+        rep_move = self.session.query(RepertoireMove).filter_by(move_id=move.id).first()
+        if not rep_move:
+            rep_move = RepertoireMove(move_id=move.id, level=level_order)
+            self.session.add(rep_move)
+        else:
+            rep_move.level = level_order
+        
+        self.session.flush()
+        
+        # Recursive force update
+        self._update_level_strong_recursive(move.to_position_id, set(), level_order)
+        self.session.commit()
+        self.clear_cache()
+
+    def _update_level_strong_recursive(self, pos_id, visited, new_level):
+        if pos_id in visited:
+            return
+        visited.add(pos_id)
+        
+        # Find all outgoing repertoire moves
+        outgoing_rep = self.session.query(RepertoireMove).join(Move, RepertoireMove.move_id == Move.id).filter(Move.from_position_id == pos_id).all()
+        
+        for rm in outgoing_rep:
+            rm.level = new_level
+            self.session.flush()
+            # Find the move to get the to_position_id
+            m = self.session.get(Move, rm.move_id)
+            if m:
+                self._update_level_strong_recursive(m.to_position_id, visited, new_level)
 
     def move_all_to_level(self, level: int) -> int:
         if not self.session: return 0
@@ -1736,6 +2099,61 @@ class DiagnosticDialog(QDialog):
             self.parent().refresh_info()
 
 
+class MaintenanceRepoWidget(QWidget):
+    """Custom row widget for the Centralized Maintenance list."""
+    def __init__(self, name, current_elo, parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.setMinimumHeight(scale(45))
+        l = QHBoxLayout(self)
+        l.setContentsMargins(scale(10), scale(5), scale(10), scale(5))
+        
+        self.chk = QCheckBox()
+        self.chk.setChecked(True)
+        l.addWidget(self.chk)
+        
+        self.lbl_name = QLabel(name)
+        self.lbl_name.setStyleSheet("font-weight: bold;")
+        l.addWidget(self.lbl_name)
+        
+        l.addStretch()
+        
+        l.addWidget(QLabel("Lichess Elo:"))
+        self.combo_elo = QComboBox()
+        self.combo_elo.addItems(["low", "mid", "high", "masters"])
+        self.combo_elo.setCurrentText(current_elo)
+        self.combo_elo.setFixedWidth(scale(100))
+        l.addWidget(self.combo_elo)
+        
+        self.lbl_status = QLabel("")
+        self.lbl_status.setStyleSheet("color: #555; font-size: 11px; font-weight: normal; margin-left: 10px;")
+        self.lbl_status.setFixedWidth(scale(250))
+        l.addWidget(self.lbl_status)
+        
+        self._task_states = {"engine": "", "lichess": "", "stats": ""}
+
+    def update_status(self, task_type, progress, status_text):
+        if task_type in self._task_states:
+            if progress < 100:
+                self._task_states[task_type] = f"{task_type.capitalize()}: {progress}%"
+            else:
+                self._task_states[task_type] = f"{task_type.capitalize()}: {status_text}"
+        
+        active_states = [v for k, v in self._task_states.items() if v]
+        self.lbl_status.setText(" | ".join(active_states))
+
+    def is_checked(self):
+        return self.chk.isChecked()
+    
+    def set_checked(self, checked):
+        self.chk.setChecked(checked)
+        
+    def get_config(self):
+        return {
+            'name': self.name,
+            'elo': self.combo_elo.currentText()
+        }
+
 class RepoSettingsDialog(QDialog):
     def __init__(self, parent=None, backend=None):
         super().__init__(parent)
@@ -1762,7 +2180,7 @@ class RepoSettingsDialog(QDialog):
         self.sidebar.setFixedWidth(scale(200))
 
         self.sidebar.currentRowChanged.connect(self.display_page)
-        for t in ["Repertoire-Daten", "Darstellung & Audio", "Import & Export", "Analyse & Werkzeuge"]:
+        for t in ["Repertoire-Daten", "Darstellung & Audio", "Import & Export", "Analyse & Werkzeuge", "Zentralisierte Wartung"]:
             item = QListWidgetItem(t)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.sidebar.addItem(item)
@@ -1772,10 +2190,12 @@ class RepoSettingsDialog(QDialog):
         self.page_design = QWidget(); self.init_page_design(self.page_design)
         self.page_imex = QWidget(); self.init_page_imex(self.page_imex)
         self.page_analysis = QWidget(); self.init_page_analysis(self.page_analysis)
+        self.page_maintenance = QWidget(); self.init_page_maintenance(self.page_maintenance)
         self.pages.addWidget(self.page_gen)
         self.pages.addWidget(self.page_design)
         self.pages.addWidget(self.page_imex)
         self.pages.addWidget(self.page_analysis)
+        self.pages.addWidget(self.page_maintenance)
         
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1809,7 +2229,12 @@ class RepoSettingsDialog(QDialog):
 
 
         f_i.addRow("Analyse:", self.l_d)
-        f_i.addRow("Elo:", self.l_e)
+        
+        self.combo_repertoire_elo = QComboBox()
+        self.combo_repertoire_elo.addItems(["low", "mid", "high", "masters"])
+        self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
+        f_i.addRow("Ziel-Elo (Lichess):", self.combo_repertoire_elo)
+        
         f_i.addRow("Züge:", self.l_m)
         self.tbl_levels = QTableWidget()
         self.tbl_levels.setColumnCount(3)
@@ -1840,7 +2265,15 @@ class RepoSettingsDialog(QDialog):
         l.addStretch()
 
     def save_description(self):
-        self.backend.set_repertoire_description(self.txt_description.toPlainText())
+        desc = self.txt_description.toPlainText()
+        self.backend.set_meta("description", desc)
+        self.backend.session.commit()
+
+    def save_repertoire_elo(self, value):
+        from opening_fenix.core.logger import logger
+        logger.info(f"Saving Repertoire Elo: {value}")
+        self.backend.set_meta("elo", value)
+        self.backend.session.commit()
 
     def init_page_design(self, page):
         l = QVBoxLayout(page)
@@ -1865,7 +2298,46 @@ class RepoSettingsDialog(QDialog):
         self.slider_vol.valueChanged.connect(self.change_volume)
         f_a.addRow("Lautstärke:", self.slider_vol)
         l.addWidget(g_a)
+
+        # --- Dynamic Tab Selection ---
+        g_tabs = QGroupBox("Sichtbare Tabs (Unten Rechts)")
+        f_tabs = QFormLayout(g_tabs)
+        
+        active_tabs = self.main_window.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+        
+        self.chk_details = QCheckBox("Details")
+        self.chk_details.setChecked("DETAILS" in active_tabs)
+        self.chk_details.toggled.connect(self.save_tab_settings)
+        f_tabs.addRow(self.chk_details)
+        
+        self.chk_analysis = QCheckBox("Analysis")
+        self.chk_analysis.setChecked("ANALYSIS" in active_tabs)
+        self.chk_analysis.toggled.connect(self.save_tab_settings)
+        f_tabs.addRow(self.chk_analysis)
+        
+        self.chk_holes = QCheckBox("Rep. Loch Finder")
+        self.chk_holes.setChecked("HOLES" in active_tabs)
+        self.chk_holes.toggled.connect(self.save_tab_settings)
+        f_tabs.addRow(self.chk_holes)
+        
+        self.chk_kontrolle = QCheckBox("Rep. Kontrolle")
+        self.chk_kontrolle.setChecked("KONTROLLE" in active_tabs)
+        self.chk_kontrolle.toggled.connect(self.save_tab_settings)
+        f_tabs.addRow(self.chk_kontrolle)
+        
+        l.addWidget(g_tabs)
         l.addStretch()
+
+    def save_tab_settings(self, _=None):
+        active_tabs = []
+        if self.chk_details.isChecked(): active_tabs.append("DETAILS")
+        if self.chk_analysis.isChecked(): active_tabs.append("ANALYSIS")
+        if self.chk_holes.isChecked(): active_tabs.append("HOLES")
+        if self.chk_kontrolle.isChecked(): active_tabs.append("KONTROLLE")
+        
+        self.main_window.config["creator_active_tabs"] = active_tabs
+        self.save_config()
+        self.main_window.apply_tab_visibility()
 
     def change_board_theme(self, theme_name):
         self.main_window.board_widget.set_theme(theme_name)
@@ -1900,8 +2372,109 @@ class RepoSettingsDialog(QDialog):
         b_e = QPushButton("Exportieren")
         b_e.clicked.connect(self.export_repertoire)
         v.addWidget(b_e)
+
+        v.addSpacing(scale(20))
+        btn_full_export = QPushButton("gesamtes Repertoire zum export vorbereiten")
+        btn_full_export.setObjectName("PrimaryButton")
+        btn_full_export.setMinimumHeight(scale(45))
+        btn_full_export.clicked.connect(self.prepare_full_course_export)
+        v.addWidget(btn_full_export)
+
         l.addWidget(g)
         l.addStretch()
+
+    def _sanitize_filename(self, filename):
+        if not filename: return "unnamed"
+        return re.sub(r'[\\/*?:"<>|]', '_', filename)
+
+    def prepare_full_course_export(self):
+        repo_name = self.backend.active_repo_name
+        if not repo_name: return
+        
+        repo_dir = get_repertoire_dir(repo_name)
+        if not os.path.exists(repo_dir):
+            os.makedirs(repo_dir, exist_ok=True)
+            
+        levels = self.backend.get_repertoire_levels()
+        if not levels:
+            QMessageBox.warning(self, "Export", "Keine Levels zum Exportieren gefunden.")
+            return
+
+        progress = QProgressDialog("Bereite Export vor...", "Abbrechen", 0, len(levels), self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        safe_repo_name = self._sanitize_filename(repo_name)
+        
+        exported_files = []
+        for i, lvl in enumerate(levels):
+            if progress.wasCanceled():
+                break
+            
+            progress.setLabelText(f"Exportiere Level {lvl['order']}: {lvl['name']}...")
+            QApplication.processEvents()
+            
+            # Generating PGN
+            # We use transpos_mode=2 (Cut with sequence comment) as requested
+            pgn = self.backend.export_pgn(max_l=lvl['order'], transpos_mode=2)
+            
+            if pgn:
+                safe_lvl_name = self._sanitize_filename(lvl['name'])
+                filename = f"{safe_repo_name} Level {lvl['order']}-{safe_lvl_name}.pgn"
+                path = os.path.join(repo_dir, filename)
+                
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(pgn)
+                exported_files.append(filename)
+            
+            progress.setValue(i + 1)
+
+        if not progress.wasCanceled():
+            # Generate README.md
+            self._create_export_readme(repo_dir, repo_name, levels, exported_files)
+            
+            # Open folder
+            try:
+                os.startfile(os.path.abspath(repo_dir))
+            except:
+                # Fallback for non-Windows or if startfile fails
+                import subprocess
+                subprocess.run(['explorer', os.path.abspath(repo_dir)])
+                
+            QMessageBox.information(self, "Export Abgeschlossen", 
+                                  f"Das Repertoire wurde erfolgreich für den Export vorbereitet.\n\n"
+                                  f"Ordner: {repo_dir}\n"
+                                  f"Dateien erstellt: {len(exported_files)} PGNs + README.md")
+
+    def _create_export_readme(self, repo_dir, repo_name, levels, exported_files):
+        info = self.backend.get_repertoire_info()
+        color_name = "Weiß" if self.backend.get_repertoire_color() == 'w' else "Schwarz"
+        desc = info.get('description', 'Keine Beschreibung vorhanden.')
+        date_str = datetime.datetime.now().strftime("%d.%m.%Y")
+        
+        content = f"# {repo_name}\n\n"
+        content += f"## Beschreibung\n{desc}\n\n"
+        content += f"## Kurs-Details\n"
+        content += f"- **Farbe:** {color_name}\n"
+        content += f"- **Export-Datum:** {date_str}\n\n"
+        content += f"## Trainings-Struktur (Levels)\n"
+        for lvl in levels:
+            content += f"- **Level {lvl['order']}:** {lvl['name']}\n"
+        
+        content += f"\n## Technische Hinweise\n"
+        content += f"Die PGN-Dateien wurden so exportiert, dass Transpositionen (Stellungen, die über verschiedene Zugfolgen erreicht werden) abgeschnitten werden, um Redundanz zu vermeiden. Ein Kommentar im PGN weist auf die primäre Zugfolge hin.\n\n"
+        
+        content += f"## Dateien in diesem Ordner\n"
+        for f in exported_files:
+            content += f"- {f}\n"
+        content += f"- README.md\n"
+        
+        content += f"\n---\n*Generiert von Opening Fenix*"
+        
+        readme_path = os.path.join(repo_dir, "README.md")
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(content)
 
     def init_page_analysis(self, page):
         l = QVBoxLayout(page)
@@ -2083,6 +2656,187 @@ class RepoSettingsDialog(QDialog):
 
         l.addStretch()
 
+    def init_page_maintenance(self, page):
+        l = QVBoxLayout(page)
+        l.setSpacing(scale(15))
+        
+        lbl_h = QLabel("Zentralisierte Repertoire-Wartung")
+        lbl_h.setStyleSheet("font-size: 18px; font-weight: bold;")
+        l.addWidget(lbl_h)
+        
+        lbl_info = QLabel("Hier kannst du gleichzeitig für mehrere Repertoires eine Wartung (Engine Analyse, Lichess-Daten, Statistiken) durchführen. Ideal für 'Overnight'-Aufgaben.")
+        lbl_info.setWordWrap(True)
+        lbl_info.setStyleSheet("color: #666; font-style: italic;")
+        l.addWidget(lbl_info)
+        
+        # 1. Repertoire Selection
+        g_repos = QGroupBox("1. Repertoires auswählen")
+        v_repos = QVBoxLayout(g_repos)
+        self.list_maintenance_repos = QListWidget()
+        self.list_maintenance_repos.setMinimumHeight(scale(150))
+        # Populate later in refresh_info or a dedicated method
+        v_repos.addWidget(self.list_maintenance_repos)
+        
+        h_repo_ctrl = QHBoxLayout()
+        btn_sel_all = QPushButton("Alle auswählen")
+        btn_sel_none = QPushButton("Keine auswählen")
+        btn_sel_all.clicked.connect(lambda: self._select_all_maintenance_repos(True))
+        btn_sel_none.clicked.connect(lambda: self._select_all_maintenance_repos(False))
+        h_repo_ctrl.addWidget(btn_sel_all)
+        h_repo_ctrl.addWidget(btn_sel_none)
+        v_repos.addLayout(h_repo_ctrl)
+        l.addWidget(g_repos)
+        
+        # 2. Task & Config
+        h_mid = QHBoxLayout()
+        
+        g_tasks = QGroupBox("2. Aufgaben")
+        v_tasks = QVBoxLayout(g_tasks)
+        self.chk_m_engine = QCheckBox("Engine Analyse (Alternative Züge)")
+        self.chk_m_lichess = QCheckBox("Lichess Daten & Prio-Scores")
+        self.chk_m_stats = QCheckBox("Statistiken/Level aktualisieren")
+        self.chk_m_engine.setChecked(True)
+        self.chk_m_lichess.setChecked(True)
+        self.chk_m_stats.setChecked(True)
+        v_tasks.addWidget(self.chk_m_engine)
+        v_tasks.addWidget(self.chk_m_lichess)
+        v_tasks.addWidget(self.chk_m_stats)
+        h_mid.addWidget(g_tasks)
+        
+        g_cfg = QGroupBox("3. Einstellungen")
+        f_cfg = QFormLayout(g_cfg)
+        self.spin_m_depth = QSpinBox(); self.spin_m_depth.setRange(10, 50); self.spin_m_depth.setValue(20)
+        self.spin_m_threads = QSpinBox(); self.spin_m_threads.setRange(1, multiprocessing.cpu_count()); self.spin_m_threads.setValue(max(1, multiprocessing.cpu_count()-1))
+        f_cfg.addRow("Engine Tiefe:", self.spin_m_depth)
+        f_cfg.addRow("Engine Threads:", self.spin_m_threads)
+        h_mid.addWidget(g_cfg)
+        
+        l.addLayout(h_mid)
+        
+        # 3. Execution & Progress
+        g_exec = QGroupBox("4. Ausführung")
+        v_exec = QVBoxLayout(g_exec)
+        
+        self.btn_m_start = QPushButton("🚀 Wartung Starten")
+        self.btn_m_start.setMinimumHeight(scale(50))
+        self.btn_m_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; font-size: 14px;")
+        self.btn_m_start.clicked.connect(self.start_centralized_maintenance)
+        
+        self.btn_m_stop = QPushButton("⏹ Abbrechen")
+        self.btn_m_stop.setMinimumHeight(scale(40))
+        self.btn_m_stop.setVisible(False)
+        self.btn_m_stop.clicked.connect(self.stop_centralized_maintenance)
+        
+        v_exec.addWidget(self.btn_m_start)
+        v_exec.addWidget(self.btn_m_stop)
+        
+        v_exec.addSpacing(scale(10))
+        
+        self.lbl_m_overall = QLabel("Gesamt-Forschritt: -")
+        self.pb_m_overall = QProgressBar()
+        v_exec.addWidget(self.lbl_m_overall)
+        v_exec.addWidget(self.pb_m_overall)
+        
+        self.lbl_m_task = QLabel("Aktuelle Aufgabe: -")
+        self.pb_m_task = QProgressBar()
+        v_exec.addWidget(self.lbl_m_task)
+        v_exec.addWidget(self.pb_m_task)
+        
+        l.addWidget(g_exec)
+        l.addStretch()
+
+    def _select_all_maintenance_repos(self, checked):
+        for i in range(self.list_maintenance_repos.count()):
+            item = self.list_maintenance_repos.item(i)
+            widget = self.list_maintenance_repos.itemWidget(item)
+            if widget:
+                widget.set_checked(checked)
+
+    def _refresh_maintenance_repo_list(self):
+        self.list_maintenance_repos.clear()
+        repos = list_all_repertoires() # Now returns [{'name':..., 'elo':...}]
+        for r_info in repos:
+            item = QListWidgetItem(self.list_maintenance_repos)
+            widget = MaintenanceRepoWidget(r_info['name'], r_info['elo'])
+            item.setSizeHint(widget.sizeHint())
+            self.list_maintenance_repos.addItem(item)
+            self.list_maintenance_repos.setItemWidget(item, widget)
+
+    def start_centralized_maintenance(self):
+        selected_configs = []
+        for i in range(self.list_maintenance_repos.count()):
+            item = self.list_maintenance_repos.item(i)
+            widget = self.list_maintenance_repos.itemWidget(item)
+            if widget and widget.is_checked():
+                selected_configs.append(widget.get_config())
+        
+        if not selected_configs:
+            QMessageBox.warning(self, "Fehler", "Bitte wähle mindestens ein Repertoire aus.")
+            return
+            
+        tasks = {
+            'engine': self.chk_m_engine.isChecked(),
+            'lichess': self.chk_m_lichess.isChecked(),
+            'stats': self.chk_m_stats.isChecked()
+        }
+        
+        if not any(tasks.values()):
+            QMessageBox.warning(self, "Fehler", "Bitte wähle mindestens eine Aufgabe aus.")
+            return
+
+        engine_settings = {
+            'depth': self.spin_m_depth.value(),
+            'threads': self.spin_m_threads.value(),
+            'path': self.txt_engine_path.text()
+        }
+        
+        self.btn_m_start.setEnabled(False)
+        self.btn_m_stop.setVisible(True)
+        self.sidebar.setEnabled(False) 
+        
+        self.m_thread = MaintenanceThread(selected_configs, tasks, engine_settings)
+        self.m_thread.overall_progress_signal.connect(self.on_m_overall_progress)
+        self.m_thread.repo_status_signal.connect(self.on_m_repo_status)
+        self.m_thread.finished_signal.connect(self.on_m_finished)
+        self.m_thread.start()
+
+    def on_m_repo_status(self, repo_name, task_type, progress, status_text):
+        for i in range(self.list_maintenance_repos.count()):
+            item = self.list_maintenance_repos.item(i)
+            widget = self.list_maintenance_repos.itemWidget(item)
+            if widget and widget.name == repo_name:
+                widget.update_status(task_type, progress, status_text)
+                break
+
+    def stop_centralized_maintenance(self):
+        if hasattr(self, 'm_thread') and self.m_thread.isRunning():
+            self.btn_m_stop.setEnabled(False)
+            self.btn_m_stop.setText("Breche ab...")
+            self.m_thread.cancel()
+
+    def on_m_overall_progress(self, current, total, name):
+        self.pb_m_overall.setMaximum(total)
+        self.pb_m_overall.setValue(current)
+        self.lbl_m_overall.setText(f"Gesamt-Fortschritt: Repertoire {current} von {total} ({name})")
+
+    def on_m_task_progress(self, percentage, status):
+        self.pb_m_task.setValue(percentage)
+        self.lbl_m_task.setText(f"Aktuelle Aufgabe: {status}")
+
+    def on_m_finished(self, success, msg):
+        self.btn_m_start.setEnabled(True)
+        self.btn_m_stop.setVisible(False)
+        self.btn_m_stop.setEnabled(True)
+        self.btn_m_stop.setText("⏹ Abbrechen")
+        self.sidebar.setEnabled(True)
+        
+        if success:
+            QMessageBox.information(self, "Wartung Abgeschlossen", msg)
+        else:
+            QMessageBox.warning(self, "Wartung Unterbrochen", msg)
+        
+        self.refresh_info()
+
     def update_priority_level_impact_preview(self):
         threshold = self.spin_prio_threshold.value()
         target_lvl = self.combo_prio_target_level.currentData()
@@ -2168,14 +2922,21 @@ class RepoSettingsDialog(QDialog):
             self.save_config()
 
     def refresh_info(self):
+        self._refresh_maintenance_repo_list()
         self.backend.scan_and_update_metadata()
         i = self.backend.get_repertoire_info()
         self.l_n.setText(i['name'])
         
         # Load description
         self.txt_description.blockSignals(True)
-        self.txt_description.setPlainText(i['description'])
+        self.txt_description.setPlainText(i.get('description', ''))
         self.txt_description.blockSignals(False)
+
+        # Load Elo from metadata
+        elo = self.backend.get_meta("elo", "high").lower()
+        self.combo_repertoire_elo.blockSignals(True)
+        self.combo_repertoire_elo.setCurrentText(elo)
+        self.combo_repertoire_elo.blockSignals(False)
 
         self.tbl_levels.setRowCount(0)
         levels = self.backend.get_repertoire_levels()
@@ -2533,7 +3294,12 @@ class CreatorWindow(QMainWindow):
 
         # Overhaul Session State
         self.overhaul_active = False
+        self.overhaul_paused = True
         self.overhaul_start = None
+
+        # Tab visibility defaults
+        if "creator_active_tabs" not in self.config:
+            self.config["creator_active_tabs"] = ["DETAILS", "ANALYSIS"]
         
         self.init_icons()
         self.init_ui()
@@ -2547,11 +3313,25 @@ class CreatorWindow(QMainWindow):
         QApplication.instance().installEventFilter(self)
 
         rtl = repertoire_name or self.config.get("last_active_repertoire")
-        if rtl and os.path.exists(get_repertoire_db_path(rtl)):
-            self.backend.load_repertoire(rtl)
-            self._load_saved_elo_or_autoselect()
-            self.set_board_to_fen(initial_fen or chess.STARTING_FEN)
-            self.update_structure_tree()
+        if rtl:
+            db_path = get_repertoire_db_path(rtl)
+            if db_path and os.path.exists(db_path):
+                self.backend.load_repertoire(rtl)
+                self._load_saved_elo_or_autoselect()
+                self.set_board_to_fen(initial_fen or chess.STARTING_FEN)
+                self.update_structure_tree()
+                self.init_management_slots()
+                
+                # Load persistent overhaul session if exists
+                session_dt = self.backend.get_overhaul_session_start()
+                if session_dt:
+                    self.overhaul_start = session_dt
+                    self.overhaul_active = True
+                    self.overhaul_paused = True
+            else:
+                from opening_fenix.core.logger import logger
+                logger.warning(f"Creator: Could not find database for repertoire '{rtl}' at {db_path}")
+
             self.setWindowTitle(f"Creator - {rtl}")
             self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
             self.board_widget.update()
@@ -2715,8 +3495,8 @@ class CreatorWindow(QMainWindow):
         self.tabs = QTabWidget()
         
         # Tab 1: Stellungs Details
-        td = QWidget()
-        dl = QVBoxLayout(td)
+        self.tab_details = QWidget()
+        dl = QVBoxLayout(self.tab_details)
         dl.setContentsMargins(0, scale(5), 0, 0) # Use 0 horizontal margin to align with parent tab width
 
 
@@ -2787,8 +3567,8 @@ class CreatorWindow(QMainWindow):
         
 
         # Analysis Tab (Merged Engine & Common Moves)
-        ta = QWidget()
-        al = QHBoxLayout(ta)
+        self.tab_analysis = QWidget()
+        al = QHBoxLayout(self.tab_analysis)
         al.setContentsMargins(0, scale(5), 0, 0)
         al.setSpacing(scale(15))
 
@@ -2895,20 +3675,23 @@ class CreatorWindow(QMainWindow):
         cvl.addWidget(self.table_common_moves)
         al.addWidget(common_container, 5) # Common moves now significantly wider
         
-        self.tabs.addTab(ta, "ANALYSIS")
-        
         # Rep. Loch Finder Tab
         self.tab_holes = QWidget()
         self.init_hole_finder_tab()
-        self.tabs.addTab(self.tab_holes, "Rep. Loch Finder")
         
         # Rep. KONTROLLE Tab
         self.tab_kontrolle = QWidget()
         self.init_kontrolle_tab()
-        self.tabs.addTab(self.tab_kontrolle, "Rep. Kontrolle")
         
-        # Restore the missing Stellungs-Details tab
-        self.tabs.insertTab(0, td, "DETAILS")
+        # Store all possible tabs in a mapping
+        self._all_tabs = {
+            "DETAILS": (self.tab_details, "DETAILS"),
+            "ANALYSIS": (self.tab_analysis, "ANALYSIS"),
+            "HOLES": (self.tab_holes, "Rep. Loch Finder"),
+            "KONTROLLE": (self.tab_kontrolle, "Rep. Kontrolle")
+        }
+        
+        self.apply_tab_visibility()
 
         self.right_splitter.addWidget(self.tabs)
         # Symmetrical layout for bottoms: Ensure tabs (Details panel) is flushed to bottom
@@ -2937,8 +3720,38 @@ class CreatorWindow(QMainWindow):
             shadow.setOffset(0, 6)
             panel.setGraphicsEffect(shadow)
 
-        # Ensure "DETAILS" tab is selected by default on startup
-        self.tabs.setCurrentIndex(0)
+        # Ensure "DETAILS" tab is selected by default on startup if visible
+        for i in range(self.tabs.count()):
+            if self.tabs.tabText(i) == "DETAILS":
+                self.tabs.setCurrentIndex(i)
+                break
+
+    def apply_tab_visibility(self):
+        # Determine which tabs should be visible
+        active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+        
+        # Remember current index if possible
+        current_text = ""
+        if self.tabs.count() > 0:
+            current_text = self.tabs.tabText(self.tabs.currentIndex())
+
+        # Clear current tabs without deleting the widgets
+        while self.tabs.count() > 0:
+            self.tabs.removeTab(0)
+            
+        # Re-add requested tabs in specific order
+        order = ["DETAILS", "ANALYSIS", "HOLES", "KONTROLLE"]
+        for key in order:
+            if key in active_tabs and key in self._all_tabs:
+                widget, title = self._all_tabs[key]
+                self.tabs.addTab(widget, title)
+                
+        # Restore index if possible
+        if current_text:
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == current_text:
+                    self.tabs.setCurrentIndex(i)
+                    break
 
     def on_details_changed(self):
         if not self._is_ui_valid() or not self.backend.current_fen: return
@@ -3117,9 +3930,12 @@ class CreatorWindow(QMainWindow):
             
         f = self.board_widget.board.fen()
         
-        # Auto-mark for overhaul if session is active
-        if self.overhaul_active:
+        # Auto-mark for overhaul if session is active and NOT paused
+        if self.overhaul_active and not self.overhaul_paused:
             self.backend.mark_position_reviewed(f)
+            self.update_overhaul_progress()
+        elif not self.overhaul_active:
+            # Still update progress bar to show general completion for current filter
             self.update_overhaul_progress()
 
         d = self.backend.get_position_data(f)
@@ -3166,8 +3982,18 @@ class CreatorWindow(QMainWindow):
         for c in cs:
             nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
             nag_s = f" {nag_map[c['nag']]}" if c['nag'] in nag_map else ""
+            
+            san_text = f"{c['san']}{nag_s}"
+            
+            # OVERHAUL V2: Add checkmark if branch is fully reviewed
+            if self.overhaul_active and not self.overhaul_paused:
+                # Use .get() for safety, though it should be there now
+                to_pos_id = c.get('to_pos_id')
+                if to_pos_id and self.backend.is_branch_fully_reviewed(to_pos_id, self.overhaul_start):
+                    san_text += "  ✅"
+            
             it = SortableTreeWidgetItem([
-                f"{c['san']}{nag_s}", 
+                san_text, 
                 f"{c['priority']*100:.2f}%", 
                 c['comment'], 
                 l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
@@ -3232,6 +4058,10 @@ class CreatorWindow(QMainWindow):
         if self.details_changed and self.backend.active_repo_name:
             self.backend.update_position_data(self.board_widget.board.fen(), self.txt_c.toPlainText(), self.i_v1.text(), self.i_v2.text(), self.i_v3.text(), auto_review=self.overhaul_active)
             self.update_structure_tree()
+            self.update_overhaul_progress()
+            # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too
+            if self.tabs.currentIndex() == 2: # KONTROLLE
+                self.init_management_slots()
             self.details_changed = False
 
     def insert_symbol(self, s):
@@ -3267,16 +4097,19 @@ class CreatorWindow(QMainWindow):
 
     def show_tree_context_menu(self, pos):
         it = self.tree_widget.itemAt(pos)
+        
+        menu = QMenu(self)
+
+        # Always add Debug info at the top
+        act_debug = QAction("🛠 Debug: Stellungs-Info anzeigen", self)
+        act_debug.triggered.connect(self.show_debug_position_info)
+        menu.addAction(act_debug)
+        menu.addSeparator()
+
         if not it:
-            # Right-click into empty space -> Debug Menu
-            menu = QMenu(self)
-            act_debug = QAction("🛠 Debug: Stellungs-Info anzeigen", self)
-            act_debug.triggered.connect(self.show_debug_position_info)
-            menu.addAction(act_debug)
             menu.exec(self.tree_widget.mapToGlobal(pos))
             return
         
-        menu = QMenu(self)
         uci = it.data(0, Qt.ItemDataRole.UserRole)
         mid = it.data(0, Qt.ItemDataRole.UserRole + 1)
         act_del = QAction("Löschen", self)
@@ -3310,14 +4143,48 @@ class CreatorWindow(QMainWindow):
             a = QAction(lvl['name'], self)
             a.triggered.connect(lambda checked, l=lvl['order']: self.set_level_action(mid, l))
             lvl_menu.addAction(a)
+            
+        if mid:
+            lvl_stark_menu = menu.addMenu("Setze Level stark")
+            for lvl in self.backend.get_repertoire_levels():
+                a = QAction(lvl['name'], self)
+                a.triggered.connect(lambda checked, l=lvl['order']: self.set_level_strong_action(mid, l))
+                lvl_stark_menu.addAction(a)
+
         menu.exec(self.tree_widget.mapToGlobal(pos))
 
     def show_debug_position_info(self):
         fen = self.board_widget.board.fen()
         incoming = self.backend.get_incoming_moves(fen)
         
+        # Fetch good_moves and depth from DB
+        clean_fen = " ".join(fen.split(" ")[:4])
+        pos_entry = self.backend.session.query(Position).filter_by(fen=clean_fen).first()
+
         title = "Stellungs-Analyse (Debug)"
         msg = f"<b>Aktuelle FEN:</b><br><code style='background-color: #eee;'>{fen}</code><br><br>"
+        
+        if pos_entry:
+            msg += f"<b>Engine Analyse (Abgespeichert):</b><br>"
+            if pos_entry.analysis_depth:
+                msg += f"• Tiefe: {pos_entry.analysis_depth}<br>"
+            
+            if pos_entry.good_moves:
+                try:
+                    gm_ucis = json.loads(pos_entry.good_moves)
+                    board = chess.Board(fen)
+                    gm_sans = []
+                    for u in gm_ucis:
+                        try:
+                            gm_sans.append(board.san(chess.Move.from_uci(u)))
+                        except:
+                            gm_sans.append(u)
+                    msg += f"• Alternate Good Moves: <b style='color: green;'>{', '.join(gm_sans)}</b><br>"
+                except Exception as e:
+                    msg += f"• Fehler beim laden der Good Moves: {e}<br>"
+            else:
+                msg += "• Keine gespeicherten Good Moves vorhanden.<br>"
+            msg += "<br>"
         
         # Check for Duplicate Positions
         unique_pos_ids = set(m['to_pos_id'] for m in incoming)
@@ -3383,6 +4250,22 @@ class CreatorWindow(QMainWindow):
     def set_level_action(self, mid, l):
         self.backend.update_move_level(mid, l)
         self.update_ui_from_fen()
+
+    def set_level_strong_action(self, mid, l):
+        count, variations = self.backend.get_strong_level_impact(mid)
+        if count == 0:
+            self.backend.update_move_level_strong(mid, l)
+            self.update_ui_from_fen()
+            return
+            
+        var_str = ", ".join(variations[:10])
+        if len(variations) > 10:
+            var_str += f", ..."
+            
+        msg = f"Achtung: Du wirst {count} Züge in den folgenden Varianten ändern:\n\n\"{var_str}\"\n\nFortfahren?"
+        if QMessageBox.warning(self, "Starkes Level setzen", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            self.backend.update_move_level_strong(mid, l)
+            self.update_ui_from_fen()
 
     def set_engine_button_blocked(self, blocked, message=""):
         self.btn_engine_toggle.setEnabled(not blocked)
@@ -3479,9 +4362,11 @@ class CreatorWindow(QMainWindow):
             self._load_saved_elo_or_autoselect()
             self.set_board_to_fen(chess.STARTING_FEN)
             self.update_structure_tree()
+            self.init_management_slots()
             self.setWindowTitle(f"Creator - {d.selected_repo}")
             self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
             self.board_widget.update()
+            self.init_management_slots() # Refresh level dropdown
 
     def new_repertoire_dialog(self):
         n, ok = QInputDialog.getText(self, "Neu", "Name:")
@@ -3490,6 +4375,7 @@ class CreatorWindow(QMainWindow):
                 self.repo_settings_dialog.close()
             self.backend.load_repertoire(n)
             self.update_ui_from_fen()
+            self.init_management_slots() # Refresh level dropdown
 
     def update_board_arrows(self):
         self.board_widget.explorer_arrows = []
@@ -3600,94 +4486,293 @@ class CreatorWindow(QMainWindow):
 
     def init_hole_finder_tab(self):
         layout = QVBoxLayout(self.tab_holes)
+        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        layout.setSpacing(scale(15))
         
-        h_ctrl = QHBoxLayout()
-        h_ctrl.addWidget(QLabel("Min popularity:"))
+        # Upper Glass Card for Controls
+        self.card_hole_controls = QFrame()
+        self.card_hole_controls.setProperty("class", "GlassPill")
+        self.repolish(self.card_hole_controls)
+        ctrl_layout = QVBoxLayout(self.card_hole_controls)
+        ctrl_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        
+        # Mode Selection
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("<b>Such-Modus:</b>"))
+        self.btn_mode_holes = QRadioButton("Lücken finden (Verschollene Züge)")
+        self.btn_mode_level = QRadioButton("Prioritäts-Check (Repertoire-Kontrolle)")
+        self.btn_mode_holes.setChecked(True)
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.btn_mode_holes)
+        self.mode_group.addButton(self.btn_mode_level)
+        mode_layout.addWidget(self.btn_mode_holes)
+        mode_layout.addWidget(self.btn_mode_level)
+        mode_layout.addStretch()
+        ctrl_layout.addLayout(mode_layout)
+        
+        ctrl_layout.addSpacing(scale(10))
+        
+        # Parameters
+        param_layout = QHBoxLayout()
+        
+        self.lbl_hole_threshold = QLabel("Min. Popularität:")
         self.spin_hole_threshold = QDoubleSpinBox()
         self.spin_hole_threshold.setRange(0.1, 100.0)
         self.spin_hole_threshold.setValue(1.0)
         self.spin_hole_threshold.setSuffix("%")
-        h_ctrl.addWidget(self.spin_hole_threshold)
+        param_layout.addWidget(self.lbl_hole_threshold)
+        param_layout.addWidget(self.spin_hole_threshold)
         
-        h_ctrl.addWidget(QLabel("Elo Range:"))
+        self.lbl_hole_elo = QLabel("Elo-Bereich:")
         self.combo_hole_elo = QComboBox()
         self.combo_hole_elo.addItems(["low", "mid", "high", "masters"])
         self.combo_hole_elo.setCurrentText("high")
-        h_ctrl.addWidget(self.combo_hole_elo)
+        param_layout.addWidget(self.lbl_hole_elo)
+        param_layout.addWidget(self.combo_hole_elo)
+        
+        self.lbl_hole_level = QLabel("Ziel-Level:")
+        self.combo_hole_level = QComboBox()
+        param_layout.addWidget(self.lbl_hole_level)
+        param_layout.addWidget(self.combo_hole_level)
+        
+        # Connect mode toggle to show/hide level selector
+        def on_mode_toggle():
+            is_level_mode = self.btn_mode_level.isChecked()
+            self.combo_hole_level.setVisible(is_level_mode)
+            self.lbl_hole_level.setVisible(is_level_mode)
+            self.lbl_hole_elo.setVisible(not is_level_mode)
+            self.combo_hole_elo.setVisible(not is_level_mode)
+        
+        self.btn_mode_holes.toggled.connect(on_mode_toggle)
+        self.btn_mode_level.toggled.connect(on_mode_toggle)
+        
+        # Initial state
+        self.combo_hole_level.setVisible(False)
+        self.lbl_hole_level.setVisible(False)
+        
+        param_layout.addStretch()
         
         self.btn_hole_scan = QPushButton("🔎 Scan Repertoire")
+        self.btn_hole_scan.setMinimumHeight(scale(40))
+        self.btn_hole_scan.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(20)}px;")
         self.btn_hole_scan.clicked.connect(self.run_hole_scan)
-        h_ctrl.addWidget(self.btn_hole_scan)
+        param_layout.addWidget(self.btn_hole_scan)
         
-        layout.addLayout(h_ctrl)
+        ctrl_layout.addLayout(param_layout)
+        layout.addWidget(self.card_hole_controls)
         
-        self.table_holes = QTableWidget(0, 4)
-        self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug", "Pfad"])
+        self.table_holes = QTableWidget(0, 3)
+        self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
         self.table_holes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_holes.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_holes.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table_holes.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_holes.verticalHeader().setVisible(False)
         self.table_holes.itemDoubleClicked.connect(self.on_hole_double_click)
         layout.addWidget(self.table_holes)
         
         h_btm = QHBoxLayout()
-        btn_exempt = QPushButton("🚫 Auswahl ignorieren")
-        btn_exempt.clicked.connect(self.exempt_selected_hole)
-        h_btm.addWidget(btn_exempt)
+        self.btn_hole_exempt = QPushButton("🚫 Auswahl ignorieren")
+        self.btn_hole_exempt.clicked.connect(self.exempt_selected_hole)
+        h_btm.addWidget(self.btn_hole_exempt)
         h_btm.addStretch()
         layout.addLayout(h_btm)
 
     def init_kontrolle_tab(self):
         layout = QVBoxLayout(self.tab_kontrolle)
+        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        layout.setSpacing(scale(15))
         
-        info = QLabel("<b>Repertoire Überarbeitung</b><br>Verfolge deinen Fortschritt beim manuellen Prüfen deiner Stellungen.")
-        info.setWordWrap(True)
-        layout.addWidget(info)
+        # Glass Dashboard Card for Stats
+        self.card_stats = QFrame()
+        self.card_stats.setObjectName("OverhaulStatsCard")
+        self.card_stats.setProperty("class", "GlassPill")
+        self.repolish(self.card_stats)
+        card_layout = QVBoxLayout(self.card_stats)
+        card_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
         
-        h_settings = QHBoxLayout()
-        h_settings.addWidget(QLabel("Überprüfe Level:"))
-        self.combo_overhaul_level = QComboBox()
-        h_settings.addWidget(self.combo_overhaul_level)
-        h_settings.addStretch()
-        layout.addLayout(h_settings)
+        lbl_title = QLabel("Repertoire Überarbeitung")
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: bold; color: white;")
+        card_layout.addWidget(lbl_title)
         
-        h_btns = QHBoxLayout()
-        self.btn_overhaul_start = QPushButton("▶ Session Starten")
-        self.btn_overhaul_start.clicked.connect(self.toggle_overhaul_session)
-        h_btns.addWidget(self.btn_overhaul_start)
+        self.lbl_overhaul_status = QLabel("Keine aktive Session")
+        self.lbl_overhaul_status.setStyleSheet("color: rgba(255, 255, 255, 0.7);")
+        card_layout.addWidget(self.lbl_overhaul_status)
         
-        self.btn_overhaul_reset = QPushButton("🔄 Reset")
-        self.btn_overhaul_reset.clicked.connect(self.reset_overhaul_session)
-        h_btns.addWidget(self.btn_overhaul_reset)
-        
-        layout.addLayout(h_btns)
+        card_layout.addSpacing(scale(10))
         
         self.pb_overhaul = QProgressBar()
         self.pb_overhaul.setValue(0)
         self.pb_overhaul.setFormat("%v / %m Stellungen (%p%)")
-        layout.addWidget(self.pb_overhaul)
+        self.pb_overhaul.setMinimumHeight(scale(25))
+        card_layout.addWidget(self.pb_overhaul)
+        
+        layout.addWidget(self.card_stats)
+        
+        # Settings Group
+        settings_group = QGroupBox("Filter & Einstellungen")
+        settings_layout = QGridLayout(settings_group)
+        settings_layout.setSpacing(scale(10))
+        
+        # Row 1: Level
+        settings_layout.addWidget(QLabel("Prüf-Level:"), 0, 0)
+        self.combo_overhaul_level = QComboBox()
+        settings_layout.addWidget(self.combo_overhaul_level, 0, 1)
+        
+        # Row 2: Variation Filter
+        settings_layout.addWidget(QLabel("Variante filtern:"), 1, 0)
+        self.combo_overhaul_variation = QComboBox()
+        self.combo_overhaul_variation.addItem("Alle Varianten", userData=None)
+        settings_layout.addWidget(self.combo_overhaul_variation, 1, 1)
+        
+        layout.addWidget(settings_group)
+        
+        # Controls Group
+        h_btns = QHBoxLayout()
+        h_btns.setSpacing(scale(10))
+        
+        self.btn_overhaul_start = QPushButton("▶ Session Starten")
+        self.btn_overhaul_start.setMinimumHeight(scale(45))
+        self.btn_overhaul_start.clicked.connect(self.toggle_overhaul_session)
+        h_btns.addWidget(self.btn_overhaul_start, 2)
+        
+        self.btn_overhaul_pause = QPushButton("⏸ Pause")
+        self.btn_overhaul_pause.setMinimumHeight(scale(45))
+        self.btn_overhaul_pause.clicked.connect(self.toggle_overhaul_pause)
+        self.btn_overhaul_pause.setVisible(False)
+        h_btns.addWidget(self.btn_overhaul_pause, 1)
+        
+        self.btn_overhaul_reset = QPushButton("🔄 Reset")
+        self.btn_overhaul_reset.setMinimumHeight(scale(40))
+        self.btn_overhaul_reset.clicked.connect(self.reset_overhaul_session)
+        h_btns.addWidget(self.btn_overhaul_reset, 1)
+        
+        layout.addLayout(h_btns)
         
         self.btn_overhaul_next = QPushButton("⏭ Nächste unkontrollierte Stellung")
         self.btn_overhaul_next.clicked.connect(self.jump_to_next_unchecked)
         self.btn_overhaul_next.setEnabled(False)
-        self.btn_overhaul_next.setMinimumHeight(scale(40))
+        self.btn_overhaul_next.setMinimumHeight(scale(50))
+        self.btn_overhaul_next.setStyleSheet("font-weight: bold; font-size: 14px;")
         layout.addWidget(self.btn_overhaul_next)
         
         layout.addStretch()
 
+    def toggle_overhaul_pause(self):
+        self.overhaul_paused = not self.overhaul_paused
+        self._update_overhaul_ui_state()
+        self.update_ui_from_fen() # Refresh to show/hide checkmarks
+
+    def _update_overhaul_ui_state(self):
+        if not self.overhaul_active:
+            self.btn_overhaul_start.setText("▶ Session Starten")
+            self.btn_overhaul_start.setProperty("class", "")
+            self.btn_overhaul_pause.setVisible(False)
+            self.btn_overhaul_next.setEnabled(False)
+            self.lbl_overhaul_status.setText("Keine aktive Session")
+            self.combo_overhaul_level.setEnabled(True)
+            self.combo_overhaul_variation.setEnabled(True)
+        else:
+            if self.overhaul_paused:
+                self.btn_overhaul_start.setText("▶ Session Fortsetzen")
+                self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
+                self.btn_overhaul_pause.setVisible(False)
+                self.btn_overhaul_next.setEnabled(False)
+                self.lbl_overhaul_status.setText(f"Session Pausiert (Start: {self.overhaul_start.strftime('%d.%m. %H:%M')})")
+            else:
+                self.btn_overhaul_start.setText("⏹ Session Stoppen")
+                self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
+                self.btn_overhaul_pause.setVisible(True)
+                self.btn_overhaul_pause.setText("⏸ Pause")
+                self.btn_overhaul_next.setEnabled(True)
+                self.lbl_overhaul_status.setText(f"Session Aktiv (Seit: {self.overhaul_start.strftime('%d.%m. %H:%M')})")
+            
+            self.combo_overhaul_level.setEnabled(False)
+            self.combo_overhaul_variation.setEnabled(False)
+        
+        self.repolish(self.btn_overhaul_start)
+        self.update_overhaul_progress()
+
+    def on_overhaul_filter_changed(self):
+        """Called when Level or Variation filter dropdowns are changed."""
+        lvl = self.combo_overhaul_level.currentData()
+        var = self.combo_overhaul_variation.currentData() # This is now a tuple (v1, v2) or None
+        
+        # Persistence: Save to metadata
+        # Levels are integers/None, Variations are tuples/None
+        self.backend.set_meta("overhaul_selected_level", lvl if lvl is not None else 99)
+        self.backend.set_meta("overhaul_selected_variation_v2", json.dumps(var) if var is not None else "All")
+        
+        # Trigger live update of progress bar
+        self.update_overhaul_progress()
+
     def init_management_slots(self):
-        # Populate overhaul level combo
+        self.combo_overhaul_level.blockSignals(True)
+        self.combo_overhaul_level.clear()
+        self.combo_hole_level.blockSignals(True)
+        self.combo_hole_level.clear()
+        
         levels = self.backend.get_repertoire_levels()
+        self.combo_overhaul_level.addItem("Alle Level (1-99)", userData=99)
+        self.combo_hole_level.addItem("Wähle Level...", userData=None)
+        
         if not levels:
-            # Fallback if no levels defined in DB
             self.combo_overhaul_level.addItem("Standard (Level 1)", userData=1)
+            self.combo_hole_level.addItem("Level 1", userData=1)
         else:
             for lvl in levels:
                 self.combo_overhaul_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
+                self.combo_hole_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
         
-        # Select first item by default
-        if self.combo_overhaul_level.count() > 0:
-            self.combo_overhaul_level.setCurrentIndex(0)
+        self.combo_overhaul_level.blockSignals(False)
+        self.combo_hole_level.blockSignals(False)
+        
+        # Overhaul V3: Hierarchical Variation Filter (Parent -> Child)
+        self.combo_overhaul_variation.blockSignals(True)
+        self.combo_overhaul_variation.clear()
+        self.combo_overhaul_variation.addItem("Alle Varianten", userData=None)
+        
+        # Build tree structure
+        structure = self.backend.get_variation_structure()
+        for v1, v2_list in structure.items():
+            # Add Parent
+            self.combo_overhaul_variation.addItem(v1, userData=(v1, None))
+            # Add Children indented
+            for v2 in v2_list:
+                self.combo_overhaul_variation.addItem(f"  └ {v2}", userData=(v1, v2))
+        
+        self.combo_overhaul_variation.blockSignals(False)
+        
+        # Persistence Restore: Load from metadata
+        saved_lvl = self.backend.get_meta("overhaul_selected_level", "99")
+        saved_var_json = self.backend.get_meta("overhaul_selected_variation_v2", "All")
+        
+        # Restore Level index
+        for i in range(self.combo_overhaul_level.count()):
+            if str(self.combo_overhaul_level.itemData(i)) == str(saved_lvl):
+                self.combo_overhaul_level.setCurrentIndex(i)
+                break
+        
+        # Restore Variation index
+        try:
+            target_data = json.loads(saved_var_json) if saved_var_json != "All" else None
+            for i in range(self.combo_overhaul_variation.count()):
+                if self.combo_overhaul_variation.itemData(i) == target_data:
+                    self.combo_overhaul_variation.setCurrentIndex(i)
+                    break
+        except: pass
+        
+        # Connect signals for live updates
+        try: self.combo_overhaul_level.currentIndexChanged.disconnect(self.on_overhaul_filter_changed)
+        except: pass
+        try: self.combo_overhaul_variation.currentIndexChanged.disconnect(self.on_overhaul_filter_changed)
+        except: pass
+        
+        self.combo_overhaul_level.currentIndexChanged.connect(self.on_overhaul_filter_changed)
+        self.combo_overhaul_variation.currentIndexChanged.connect(self.on_overhaul_filter_changed)
+
+        # Sync UI state if session was loaded from metadata
+        if self.overhaul_active:
+            self._update_overhaul_ui_state()
 
     def run_hole_scan(self):
         self.btn_hole_scan.setEnabled(False)
@@ -3695,10 +4780,25 @@ class CreatorWindow(QMainWindow):
         QApplication.processEvents()
         
         try:
-            holes = self.backend.find_repertoire_holes(self.spin_hole_threshold.value() / 100.0, self.combo_hole_elo.currentText())
+            if self.btn_mode_holes.isChecked():
+                # Traditional Hole Finder
+                holes = self.backend.find_repertoire_holes(self.spin_hole_threshold.value(), self.combo_hole_elo.currentText())
+                self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
+                self.btn_hole_exempt.setVisible(True)
+            else:
+                # Priority Check
+                level = self.combo_hole_level.currentData()
+                if level is None:
+                    QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+                    return
+                threshold = self.spin_hole_threshold.value()
+                holes = self.backend.find_priority_mismatches(level, threshold)
+                self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
+                self.btn_hole_exempt.setVisible(False)
+
             self.table_holes.setRowCount(len(holes))
             for i, h in enumerate(holes):
-                pop_val = h.get('popularity', h.get('prob', 0) * 100)
+                pop_val = h.get('popularity', 0)
                 item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
                 item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
                 item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
@@ -3706,13 +4806,17 @@ class CreatorWindow(QMainWindow):
                 item_type = QTableWidgetItem(h['type'].upper())
                 if h['type'] == 'user':
                     item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                else:
+                    item_type.setText("BENUTZER")
+                elif h['type'] == 'opponent':
                     item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                    item_type.setText("GEGNER")
+                elif h['type'] == 'priority_check':
+                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                    item_type.setText("ZU WICHTIG?")
 
                 self.table_holes.setItem(i, 0, item_pop)
                 self.table_holes.setItem(i, 1, item_type)
                 self.table_holes.setItem(i, 2, QTableWidgetItem(h['move_san']))
-                self.table_holes.setItem(i, 3, QTableWidgetItem(h.get('path', 'N/A')))
         finally:
             self.btn_hole_scan.setEnabled(True)
             self.btn_hole_scan.setText("🔎 Scan Repertoire")
@@ -3734,30 +4838,37 @@ class CreatorWindow(QMainWindow):
 
     def toggle_overhaul_session(self):
         if not self.overhaul_active:
-            # Start
+            # START NEW SESSION
             lvl = self.combo_overhaul_level.currentData()
             if lvl is None:
                 QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
                 return
 
             self.overhaul_active = True
+            self.overhaul_paused = False
             self.overhaul_start = datetime.datetime.now()
-            self.btn_overhaul_start.setText("⏹ Session Stoppen")
-            self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
-            self.btn_overhaul_next.setEnabled(True)
-            self.combo_overhaul_level.setEnabled(False)
+            
+            # Save to metadata for persistence
+            self.backend.save_overhaul_session_start(self.overhaul_start)
             
             # Mark current if valid
             f = self.board_widget.board.fen()
             self.backend.mark_position_reviewed(f)
-            self.update_overhaul_progress()
         else:
-            # Stop
-            self.overhaul_active = False
-            self.btn_overhaul_start.setText("▶ Session Starten")
-            self.btn_overhaul_start.setStyleSheet("")
-            self.btn_overhaul_next.setEnabled(False)
-            self.combo_overhaul_level.setEnabled(True)
+            if self.overhaul_paused:
+                # RESUME
+                self.overhaul_paused = False
+            else:
+                # STOP/CLOSE SESSION
+                if QMessageBox.question(self, "Session beenden", "Möchtest du diese Session wirklich endgültig beenden?") == QMessageBox.StandardButton.No:
+                    return
+                self.overhaul_active = False
+                self.overhaul_paused = True
+                self.overhaul_start = None
+                self.backend.save_overhaul_session_start(None)
+        
+        self._update_overhaul_ui_state()
+        self.update_ui_from_fen()
 
     def reset_overhaul_session(self):
         if QMessageBox.question(self, "Reset", "Möchtest du den Fortschritt wirklich zurücksetzen?\n(Hinweis: Dies löscht nicht die Datenbank-Zeitstempel, sondern setzt nur den Startpunkt der aktuellen Session auf JETZT.)") == QMessageBox.StandardButton.Yes:
@@ -3765,21 +4876,40 @@ class CreatorWindow(QMainWindow):
             self.update_overhaul_progress()
 
     def update_overhaul_progress(self):
-        if not self.overhaul_start: return
+        if not self.overhaul_start: 
+            # If no active session, calculate total reachable for current filter
+            lvl = self.combo_overhaul_level.currentData()
+            var = self.combo_overhaul_variation.currentData()
+            checked, total = self.backend.get_overhaul_stats(lvl, var)
+            self.pb_overhaul.setMaximum(total)
+            self.pb_overhaul.setValue(checked)
+            return
+            
         lvl = self.combo_overhaul_level.currentData()
-        checked, total = self.backend.get_overhaul_stats(lvl, self.overhaul_start)
+        var = self.combo_overhaul_variation.currentData()
+        checked, total = self.backend.get_overhaul_stats(lvl, var, self.overhaul_start)
         self.pb_overhaul.setMaximum(total)
         self.pb_overhaul.setValue(checked)
 
     def jump_to_next_unchecked(self):
-        if not self.overhaul_start: return
+        if not self.overhaul_active or not self.overhaul_start or self.overhaul_paused: return
+        
         lvl = self.combo_overhaul_level.currentData()
-        next_fen = self.backend.find_nearest_unreviewed(self.board_widget.board.fen(), lvl, self.overhaul_start)
+        variation_filter = self.combo_overhaul_variation.currentData()
+        
+        # Backend-optimized strict filtering
+        next_fen = self.backend.find_nearest_unreviewed(self.board_widget.board.fen(), lvl, variation_filter, self.overhaul_start)
+        
         if next_fen:
             self.set_board_to_fen(next_fen)
         else:
-            QMessageBox.information(self, "Fertig!", "Glückwunsch! Alle Stellungen dieses Levels wurden in der aktuellen Session geprüft.")
-            self.toggle_overhaul_session()
+            msg = "Glückwunsch! Alle Stellungen wurden in der aktuellen Session geprüft."
+            if variation_filter:
+                msg = f"Glückwunsch! Alle Stellungen der Variante '{variation_filter}' wurden geprüft."
+            
+            QMessageBox.information(self, "Fertig!", msg)
+            if not variation_filter:
+                self.toggle_overhaul_session()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

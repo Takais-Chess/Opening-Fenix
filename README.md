@@ -122,6 +122,8 @@ TODO: Add license information.
 
 See [FUTURE_TODO.md](FUTURE_TODO.md) for planned features:
 - Multi-language support (English/German).
-- Repertoire Overhaul Mode (Position Checklist).
+- Repertoire Overhaul Mode (Position Checklist) with filtering.
+- Repertoire Hole Finder (Lichess Data Integration).
+- Creator UI Polish (Kontrolle & Hole Finder tabs).
 - Tactics and Endgame Trainer.
 - Dynamic Rating System (Opening Elo).

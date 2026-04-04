@@ -583,16 +583,29 @@ class MainWindow(QMainWindow):
             if self.creator_window.isMinimized():
                 self.creator_window.showNormal()
             
-            # 2. Update FEN
+            # 2. Update Repertoire if it changed in the main window
+            active_repo = self.repertoire_manager.active_repertoire_name
+            if self.creator_window.backend.active_repo_name != active_repo:
+                from opening_fenix.core.logger import logger
+                logger.info(f"Main: Switching Creator repertoire to {active_repo}")
+                self.creator_window.backend.load_repertoire(active_repo)
+                # Ensure UI is refreshed for the new database
+                if hasattr(self.creator_window, '_load_saved_elo_or_autoselect'):
+                    self.creator_window._load_saved_elo_or_autoselect()
+                if hasattr(self.creator_window, 'update_structure_tree'):
+                    self.creator_window.update_structure_tree()
+            
+            # 3. Update FEN
             self.creator_window.set_board_to_fen(target_fen)
             
-            # 3. Ensure it's visible, on top, and active
+            # 4. Ensure it's visible, on top, and active
             self.creator_window.show()
             self.creator_window.raise_()
             self.creator_window.activateWindow()
         else:
             self.creator_window = CreatorWindow(repertoire_name=self.repertoire_manager.active_repertoire_name, initial_fen=target_fen)
             self.creator_window.showMaximized()
+
 
     def set_button_state(self, state):
         self.button_state = state

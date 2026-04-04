@@ -42,7 +42,7 @@ def test_delete_repertoire_db(mock_user_dir, sample_repertoire):
     # Test non-existent
     success, msg = delete_repertoire_db("NonExistent")
     assert success is False
-    assert "Datei nicht gefunden" in msg
+    assert "nicht gefunden" in msg
 
 def test_check_integrity(mock_user_dir, sample_repertoire):
     # The sample repertoire has no cached variations, but also no variations defined

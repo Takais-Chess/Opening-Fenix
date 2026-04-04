@@ -146,7 +146,7 @@ def _update_cached_names_recursive_standalone(session: Session, pos: Position, v
         incoming_moves = session.query(Move).filter_by(to_position_id=pos.id).order_by(Move.priority_score.desc()).all()
         p_v1, p_v2, p_v3 = None, None, None
         for move in incoming_moves:
-            parent = session.query(Position).get(move.from_position_id)
+            parent = session.get(Position, move.from_position_id)
             if not parent: continue
             if p_v1 is None and parent.cached_v1: p_v1 = parent.cached_v1
             if p_v2 is None and parent.cached_v2: p_v2 = parent.cached_v2
@@ -170,6 +170,6 @@ def _update_cached_names_recursive_standalone(session: Session, pos: Position, v
     
     children_moves = session.query(Move).filter_by(from_position_id=pos.id).all()
     for move in children_moves:
-        child_pos = session.query(Position).get(move.to_position_id)
+        child_pos = session.get(Position, move.to_position_id)
         if child_pos:
             _update_cached_names_recursive_standalone(session, child_pos, visited)
