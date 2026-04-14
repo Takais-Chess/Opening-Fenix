@@ -6,7 +6,7 @@ import time
 import chess
 from collections import deque
 from typing import List, Dict, Tuple, Any, Optional, Set
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import joinedload
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, Base, TrainingData
 from opening_fenix.core.db.database import DatabaseManager
@@ -32,11 +32,15 @@ class RepertoireManager:
     def active_repertoire_name(self):
         return self.core.active_repertoire_name
 
+    @property
+    def is_active_test(self):
+        return self.core.is_active_test
+
     def get_all_repertoires(self) -> List[str]:
         return self.core.get_all_repertoires()
 
-    def set_active_repertoire(self, repo_name: Optional[str]) -> None:
-        self.core.set_active_repertoire(repo_name)
+    def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = None) -> None:
+        self.core.set_active_repertoire(repo_name, is_test)
         
         if repo_name:
             self.nav = TreeNavigationService(self.core.repo_session)
@@ -66,6 +70,18 @@ class RepertoireManager:
         success = self.core.delete_repertoire(repo_name)
         return success, "Gelöscht" if success else "Fehler beim Löschen"
 
+    def rename_repertoire(self, old_name: str, new_name: str) -> Tuple[bool, str]:
+        """Renames the repertoire and re-initializes sub-services if the renamed repo was active."""
+        was_active = (self.active_repertoire_name == old_name)
+        
+        success, msg = self.core.rename_repertoire(old_name, new_name)
+        
+        if success and was_active:
+            # Re-initialize with new name
+            self.set_active_repertoire(new_name)
+            
+        return success, msg
+
     def get_repertoire_levels(self) -> List[Dict[str, Any]]:
         return self.core.get_repertoire_levels()
 
@@ -78,8 +94,8 @@ class RepertoireManager:
     def move_all_to_level(self, level: int) -> int:
         return self.core.move_all_to_level(level)
 
-    def get_repertoire_info(self) -> Dict[str, Any]:
-        return self.core.get_repertoire_info()
+    def get_repertoire_info(self, fast_only=False) -> Dict[str, Any]:
+        return self.core.get_repertoire_info(fast_only=fast_only)
 
     def set_repertoire_description(self, description: str) -> None:
         self.core.set_repertoire_description(description)
@@ -108,21 +124,40 @@ class RepertoireManager:
         if not self.nav: return None
         return self.nav.get_variation_entry_point_fen(variation_name)
 
-    def get_history_for_move(self, move_obj, root_fen=None):
+    def get_history_for_move(self, move_obj, variation_name: Optional[str] = None):
         if not self.nav or not move_obj: return []
-        return self.nav.get_history_for_move_recursive(move_obj.id)
+        return self.nav.get_history_for_move_recursive(move_obj.id, variation_name=variation_name)
 
-    def get_history_for_fen(self, fen):
+    def get_history_for_fen(self, fen, variation_name: Optional[str] = None):
         if not self.repo_session: return []
         board = chess.Board(fen)
         clean_fen = " ".join(board.fen().split(" ")[:4])
         pos = self.repo_session.query(Position).filter_by(fen=clean_fen).first()
         if not pos: return []
         
-        move_to_pos = self.repo_session.query(Move).filter(Move.to_position_id == pos.id).order_by(Move.priority_score.desc()).first()
-        if not move_to_pos: return []
-        
-        return self.get_history_for_move(move_to_pos)
+        # Priority for path retrieval: if we have a variation filter, prefer moves that lead to this position 
+        # and belong to that variation.
+        prio_sql = ""
+        if variation_name:
+            prio_sql = f"CASE WHEN (p.variation_1 = '{variation_name}' OR p.variation_2 = '{variation_name}' OR p.variation_3 = '{variation_name}') THEN 1 ELSE 0 END DESC,"
+
+        query = text(f"""
+            SELECT m.id FROM moves m
+            JOIN positions p ON m.from_position_id = p.id
+            WHERE m.to_position_id = :pid
+            ORDER BY {prio_sql} m.priority_score DESC
+            LIMIT 1
+        """)
+        try:
+            res = self.repo_session.execute(query, {"pid": pos.id}).fetchone()
+            if not res: return []
+            move_id = res[0]
+            # Since get_history_for_move_recursive takes an ID, we just need the Move object or its proxy
+            # But the service now takes move_id directly, so let's simplify.
+            return self.nav.get_history_for_move_recursive(move_id, variation_name=variation_name)
+        except Exception as e:
+            logger.error(f"Error in get_history_for_fen: {e}")
+            return []
 
     def get_repertoire_root_fen(self):
         if not self.repo_session: return None

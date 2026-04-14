@@ -40,6 +40,7 @@ class CustomTitleBar(QWidget):
         """
         
         self.btn_minimize = QPushButton("—")
+        self.btn_minimize.setObjectName("MinimizeButton")
         self.btn_minimize.setFixedSize(scale(40), scale(25))
         self.btn_minimize.setStyleSheet(btn_style)
 
@@ -47,6 +48,7 @@ class CustomTitleBar(QWidget):
         self.layout.addWidget(self.btn_minimize, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.btn_maximize = QPushButton("🗖")
+        self.btn_maximize.setObjectName("MaximizeButton")
         self.btn_maximize.setFixedSize(scale(40), scale(25))
         self.btn_maximize.setStyleSheet(btn_style)
 
@@ -54,6 +56,7 @@ class CustomTitleBar(QWidget):
         self.layout.addWidget(self.btn_maximize, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.btn_close = QPushButton("✕")
+        self.btn_close.setObjectName("CloseButton")
         self.btn_close.setFixedSize(scale(40), scale(25))
         self.btn_close.setStyleSheet(btn_style + f"QPushButton:hover {{ background-color: {COLORS['burnt_orange']}; color: white; }}")
 

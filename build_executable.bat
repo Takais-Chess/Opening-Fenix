@@ -69,7 +69,7 @@ if exist "dist_backup" (
 )
 
 if not exist "dist\Opening Fenix\repertoires" mkdir "dist\Opening Fenix\repertoires"
-xcopy /D /Y "repertoires\*.db" "dist\Opening Fenix\repertoires\"
+xcopy /E /I /H /Y /D "repertoires\*" "dist\Opening Fenix\repertoires\"
 xcopy /D /Y "*.md" "dist\Opening Fenix\"
 
 echo.

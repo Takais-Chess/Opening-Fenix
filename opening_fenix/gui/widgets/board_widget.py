@@ -151,6 +151,7 @@ class ChessBoardWidget(QWidget):
                     self.dragging_piece = piece
                     self.drag_start_square = square
                     self.mouse_pos = event.position().toPoint()
+                    self._board_snapshot = None  # Clear snapshot to rebuild it without the dragging piece
                     self.update()
 
     def mouseMoveEvent(self, event):
@@ -179,6 +180,7 @@ class ChessBoardWidget(QWidget):
                 if move in self.board.legal_moves: self.move_executed.emit(move)
             self.dragging_piece = None
             self.drag_start_square = None
+            self._board_snapshot = None  # Clear snapshot
             self.update()
 
     def _draw_arrow(self, painter, start, end, color, square_size):
@@ -277,11 +279,11 @@ class ChessBoardWidget(QWidget):
         for move, color in self.explorer_arrows:
             self._draw_arrow(painter, move.from_square, move.to_square, color, square_size)
 
-    def _build_animation_snapshot(self):
+    def _build_board_snapshot(self):
         """
         Renders the entire static board (squares, coords, pieces, arrows) to an off-screen
-        QPixmap, EXCLUDING the piece being animated. This snapshot is reused for every
-        animation frame, reducing per-frame cost from ~120 draw calls to just 2 (pixmap + piece).
+        QPixmap, EXCLUDING the piece(s) being animated or dragged. This snapshot is reused 
+        for every frame, reducing per-frame cost from ~120 draw calls to just 2.
         """
         dpr = self.devicePixelRatioF()
         snapshot = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
@@ -294,12 +296,26 @@ class ChessBoardWidget(QWidget):
         
         side, square_size, x_offset, y_offset = self.get_metrics()
         painter.translate(x_offset, y_offset)
-        # Note: _update_pixmap_cache is already called by paintEvent before this method
         
+        # Determine which squares to skip (don't draw pieces on them)
+        skip_squares = []
+        if self.animating_piece_data:
+            skip_squares.append(self.animating_piece_data['from_square'])
+        if self.dragging_piece and self.drag_start_square is not None:
+            skip_squares.append(self.drag_start_square)
+
         # Draw all static elements
-        skip_sq = self.animating_piece_data['from_square'] if self.animating_piece_data else None
         self._paint_board_base(painter, square_size)
-        self._paint_pieces(painter, square_size, skip_square=skip_sq)
+        
+        # Draw all pieces except the skipped ones
+        for row in range(8):
+            for col in range(8):
+                rank, file = (row if self.flipped else 7 - row), (7 - col if self.flipped else col)
+                sq = chess.square(file, rank)
+                if sq in skip_squares: continue
+                piece = self.board.piece_at(sq)
+                if piece: self.draw_piece(painter, piece, col, row, square_size)
+                
         self._paint_arrows(painter, square_size)
         
         painter.end()
@@ -314,59 +330,49 @@ class ChessBoardWidget(QWidget):
         side, square_size, x_offset, y_offset = self.get_metrics()
         self._update_pixmap_cache(square_size)
         
-        # ── ANIMATION FAST PATH ──
-        # During piece slides, use a cached snapshot + draw only the moving piece.
-        # This reduces per-frame overhead from ~120 draw calls to just 2.
-        if self.is_animating and self.animating_piece_data:
+        is_drag = self.dragging_piece is not None
+        is_anim = self.is_animating and self.animating_piece_data
+        
+        # ── SNAPSHOT FAST PATH ──
+        # During piece drags or slides, use a cached snapshot + draw only the moving pieces.
+        if is_drag or is_anim:
             if self._board_snapshot is None or self._snapshot_flipped != self.flipped:
-                self._board_snapshot = self._build_animation_snapshot()
+                self._board_snapshot = self._build_board_snapshot()
             
             # 1. Draw the cached static board (single drawPixmap call)
             painter.drawPixmap(0, 0, self._board_snapshot)
-            
-            # 2. Draw moving piece with "Lift & Shadow" effect
             painter.translate(x_offset, y_offset)
-            d = self.animating_piece_data
-            p = d['progress']
-            cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
-            cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
             
-            # Lift effect: scale peaks at 1.15x in the middle of movement
-            # We use a sine curve for a natural lift/land arc
-            lift = math.sin(p * math.pi) 
-            scale_factor = 1.0 + (0.15 * lift)
+            # 2. Draw animating piece with "Lift & Shadow" effect
+            if is_anim:
+                d = self.animating_piece_data
+                p = d['progress']
+                cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
+                cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
+                
+                lift = math.sin(p * math.pi) 
+                scale_factor = 1.0 + (0.15 * lift)
+                shadow_offset = scale(3) + (scale(5) * lift)
+                shadow_rect = QRectF(cur_col * square_size + shadow_offset, cur_row * square_size + shadow_offset, square_size, square_size)
+                painter.setBrush(QColor(0, 0, 0, int(60 * lift))) 
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.drawEllipse(shadow_rect.translated(square_size*0.05, square_size*0.05).adjusted(square_size*0.1, square_size*0.1, -square_size*0.1, -square_size*0.1))
+                
+                self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
             
-            # Draw subtle drop shadow slightly offset based on lift
-            shadow_offset = scale(3) + (scale(5) * lift)
-            shadow_rect = QRectF(cur_col * square_size + shadow_offset, cur_row * square_size + shadow_offset, square_size, square_size)
-            painter.setBrush(QColor(0, 0, 0, int(60 * lift))) # Shadow fades in/out with lift
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawEllipse(shadow_rect.translated(square_size*0.05, square_size*0.05).adjusted(square_size*0.1, square_size*0.1, -square_size*0.1, -square_size*0.1))
-            
-            # Draw the piece itself (centered and scaled)
-            self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
-            
-            # Draw dragging overlay on top of animation if exists
-            if self.dragging_piece:
+            # 3. Draw dragging piece on top
+            if is_drag:
                 mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
                 target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
                 key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
-                if key in self.piece_pixmaps: painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
-            return  # Done! ~10x faster than full repaint
+                if key in self.piece_pixmaps: 
+                    painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
+            return  # Done! Efficiently rendered.
         
-        # ── NORMAL PATH (no animation) ──
+        # ── NORMAL PATH (no drag, no animation) ──
         painter.translate(x_offset, y_offset)
-        
         self._paint_board_base(painter, square_size)
         self._paint_pieces(painter, square_size)
-        
-        # Dragging overlay
-        if self.dragging_piece:
-            mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
-            target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
-            key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
-            if key in self.piece_pixmaps: painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
-
         self._paint_arrows(painter, square_size)
 
     def start_piece_slide(self, piece, from_square, to_square, move):

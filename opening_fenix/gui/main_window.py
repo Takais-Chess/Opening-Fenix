@@ -19,7 +19,7 @@ from PyQt6.QtWidgets import (
     QTabBar, QStackedWidget, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFontMetrics, QAction
+    QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFontMetrics, QAction, QTextCursor
 )
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QUrl, QPointF, QEvent, QSize
 from PyQt6.QtSvg import QSvgRenderer
@@ -28,11 +28,14 @@ from PyQt6.QtMultimedia import QSoundEffect
 from opening_fenix.core.repertoire import RepertoireManager
 from opening_fenix.core.training import TrainingManager
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
+from opening_fenix.core.utils import localize_san
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget
 from opening_fenix.gui.widgets.charts import PieChartWidget
 from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame
 from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
 from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
+from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
+from opening_fenix.gui.dialogs.faq_dialog import FAQDialog
 from opening_fenix.creator.creator_window import CreatorWindow
 
 # Import centralized styles
@@ -86,11 +89,12 @@ class MainWindow(QMainWindow):
         self.previous_fen_for_animation = None
         
         self.refresh_repertoire_buttons()
-        visible_repos = self.training_manager.get_visible_repos()
-        if visible_repos:
-            self.change_repertoire(visible_repos[0])
+        # Pre-select the first repertoire from our sorted list
+        if self.sorted_repo_names:
+            # OPTIMIZATION: skip refresh_buttons here since they were just refreshed on the line above
+            self.change_repertoire(self.sorted_repo_names[0], refresh_buttons=False)
         else:
-            self.change_repertoire(None)
+            self.change_repertoire(None, refresh_buttons=False)
         
         self.set_button_state('start')
         self.setStyleSheet(get_main_window_style())
@@ -101,6 +105,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
         QTimer.singleShot(100, self.trigger_board_adjust)
+        # Start the onboarding tour if not shown yet
+        QTimer.singleShot(500, self.check_for_onboarding)
 
     def trigger_board_adjust(self):
         if hasattr(self, 'board_panel') and hasattr(self, 'main_splitter'):
@@ -122,6 +128,93 @@ class MainWindow(QMainWindow):
                 self.centralWidget().layout().activate()
             self.board_widget.update()
 
+    def check_for_onboarding(self):
+        """Check if the guided tour should be started for this profile."""
+        if self.profile_name == "Freies Training":
+            return
+            
+        guide_shown = self.training_manager.get_setting("guide_shown")
+        if not guide_shown:
+            self.start_guided_tour()
+
+    def start_guided_tour(self):
+        """Initializes and starts the step-by-step guided tour."""
+        self.tour = GuidedTourOverlay(self)
+        
+        # Step 1: Welcome (Moved to first)
+        self.tour.add_step(None, "Willkommen bei Opening Fenix!", 
+            "Lass uns kurz die wichtigsten Funktionen durchgehen, damit du direkt mit deinem Training starten kannst.")
+
+        # Step 2: Trainer Overview (NEW / Moved to second)
+        self.tour.add_step(None, "Der Trainer", 
+            "Das Programm besteht aus 2 Modulen. Dem Trainer und dem Creator. \n"
+            "Mit dem Trainer übst du deine Züge aus den Reperotires und lernst neue. Zum Creator wird später noch etwas gesagt.")
+            
+        # Step 3: Repertoires
+        self.tour.add_step(self.repo_scroll, "Deine Repertoires", 
+            "Hier oben findest du alle Eröffnungen, die du für dieses Profil gewählt hast. Du kannst jederzeit zwischen ihnen wechseln.")
+            
+        # Step 4: Elo
+        self.tour.add_step(self.lbl_elo, "Dein Fortschritt (Elo)", 
+            "Diese Elo zeigt dir, wie gut du das Repertoire bereits beherrschst. Sie wird steigen, je mehr du das Repertoire lernst und übst.")
+            
+        # Step 5: Training Hub
+        self.tour.add_step(self.side_panel, "Das Training Center", 
+            "Hier schlägt das Herz der App. Die Grafik zeigt dir, wie viele Züge du bereits gelernt hast und wie viele zur Wiederholung fällig sind.")
+
+        # Step 6: Notation
+        self.tour.add_step(self.txt_notation, "Notation & Details", 
+            "Hier siehst du den Partieverlauf und deine Kommentare. Ein Klick auf einen Zug bringt dich an die entsprechende Stelle im Creator.")
+            
+        # Step 7: Starten Button (Updated Text)
+        self.tour.add_step(self.btn_smart, "Training Starten", 
+            "Klicke hier, um mit dem Training zu starten und zur nächsten Variante zu gehen")
+            
+        # Step 8: Learn New
+        self.tour.add_step(self.btn_learn_new, "Neues lernen (🧠)", 
+            "Aktiviere das Gehirn-Icon, um gezielt neue Züge aus deinem Repertoire zu lernen, die du noch nicht kennst.")
+
+        # Step 9: Auto-Weiter (Updated Text)
+        self.tour.add_step(self.btn_auto_continue, "Auto-Weiter (⚡)", 
+            "Ist dieser Button aktiv, springt die App am Ende einer Variante automatisch zur nächsten fälligen Aufgabe. "
+            "Ideal falls man Züge wiederholt und schon vertraut ist mit der Eröffnung")
+
+        # Step 10: Lichess (Updated Text)
+        self.tour.add_step(self.btn_lichess, "Lichess Analyse", 
+            "Du verstehst nicht warum dein Zug falsch ist? Mit dem Lichess-Button kannst du die aktuelle Position direkt in der Lichess-Analyse mit der Engine prüfen.")
+            
+        # Step 11: Creator
+        self.tour.add_step(self.btn_creator, "Repertoire Creator (✏️)", 
+            "Möchtest du das gesamte Repertoire durchstöbern oder das Repertoire bearbeiten? Mit dem Creator-Button (✏️) springst du direkt in den Editor.")
+            
+        # Step 12: Filter (Updated Text)
+        self.tour.add_step(self.btn_filter, "Fokussiertes Training", 
+            "Nutze den Variantenfilter oben, um nur bestimmte Varianten zu trainieren oder lernen - ideal, wenn man eine neue Variante lernt und man möchte alle züge zu dieser Variante lernen bevor man etwas anderes lernt oder um sich auf eine spezielle Eröffnung vorzubereiten")
+
+        # Step 13: Ressourcen (NEW)
+        self.tour.add_step(self.btn_resources, "Ressourcen", 
+            "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm")
+
+        self.tour.finished.connect(self.on_tour_finished)
+        self.tour.start_tour()
+
+    def on_tour_finished(self):
+        """Mark the tour as shown, show the FAQ dialog, then proceed to course intro if needed."""
+        self.training_manager.set_setting("guide_shown", True)
+        FAQDialog(self).exec()
+        
+        # After FAQ is closed, ensure we show the intro for the correctly prioritized repertoire
+        # We use sorted_repo_names[0] to be consistent with the UI tabs
+        active_repo = self.repertoire_manager.active_repertoire_name
+        if not active_repo and self.sorted_repo_names:
+            active_repo = self.sorted_repo_names[0]
+            
+        if active_repo:
+            # After FAQ, if we are already on the right repo, we still need to trigger 
+            # the Course Intro check which was suppressed during the tour.
+            # Calling change_repertoire with refresh_buttons=False is fast.
+            self.change_repertoire(active_repo, refresh_buttons=False)
+
     def init_ui(self):
         self.setStyleSheet(get_main_window_style())
 
@@ -140,7 +233,7 @@ class MainWindow(QMainWindow):
 
         top_layout = QHBoxLayout()
         top_layout.setContentsMargins(10, 6, 20, 6)
-        top_layout.setSpacing(0)
+        top_layout.setSpacing(scale(14))
 
         self.btn_scroll_left = QPushButton("◄")
         self.btn_scroll_left.setFixedSize(scale(30), scale(40))
@@ -218,9 +311,29 @@ class MainWindow(QMainWindow):
         top_right_layout.addWidget(self.btn_switch_profile)
         top_right_layout.addWidget(self.btn_settings)
         top_layout.addWidget(top_right_container)
+
+        # Repertoire Resources Pill (Container approach to match the User/Settings pill)
+        self.res_pill = QWidget()
+        self.res_pill.setProperty("class", "GlassPill")
+        res_pill_layout = QHBoxLayout(self.res_pill)
+        res_pill_layout.setContentsMargins(scale(15), 0, scale(15), 0)
+        res_pill_layout.setSpacing(0)
+
+        self.btn_resources = QPushButton("📁 Ressourcen")
+        self.btn_resources.setFlat(True)
+        self.btn_resources.setStyleSheet(f"""
+            QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
+            QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
+        """)
+        self.btn_resources.setFixedHeight(scale(40)) # Use 40px to drive the pill height, matching btn_settings
+        self.btn_resources.setToolTip("Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)")
+        self.btn_resources.clicked.connect(self.open_repertoire_folder)
+        res_pill_layout.addWidget(self.btn_resources)
+        
+        top_layout.addWidget(self.res_pill)
         
         # Apply GlassPill classes and small drop shadows to the top elements
-        for pill in [self.repo_scroll, top_right_container]:
+        for pill in [self.repo_scroll, top_right_container, self.res_pill]:
             pill.setProperty("class", "GlassPill")
             self.repolish(pill)
             shadow = QGraphicsDropShadowEffect()
@@ -248,7 +361,13 @@ class MainWindow(QMainWindow):
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.check_user_move)
         board_inner_layout.addWidget(self.board_widget)
-        self.main_splitter.addWidget(self.board_panel)
+        
+        # Board Container to provide the visual gap to the right (matching Creator style)
+        self.board_container = QWidget()
+        board_container_layout = QVBoxLayout(self.board_container)
+        board_container_layout.setContentsMargins(0, 0, scale(10), 0)
+        board_container_layout.addWidget(self.board_panel)
+        self.main_splitter.addWidget(self.board_container)
 
         self.side_panel = QFrame()
         self.side_panel.setObjectName("SidePanel")
@@ -306,8 +425,8 @@ class MainWindow(QMainWindow):
         
         self.btn_creator = QPushButton("✏️")
         self.btn_creator.setObjectName("ActionButton")
-        self.btn_creator.clicked.connect(self.open_creator_at_current_position)
-        self.btn_creator.setToolTip("<b>Repertoire Creator</b><br>Bearbeite dein Repertoire an dieser Position.")
+        self.btn_creator.clicked.connect(lambda: self.open_creator_at_current_position(chess.STARTING_FEN))
+        self.btn_creator.setToolTip("<b>Repertoire Creator</b><br>Öffne den Creator an der Startposition, um dein Repertoire zu bearbeiten.")
         
         actions_grid.addWidget(self.btn_learn_new, 0, 0)
         actions_grid.addWidget(self.btn_auto_continue, 0, 1)
@@ -322,7 +441,13 @@ class MainWindow(QMainWindow):
         hub_layout.addWidget(self.btn_smart)
 
         side_layout.addWidget(training_hub)
-        self.main_splitter.addWidget(self.side_panel)
+        
+        # Side Container to provide the visual gap to the left (matching Creator style)
+        self.side_container = QWidget()
+        side_container_layout = QVBoxLayout(self.side_container)
+        side_container_layout.setContentsMargins(scale(5), 0, 0, 0)
+        side_container_layout.addWidget(self.side_panel)
+        self.main_splitter.addWidget(self.side_container)
         
         # Initial proportions: 3:2
         self.main_splitter.setStretchFactor(0, 3)
@@ -357,15 +482,22 @@ class MainWindow(QMainWindow):
     def on_repertoire_button_clicked(self, button):
         self.change_repertoire(button.property("repo_name"))
 
-    def change_repertoire(self, repo_name, reset_filter=True):
+    def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
         # Cancel any ongoing animations before switching
         self.animation_moves = []
         if hasattr(self.board_widget, 'abort_piece_slide'):
             self.board_widget.abort_piece_slide()
 
+        # Update checked state of existing buttons immediately (Fast UI feedback)
         for btn in self.repo_button_group.buttons():
             btn.setChecked(btn.property("repo_name") == repo_name)
         
+        if repo_name == self.repertoire_manager.active_repertoire_name and not refresh_buttons:
+            # We are already on this repo and no UI rebuild requested.
+            # But we still need to check if the Course Intro should be shown now (e.g. after tour).
+            self._check_for_course_intro(repo_name)
+            return
+
         # Reset all caches and trainer state
         self.repertoire_manager.set_active_repertoire(repo_name)
         self.training_manager.on_repertoire_changed()
@@ -386,15 +518,22 @@ class MainWindow(QMainWindow):
         self.txt_notation.clear()
         self.set_button_state('start')
         self.current_move_obj = None
-        self.refresh_repertoire_buttons()
+        
+        if refresh_buttons:
+            self.refresh_repertoire_buttons()
+        
+        self._check_for_course_intro(repo_name)
 
+    def _check_for_course_intro(self, repo_name):
         # Handle Course Intro and Learning Modes
         if self.repertoire_manager.repo_session:
             new, due, done_dist = self.training_manager.get_stats()
             learned = sum(done_dist.values()) if isinstance(done_dist, dict) else 0
             
             # Show Course Intro Splash if no moves have been learned yet and not free training
-            if learned == 0 and repo_name and self.profile_name != "Freies Training":
+            # BUGFIX: Don't show if the onboarding tour is currently active or not yet shown
+            guide_shown = self.training_manager.get_setting("guide_shown")
+            if learned == 0 and due == 0 and repo_name and self.profile_name != "Freies Training" and guide_shown:
                 repo_info = self.repertoire_manager.get_repertoire_info()
                 self._current_intro = CourseIntroDialog(self, repo_info)
                 self._current_intro.setWindowModality(Qt.WindowModality.NonModal)
@@ -445,7 +584,7 @@ class MainWindow(QMainWindow):
             if entry_fen:
                 self.active_variation_entry_fen = entry_fen # Cache for start_animation
                 self.board_widget.set_fen(entry_fen)
-                hist = self.repertoire_manager.get_history_for_fen(entry_fen)
+                hist = self.repertoire_manager.get_history_for_fen(entry_fen, variation_name=var_name)
                 # Ensure the last move is highlighted in notation if we jumped to a specific FEN
                 self.update_notation_display(temp_hist=hist, reveal_move=True)
                 
@@ -467,16 +606,9 @@ class MainWindow(QMainWindow):
         original_repo = active_repo
         
         for repo_name in visible_repos:
-            self.repertoire_manager.set_active_repertoire(repo_name)
-            self.training_manager.on_repertoire_changed()
-            stats = (0, 0, {})
-            if self.repertoire_manager.repo_session:
-                stats = self.training_manager.get_stats()
+            # OPTIMIZATION: Use the fast persistent cache path instead of full repo switch
+            stats = self.training_manager.get_stats_for_repertoire(repo_name)
             repo_data.append((repo_name, stats))
-            
-        # Restore active repertoire
-        self.repertoire_manager.set_active_repertoire(original_repo)
-        self.training_manager.on_repertoire_changed()
         
         if self.sorted_repo_names is None:
             # Sort by due moves (stats[1]) descending
@@ -570,9 +702,11 @@ class MainWindow(QMainWindow):
     def on_notation_click(self, url):
         # Extract the FEN from the URL and properly decode percent-encoding (e.g., %20 -> " ")
         raw_fen = url.toString().replace("fen:", "")
+        # Robust decoding path: ensure we handle '+' and other characters
         decoded_fen = QUrl.fromPercentEncoding(raw_fen.encode('utf-8'))
+        
         self.open_creator_at_current_position(decoded_fen)
-
+        
     def open_creator_at_current_position(self, fen=None):
         if not self.repertoire_manager.active_repertoire_name: return
         target_fen = fen or self.board_widget.board.fen()
@@ -585,15 +719,13 @@ class MainWindow(QMainWindow):
             
             # 2. Update Repertoire if it changed in the main window
             active_repo = self.repertoire_manager.active_repertoire_name
-            if self.creator_window.backend.active_repo_name != active_repo:
-                from opening_fenix.core.logger import logger
-                logger.info(f"Main: Switching Creator repertoire to {active_repo}")
-                self.creator_window.backend.load_repertoire(active_repo)
-                # Ensure UI is refreshed for the new database
-                if hasattr(self.creator_window, '_load_saved_elo_or_autoselect'):
-                    self.creator_window._load_saved_elo_or_autoselect()
-                if hasattr(self.creator_window, 'update_structure_tree'):
-                    self.creator_window.update_structure_tree()
+            is_test = self.repertoire_manager.is_active_test
+            
+            # Switch if name OR folder context (test vs. regular) changed OR session was closed
+            if (self.creator_window.backend.active_repo_name != active_repo or 
+                self.creator_window.is_test != is_test or
+                self.creator_window.backend.session is None):
+                self.creator_window.load_repertoire(active_repo, self.training_manager, is_test)
             
             # 3. Update FEN
             self.creator_window.set_board_to_fen(target_fen)
@@ -603,7 +735,14 @@ class MainWindow(QMainWindow):
             self.creator_window.raise_()
             self.creator_window.activateWindow()
         else:
-            self.creator_window = CreatorWindow(repertoire_name=self.repertoire_manager.active_repertoire_name, initial_fen=target_fen)
+            is_t = self.repertoire_manager.is_active_test
+            self.creator_window = CreatorWindow(
+                repertoire_name=self.repertoire_manager.active_repertoire_name, 
+                initial_fen=target_fen, 
+                training_manager=self.training_manager,
+                is_test=is_t
+            )
+            self.creator_window.show()
             self.creator_window.showMaximized()
 
 
@@ -658,26 +797,46 @@ class MainWindow(QMainWindow):
                 self.update_stats_display() # Update big donut chart after failed move
 
     def update_notation_display(self, temp_hist=None, reveal_move=False):
-        hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj)
+        hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter)
+        if not hist:
+            self.txt_notation.clear()
+            return
+
         html = "<body style='line-height: 1.6;'>"
         start_move_offset = self.repertoire_manager.get_repertoire_start_move() - 1
+        lang = self.training_manager.get_setting("notation_language") or "en"
+        
+        # Determine if the first move in history is Black (to adjust numbering/dots)
+        # In hist, 'fen' is the position AFTER the move. If 'w' follows, Black just moved.
+        first_fen = hist[0].get('fen', "")
+        starts_with_black = " w " in first_fen
+        
         for i, item in enumerate(hist):
             is_last = (i == len(hist) - 1)
             if is_last and not reveal_move: break
-            move_num = (i // 2) + 1 + start_move_offset
-            if i % 2 == 0: html += f"<b>{move_num}.</b> "
+            
+            # Adjusted move number calculation
+            idx_for_calc = i + 1 if starts_with_black else i
+            move_num = (idx_for_calc // 2) + 1 + start_move_offset
+            
+            # Formatting logic
+            if i == 0 and starts_with_black:
+                html += f"<b>{move_num}...</b> "
+            elif idx_for_calc % 2 == 0:
+                html += f"<b>{move_num}.</b> "
+                
             style = f"text-decoration:none; color:{COLORS['brown_text']}; font-weight:bold;"
             if is_last and reveal_move: style += f" background-color: {COLORS['burnt_orange']}; color: white; border-radius: 3px; padding: 0 2px;"
             nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
             nag_text = nag_map.get(item.get('nag'), "")
-            html += f"<a href='fen:{item['fen']}' style='{style}'>{item['san']}{nag_text}</a> "
+            san = localize_san(item['san'], lang)
+            html += f"<a href='fen:{item['fen']}' style='{style}'>{san}{nag_text}</a> "
             if item.get('comment'): html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{item['comment']}</p>"
         html += "</body>"
         self.txt_notation.setHtml(html)
-        # Use a singleShot timer to ensure the layout is complete before scrolling
-        QTimer.singleShot(10, lambda: self.txt_notation.verticalScrollBar().setValue(
-            self.txt_notation.verticalScrollBar().maximum()
-        ))
+        # Use a singleShot timer to ensure the layout is complete before scrolling.
+        # moveCursor(End) is more robust than manually setting scrollbar values.
+        QTimer.singleShot(50, lambda: self.txt_notation.moveCursor(QTextCursor.MoveOperation.End))
 
     def open_settings(self):
         SettingsDialog(self).exec()
@@ -733,24 +892,24 @@ class MainWindow(QMainWindow):
         # ── VARIATION FILTER TRUNCATION ──
         reset_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
         if self.active_variation_filter:
-            # Use cached entry FEN for performance
             entry_fen = self.active_variation_entry_fen
             if entry_fen:
-                reset_fen = entry_fen
                 # Identify where the variation starts in the history
                 c_entry = clean_fen(entry_fen)
                 boundary_idx = -1
                 for i, item in enumerate(history[:-1]):
                     if clean_fen(item['fen']) == c_entry:
-                        boundary_idx = i; break
+                        boundary_idx = i
+                        break
                 
-                # Truncate to start only from variation boundary
+                # Truncate to start only from variation boundary IF current move is inside the variation
                 if boundary_idx != -1:
+                    reset_fen = entry_fen
                     full_moves = full_moves[boundary_idx + 1:]
                     history = history[boundary_idx + 1:]
-                elif clean_fen(chess.STARTING_FEN) != c_entry:
-                    # Variation starts at a position NOT in history (shouldn't happen with correct CTE)
-                    # or history is already shorter. We'll just reset board if mismatch later.
+                else:
+                    # Current move is a lead-up move starting BEFORE the variation entry point
+                    # Reset fen remains the standard starting FEN
                     pass
 
         current_fen = clean_fen(self.board_widget.board.fen())
@@ -850,6 +1009,20 @@ class MainWindow(QMainWindow):
             self.change_repertoire(visible_repos[0])
         else:
             self.change_repertoire(None)
+
+    def open_repertoire_folder(self):
+        """Opens the active repertoire's folder in Windows Explorer."""
+        repo_name = self.repertoire_manager.active_repertoire_name
+        if not repo_name:
+            return
+        
+        from opening_fenix.core.utils import get_repertoire_dir
+        path = get_repertoire_dir(repo_name)
+        
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            QMessageBox.warning(self, "Ordner nicht gefunden", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}")
 
     def repolish(self, widget):
         if widget:

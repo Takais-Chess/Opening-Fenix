@@ -147,3 +147,29 @@ def migrate_repertoire_storage():
         except Exception as e:
             print(f"ERROR: Failed to migrate repertoire {repo_name}: {e}")
 
+
+def localize_san(san: str, language: str = 'en') -> str:
+    """
+    Converts English SAN (Standard Algebraic Notation) to a localized version.
+    Currently supports German ('de').
+    """
+    if not san or language == 'en':
+        return san
+    
+    if language == 'de':
+        # Piece mappings: K=K, Q=D (Dame), R=T (Turm), B=L (Läufer), N=S (Springer)
+        # Note: P (Pawn) is implicit in SAN and doesn't need mapping unless it's a promotion.
+        
+        # 1. Handle piece moves (start of string)
+        # King (K) is same in both languages.
+        piece_map = {"Q": "D", "R": "T", "B": "L", "N": "S"}
+        if san[0] in piece_map:
+            san = piece_map[san[0]] + san[1:]
+            
+        # 2. Handle promotions (e.g., e8=Q)
+        for eng, ger in piece_map.items():
+            san = san.replace(f"={eng}", f"={ger}")
+            
+        return san
+        
+    return san

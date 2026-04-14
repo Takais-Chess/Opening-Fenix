@@ -18,9 +18,9 @@ class ExportDialog(QDialog):
 
         self.backend = backend
         self.setStyleSheet(get_export_dialog_style())
-        self.init_ui()
+        self.init_ui(parent)
 
-    def init_ui(self):
+    def init_ui(self, parent):
         layout = QVBoxLayout(self)
         
         
@@ -82,6 +82,19 @@ class ExportDialog(QDialog):
         self.combo_transpos.setCurrentIndex(2)
         l_opt.addRow("Transpositionen:", self.combo_transpos)
         
+        # Language Selection
+        self.combo_lang = QComboBox()
+        self.combo_lang.addItem("Standard (English)", "en")
+        self.combo_lang.addItem("Deutsch", "de")
+        
+        # Default to current profile setting if available
+        if parent and hasattr(parent, 'get_notation_lang'):
+            lang = parent.get_notation_lang()
+            idx = self.combo_lang.findData(lang)
+            if idx >= 0: self.combo_lang.setCurrentIndex(idx)
+            
+        l_opt.addRow("Sprache:", self.combo_lang)
+        
         # Level Selection
         self.chk_limit = QCheckBox("Nur bis Level exportieren:")
         self.combo_level = QComboBox()
@@ -135,6 +148,7 @@ class ExportDialog(QDialog):
         transpos_mode = self.combo_transpos.currentIndex()
         
         max_l = self.combo_level.currentData() if self.chk_limit.isChecked() else None
+        lang = self.combo_lang.currentData()
         
-        self.result_data = (fmt, scope, transpos_mode, max_l)
+        self.result_data = (fmt, scope, transpos_mode, max_l, lang)
         self.accept()

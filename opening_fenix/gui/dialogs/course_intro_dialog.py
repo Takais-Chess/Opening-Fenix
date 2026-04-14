@@ -163,7 +163,7 @@ class CourseIntroDialog(QDialog):
             description = "Dieses Repertoire wurde noch nicht mit einer Beschreibung versehen.<br><br><i>Tipp: Du kannst im Creator unter 'Repertoire-Einstellungen' eine Beschreibung hinzufügen!</i>"
         
         txt_desc = QTextBrowser()
-        txt_desc.setHtml(f"<div style='font-size: {scale(16)}px; line-height: 1.6; color: {COLORS['brown_text']};'>{description}</div>")
+        txt_desc.setHtml(f"<div style='font-size: {scale(10)}px; line-height: 1.6; color: {COLORS['brown_text']};'>{description}</div>")
         txt_desc.setStyleSheet(f"""
             QTextBrowser {{
                 background-color: rgba(255, 255, 255, 0.4);

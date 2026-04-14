@@ -87,12 +87,10 @@ if __name__ == "__main__":
             
         # More unique and descriptive ID to ensure Windows taskbar grouping matches the logo.
         # This string should be unique to the app (including version if needed).
-        myappid = 'OpeningFenix.Lab.V2.1.0' 
+        myappid = 'OpeningFenix.Lab.V2.2.0' 
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-            print(f"DEBUG: SetCurrentProcessExplicitAppUserModelID set to: {myappid}")
-        except (AttributeError, OSError) as e:
-             print(f"DEBUG: Failed to set AppUserModelID: {e}")
+        except (AttributeError, OSError):
              pass
 
     try:
@@ -107,7 +105,7 @@ if __name__ == "__main__":
         # Explicitly set application identity for Windows taskbar grouping
         app.setApplicationName("OpeningFenix")
         app.setOrganizationName("OpeningFenixLab")
-        app.setApplicationVersion("2.1.0")
+        app.setApplicationVersion("2.2.0")
         app.setApplicationDisplayName("Opening Fenix")
         
         # Set icon on the app instance immediately

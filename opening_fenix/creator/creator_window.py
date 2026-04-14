@@ -12,6 +12,8 @@ import multiprocessing
 import re
 import collections
 import webbrowser
+import time
+import stat
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -32,13 +34,15 @@ from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets
-from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san
+from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, TranspositionSearchThread
+
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.engine import EngineThread
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
+from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
 
 # Import centralized styles
 from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon
@@ -46,12 +50,34 @@ from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 
 
+# --- EXPORTERS ---
+class LocalizedExporter(chess.pgn.StringExporter):
+    def __init__(self, language='en', **kwargs):
+        super().__init__(**kwargs)
+        self.language = language
+        
+    def visit_move(self, board, move):
+        if self.language == 'en':
+            return super().visit_move(board, move)
+            
+        # Standard PGN logic with localized SAN
+        # We ensure move numbers and spaces are correctly placed
+        if board.turn == chess.WHITE:
+            self.write_token(str(board.fullmove_number) + ". ")
+        elif self.force_movenumber:
+            self.write_token(str(board.fullmove_number) + "... ")
+
+        san = localize_san(board.san(move), self.language)
+        self.write_token(san + " ")
+        self.force_movenumber = False
+
 # --- BACKEND ---
 class CreatorBackend:
-    def __init__(self):
+    def __init__(self, is_test=None):
         self.db_manager = None
         self.session = None
         self.active_repo_name = None
+        self.is_test = is_test
         self._export_count = 0
         self._cached_start_move = 1
         
@@ -69,20 +95,26 @@ class CreatorBackend:
         m = self.session.query(Metadata).filter_by(key=key).first()
         return m.value if m else default
 
-    def load_repertoire(self, name):
+    def load_repertoire(self, name, is_test=None):
         self.close()
         self.active_repo_name = name
-        db_path = get_repertoire_db_path(name)
-        repo_dir = get_repertoire_dir(name)
+        # If is_test is explicitly provided as True/False, use it, otherwise use self.is_test
+        if is_test is None:
+            is_test = self.is_test
+        
+        self.is_test = is_test
+        db_path = get_repertoire_db_path(name, is_test)
+        repo_dir = get_repertoire_dir(name, is_test)
         
         from opening_fenix.core.logger import logger
-        logger.info(f"CreatorBackend: Loading repertoire '{name}' from {db_path}")
+        logger.info(f"CreatorBackend: Loading repertoire '{name}' (is_test={is_test}) from {db_path}")
         
         # Ensure directory and assets exist
         initialize_repertoire_assets(repo_dir)
         
         self.db_manager = DatabaseManager(db_path)
         self.session = self.db_manager.get_session()
+        self._seed_default_levels()
         self.clear_cache()
 
         self._cached_start_move = self.get_repertoire_start_move(force_refresh=True)
@@ -122,6 +154,22 @@ class CreatorBackend:
         self.session.commit()
         self._cached_start_move = value
 
+    def rename_repertoire(self, old_name, new_name):
+        """Delegates renaming to the core service and reloads if necessary."""
+        from opening_fenix.core.services.repertoire_core_service import RepertoireService
+        service = RepertoireService()
+        
+        # If the renamed repo is the one we have open, close it first
+        if self.active_repo_name == old_name:
+            self.close()
+            
+        success, msg = service.rename_repertoire(old_name, new_name)
+        
+        if success and self.active_repo_name == old_name:
+            self.load_repertoire(new_name)
+            
+        return success, msg
+
     def get_repertoire_description(self):
         if not self.session: return ""
         m = self.session.query(Metadata).filter_by(key="description").first()
@@ -158,8 +206,8 @@ class CreatorBackend:
         if cache_key in self._ui_cache:
             return self._ui_cache[cache_key]
             
-        clean_fen = " ".join(fen.split(" ")[:4])
-        pos = self.session.query(Position).filter_by(fen=clean_fen).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         data = {"id": None, "comment": "", "variation_1": "", "variation_2": "", "variation_3": "",
                 "v1_inherited": False, "v2_inherited": False, "v3_inherited": False}
         if not pos: 
@@ -230,7 +278,8 @@ class CreatorBackend:
     def mark_position_reviewed(self, fen):
         if not self.session: return
         clean_fen = " ".join(fen.split(" ")[:4])
-        pos = self.session.query(Position).filter_by(fen=clean_fen).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if pos:
             pos.last_overhaul_review = datetime.datetime.now()
             self.session.commit()
@@ -489,256 +538,10 @@ class CreatorBackend:
                     
         return None
 
-    def find_repertoire_holes(self, threshold, elo_range):
-        """
-        Finds moves that are popular (per Lichess) but not covered in the repertoire (Opponent
-        Holes), or positions where the user has no repertoire move defined (User Holes).
 
-        Uses the same probability-propagation algorithm as priority_service.py for accuracy.
-        threshold: raw % value, e.g. 1.0 means 1 %.
-        """
-        if not self.session: return []
-
-        threshold_val = threshold / 100.0          # 1.0 % → 0.01
-        user_turn_char = self.get_repertoire_color()  # 'w' or 'b'
-
-        # ── 1. Pre-fetch everything we need ──────────────────────────────────────
-        all_moves_db = self.session.query(Move).all()
-        rep_move_ids = {
-            rm.move_id
-            for rm in self.session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
-        }
-
-        # all_moves_from – keyed by from_position_id (every move in the DB)
-        # rep_moves_from – keyed by from_position_id (only active rep moves)
-        all_moves_from = collections.defaultdict(list)
-        rep_moves_from = collections.defaultdict(list)
-        for m in all_moves_db:
-            all_moves_from[m.from_position_id].append(m)
-            if m.id in rep_move_ids:
-                rep_moves_from[m.from_position_id].append(m)
-
-        id_to_fen = dict(self.session.query(Position.id, Position.fen).all())
-
-        # Pre-fetch all Lichess data for this ELO range into a dict keyed by clean FEN
-        lichess_cache: dict = {}
-        for ld in self.session.query(LichessData).filter_by(elo_range=elo_range).all():
-            clean = " ".join(ld.fen.split(" ")[:4])
-            try:
-                lichess_cache[clean] = json.loads(ld.moves_json)
-            except Exception:
-                pass
-
-        # Pre-fetch exempt positions
-        exempt_fens = {
-            " ".join(row[0].split(" ")[:4])
-            for row in self.session.query(Position.fen).filter(Position.is_hole_exempt == True).all()
-        }
-
-        # Castling alternative UCI pairs
-        CASTLING_ALT = {
-            'e1g1': 'e1h1', 'e1h1': 'e1g1',
-            'e1c1': 'e1a1', 'e1a1': 'e1c1',
-            'e8g8': 'e8h8', 'e8h8': 'e8g8',
-            'e8c8': 'e8a8', 'e8a8': 'e8c8',
-        }
-
-        def covered_ucis_for(pid):
-            """Normalized UCI set for the active rep moves leaving position pid."""
-            ucis: set = set()
-            for m in rep_moves_from.get(pid, []):
-                u = m.uci.strip().lower()
-                ucis.add(u)
-                alt = CASTLING_ALT.get(u)
-                if alt:
-                    ucis.add(alt)
-            return ucis
-
-        # ── 2. Root position ─────────────────────────────────────────────────────
-        sp = self.session.query(Position.id).filter(
-            Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
-        ).first()
-        if not sp:
-            return []
-        root_id = sp[0]
-
-        # ── 3. BFS – build depth-ordered list of reachable positions ─────────────
-        # On USER  turn: only follow active rep moves (probability stops here otherwise)
-        # On OPP   turn: follow all DB moves so child positions receive probability
-        reach_probs: dict = {root_id: 1.0}
-        pos_by_depth: list = []
-        bfs_queue = collections.deque([(root_id, 0)])
-        bfs_visited: set = set()
-
-        while bfs_queue:
-            pid, d = bfs_queue.popleft()
-            if pid in bfs_visited:
-                continue
-            bfs_visited.add(pid)
-            if d > 150:
-                continue
-
-            while len(pos_by_depth) <= d:
-                pos_by_depth.append([])
-            pos_by_depth[d].append(pid)
-
-            fen = id_to_fen.get(pid, "")
-            parts = fen.split(" ")
-            is_user = len(parts) > 1 and parts[1] == user_turn_char
-
-            nexts = rep_moves_from.get(pid, []) if is_user else all_moves_from.get(pid, [])
-            for m in nexts:
-                if m.to_position_id and m.to_position_id not in bfs_visited:
-                    bfs_queue.append((m.to_position_id, d + 1))
-
-        # ── 4. Depth-ordered propagation; collect holes inline ───────────────────
-        holes: list = []
-
-        for depth_list in pos_by_depth:
-            for pid in depth_list:
-                p_reach = reach_probs.get(pid, 0.0)
-                if p_reach < threshold_val:
-                    continue  # Prune: no descendant can exceed threshold
-
-                fen = id_to_fen.get(pid)
-                if not fen:
-                    continue
-                clean_fen = " ".join(fen.split(" ")[:4])
-                # NOTE: exempt positions still propagate probability – they just
-                # don't get reported as holes themselves.
-                is_exempt = clean_fen in exempt_fens
-
-                parts = clean_fen.split(" ")
-                is_user = len(parts) > 1 and parts[1] == user_turn_char
-                rep_moves = rep_moves_from.get(pid, [])
-
-                if is_user:
-                    if not rep_moves:
-                        # ── User hole: reachable position with no rep move ──
-                        if not is_exempt:
-                            lichess_moves = lichess_cache.get(clean_fen, {})
-                            total_games = sum(v.get('total', 0) for v in lichess_moves.values())
-                            
-                            if total_games > 0:
-                                # Report individual popular moves as holes
-                                for uci, stats in lichess_moves.items():
-                                    move_total = stats.get('total', 0)
-                                    p_move = move_total / total_games
-                                    p_total = p_reach * p_move
-                                    if p_total >= threshold_val:
-                                        san = stats.get('san', uci)
-                                        holes.append({
-                                            "fen": clean_fen,
-                                            "move_san": san,
-                                            "type": "user",
-                                            "popularity": p_total * 100,
-                                        })
-                            else:
-                                # Fallback if no Lichess data
-                                holes.append({
-                                    "fen": clean_fen,
-                                    "move_san": "—",
-                                    "type": "user",
-                                    "popularity": p_reach * 100,
-                                })
-                        # No probability propagates from here either way
-                    else:
-                        # Split probability evenly among rep moves
-                        p_next = p_reach / len(rep_moves)
-                        for m in rep_moves:
-                            if m.to_position_id:
-                                reach_probs[m.to_position_id] = (
-                                    reach_probs.get(m.to_position_id, 0.0) + p_next
-                                )
-                else:
-                    # ── Opponent turn: distribute probability via Lichess data ──
-                    lichess_moves = lichess_cache.get(clean_fen, {})
-                    total_games = sum(v.get('total', 0) for v in lichess_moves.values())
-
-                    if total_games == 0:
-                        # No Lichess data – even split among DB moves as fallback
-                        out_moves = all_moves_from.get(pid, [])
-                        if out_moves:
-                            p_next = p_reach / len(out_moves)
-                            for m in out_moves:
-                                if m.to_position_id:
-                                    reach_probs[m.to_position_id] = (
-                                        reach_probs.get(m.to_position_id, 0.0) + p_next
-                                    )
-                        continue
-
-                    covered = covered_ucis_for(pid)
-
-                    for uci, stats in lichess_moves.items():
-                        move_total = stats.get('total', 0)
-                        if move_total == 0:
-                            continue
-                        norm_uci = uci.strip().lower()
-                        p_move = move_total / total_games
-                        p_total = p_reach * p_move
-
-                        is_covered = (
-                            norm_uci in covered
-                            or CASTLING_ALT.get(norm_uci, '') in covered
-                        )
-
-                        if is_covered:
-                            # Propagate probability forward through the matching rep move
-                            for m in rep_moves:
-                                m_uci = m.uci.strip().lower()
-                                if m_uci == norm_uci or CASTLING_ALT.get(m_uci, '') == norm_uci:
-                                    if m.to_position_id:
-                                        reach_probs[m.to_position_id] = (
-                                            reach_probs.get(m.to_position_id, 0.0) + p_total
-                                        )
-                                    break
-                        else:
-                            # Uncovered popular Lichess move → opponent hole
-                            if p_total >= threshold_val and not is_exempt:
-                                san = stats.get('san', uci)
-                                holes.append({
-                                    "fen": clean_fen,
-                                    "move_san": san,
-                                    "type": "opponent",
-                                    "popularity": p_total * 100,
-                                })
-
-        holes.sort(key=lambda x: x['popularity'], reverse=True)
-        return holes
-
-
-    def find_priority_mismatches(self, level_order, threshold):
-        """
-        Finds moves in the repertoire that are assigned to a specific level
-        but have a priority score (frequency) above the threshold.
-        """
-        if not self.session: return []
-        
-        # Query for RepertoireMoves joined with Moves
-        # We also need basic Move info 
-        mismatches = self.session.query(Move).join(RepertoireMove).filter(
-            RepertoireMove.level == level_order,
-            Move.priority_score >= (threshold / 100.0)
-        ).all()
-        
-        results = []
-        for move in mismatches:
-            from_pos = self.session.get(Position, move.from_position_id)
-            if not from_pos: continue
-            
-            _, path = self.get_path_to_fen(from_pos.fen)
-            results.append({
-                "fen": from_pos.fen,
-                "path": " > ".join(path) if path else "Start",
-                "move_san": move.san,
-                "type": "priority_check",
-                "popularity": move.priority_score * 100
-            })
-            
-        results.sort(key=lambda x: x['popularity'], reverse=True)
-        return results
 
     def reset_hole_exemptions(self):
+
         if not self.session: return
         self.session.query(Position).update({Position.is_hole_exempt: False})
         self.session.commit()
@@ -747,7 +550,8 @@ class CreatorBackend:
     def set_position_hole_exempt(self, fen, exempt):
         if not self.session: return
         clean_fen = " ".join(fen.split(" ")[:4])
-        pos = self.session.query(Position).filter_by(fen=clean_fen).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if pos:
             pos.is_hole_exempt = exempt
             self.session.commit()
@@ -803,7 +607,9 @@ class CreatorBackend:
 
     def update_position_analysis(self, fen, depth, eval_val):
         if not self.session: return
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split()[:4])
+        # Use GLOB for case-sensitive prefix matching in SQLite
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if pos and (pos.analysis_depth is None or depth > pos.analysis_depth):
             pos.analysis_depth, pos.engine_eval = depth, eval_val
             self.session.commit()
@@ -817,7 +623,9 @@ class CreatorBackend:
         if cache_key in self._ui_cache:
             return self._ui_cache[cache_key]
             
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split()[:4])
+        # Use GLOB for case-sensitive prefix matching in SQLite
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if not pos: 
             self._ui_cache[cache_key] = []
             return []
@@ -952,6 +760,14 @@ class CreatorBackend:
         if lvl:
             lvl.target_elo = target_elo
             self.session.commit()
+
+    def update_level_name(self, level_order, new_name):
+        if not self.session: return
+        lvl = self.session.query(RepertoireLevel).filter_by(order=level_order).first()
+        if lvl:
+            lvl.name = new_name
+            self.session.commit()
+
 
     def update_move_level(self, move_id, level_order):
         if not self.session: return
@@ -1217,7 +1033,8 @@ class CreatorBackend:
 
     def preview_delete_impact(self, uci, fen):
         if not self.session: return 0, 0
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return 0, 0
         move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
         if not move: return 0, 0
@@ -1237,7 +1054,8 @@ class CreatorBackend:
 
     def delete_move(self, uci, fen):
         if not self.session: return
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return
         move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
         if move:
@@ -1332,16 +1150,32 @@ class CreatorBackend:
     def _delete_move_recursive(self, move):
         self.session.query(RepertoireMove).filter_by(move_id=move.id).delete()
         next_id = move.to_position_id
+        
+        # Determine FEN of the position being deleted to clean up LichessData
+        pos_to_delete = self.session.get(Position, next_id)
+        fen_to_cleanup = None
+        if pos_to_delete:
+            fen_to_cleanup = " ".join(pos_to_delete.fen.split(" ")[:4])
+
         self.session.delete(move)
         self.session.flush()
+        
         if self.session.query(Move).filter_by(to_position_id=next_id).count() == 0:
-            for out in self.session.query(Move).filter_by(from_position_id=next_id).all():
-                self._delete_move_recursive(out)
-            self.session.query(Position).filter_by(id=next_id).delete()
+            # Re-fetch position to be sure (though we already have it)
+            if pos_to_delete:
+                for out in self.session.query(Move).filter_by(from_position_id=next_id).all():
+                    self._delete_move_recursive(out)
+                
+                # Clean up LichessData for this FEN
+                if fen_to_cleanup:
+                    self.session.query(LichessData).filter(LichessData.fen.like(fen_to_cleanup + "%")).delete(synchronize_session=False)
+                
+                self.session.delete(pos_to_delete)
 
     def set_nag(self, uci, fen, nag):
         if not self.session: return
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return
         move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
         if move:
@@ -1444,37 +1278,64 @@ class CreatorBackend:
         inc = self.session.query(Move).filter_by(to_position_id=pid).order_by(Move.priority_score.desc()).first()
         return inc.priority_score if inc else 0.0
 
-    def get_repertoire_info(self):
-        if not self.session: return {"name": self.active_repo_name, "levels": [], "depth": "N/A", "elo": "N/A", "moves": "N/A", "description": ""}
+    def get_repertoire_info(self, fast_only=False):
+        if not self.session: return {"name": self.active_repo_name, "levels": [], "depth": "N/A", "elo": "N/A", "moves": "N/A", "description": "", "coverage_pct": 0}
         levels = self.get_repertoire_levels()
-        moves = self.session.query(RepertoireMove.move_id).distinct().count()
         def gm(k, d): m = self.session.query(Metadata).filter_by(key=k).first(); return m.value if m else d
+        
+        elo_cat = gm("elo", "high")
+        description = gm("description", "")
+
+        if fast_only:
+            return {
+                "name": self.active_repo_name,
+                "levels": [l['name'] for l in levels],
+                "depth": "Laden...",
+                "elo": elo_cat,
+                "coverage_pct": 0,
+                "moves": "Laden...",
+                "description": description
+            }
+
+        moves = self.session.query(RepertoireMove.move_id).distinct().count()
 
         # Inline analysis status using the existing session (avoids opening a new DatabaseManager on every refresh)
         player_color = gm("color", "w")
         turn_filter = Position.fen.like(f'% {player_color} %')
-        positions = self.session.query(Position.analysis_depth).filter(turn_filter).all()
-        total = len(positions)
+        stats = self.session.query(
+            func.count(Position.id),
+            func.count(Position.analysis_depth),
+            func.min(Position.analysis_depth),
+            func.max(Position.analysis_depth)
+        ).filter(turn_filter).first()
+        
+        total, analyzed_count, min_depth, max_depth = stats
         if total == 0:
             analysis_status = "Keine Spielerzüge"
+        elif analyzed_count == 0:
+            analysis_status = "Nicht analysiert"
+        elif analyzed_count < total:
+            analysis_status = "Teilweise analysiert"
+        elif min_depth == max_depth:
+            analysis_status = f"Tiefe: {min_depth}"
         else:
-            depths = [p.analysis_depth for p in positions if p.analysis_depth is not None]
-            if not depths:
-                analysis_status = "Nicht analysiert"
-            elif len(depths) < total:
-                analysis_status = "Teilweise analysiert"
-            elif min(depths) == max(depths):
-                analysis_status = f"Tiefe: {min(depths)}"
-            else:
-                analysis_status = f"Tiefe: Zwischen {min(depths)} und {max(depths)}"
+            analysis_status = f"Tiefe: Zwischen {min_depth} und {max_depth}"
+
+        # Calculate coverage % - Join with positions to ensure we only count what belongs to this repo
+        total_p = self.session.query(Position.id).count()
+        # Ensure we only count LichessData that corresponds to a position actually in our DB
+        covered_p = self.session.query(Position.id).join(LichessData, Position.fen.like(LichessData.fen + "%")).filter(LichessData.elo_range == elo_cat).count()
+
+        coverage_pct = (covered_p / total_p * 100.0) if total_p > 0 else 0.0
 
         return {
             "name": self.active_repo_name,
             "levels": [l['name'] for l in levels],
             "depth": analysis_status,
-            "elo": gm("lichess_elo", "N/A"),
+            "elo": elo_cat,
+            "coverage_pct": coverage_pct,
             "moves": moves,
-            "description": gm("description", "")
+            "description": description
         }
 
     def get_repertoire_color(self):
@@ -1506,6 +1367,19 @@ class CreatorBackend:
             return True, f"{n} Einträge gelöscht."
         except Exception as e: self.session.rollback(); return False, str(e)
 
+    def cleanup_orphaned_lichess_data(self):
+        """Removes all LichessData entries that are no longer referenced by any Position."""
+        from opening_fenix.core.services.lichess_service import run_lichess_orphan_cleanup
+        success, msg = run_lichess_orphan_cleanup(self.active_repo_name)
+        if success:
+            self.clear_cache()
+            # Extract count from message "X Einträge bereinigt."
+            try:
+                return int(msg.split(" ")[0])
+            except:
+                return 0
+        return 0
+
     def delete_repertoire(self):
         if not self.active_repo_name: return False, "No active repo."
         n = self.active_repo_name
@@ -1516,11 +1390,15 @@ class CreatorBackend:
         from opening_fenix.core.data_tools import delete_repertoire_db
         return delete_repertoire_db(n)
 
-    def export_pgn(self, start=None, transpos_mode=2, cb=None, max_l=None):
+    def export_pgn(self, start=None, transpos_mode=2, cb=None, max_l=None, language='en'):
         if not self.session: return None
         if start is None: start = chess.STARTING_FEN
-        pos = self.session.query(Position).filter_by(fen=" ".join(start.split(" ")[:4])).first()
-        if not pos: return None
+        clean_start = " ".join(start.strip().split()[:4])
+        pos = self.session.query(Position).filter_by(fen=clean_start).first()
+        if not pos:
+            # Fallback for old databases
+            pos = self.session.query(Position).filter(Position.fen.op('GLOB')(f"{clean_start}*")).first()
+            if not pos: return None
         
         # PRE-FETCH OPTIMIZATION for PGN export
         all_moves = self.session.query(Move).options(joinedload(Move.to_position)).all()
@@ -1548,19 +1426,19 @@ class CreatorBackend:
                         m = chess.Move.from_uci(uci)
                         if m in board.legal_moves: node = node.add_variation(m); board.push(m)
                         else: break
-                    self._build_pgn_tree(node, pos.id, set(), {} if transpos_mode > 0 else None, "", cb, max_l, transpos_mode)
+                    self._build_pgn_tree(node, pos.id, set(), {} if transpos_mode > 0 else None, "", cb, max_l, transpos_mode, language=language)
                     
                     # Clean up cache
                     del self.export_moves_cache
                     del self.export_rep_cache
-                    return game.accept(chess.pgn.StringExporter(headers=True, variations=True, comments=True))
+                    return game.accept(LocalizedExporter(language=language, headers=True, variations=True, comments=True))
                     
-            self._build_pgn_tree(game, pos.id, set(), {} if transpos_mode > 0 else None, "", cb, max_l, transpos_mode)
+            self._build_pgn_tree(game, pos.id, set(), {} if transpos_mode > 0 else None, "", cb, max_l, transpos_mode, language=language)
             
             # Clean up cache
             del self.export_moves_cache
             del self.export_rep_cache
-            return game.accept(chess.pgn.StringExporter(headers=True, variations=True, comments=True))
+            return game.accept(LocalizedExporter(language=language, headers=True, variations=True, comments=True))
         except InterruptedError: return None
 
     def _get_history_for_pos(self, pid):
@@ -1571,7 +1449,141 @@ class CreatorBackend:
             path.insert(0, inc.uci); curr = inc.from_position_id
         return path
 
-    def _build_pgn_tree(self, node, pid, vp, vg, line, cb, max_l, transpos_mode=2):
+    def check_immediate_transposition(self, current_fen):
+        """Fast check if any legal move leads to a position already in the repertoire."""
+        if not self.session: return []
+        
+        board = chess.Board(current_fen)
+        
+        # 1. Identify moves already explicitly in the repertoire from this position
+        clean_current = " ".join(current_fen.split()[:4])
+        current_pos_db = self.session.query(Position).filter(Position.fen.like(f"{clean_current}%")).first()
+        ignored_ucis = set()
+        if current_pos_db:
+            existing_moves = self.session.query(Move.uci).join(RepertoireMove).filter(Move.from_position_id == current_pos_db.id).all()
+            ignored_ucis = {m.uci for m in existing_moves}
+
+        results = []
+        for move in board.legal_moves:
+            uci = move.uci()
+            if uci in ignored_ucis:
+                continue
+            
+            san = board.san(move)
+            board.push(move)
+            next_fen = " ".join(board.fen().split()[:4])
+            board.pop()
+            
+            # Check if this FEN exists in the DB (Case-sensitive!)
+            next_fen_short = " ".join(next_fen.split()[:4])
+            pos = self.session.query(Position).filter(Position.fen.op('GLOB')(next_fen_short + "*")).first()
+            
+            if pos:
+                has_variation = any([pos.variation_1, pos.variation_2, pos.variation_3, pos.cached_v1, pos.cached_v2])
+                incoming_repo = self.session.query(RepertoireMove).join(Move).filter(Move.to_position_id == pos.id).count() > 0
+                outgoing_repo = self.session.query(RepertoireMove).join(Move).filter(Move.from_position_id == pos.id).count() > 0
+                
+                if has_variation or incoming_repo or outgoing_repo:
+                    v_name = pos.variation_1 or pos.cached_v1 or pos.variation_2 or pos.cached_v2 or "Variante"
+                    results.append({
+                        "move_uci": uci,
+                        "move_san": san,
+                        "target_fen": next_fen,
+                        "variation_name": v_name
+                    })
+        return results
+
+    def find_direct_transpositions(self, fen, exclude_path=None):
+        """Finds all distinct repertoire paths that lead to the given FEN."""
+        if not self.session: return []
+        
+        clean_fen = " ".join(fen.strip().split()[:4])
+        # Use GLOB for case-sensitive prefix matching in SQLite
+        positions = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).all()
+        
+        paths = []
+        for p in positions:
+            # Find all incoming REPERTOIRE moves
+            incoming_moves = self.session.query(Move).join(RepertoireMove).filter(Move.to_position_id == p.id).all()
+            for m in incoming_moves:
+                path_ucis = self._get_history_for_pos(m.from_position_id)
+                path_ucis.append(m.uci)
+                
+                # Exclusion Logic: Skip the path if it's identical to the current history
+                if exclude_path and path_ucis == exclude_path:
+                    continue
+                
+                # Get variation names for the target position
+                v_name = p.variation_1 or p.cached_v1 or p.variation_2 or p.cached_v2 or "Variante"
+                
+                paths.append({
+                    "path": path_ucis,
+                    "variation_name": v_name,
+                    "target_san": m.san,
+                    "priority": m.priority_score
+                })
+        
+        # Sort by priority
+        paths.sort(key=lambda x: x["priority"], reverse=True)
+        return paths
+
+    def find_engine_approved_transpositions(self, start_fen, pvs, threshold=0.3):
+        """
+        Takes a list of engine PVs and checks if any FEN in those paths exists in the repertoire.
+        Each PV is expected to be a list of UCI move strings.
+        Returns a list of matching sequences.
+        """
+        if not self.session: return []
+        
+        results = []
+        for pv_data in pvs:
+            score = pv_data.get("score", 0) # Expected in cp
+            moves = pv_data.get("moves", [])
+            
+            board = chess.Board(start_fen)
+            current_path = []
+            
+            for move_uci in moves:
+                try:
+                    move = chess.Move.from_uci(move_uci)
+                    san = board.san(move)
+                    board.push(move)
+                    current_path.append(san)
+                    
+                    target_fen = " ".join(board.fen().split()[:4])
+                    
+                    # Store Move Data for UI Execution
+                    m_ucis = moves[:len(current_path)]
+                    m_sans = list(current_path)
+
+                    # Check if target FEN is in repo (Case-sensitive!)
+                    pos = self.session.query(Position).filter(Position.fen.op('GLOB')(target_fen + "*")).first()
+                    if pos:
+                        is_in_repo = self.session.query(RepertoireMove).join(Move).filter(Move.to_position_id == pos.id).count() > 0
+                        if is_in_repo:
+                            # Found a way back!
+                            v_name = pos.variation_1 or pos.cached_v1 or pos.variation_2 or pos.cached_v2 or "Variante"
+                            results.append({
+                                "sequence": " ".join(current_path),
+                                "move_ucis": m_ucis,
+                                "move_sans": m_sans,
+                                "target_fen": target_fen,
+                                "variation_name": v_name,
+                                "eval": score,
+                                "moves_count": len(current_path)
+                            })
+                            # We stop at the first hit in this PV
+                            break
+                except Exception as e:
+                    import logging
+                    logging.error(f"Error in transposition path verification: {e}")
+                    break
+        
+        # Sort by evaluation descending (highest first) as requested by user
+        results.sort(key=lambda x: x["eval"], reverse=True)
+        return results
+
+    def _build_pgn_tree(self, node, pid, vp, vg, line, cb, max_l, transpos_mode=2, language='en'):
         # Prevent infinite loops from actual cycles
         if pid in vp: 
             node.comment = f"{node.comment} (Cycle)" if node.comment else "(Cycle)"
@@ -1629,15 +1641,44 @@ class CreatorBackend:
             if np and np.comment: new.comment = np.comment
             
             mn = board.fullmove_number
-            seg = f"{mn}. {m_db.san}" if board.turn == chess.WHITE else (f"{mn}... {m_db.san}" if not line else m_db.san)
+            san = localize_san(m_db.san, language)
+            seg = f"{mn}. {san}" if board.turn == chess.WHITE else (f"{mn}... {san}" if not line else san)
             
-            self._build_pgn_tree(new, m_db.to_position_id, vp, vg, f"{line} {seg}".strip(), cb, max_l, transpos_mode)
+            self._build_pgn_tree(new, m_db.to_position_id, vp, vg, f"{line} {seg}".strip(), cb, max_l, transpos_mode, language=language)
             
         vp.remove(pid)
 
-    def add_repertoire_level(self, name, idx):
-        if not self.session: return False, "No repo."
+    def _seed_default_levels(self):
+        """Adds default levels to a new/empty repertoire."""
+        if not self.session: return
         try:
+            count = self.session.query(RepertoireLevel).count()
+            if count == 0:
+                defaults = [
+                    "Grundlagen",
+                    "Tiefe Theorie",
+                    "Nachschlagewerk und Erklärungen"
+                ]
+                from opening_fenix.core.logger import logger
+                logger.info(f"CreatorBackend: Seeding default levels for '{self.active_repo_name}'")
+                for i, name in enumerate(defaults, 1):
+                    lvl = RepertoireLevel(name=name, order=i, target_elo=1500)
+                    self.session.add(lvl)
+                self.session.commit()
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Error seeding default levels: {e}")
+            self.session.rollback()
+
+    def add_repertoire_level(self, name, idx=None):
+        if not self.session: return False, "Kein Repertoire geladen."
+        
+        try:
+            if idx is None:
+                # Append at the end (Legacy behavior from first definition)
+                max_order = self.session.query(func.max(RepertoireLevel.order)).scalar()
+                idx = (max_order if max_order is not None else 0) + 1
+
             # 1. Update Levels (one by one to avoid unique constraint violations in SQLite)
             levels_to_shift = self.session.query(RepertoireLevel).filter(RepertoireLevel.order >= idx).order_by(desc(RepertoireLevel.order)).all()
             for lvl in levels_to_shift:
@@ -1750,53 +1791,14 @@ class CreatorBackend:
             self.session.rollback()
             return False, str(e)
 
-    def rename_repertoire(self, new_name):
-        if not self.active_repo_name: return False, "No active repo."
-        if not new_name: return False, "Invalid name."
-        old_dir = get_repertoire_dir(self.active_repo_name)
-        new_dir = get_repertoire_dir(new_name)
-        if os.path.exists(new_dir): return False, "Name already exists."
-        
-        try:
-            self.session.close()
-            self.db_manager.close()
-            import gc
-            gc.collect()
-            
-            # The new name might indicate moving to/from 'test/' 
-            # os.rename handles this if parent exists. Let's make sure parent exists
-            parent_dir = os.path.dirname(new_dir)
-            if not os.path.exists(parent_dir):
-                os.makedirs(parent_dir)
-                
-            os.rename(old_dir, new_dir)
-            
-            # Inside the new directory, we also need to rename the database files
-            old_db_file_inside = os.path.join(new_dir, f"{self.active_repo_name}.db")
-            new_db_file_inside = get_repertoire_db_path(new_name)
-            
-            if os.path.exists(old_db_file_inside):
-                os.rename(old_db_file_inside, new_db_file_inside)
-                
-                # Check for WAL/SHM
-                for ext in [".db-wal", ".db-shm"]:
-                    old_aux = os.path.join(new_dir, f"{self.active_repo_name}{ext}")
-                    new_aux = get_repertoire_db_path(new_name).replace(".db", ext)
-                    if os.path.exists(old_aux):
-                        os.rename(old_aux, new_aux)
-                        
-            self.load_repertoire(new_name)
-            return True, "Renamed."
-        except Exception as e:
-            return False, str(e)
-
     def export_db(self, path, start=None):
         if not self.active_repo_name: return False, "No active repo."
         try: shutil.copy2(get_repertoire_db_path(self.active_repo_name), path); return True, "Exported."
         except Exception as e: return False, str(e)
 
     def scan_and_get_impact(self, uci, fen):
-        pos = self.session.query(Position).filter_by(fen=" ".join(fen.split(" ")[:4])).first()
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return 0, 0
         move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
         if not move: return 0, 0
@@ -1922,6 +1924,15 @@ class CreatorBackend:
             
         result['level_inconsistencies'] = inconsistencies
         
+        # 6. Check Orphaned Lichess Data
+        all_lichess_fens = self.session.query(LichessData.fen).distinct().all()
+        orphaned_lichess = 0
+        for (l_fen,) in all_lichess_fens:
+            exists = self.session.query(Position.id).filter(Position.fen.like(l_fen + "%")).first()
+            if not exists:
+                orphaned_lichess += self.session.query(LichessData).filter_by(fen=l_fen).count()
+        result['orphaned_lichess'] = orphaned_lichess
+
         return result
 
     def repair_diagnostic_issues(self):
@@ -1931,23 +1942,10 @@ class CreatorBackend:
         from opening_fenix.core.models import Base
         self.db_manager._migrate_schema(Base)
         
-        # 2. Repair Gaps
-        while True:
-            subq = self.session.query(Move.from_position_id).join(RepertoireMove, Move.id == RepertoireMove.move_id).distinct()
-            gaps = self.session.query(Move).outerjoin(RepertoireMove, Move.id == RepertoireMove.move_id)\
-                .filter(RepertoireMove.id == None)\
-                .filter(Move.to_position_id.in_(subq)).all()
-            
-            if not gaps: break
-                
-            for g in gaps:
-                min_child_level = self.session.query(func.min(RepertoireMove.level))\
-                    .join(Move, RepertoireMove.move_id == Move.id)\
-                    .filter(Move.from_position_id == g.to_position_id).scalar()
-                
-                lvl = min_child_level if min_child_level is not None else 1
-                self.session.add(RepertoireMove(move_id=g.id, level=lvl))
-            self.session.flush()
+        # 2. Repair Gaps & Enforce Level Consistency
+        from opening_fenix.core.services.repair_service import repair_repertoire_health
+        repair_repertoire_health(self.session)
+        self.session.flush()
 
         # 3. Repair FEN Duplicates (Merging)
         duplicates = self.session.query(Position.fen).group_by(Position.fen).having(func.count(Position.id) > 1).all()
@@ -1981,6 +1979,9 @@ class CreatorBackend:
                     self.session.delete(p)
                 self.session.flush()
 
+        # 4. Repair Orphaned Lichess Data
+        self.cleanup_orphaned_lichess_data()
+
         self.session.commit()
         self.clear_cache()
         return 0
@@ -2007,1234 +2008,9 @@ class CreatorBackend:
         self.session.commit()
         self.clear_cache()
 
-# --- DIALOGS ---
-class DiagnosticDialog(QDialog):
-    def __init__(self, backend, parent=None):
-        super().__init__(parent)
-        set_consistent_icon(self)
-        self.setWindowTitle("Datenbank Diagnose")
-        self.setMinimumWidth(450)
-        self.backend = backend
-        self.init_ui()
-        self.run_diagnostic()
 
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        self.lbl_info = QLabel("Überprüfe Repertoire-Struktur...")
-        layout.addWidget(self.lbl_info)
-        
-        self.txt_results = QTextEdit()
-        self.txt_results.setReadOnly(True)
-        layout.addWidget(self.txt_results)
-        
-        self.btn_repair = QPushButton("🔧 Probleme beheben")
-        self.btn_repair.clicked.connect(self.repair)
-        self.btn_repair.setEnabled(False)
-        self.btn_repair.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
-        
-        btn_close = QPushButton("Schließen")
-        btn_close.clicked.connect(self.accept)
-        
-        h_btn = QHBoxLayout()
-        h_btn.addWidget(btn_close)
-        h_btn.addWidget(self.btn_repair)
-        layout.addLayout(h_btn)
 
-    def run_diagnostic(self):
-        self.issues = self.backend.run_diagnostic()
-        msg = "<b>Diagnose-Ergebnis:</b><br><br>"
-        
-        has_issues = False
-        
-        # Schema
-        if self.issues['schema']:
-            msg += f"<span style='color: red;'>⚠️ Veraltetes Datenbankschema. Fehlende Spalten: {', '.join(self.issues['schema'])}</span><br>"
-            has_issues = True
-        else:
-            msg += "<span style='color: green;'>✅ Datenbankschema ist aktuell.</span><br>"
-            
-        # Gaps
-        if self.issues['gaps'] > 0:
-            msg += f"<span style='color: red;'>⚠️ {self.issues['gaps']} fehlende Repertoire-Links (Löcher) gefunden.</span><br>"
-            has_issues = True
-        else:
-            msg += "<span style='color: green;'>✅ Keine Lücken in der Kette gefunden.</span><br>"
-            
-        # Duplicates
-        if self.issues['duplicates'] > 0:
-            msg += f"<span style='color: red;'>⚠️ {self.issues['duplicates']} duplizierte FENs (Geister-Stellungen) gefunden.</span><br>"
-            has_issues = True
-        else:
-            msg += "<span style='color: green;'>✅ Keine FEN-Duplikate gefunden.</span><br>"
-            
-        # Orphans
-        if self.issues['orphans'] > 0:
-            msg += f"<span style='color: orange;'>⚠️ {self.issues['orphans']} isolierte Stellungen (nicht erreichbar).</span><br>"
-            # We don't automatically delete orphans yet, just report them
-        else:
-            msg += "<span style='color: green;'>✅ Keine isolierten Stellungen.</span><br>"
-            
-        self.txt_results.setHtml(msg)
-        
-        if has_issues:
-            self.lbl_info.setText("Es wurden Probleme gefunden, die die Funktionalität beeinträchtigen können.")
-            self.btn_repair.setEnabled(True)
-            self.btn_repair.setVisible(True)
-        else:
-            self.lbl_info.setText("Alles in bester Ordnung! Deine Datenbank ist strukturell gesund.")
-            # Keine Aktion erforderlich, Reparatur-Button ausblenden
-            self.btn_repair.setVisible(False)
 
-    def repair(self):
-        self.btn_repair.setEnabled(False)
-        self.lbl_info.setText("Führe Reparatur und Kaskadierung durch... Bitte warten.")
-        QApplication.processEvents()
-        
-        self.backend.repair_diagnostic_issues()
-        
-        self.txt_results.append("<br><br><b>Reparatur erfolgreich abgeschlossen!</b>")
-        self.txt_results.append("Alle Löcher wurden gestopft und Duplikate zusammengeführt.")
-        self.lbl_info.setText("Probleme behoben.")
-        if hasattr(self.parent(), 'refresh_info'):
-            self.parent().refresh_info()
-
-
-class MaintenanceRepoWidget(QWidget):
-    """Custom row widget for the Centralized Maintenance list."""
-    def __init__(self, name, current_elo, parent=None):
-        super().__init__(parent)
-        self.name = name
-        self.setMinimumHeight(scale(45))
-        l = QHBoxLayout(self)
-        l.setContentsMargins(scale(10), scale(5), scale(10), scale(5))
-        
-        self.chk = QCheckBox()
-        self.chk.setChecked(True)
-        l.addWidget(self.chk)
-        
-        self.lbl_name = QLabel(name)
-        self.lbl_name.setStyleSheet("font-weight: bold;")
-        l.addWidget(self.lbl_name)
-        
-        l.addStretch()
-        
-        l.addWidget(QLabel("Lichess Elo:"))
-        self.combo_elo = QComboBox()
-        self.combo_elo.addItems(["low", "mid", "high", "masters"])
-        self.combo_elo.setCurrentText(current_elo)
-        self.combo_elo.setFixedWidth(scale(100))
-        l.addWidget(self.combo_elo)
-        
-        self.lbl_status = QLabel("")
-        self.lbl_status.setStyleSheet("color: #555; font-size: 11px; font-weight: normal; margin-left: 10px;")
-        self.lbl_status.setFixedWidth(scale(250))
-        l.addWidget(self.lbl_status)
-        
-        self._task_states = {"engine": "", "lichess": "", "stats": ""}
-
-    def update_status(self, task_type, progress, status_text):
-        if task_type in self._task_states:
-            if progress < 100:
-                self._task_states[task_type] = f"{task_type.capitalize()}: {progress}%"
-            else:
-                self._task_states[task_type] = f"{task_type.capitalize()}: {status_text}"
-        
-        active_states = [v for k, v in self._task_states.items() if v]
-        self.lbl_status.setText(" | ".join(active_states))
-
-    def is_checked(self):
-        return self.chk.isChecked()
-    
-    def set_checked(self, checked):
-        self.chk.setChecked(checked)
-        
-    def get_config(self):
-        return {
-            'name': self.name,
-            'elo': self.combo_elo.currentText()
-        }
-
-class RepoSettingsDialog(QDialog):
-    def __init__(self, parent=None, backend=None):
-        super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        set_consistent_icon(self)
-        self.main_window = parent
-        self.setWindowTitle("Repertoire Einstellungen")
-        self.setMinimumSize(scale(800), scale(600))
-        self.backend = backend
-        self.resize(scale(1500), scale(900))
-        self.setStyleSheet(get_creator_window_style())
-
-
-        self.init_ui()
-
-        self.refresh_info()
-
-    def init_ui(self):
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        self.sidebar = QListWidget()
-        self.sidebar.setObjectName("Sidebar")
-        self.sidebar.setFixedWidth(scale(200))
-
-        self.sidebar.currentRowChanged.connect(self.display_page)
-        for t in ["Repertoire-Daten", "Darstellung & Audio", "Import & Export", "Analyse & Werkzeuge", "Zentralisierte Wartung"]:
-            item = QListWidgetItem(t)
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.sidebar.addItem(item)
-        layout.addWidget(self.sidebar)
-        self.pages = QStackedWidget()
-        self.page_gen = QWidget(); self.init_page_general(self.page_gen)
-        self.page_design = QWidget(); self.init_page_design(self.page_design)
-        self.page_imex = QWidget(); self.init_page_imex(self.page_imex)
-        self.page_analysis = QWidget(); self.init_page_analysis(self.page_analysis)
-        self.page_maintenance = QWidget(); self.init_page_maintenance(self.page_maintenance)
-        self.pages.addWidget(self.page_gen)
-        self.pages.addWidget(self.page_design)
-        self.pages.addWidget(self.page_imex)
-        self.pages.addWidget(self.page_analysis)
-        self.pages.addWidget(self.page_maintenance)
-        
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setWidget(self.pages)
-        layout.addWidget(scroll, 1)
-        self.sidebar.setCurrentRow(0)
-
-    def display_page(self, index): self.pages.setCurrentIndex(index)
-
-    def init_page_general(self, page):
-        l = QVBoxLayout(page)
-        g_i = QGroupBox("Informationen")
-        f_i = QFormLayout(g_i)
-        self.l_n, self.l_d, self.l_e, self.l_m = QLabel(), QLabel(), QLabel(), QLabel()
-        h_n = QHBoxLayout()
-        h_n.addWidget(self.l_n)
-        b_edit_name = QPushButton("✎")
-        b_edit_name.setFixedSize(scale(30), scale(30))
-        b_edit_name.clicked.connect(self.rename_repertoire)
-        h_n.addWidget(b_edit_name)
-
-        f_i.addRow("Name:", h_n)
-
-        # Description Field
-        self.txt_description = QPlainTextEdit()
-        self.txt_description.setPlaceholderText("Beschreibe dein Repertoire...")
-        self.txt_description.setMinimumHeight(scale(100))
-        self.txt_description.textChanged.connect(self.save_description)
-        f_i.addRow("Beschreibung:", self.txt_description)
-
-
-        f_i.addRow("Analyse:", self.l_d)
-        
-        self.combo_repertoire_elo = QComboBox()
-        self.combo_repertoire_elo.addItems(["low", "mid", "high", "masters"])
-        self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
-        f_i.addRow("Ziel-Elo (Lichess):", self.combo_repertoire_elo)
-        
-        f_i.addRow("Züge:", self.l_m)
-        self.tbl_levels = QTableWidget()
-        self.tbl_levels.setColumnCount(3)
-        self.tbl_levels.setHorizontalHeaderLabels(["Lvl", "Name", "Ziel-Elo"])
-        self.tbl_levels.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl_levels.setMaximumHeight(scale(150))
-        self.tbl_levels.verticalHeader().setVisible(False)
-
-        self.tbl_levels.itemDoubleClicked.connect(self.rename_level)
-        
-        b_a_l = QPushButton("Level hinzufügen")
-        b_a_l.clicked.connect(self.add_level)
-        v_l = QVBoxLayout()
-        v_l.addWidget(self.tbl_levels)
-        v_l.addWidget(b_a_l)
-        f_i.addRow("Levels:", v_l)
-        b_r = QPushButton("Aktualisieren")
-        b_r.clicked.connect(self.refresh_info)
-        f_i.addRow("", b_r)
-        l.addWidget(g_i)
-        g_da = QGroupBox("Gefahrenzone")
-        v_da = QVBoxLayout(g_da)
-        b_d_r = QPushButton("Repertoire Löschen")
-        b_d_r.setStyleSheet(f"color: {COLORS['error_red']};")
-        b_d_r.clicked.connect(self.delete_repertoire_action)
-        v_da.addWidget(b_d_r)
-        l.addWidget(g_da)
-        l.addStretch()
-
-    def save_description(self):
-        desc = self.txt_description.toPlainText()
-        self.backend.set_meta("description", desc)
-        self.backend.session.commit()
-
-    def save_repertoire_elo(self, value):
-        from opening_fenix.core.logger import logger
-        logger.info(f"Saving Repertoire Elo: {value}")
-        self.backend.set_meta("elo", value)
-        self.backend.session.commit()
-
-    def init_page_design(self, page):
-        l = QVBoxLayout(page)
-        g_d = QGroupBox("Visuelles Design")
-        f_d = QFormLayout(g_d)
-        self.combo_theme = QComboBox()
-        for theme_name in THEMES.keys():
-            self.combo_theme.addItem(theme_name)
-        current_theme = self.main_window.config.get("theme", "Blau (Turnier)")
-        index = self.combo_theme.findText(current_theme)
-        if index >= 0:
-            self.combo_theme.setCurrentIndex(index)
-        self.combo_theme.currentTextChanged.connect(self.change_board_theme)
-        f_d.addRow("Brett Design:", self.combo_theme)
-        l.addWidget(g_d)
-        g_a = QGroupBox("Audio")
-        f_a = QFormLayout(g_a)
-        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
-        self.slider_vol.setRange(0, 100)
-        current_vol = self.main_window.config.get("master_volume", 100)
-        self.slider_vol.setValue(current_vol)
-        self.slider_vol.valueChanged.connect(self.change_volume)
-        f_a.addRow("Lautstärke:", self.slider_vol)
-        l.addWidget(g_a)
-
-        # --- Dynamic Tab Selection ---
-        g_tabs = QGroupBox("Sichtbare Tabs (Unten Rechts)")
-        f_tabs = QFormLayout(g_tabs)
-        
-        active_tabs = self.main_window.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
-        
-        self.chk_details = QCheckBox("Details")
-        self.chk_details.setChecked("DETAILS" in active_tabs)
-        self.chk_details.toggled.connect(self.save_tab_settings)
-        f_tabs.addRow(self.chk_details)
-        
-        self.chk_analysis = QCheckBox("Analysis")
-        self.chk_analysis.setChecked("ANALYSIS" in active_tabs)
-        self.chk_analysis.toggled.connect(self.save_tab_settings)
-        f_tabs.addRow(self.chk_analysis)
-        
-        self.chk_holes = QCheckBox("Rep. Loch Finder")
-        self.chk_holes.setChecked("HOLES" in active_tabs)
-        self.chk_holes.toggled.connect(self.save_tab_settings)
-        f_tabs.addRow(self.chk_holes)
-        
-        self.chk_kontrolle = QCheckBox("Rep. Kontrolle")
-        self.chk_kontrolle.setChecked("KONTROLLE" in active_tabs)
-        self.chk_kontrolle.toggled.connect(self.save_tab_settings)
-        f_tabs.addRow(self.chk_kontrolle)
-        
-        l.addWidget(g_tabs)
-        l.addStretch()
-
-    def save_tab_settings(self, _=None):
-        active_tabs = []
-        if self.chk_details.isChecked(): active_tabs.append("DETAILS")
-        if self.chk_analysis.isChecked(): active_tabs.append("ANALYSIS")
-        if self.chk_holes.isChecked(): active_tabs.append("HOLES")
-        if self.chk_kontrolle.isChecked(): active_tabs.append("KONTROLLE")
-        
-        self.main_window.config["creator_active_tabs"] = active_tabs
-        self.save_config()
-        self.main_window.apply_tab_visibility()
-
-    def change_board_theme(self, theme_name):
-        self.main_window.board_widget.set_theme(theme_name)
-        self.main_window.config["theme"] = theme_name
-        self.save_config()
-
-    def change_volume(self, value):
-        self.main_window.config["master_volume"] = value
-        self.save_config()
-        for sound in self.main_window.sounds.values():
-            sound.setVolume(value / 100.0)
-
-    def save_config(self):
-        config_path = os.path.join(get_user_dir(), "config.json")
-        try:
-            with open(config_path, "w") as f:
-                json.dump(self.main_window.config, f, indent=4)
-        except: pass
-
-    def init_page_imex(self, page):
-        l = QVBoxLayout(page)
-        g = QGroupBox("Import / Export")
-        v = QVBoxLayout(g)
-        h = QHBoxLayout()
-        b_p = QPushButton("PGN Text einfügen")
-        b_p.clicked.connect(self.paste_pgn_dialog)
-        b_f = QPushButton("PGN Datei einfügen")
-        b_f.clicked.connect(self.import_pgn_file_dialog)
-        h.addWidget(b_p)
-        h.addWidget(b_f)
-        v.addLayout(h)
-        b_e = QPushButton("Exportieren")
-        b_e.clicked.connect(self.export_repertoire)
-        v.addWidget(b_e)
-
-        v.addSpacing(scale(20))
-        btn_full_export = QPushButton("gesamtes Repertoire zum export vorbereiten")
-        btn_full_export.setObjectName("PrimaryButton")
-        btn_full_export.setMinimumHeight(scale(45))
-        btn_full_export.clicked.connect(self.prepare_full_course_export)
-        v.addWidget(btn_full_export)
-
-        l.addWidget(g)
-        l.addStretch()
-
-    def _sanitize_filename(self, filename):
-        if not filename: return "unnamed"
-        return re.sub(r'[\\/*?:"<>|]', '_', filename)
-
-    def prepare_full_course_export(self):
-        repo_name = self.backend.active_repo_name
-        if not repo_name: return
-        
-        repo_dir = get_repertoire_dir(repo_name)
-        if not os.path.exists(repo_dir):
-            os.makedirs(repo_dir, exist_ok=True)
-            
-        levels = self.backend.get_repertoire_levels()
-        if not levels:
-            QMessageBox.warning(self, "Export", "Keine Levels zum Exportieren gefunden.")
-            return
-
-        progress = QProgressDialog("Bereite Export vor...", "Abbrechen", 0, len(levels), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        safe_repo_name = self._sanitize_filename(repo_name)
-        
-        exported_files = []
-        for i, lvl in enumerate(levels):
-            if progress.wasCanceled():
-                break
-            
-            progress.setLabelText(f"Exportiere Level {lvl['order']}: {lvl['name']}...")
-            QApplication.processEvents()
-            
-            # Generating PGN
-            # We use transpos_mode=2 (Cut with sequence comment) as requested
-            pgn = self.backend.export_pgn(max_l=lvl['order'], transpos_mode=2)
-            
-            if pgn:
-                safe_lvl_name = self._sanitize_filename(lvl['name'])
-                filename = f"{safe_repo_name} Level {lvl['order']}-{safe_lvl_name}.pgn"
-                path = os.path.join(repo_dir, filename)
-                
-                with open(path, "w", encoding="utf-8") as f:
-                    f.write(pgn)
-                exported_files.append(filename)
-            
-            progress.setValue(i + 1)
-
-        if not progress.wasCanceled():
-            # Generate README.md
-            self._create_export_readme(repo_dir, repo_name, levels, exported_files)
-            
-            # Open folder
-            try:
-                os.startfile(os.path.abspath(repo_dir))
-            except:
-                # Fallback for non-Windows or if startfile fails
-                import subprocess
-                subprocess.run(['explorer', os.path.abspath(repo_dir)])
-                
-            QMessageBox.information(self, "Export Abgeschlossen", 
-                                  f"Das Repertoire wurde erfolgreich für den Export vorbereitet.\n\n"
-                                  f"Ordner: {repo_dir}\n"
-                                  f"Dateien erstellt: {len(exported_files)} PGNs + README.md")
-
-    def _create_export_readme(self, repo_dir, repo_name, levels, exported_files):
-        info = self.backend.get_repertoire_info()
-        color_name = "Weiß" if self.backend.get_repertoire_color() == 'w' else "Schwarz"
-        desc = info.get('description', 'Keine Beschreibung vorhanden.')
-        date_str = datetime.datetime.now().strftime("%d.%m.%Y")
-        
-        content = f"# {repo_name}\n\n"
-        content += f"## Beschreibung\n{desc}\n\n"
-        content += f"## Kurs-Details\n"
-        content += f"- **Farbe:** {color_name}\n"
-        content += f"- **Export-Datum:** {date_str}\n\n"
-        content += f"## Trainings-Struktur (Levels)\n"
-        for lvl in levels:
-            content += f"- **Level {lvl['order']}:** {lvl['name']}\n"
-        
-        content += f"\n## Technische Hinweise\n"
-        content += f"Die PGN-Dateien wurden so exportiert, dass Transpositionen (Stellungen, die über verschiedene Zugfolgen erreicht werden) abgeschnitten werden, um Redundanz zu vermeiden. Ein Kommentar im PGN weist auf die primäre Zugfolge hin.\n\n"
-        
-        content += f"## Dateien in diesem Ordner\n"
-        for f in exported_files:
-            content += f"- {f}\n"
-        content += f"- README.md\n"
-        
-        content += f"\n---\n*Generiert von Opening Fenix*"
-        
-        readme_path = os.path.join(repo_dir, "README.md")
-        with open(readme_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    def init_page_analysis(self, page):
-        l = QVBoxLayout(page)
-        lbl_info = QLabel("Hier kannst du 'Gute Züge' (Alternativen) berechnen lassen und die Prioritäts-Scores (Wahrscheinlichkeiten) aktualisieren.")
-        lbl_info.setWordWrap(True)
-        lbl_info.setStyleSheet("color: #555; font-style: italic; margin-bottom: 10px;")
-        l.addWidget(lbl_info)
-        
-        # --- Group 3: Structure Repair (NEW) ---
-        g_repair = QGroupBox("Repertoire-Diagnose & Reparatur")
-        v_repair = QVBoxLayout(g_repair)
-        lbl_rep_info = QLabel("Prüft die Datenbank auf fehlende Tabellen, Löcher in der Zug-Kette und fehlerhafte Level-Inkonsistenzen.")
-        lbl_rep_info.setWordWrap(True)
-        lbl_rep_info.setStyleSheet("color: #666; font-size: 11px;")
-        v_repair.addWidget(lbl_rep_info)
-        btn_repair = QPushButton("🔎 Datenbank-Diagnose")
-        btn_repair.clicked.connect(self.run_structure_repair)
-        v_repair.addWidget(btn_repair)
-        
-        btn_var_repair = QPushButton("🏷️ Variantennamen-Cache Reparatur")
-        btn_var_repair.setToolTip("Löscht alle vererbten Namen und berechnet sie basierend auf aktuellen Prioritäten neu.")
-        btn_var_repair.clicked.connect(self.run_variation_name_repair)
-        v_repair.addWidget(btn_var_repair)
-        l.addWidget(g_repair)
-
-        g_eng = QGroupBox("1. Engine Analyse (Alternative Züge)")
-        f_eng = QFormLayout(g_eng)
-        self.txt_engine_path = QLineEdit()
-        self.txt_engine_path.setPlaceholderText("Pfad zur Engine Executable...")
-        current_engine = self.main_window.config.get("engine_path", "")
-        self.txt_engine_path.setText(current_engine)
-        btn_browse_engine = QPushButton("...")
-        btn_browse_engine.setFixedWidth(30)
-        btn_browse_engine.clicked.connect(self.browse_engine_path)
-        h_eng_path = QHBoxLayout()
-        h_eng_path.addWidget(self.txt_engine_path)
-        h_eng_path.addWidget(btn_browse_engine)
-        f_eng.addRow("Engine Pfad:", h_eng_path)
-        self.s_d = QSpinBox()
-        self.s_d.setRange(10, 50)
-        self.s_d.setValue(20)
-        self.c_threads = QComboBox()
-        max_threads = multiprocessing.cpu_count()
-        for i in range(1, max_threads + 1):
-            self.c_threads.addItem(str(i))
-        self.c_threads.setCurrentIndex(max(0, min(3, max_threads - 1)))
-        f_eng.addRow("Tiefe:", self.s_d)
-        f_eng.addRow("Threads:", self.c_threads)
-        b_eng = QPushButton("Engine Analyse Starten")
-        b_eng.clicked.connect(self.start_analysis)
-        f_eng.addRow(b_eng)
-        self.pb_eng = QProgressBar()
-        self.l_eng_status = QLabel("Bereit")
-        l.addWidget(g_eng)
-        l.addWidget(self.l_eng_status)
-        l.addWidget(self.pb_eng)
-        g_lich = QGroupBox("2. Lichess Daten & Prio Scores")
-        v_lich = QVBoxLayout(g_lich)
-        
-        # --- Lichess API Token (NEW) ---
-        h_token = QHBoxLayout()
-        h_token.addWidget(QLabel("Lichess API Token:"))
-        self.txt_lichess_token = QLineEdit()
-        self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Password)
-        self.txt_lichess_token.setPlaceholderText("lip_...")
-        current_token = self.main_window.config.get("lichess_token", "")
-        self.txt_lichess_token.setText(current_token)
-        self.txt_lichess_token.textChanged.connect(self.on_token_changed)
-        
-        btn_test_token = QPushButton("Verbindung testen")
-        btn_test_token.clicked.connect(self.test_lichess_token)
-
-        self.chk_show_token = QCheckBox("Anzeigen")
-        self.chk_show_token.toggled.connect(lambda checked: self.txt_lichess_token.setEchoMode(
-            QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password))
-
-        h_token.addWidget(self.txt_lichess_token)
-        h_token.addWidget(self.chk_show_token)
-        h_token.addWidget(btn_test_token)
-        v_lich.addLayout(h_token)
-        # -----------------------------
-
-        self.bg_e = QButtonGroup(self)
-        r1 = QRadioButton("Low (<1400)")
-        r2 = QRadioButton("Mid (1400-2000)")
-        r3 = QRadioButton("High (>2000)")
-        r4 = QRadioButton("Masters")
-        r3.setChecked(True)
-        self.bg_e.addButton(r1, 1)
-        self.bg_e.addButton(r2, 2)
-        self.bg_e.addButton(r3, 3)
-        self.bg_e.addButton(r4, 4)
-        h_r = QHBoxLayout()
-        h_r.addWidget(r1)
-        h_r.addWidget(r2)
-        h_r.addWidget(r3)
-        h_r.addWidget(r4)
-        v_lich.addLayout(h_r)
-        b_lich = QPushButton("Daten laden & Scores berechnen")
-        b_lich.clicked.connect(self.start_fetch)
-        v_lich.addWidget(b_lich)
-        b_del_lich = QPushButton("Lichess Daten löschen")
-        b_del_lich.setStyleSheet(f"color: {COLORS['error_red']};")
-        b_del_lich.clicked.connect(self.delete_lichess_data)
-        v_lich.addWidget(b_del_lich)
-        self.pb_lich = QProgressBar()
-        self.l_lich_status = QLabel("Bereit")
-        l.addWidget(g_lich)
-        l.addWidget(self.l_lich_status)
-        l.addWidget(self.pb_lich)
-
-        # --- Group 4: Priority-Based Level Management (NEW) ---
-        g_prio_levels = QGroupBox("4. Prioritäts-basierte Level-Anpassung")
-        v_prio = QVBoxLayout(g_prio_levels)
-        lbl_prio_info = QLabel("Versetzt alle Züge, deren Priorität über einem Schwellenwert liegt, in ein wichtigeres Level (z.B. Level 1). Es werden nur Züge 'befördert', niemals herabgestuft.")
-        lbl_prio_info.setWordWrap(True)
-        lbl_prio_info.setStyleSheet("color: #666; font-size: 11px;")
-        v_prio.addWidget(lbl_prio_info)
-
-        f_prio = QFormLayout()
-        self.spin_prio_threshold = QDoubleSpinBox()
-        self.spin_prio_threshold.setRange(0.0, 100.0)
-        self.spin_prio_threshold.setSuffix(" %")
-        self.spin_prio_threshold.setValue(1.0)
-        self.spin_prio_threshold.setSingleStep(0.1)
-        f_prio.addRow("Prioritäts-Schwellenwert:", self.spin_prio_threshold)
-
-        self.combo_prio_target_level = QComboBox()
-        f_prio.addRow("Ziel-Level (Wichtigkeit):", self.combo_prio_target_level)
-        v_prio.addLayout(f_prio)
-
-        h_prio_btns = QHBoxLayout()
-        btn_prio_preview = QPushButton("🔎 Vorschau der Änderungen")
-        btn_prio_preview.clicked.connect(self.update_priority_level_impact_preview)
-        btn_prio_apply = QPushButton("🚀 Level anpassen (Nur Upgrade)")
-        btn_prio_apply.clicked.connect(self.apply_priority_level_change)
-        h_prio_btns.addWidget(btn_prio_preview)
-        h_prio_btns.addWidget(btn_prio_apply)
-        v_prio.addLayout(h_prio_btns)
-
-        l.addWidget(g_prio_levels)
-
-        # Kommentare bereinigen (Duplikate innerhalb einzelner Kommentare entfernen)
-        g_comm = QGroupBox("Kommentare bereinigen")
-        v_comm = QVBoxLayout(g_comm)
-        lbl_comm = QLabel("Bereinigt Kommentare, in denen derselbe Text durch fehlerhafte Importe mehrfach hintereinander wiederholt wurde. Nur innerhalb einzelner Kommentare, nicht datenbankweit.")
-        lbl_comm.setWordWrap(True)
-        lbl_comm.setStyleSheet("color: #666; font-size: 11px;")
-        v_comm.addWidget(lbl_comm)
-        b_comm = QPushButton("Kommentare deduplizieren")
-        b_comm.setToolTip("Entfernt Duplikate desselben Textes innerhalb eines einzelnen Kommentars.")
-        b_comm.clicked.connect(self.run_deduplicate_comments)
-        v_comm.addWidget(b_comm)
-
-        b_brackets = QPushButton("Kommentare bereinigen von [...]")
-        b_brackets.setToolTip("Entfernt alle eckigen Klammern und deren Inhalt aus den Kommentaren.")
-        b_brackets.clicked.connect(self.run_clean_brackets)
-        v_comm.addWidget(b_brackets)
-
-        l.addWidget(g_comm)
-        
-        # --- Group 5: Bulk Level Change (NEW) ---
-        g_bulk = QGroupBox("5. Massen-Aktionen (Alle Züge)")
-        v_bulk = QVBoxLayout(g_bulk)
-        lbl_bulk_info = QLabel("Setzt das Level ALLER Züge in diesem Repertoire auf das gewählte Ziel-Level. Nützlich für schnelle Reorganisationen.")
-        lbl_bulk_info.setWordWrap(True)
-        lbl_bulk_info.setStyleSheet("color: #666; font-size: 11px;")
-        v_bulk.addWidget(lbl_bulk_info)
-        
-        f_bulk = QFormLayout()
-        self.combo_bulk_level = QComboBox()
-        f_bulk.addRow("Ziel-Level:", self.combo_bulk_level)
-        v_bulk.addLayout(f_bulk)
-        
-        btn_bulk_apply = QPushButton("🚀 Alle Züge verschieben")
-        btn_bulk_apply.clicked.connect(self.apply_bulk_level_move)
-        v_bulk.addWidget(btn_bulk_apply)
-        l.addWidget(g_bulk)
-
-        l.addStretch()
-
-    def init_page_maintenance(self, page):
-        l = QVBoxLayout(page)
-        l.setSpacing(scale(15))
-        
-        lbl_h = QLabel("Zentralisierte Repertoire-Wartung")
-        lbl_h.setStyleSheet("font-size: 18px; font-weight: bold;")
-        l.addWidget(lbl_h)
-        
-        lbl_info = QLabel("Hier kannst du gleichzeitig für mehrere Repertoires eine Wartung (Engine Analyse, Lichess-Daten, Statistiken) durchführen. Ideal für 'Overnight'-Aufgaben.")
-        lbl_info.setWordWrap(True)
-        lbl_info.setStyleSheet("color: #666; font-style: italic;")
-        l.addWidget(lbl_info)
-        
-        # 1. Repertoire Selection
-        g_repos = QGroupBox("1. Repertoires auswählen")
-        v_repos = QVBoxLayout(g_repos)
-        self.list_maintenance_repos = QListWidget()
-        self.list_maintenance_repos.setMinimumHeight(scale(150))
-        # Populate later in refresh_info or a dedicated method
-        v_repos.addWidget(self.list_maintenance_repos)
-        
-        h_repo_ctrl = QHBoxLayout()
-        btn_sel_all = QPushButton("Alle auswählen")
-        btn_sel_none = QPushButton("Keine auswählen")
-        btn_sel_all.clicked.connect(lambda: self._select_all_maintenance_repos(True))
-        btn_sel_none.clicked.connect(lambda: self._select_all_maintenance_repos(False))
-        h_repo_ctrl.addWidget(btn_sel_all)
-        h_repo_ctrl.addWidget(btn_sel_none)
-        v_repos.addLayout(h_repo_ctrl)
-        l.addWidget(g_repos)
-        
-        # 2. Task & Config
-        h_mid = QHBoxLayout()
-        
-        g_tasks = QGroupBox("2. Aufgaben")
-        v_tasks = QVBoxLayout(g_tasks)
-        self.chk_m_engine = QCheckBox("Engine Analyse (Alternative Züge)")
-        self.chk_m_lichess = QCheckBox("Lichess Daten & Prio-Scores")
-        self.chk_m_stats = QCheckBox("Statistiken/Level aktualisieren")
-        self.chk_m_engine.setChecked(True)
-        self.chk_m_lichess.setChecked(True)
-        self.chk_m_stats.setChecked(True)
-        v_tasks.addWidget(self.chk_m_engine)
-        v_tasks.addWidget(self.chk_m_lichess)
-        v_tasks.addWidget(self.chk_m_stats)
-        h_mid.addWidget(g_tasks)
-        
-        g_cfg = QGroupBox("3. Einstellungen")
-        f_cfg = QFormLayout(g_cfg)
-        self.spin_m_depth = QSpinBox(); self.spin_m_depth.setRange(10, 50); self.spin_m_depth.setValue(20)
-        self.spin_m_threads = QSpinBox(); self.spin_m_threads.setRange(1, multiprocessing.cpu_count()); self.spin_m_threads.setValue(max(1, multiprocessing.cpu_count()-1))
-        f_cfg.addRow("Engine Tiefe:", self.spin_m_depth)
-        f_cfg.addRow("Engine Threads:", self.spin_m_threads)
-        h_mid.addWidget(g_cfg)
-        
-        l.addLayout(h_mid)
-        
-        # 3. Execution & Progress
-        g_exec = QGroupBox("4. Ausführung")
-        v_exec = QVBoxLayout(g_exec)
-        
-        self.btn_m_start = QPushButton("🚀 Wartung Starten")
-        self.btn_m_start.setMinimumHeight(scale(50))
-        self.btn_m_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; font-size: 14px;")
-        self.btn_m_start.clicked.connect(self.start_centralized_maintenance)
-        
-        self.btn_m_stop = QPushButton("⏹ Abbrechen")
-        self.btn_m_stop.setMinimumHeight(scale(40))
-        self.btn_m_stop.setVisible(False)
-        self.btn_m_stop.clicked.connect(self.stop_centralized_maintenance)
-        
-        v_exec.addWidget(self.btn_m_start)
-        v_exec.addWidget(self.btn_m_stop)
-        
-        v_exec.addSpacing(scale(10))
-        
-        self.lbl_m_overall = QLabel("Gesamt-Forschritt: -")
-        self.pb_m_overall = QProgressBar()
-        v_exec.addWidget(self.lbl_m_overall)
-        v_exec.addWidget(self.pb_m_overall)
-        
-        self.lbl_m_task = QLabel("Aktuelle Aufgabe: -")
-        self.pb_m_task = QProgressBar()
-        v_exec.addWidget(self.lbl_m_task)
-        v_exec.addWidget(self.pb_m_task)
-        
-        l.addWidget(g_exec)
-        l.addStretch()
-
-    def _select_all_maintenance_repos(self, checked):
-        for i in range(self.list_maintenance_repos.count()):
-            item = self.list_maintenance_repos.item(i)
-            widget = self.list_maintenance_repos.itemWidget(item)
-            if widget:
-                widget.set_checked(checked)
-
-    def _refresh_maintenance_repo_list(self):
-        self.list_maintenance_repos.clear()
-        repos = list_all_repertoires() # Now returns [{'name':..., 'elo':...}]
-        for r_info in repos:
-            item = QListWidgetItem(self.list_maintenance_repos)
-            widget = MaintenanceRepoWidget(r_info['name'], r_info['elo'])
-            item.setSizeHint(widget.sizeHint())
-            self.list_maintenance_repos.addItem(item)
-            self.list_maintenance_repos.setItemWidget(item, widget)
-
-    def start_centralized_maintenance(self):
-        selected_configs = []
-        for i in range(self.list_maintenance_repos.count()):
-            item = self.list_maintenance_repos.item(i)
-            widget = self.list_maintenance_repos.itemWidget(item)
-            if widget and widget.is_checked():
-                selected_configs.append(widget.get_config())
-        
-        if not selected_configs:
-            QMessageBox.warning(self, "Fehler", "Bitte wähle mindestens ein Repertoire aus.")
-            return
-            
-        tasks = {
-            'engine': self.chk_m_engine.isChecked(),
-            'lichess': self.chk_m_lichess.isChecked(),
-            'stats': self.chk_m_stats.isChecked()
-        }
-        
-        if not any(tasks.values()):
-            QMessageBox.warning(self, "Fehler", "Bitte wähle mindestens eine Aufgabe aus.")
-            return
-
-        engine_settings = {
-            'depth': self.spin_m_depth.value(),
-            'threads': self.spin_m_threads.value(),
-            'path': self.txt_engine_path.text()
-        }
-        
-        self.btn_m_start.setEnabled(False)
-        self.btn_m_stop.setVisible(True)
-        self.sidebar.setEnabled(False) 
-        
-        self.m_thread = MaintenanceThread(selected_configs, tasks, engine_settings)
-        self.m_thread.overall_progress_signal.connect(self.on_m_overall_progress)
-        self.m_thread.repo_status_signal.connect(self.on_m_repo_status)
-        self.m_thread.finished_signal.connect(self.on_m_finished)
-        self.m_thread.start()
-
-    def on_m_repo_status(self, repo_name, task_type, progress, status_text):
-        for i in range(self.list_maintenance_repos.count()):
-            item = self.list_maintenance_repos.item(i)
-            widget = self.list_maintenance_repos.itemWidget(item)
-            if widget and widget.name == repo_name:
-                widget.update_status(task_type, progress, status_text)
-                break
-
-    def stop_centralized_maintenance(self):
-        if hasattr(self, 'm_thread') and self.m_thread.isRunning():
-            self.btn_m_stop.setEnabled(False)
-            self.btn_m_stop.setText("Breche ab...")
-            self.m_thread.cancel()
-
-    def on_m_overall_progress(self, current, total, name):
-        self.pb_m_overall.setMaximum(total)
-        self.pb_m_overall.setValue(current)
-        self.lbl_m_overall.setText(f"Gesamt-Fortschritt: Repertoire {current} von {total} ({name})")
-
-    def on_m_task_progress(self, percentage, status):
-        self.pb_m_task.setValue(percentage)
-        self.lbl_m_task.setText(f"Aktuelle Aufgabe: {status}")
-
-    def on_m_finished(self, success, msg):
-        self.btn_m_start.setEnabled(True)
-        self.btn_m_stop.setVisible(False)
-        self.btn_m_stop.setEnabled(True)
-        self.btn_m_stop.setText("⏹ Abbrechen")
-        self.sidebar.setEnabled(True)
-        
-        if success:
-            QMessageBox.information(self, "Wartung Abgeschlossen", msg)
-        else:
-            QMessageBox.warning(self, "Wartung Unterbrochen", msg)
-        
-        self.refresh_info()
-
-    def update_priority_level_impact_preview(self):
-        threshold = self.spin_prio_threshold.value()
-        target_lvl = self.combo_prio_target_level.currentData()
-        if target_lvl is None: return
-        
-        count = self.backend.get_priority_level_impact(threshold, target_lvl)
-        QMessageBox.information(self, "Vorschau", f"Es wurden {count} Züge gefunden, die eine Priorität von ≥ {threshold}% haben und aktuell in einem weniger wichtigen Level als {target_lvl} sind.")
-
-    def apply_priority_level_change(self):
-        threshold = self.spin_prio_threshold.value()
-        target_lvl = self.combo_prio_target_level.currentData()
-        if target_lvl is None: return
-        
-        count = self.backend.get_priority_level_impact(threshold, target_lvl)
-        if count == 0:
-            QMessageBox.information(self, "Keine Änderungen", "Es wurden keine Züge gefunden, die den Kriterien entsprechen.")
-            return
-            
-        if QMessageBox.question(self, "Bestätigen", f"Möchtest du wirklich {count} Züge auf Level {target_lvl} hochstufen?\n\nHinweis: Bestehende Level 1 Züge bleiben Level 1.") == QMessageBox.StandardButton.Yes:
-            modified = self.backend.apply_priority_level_update(threshold, target_lvl)
-            QMessageBox.information(self, "Erfolg", f"{modified} Züge wurden erfolgreich auf Level {target_lvl} angepasst.")
-            self.refresh_info()
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-
-    def apply_bulk_level_move(self):
-        target_lvl = self.combo_bulk_level.currentData()
-        level_name = self.combo_bulk_level.currentText()
-        if target_lvl is None: return
-        
-        msg = f"Möchtest du wirklich ALLE Züge dieses Repertoires auf '{level_name}' setzen?"
-        if QMessageBox.question(self, "Bestätigung", msg) == QMessageBox.StandardButton.Yes:
-            count = self.backend.move_all_to_level(target_lvl)
-            QMessageBox.information(self, "Erfolg", f"{count} Züge wurden erfolgreich auf {level_name} gesetzt.")
-            self.refresh_info()
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-
-    def run_structure_repair(self):
-        dialog = DiagnosticDialog(self.backend, self)
-        dialog.exec()
-        if hasattr(self.main_window, 'update_ui_from_fen'):
-            self.main_window.update_ui_from_fen()
-
-    def run_variation_name_repair(self):
-        msg = ("Möchtest du den Variantennamen-Cache wirklich zurücksetzen und neu berechnen?\n\n"
-               "Dies löscht alle vererbten Namen und berechnet sie von der Grundstellung aus neu. "
-               "Deine manuell eingegebenen Namen bleiben dabei erhalten.")
-        if QMessageBox.question(self, "Bestätigung", msg) == QMessageBox.StandardButton.Yes:
-            self.main_window.setCursor(Qt.CursorShape.WaitCursor)
-            try:
-                self.backend.reset_and_repair_variation_names()
-                QMessageBox.information(self, "Erfolg", "Der Variantennamen-Cache wurde erfolgreich neu berechnet.")
-            finally:
-                self.main_window.setCursor(Qt.CursorShape.ArrowCursor)
-            
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-
-    def run_deduplicate_comments(self):
-        count = self.backend.deduplicate_comments_in_repo()
-        if count > 0:
-            QMessageBox.information(self, "Kommentare bereinigt", f"{count} Kommentare bereinigt (Duplikate innerhalb einzelner Kommentare entfernt).")
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-        else:
-            QMessageBox.information(self, "Keine Änderungen", "Es wurden keine doppelten Texte innerhalb einzelner Kommentare gefunden.")
-
-    def run_clean_brackets(self):
-        count = self.backend.clean_brackets_in_repo()
-        if count > 0:
-            QMessageBox.information(self, "Kommentare bereinigt", f"{count} Kommentare bereinigt (Klammern [...] entfernt).")
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-        else:
-            QMessageBox.information(self, "Keine Änderungen", "Es wurden keine Klammern [...] in den Kommentaren gefunden.")
-
-    def browse_engine_path(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Engine wählen", "", "Executable (*.exe);;All Files (*)")
-        if path:
-            self.txt_engine_path.setText(path)
-            self.main_window.config["engine_path"] = path
-            self.save_config()
-
-    def refresh_info(self):
-        self._refresh_maintenance_repo_list()
-        self.backend.scan_and_update_metadata()
-        i = self.backend.get_repertoire_info()
-        self.l_n.setText(i['name'])
-        
-        # Load description
-        self.txt_description.blockSignals(True)
-        self.txt_description.setPlainText(i.get('description', ''))
-        self.txt_description.blockSignals(False)
-
-        # Load Elo from metadata
-        elo = self.backend.get_meta("elo", "high").lower()
-        self.combo_repertoire_elo.blockSignals(True)
-        self.combo_repertoire_elo.setCurrentText(elo)
-        self.combo_repertoire_elo.blockSignals(False)
-
-        self.tbl_levels.setRowCount(0)
-        levels = self.backend.get_repertoire_levels()
-        for idx, lvl in enumerate(levels):
-            self.tbl_levels.insertRow(idx)
-            self.tbl_levels.setItem(idx, 0, QTableWidgetItem(str(lvl['order'])))
-            self.tbl_levels.setItem(idx, 1, QTableWidgetItem(lvl['name']))
-            
-            spin = QSpinBox()
-            spin.setRange(800, 4000)
-            spin.setValue(lvl.get('target_elo', 1500))
-            # Use a lambda that captures the current level order
-            spin.valueChanged.connect(lambda val, lo=lvl['order']: self.backend.update_level_elo(lo, val))
-            self.tbl_levels.setCellWidget(idx, 2, spin)
-
-        self.l_d.setText(i['depth'])
-        self.l_e.setText(i['elo'])
-        self.l_m.setText(str(i['moves']))
-
-        # Update the Common Moves Elo selector if it exists
-        if hasattr(self, 'combo_lichess_cat'):
-            current_elo_meta = i.get('elo', 'N/A')
-            if current_elo_meta != 'N/A':
-                vals = [v.strip() for v in current_elo_meta.split(",")]
-                if vals:
-                    current_sel = self.combo_lichess_cat.currentText()
-                    if current_sel not in vals:
-                        self.combo_lichess_cat.setCurrentText(vals[0])
-
-        # Updated current priority target level combo
-        current_data = self.combo_prio_target_level.currentData()
-        bulk_data = self.combo_bulk_level.currentData()
-        
-        self.combo_prio_target_level.blockSignals(True)
-        self.combo_bulk_level.blockSignals(True)
-        
-        self.combo_prio_target_level.clear()
-        self.combo_bulk_level.clear()
-        
-        for lvl in levels:
-            txt = f"Level {lvl['order']} ({lvl['name']})"
-            self.combo_prio_target_level.addItem(txt, userData=lvl['order'])
-            self.combo_bulk_level.addItem(txt, userData=lvl['order'])
-            
-        idx = self.combo_prio_target_level.findData(current_data)
-        if idx >= 0: self.combo_prio_target_level.setCurrentIndex(idx)
-        else: self.combo_prio_target_level.setCurrentIndex(0)
-        
-        idx_bulk = self.combo_bulk_level.findData(bulk_data)
-        if idx_bulk >= 0: self.combo_bulk_level.setCurrentIndex(idx_bulk)
-        else: self.combo_bulk_level.setCurrentIndex(0)
-        
-        self.combo_prio_target_level.blockSignals(False)
-        self.combo_bulk_level.blockSignals(False)
-
-    def delete_lichess_data(self):
-        cat = {1: 'low', 2: 'mid', 3: 'high', 4: 'masters'}[self.bg_e.checkedId()]
-        if QMessageBox.question(self, "Lichess-Daten löschen", f"ELO-Bereich '{cat}' löschen?") == QMessageBox.StandardButton.Yes:
-            s, m = self.backend.delete_lichess_data(cat)
-            (QMessageBox.information if s else QMessageBox.warning)(self, "Ergebnis", m)
-            self.refresh_info()
-
-    def start_analysis(self):
-        ep = self.txt_engine_path.text()
-        if not ep or not os.path.exists(ep):
-            ep = os.path.join(get_base_path(), "engines", os.path.basename(ep)) if ep else ""
-        if not ep or not os.path.exists(ep):
-            QMessageBox.warning(self, "Fehler", "Keine gültige Engine konfiguriert.")
-            return
-        self.l_eng_status.setText("Analysiere...")
-        self.pb_eng.setValue(0)
-        
-        # Cancel existing analysis if running
-        if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
-            self.w_eng.cancel()
-            self.w_eng.wait()
-            
-        threads = int(self.c_threads.currentText())
-        self.main_window.set_engine_button_blocked(True, "Engine blockiert während gesamter Engine Analysis")
-        self.w_eng = AnalysisThread(self.backend.active_repo_name, self.s_d.value(), threads, ep)
-        self.w_eng.progress_signal.connect(self.pb_eng.setValue)
-        self.w_eng.finished_signal.connect(self.on_analysis_finished)
-        self.w_eng.start()
-
-    def on_analysis_finished(self, success, msg):
-        self.l_eng_status.setText(msg)
-        self.main_window.set_engine_button_blocked(False) # Unblock
-        (QMessageBox.information if success else QMessageBox.warning)(self, "Fertig" if success else "Fehler", msg)
-        self.refresh_info()
-
-    def start_fetch(self):
-        cat = {1: 'low', 2: 'mid', 3: 'high', 4: 'masters'}[self.bg_e.checkedId()]
-        self.l_lich_status.setText(f"Lade {cat}...")
-        self.pb_lich.setValue(0)
-        
-        # Cancel existing fetch if running
-        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
-            self.l_lich_status.setText(f"Breche vorherigen Import ab...")
-            self.w_lich.cancel()
-            self.w_lich.wait()
-            
-        self.w_lich = LichessImportThread(self.backend.active_repo_name, cat)
-        self.w_lich.progress_signal.connect(self.pb_lich.setValue)
-        self.w_lich.finished_signal.connect(self.on_fetch_finished)
-        self.w_lich.start()
-
-    def on_token_changed(self, text):
-        self.main_window.config["lichess_token"] = text
-        self.save_config()
-
-    def test_lichess_token(self):
-        token = self.txt_lichess_token.text().strip()
-        if not token:
-            QMessageBox.warning(self, "Fehler", "Bitte gib zuerst ein Lichess API Token ein.")
-            return
-            
-        from opening_fenix.core.services.lichess_service import verify_lichess_token
-        
-        # Show a "Testing..." status or just execute (it's fast)
-        self.l_lich_status.setText("Teste Token...")
-        QApplication.processEvents()
-        
-        success, msg = verify_lichess_token(token)
-        self.l_lich_status.setText("Bereit")
-        
-        if success:
-            QMessageBox.information(self, "Erfolg", msg)
-        else:
-            QMessageBox.warning(self, "Fehler", msg)
-
-    def on_fetch_finished(self, success, msg):
-        self.l_lich_status.setText(msg)
-        if success:
-            # Trigger variation name repair after priority change
-            self.backend.reset_and_repair_variation_names()
-            
-        (QMessageBox.information if success else QMessageBox.warning)(self, "Fertig" if success else "Fehler", msg)
-        self.backend.clear_cache()
-        self.refresh_info()
-
-    def delete_repertoire_action(self):
-        if QMessageBox.question(self, "Löschen", "Repertoire wirklich löschen?") == QMessageBox.StandardButton.Yes:
-            s, m = self.backend.delete_repertoire()
-            (QMessageBox.information if s else QMessageBox.warning)(self, "Ergebnis", m)
-            self.accept()
-            # FIX: Get the main application window (not parent dialog) to call UI updates
-            app = QApplication.instance()
-            for widget in app.topLevelWidgets():
-                if widget.objectName() == "MainWindow" or hasattr(widget, "on_repertoire_deleted"):
-                    widget.on_repertoire_deleted()
-                    break
-
-    def task_fin(self, s, m):
-        self.l_p.setText(m)
-        (QMessageBox.information if s else QMessageBox.warning)(self, "Fertig", m)
-        self.refresh_info()
-
-    def add_level(self):
-        n, ok = QInputDialog.getText(self, "Level", "Name:")
-        idx, ok2 = QInputDialog.getInt(self, "Pos", "Index:", self.tbl_levels.rowCount()+1, 1, 100)
-        if ok and n:
-            s, m = self.backend.add_repertoire_level(n, idx)
-            (QMessageBox.information if s else QMessageBox.warning)(self, "Ergebnis", m)
-            self.refresh_info()
-    
-    def rename_repertoire(self):
-        old_name = self.l_n.text()
-        new_name, ok = QInputDialog.getText(self, "Umbenennen", "Neuer Name:", text=old_name)
-        if ok and new_name and new_name != old_name:
-            s, m = self.backend.rename_repertoire(new_name)
-            if s:
-                current_profile = None
-                config_path = os.path.join(get_user_dir(), "config.json")
-                if os.path.exists(config_path):
-                    try:
-                        with open(config_path, "r") as f:
-                            config = json.load(f)
-                            current_profile = config.get("last_profile")
-                    except: pass
-                if current_profile:
-                    try:
-                        from opening_fenix.core.training import TrainingManager
-                        class DummyRepoManager:
-                            def __init__(self): self.active_repertoire_name = None
-                        tm = TrainingManager(current_profile, DummyRepoManager())
-                        tm.rename_repertoire_in_user_data(old_name, new_name)
-                        tm.user_db.close()
-                    except Exception as e:
-                        print(f"Warning: Could not update user profile data: {e}")
-                QMessageBox.information(self, "Erfolg", m)
-                self.refresh_info()
-                self.main_window.setWindowTitle(f"Creator - {new_name}")
-            else:
-                QMessageBox.warning(self, "Fehler", m)
-
-    def rename_level(self, item):
-        if item.column() != 1: return
-        old_name = item.text()
-        try:
-            new_name, ok = QInputDialog.getText(self, "Level Umbenennen", "Neuer Name:", text=old_name)
-            if ok and new_name:
-                s, m = self.backend.rename_repertoire_level(old_name, new_name)
-                if s:
-                    self.refresh_info()
-                else:
-                    QMessageBox.warning(self, "Fehler", m)
-        except Exception: pass
-
-    def paste_pgn_dialog(self):
-        d = QDialog(self)
-        d.setWindowTitle("Einfügen")
-        l = QVBoxLayout(d)
-        t = QPlainTextEdit()
-        l.addWidget(t)
-        c = QComboBox()
-        for lvl in self.backend.get_repertoire_levels():
-            c.addItem(f"L{lvl['order']} ({lvl['name']})", userData=lvl['order'])
-        l.addWidget(c)
-        b = QPushButton("Import")
-        b.clicked.connect(lambda: self.run_pgn_import(t.toPlainText(), d, c.currentData()))
-        l.addWidget(b)
-        d.exec()
-
-    def import_pgn_file_dialog(self):
-        p, _ = QFileDialog.getOpenFileName(self, "PGN", "", "*.pgn")
-        if p:
-            lvls = self.backend.get_repertoire_levels()
-            n, ok = QInputDialog.getItem(self, "Level", "Level:", [f"L{l['order']} ({l['name']})" for l in lvls], 0, False)
-            if ok:
-                sel = next((l for l in lvls if f"L{l['order']} ({l['name']})" == n), None)
-                if sel:
-                    self.start_pgn_import(p, sel['order'])
-
-    def run_pgn_import(self, text, d, lvl):
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.pgn', delete=False, encoding='utf-8') as tf:
-            tf.write(text)
-            temp_path = tf.name
-        
-        d.accept()
-        self.start_pgn_import(temp_path, lvl, is_temp=True)
-
-    def start_pgn_import(self, path, lvl_order, is_temp=False):
-        repo_name = self.backend.active_repo_name
-        side = self.backend.get_meta("color", "w")
-        levels = self.backend.get_repertoire_levels()
-        lvl_name = next((l['name'] for l in levels if l['order'] == lvl_order), f"Level {lvl_order}")
-
-        progress = QProgressDialog("Importiere PGN...", "Abbrechen", 0, 100, self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setMinimumDuration(0)
-        progress.setValue(0)
-
-        thread = PGNImportThread(path, repo_name, side, lvl_name, lvl_order)
-        thread.progress_signal.connect(progress.setValue)
-        
-        def on_finished(success, msg):
-            progress.close()
-            if is_temp:
-                try: os.remove(path)
-                except: pass
-            
-            if success:
-                # Trigger variation name repair after import
-                self.backend.reset_and_repair_variation_names()
-                QMessageBox.information(self, "Erfolg", msg)
-            else:
-                QMessageBox.warning(self, "Fehler", msg)
-            
-            self.refresh_info()
-            if hasattr(self.main_window, 'update_ui_from_fen'):
-                self.main_window.update_ui_from_fen()
-
-        thread.finished_signal.connect(on_finished)
-        thread.start()
-        # Keep a reference to avoid GC
-        self._import_thread = thread
-
-    def export_repertoire(self):
-        d = ExportDialog(self.backend, self)
-        if d.exec() == QDialog.DialogCode.Accepted:
-            fmt, scope, transpos_mode, max_l = d.result_data
-            start = self.main_window.board_widget.board.fen() if scope == "current" else None
-            if fmt == "pgn":
-                p = QProgressDialog("Exportiere...", "Abbrechen", 0, 0, self)
-                p.setWindowModality(Qt.WindowModality.WindowModal)
-                def cb(c): p.setValue(c); return p.wasCanceled()
-                pgn = self.backend.export_pgn(start, transpos_mode, cb, max_l)
-                if not p.wasCanceled() and pgn:
-                    path, _ = QFileDialog.getSaveFileName(self, "Speichern", f"{self.backend.active_repo_name}.pgn", "*.pgn")
-                    if path:
-                        with open(path, "w", encoding="utf-8") as f: f.write(pgn)
-                        QMessageBox.information(self, "OK", "Exportiert.")
-            else:
-                path, _ = QFileDialog.getSaveFileName(self, "Speichern", f"{self.backend.active_repo_name}_export.db", "*.db")
-                if path:
-                    s, m = self.backend.export_db(path, start)
-                    (QMessageBox.information if s else QMessageBox.warning)(self, "Ergebnis", m)
 
 class SortableTreeWidgetItem(QTreeWidgetItem):
     def __lt__(self, other):
@@ -3246,6 +2022,47 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
             if v2 is None: v2 = -1.0
             return v1 < v2
         return self.text(col) < other.text(col)
+
+
+class NewRepertoireDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Neues Repertoire")
+        self.setFixedWidth(scale(400))
+        set_consistent_icon(self)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(scale(15))
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+
+        form = QFormLayout()
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText("z.B. Caro-Kann für Fortgeschrittene")
+        
+        self.color_combo = QComboBox()
+        self.color_combo.addItem("Weiß", "w")
+        self.color_combo.addItem("Schwarz", "b")
+        
+        form.addRow("Name:", self.name_input)
+        form.addRow("Deine Farbe:", self.color_combo)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        btn_ok = QPushButton("Erstellen")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Abbrechen")
+        btn_cancel.clicked.connect(self.reject)
+        
+        btns.addStretch()
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_ok)
+        layout.addLayout(btns)
+
+    def get_data(self):
+        return self.name_input.text().strip(), self.color_combo.currentData()
 
 class CreatorWindow(QMainWindow):
     def _is_ui_valid(self):
@@ -3260,14 +2077,16 @@ class CreatorWindow(QMainWindow):
         except (AttributeError, RuntimeError):
             return False
 
-    def __init__(self, repertoire_name=None, initial_fen=None):
+    def __init__(self, repertoire_name=None, initial_fen=None, training_manager=None, is_test=False):
         super().__init__()
         self.setWindowTitle("Opening Fenix - Repertoire Creator")
         set_consistent_icon(self)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         self.resize(scale(1400), scale(900))
 
-        self.backend = CreatorBackend()
+        self.backend = CreatorBackend(is_test=is_test)
+        self.training_manager = training_manager
+        self.is_test = is_test
         self._processing_event = False  # Re-entrancy guard for eventFilter
         self.engine_thread = None
         self.sounds, self.piece_icons = {}, {}
@@ -3279,6 +2098,13 @@ class CreatorWindow(QMainWindow):
         self.i_v2 = None
         self.i_v3 = None
         self.txt_c = None
+        
+        # Hole Finder Async
+        self.hole_thread = None
+        self.hole_anim_timer = QTimer(self)
+        self.hole_anim_timer.timeout.connect(self._animate_hole_button)
+        self._hole_dots = 0
+
 
         cp = os.path.join(get_user_dir(), "config.json")
         if os.path.exists(cp):
@@ -3299,7 +2125,10 @@ class CreatorWindow(QMainWindow):
 
         # Tab visibility defaults
         if "creator_active_tabs" not in self.config:
-            self.config["creator_active_tabs"] = ["DETAILS", "ANALYSIS"]
+            self.config["creator_active_tabs"] = ["DETAILS", "ANALYSIS", "TRANSPOSITIONS"]
+        elif "TRANSPOSITIONS" not in self.config["creator_active_tabs"]:
+            # Auto-enable for the first time
+            self.config["creator_active_tabs"].append("TRANSPOSITIONS")
         
         self.init_icons()
         self.init_ui()
@@ -3308,29 +2137,30 @@ class CreatorWindow(QMainWindow):
         # Lazy load sounds to improve startup time
         QTimer.singleShot(200, self.init_sounds)
 
-        st = self.config.get("theme")
+        st = self.get_setting("theme")
         if st: self.board_widget.set_theme(st)
         QApplication.instance().installEventFilter(self)
 
         rtl = repertoire_name or self.config.get("last_active_repertoire")
-        if rtl:
-            db_path = get_repertoire_db_path(rtl)
-            if db_path and os.path.exists(db_path):
-                self.backend.load_repertoire(rtl)
-                self._load_saved_elo_or_autoselect()
-                self.set_board_to_fen(initial_fen or chess.STARTING_FEN)
-                self.update_structure_tree()
-                self.init_management_slots()
-                
-                # Load persistent overhaul session if exists
-                session_dt = self.backend.get_overhaul_session_start()
-                if session_dt:
-                    self.overhaul_start = session_dt
-                    self.overhaul_active = True
-                    self.overhaul_paused = True
-            else:
-                from opening_fenix.core.logger import logger
-                logger.warning(f"Creator: Could not find database for repertoire '{rtl}' at {db_path}")
+        self.is_test = is_test
+
+        if rtl and isinstance(rtl, str):
+            # Probe is_test if not explicitly provided (for backward compatibility / last_active)
+            if self.is_test is None:
+                db_path_reg = get_repertoire_db_path(rtl, is_test=False)
+                db_path_test = get_repertoire_db_path(rtl, is_test=True)
+                if os.path.exists(db_path_test): self.is_test = True
+                elif os.path.exists(db_path_reg): self.is_test = False
+            
+            self.load_repertoire(rtl, training_manager, self.is_test)
+            self.set_board_to_fen(initial_fen or chess.STARTING_FEN)
+            
+            # Load persistent overhaul session if exists
+            session_dt = self.backend.get_overhaul_session_start()
+            if session_dt:
+                self.overhaul_start = session_dt
+                self.overhaul_active = True
+                self.overhaul_paused = True
 
             self.setWindowTitle(f"Creator - {rtl}")
             self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
@@ -3340,6 +2170,28 @@ class CreatorWindow(QMainWindow):
             self.setWindowTitle("Creator - Kein Repertoire")
             # We can automatically prompt for a new repertoire if none is found
             QTimer.singleShot(100, self.new_repertoire_dialog)
+
+    def get_setting(self, key, default=None):
+        if self.training_manager:
+            # TrainingManager.get_setting returns the setting value directly
+            return self.training_manager.get_setting(key) or self.config.get(key, default)
+        return self.config.get(key, default)
+
+    def set_setting(self, key, value):
+        if self.training_manager:
+            self.training_manager.set_setting(key, value)
+        self.config[key] = value
+        self.save_config()
+
+    def get_notation_lang(self):
+        return self.get_setting("notation_language", "en")
+
+    def save_config(self):
+        config_path = os.path.join(get_user_dir(), "config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(self.config, f, indent=4)
+        except: pass
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -3415,6 +2267,14 @@ class CreatorWindow(QMainWindow):
         self.btn_lichess.clicked.connect(self.open_lichess_analysis)
         self.repolish(self.btn_lichess)
         self.toolbar.addWidget(self.btn_lichess)
+
+        # Repertoire Resources Button
+        self.btn_resources = QPushButton("📁 Ressourcen")
+        self.btn_resources.setProperty("class", "GlassPill")
+        self.repolish(self.btn_resources)
+        self.btn_resources.setToolTip("Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)")
+        self.btn_resources.clicked.connect(self.open_repertoire_folder)
+        self.toolbar.addWidget(self.btn_resources)
 
         top_layout.addWidget(self.toolbar)
 
@@ -3583,29 +2443,41 @@ class CreatorWindow(QMainWindow):
         h_eng_settings.setSpacing(scale(5))
         
         self.combo_depth = QComboBox()
-        self.combo_depth.setEditable(False)
+        self.combo_depth.setEditable(True)
+        self.combo_depth.lineEdit().setReadOnly(True)
+        self.combo_depth.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combo_depth.addItems([str(i) for i in range(10, 51, 2)])
         self.combo_depth.setCurrentText("20")
         self.combo_depth.setFixedWidth(scale(48))
         self.combo_depth.setProperty("class", "SmallCombo")
         self.repolish(self.combo_depth)
+        self.combo_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_depth.lineEdit().installEventFilter(self)
         
         self.combo_threads = QComboBox()
-        self.combo_threads.setEditable(False)
+        self.combo_threads.setEditable(True)
+        self.combo_threads.lineEdit().setReadOnly(True)
+        self.combo_threads.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_threads.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         max_threads = multiprocessing.cpu_count()
         self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
         self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
         self.combo_threads.setFixedWidth(scale(48))
         self.combo_threads.setProperty("class", "SmallCombo")
         self.repolish(self.combo_threads)
+        self.combo_threads.lineEdit().installEventFilter(self)
         
         self.combo_lines = QComboBox()
-        self.combo_lines.setEditable(False)
+        self.combo_lines.setEditable(True)
+        self.combo_lines.lineEdit().setReadOnly(True)
+        self.combo_lines.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_lines.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_lines.addItems([str(i) for i in range(1, 11)])
         self.combo_lines.setCurrentText("5")
         self.combo_lines.setFixedWidth(scale(48))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
+        self.combo_lines.lineEdit().installEventFilter(self)
         
         lbl_depth = QLabel("Depth:")
         lbl_threads = QLabel("Threads:")
@@ -3683,15 +2555,21 @@ class CreatorWindow(QMainWindow):
         self.tab_kontrolle = QWidget()
         self.init_kontrolle_tab()
         
+        # Transposition Finder Tab
+        self.tab_transpositions = QWidget()
+        self.init_transpositions_tab()
+        
         # Store all possible tabs in a mapping
         self._all_tabs = {
             "DETAILS": (self.tab_details, "DETAILS"),
             "ANALYSIS": (self.tab_analysis, "ANALYSIS"),
             "HOLES": (self.tab_holes, "Rep. Loch Finder"),
-            "KONTROLLE": (self.tab_kontrolle, "Rep. Kontrolle")
+            "KONTROLLE": (self.tab_kontrolle, "Rep. Kontrolle"),
+            "TRANSPOSITIONS": (self.tab_transpositions, "Transpositionen")
         }
         
         self.apply_tab_visibility()
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         self.right_splitter.addWidget(self.tabs)
         # Symmetrical layout for bottoms: Ensure tabs (Details panel) is flushed to bottom
@@ -3726,6 +2604,14 @@ class CreatorWindow(QMainWindow):
                 self.tabs.setCurrentIndex(i)
                 break
 
+    def _on_tab_changed(self, index):
+        if not self._is_ui_valid(): return
+        widget = self.tabs.widget(index)
+        if widget == self.tab_transpositions:
+            self.update_transpositions_tab()
+        elif widget == self.tab_kontrolle:
+            self.update_overhaul_progress()
+
     def apply_tab_visibility(self):
         # Determine which tabs should be visible
         active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
@@ -3740,7 +2626,7 @@ class CreatorWindow(QMainWindow):
             self.tabs.removeTab(0)
             
         # Re-add requested tabs in specific order
-        order = ["DETAILS", "ANALYSIS", "HOLES", "KONTROLLE"]
+        order = ["DETAILS", "ANALYSIS", "TRANSPOSITIONS", "HOLES", "KONTROLLE"]
         for key in order:
             if key in active_tabs and key in self._all_tabs:
                 widget, title = self._all_tabs[key]
@@ -3785,7 +2671,10 @@ class CreatorWindow(QMainWindow):
         if not self.backend.session:
             return
             
-        current_elo_meta = self.backend.session.query(Metadata).filter_by(key="lichess_elo").first()
+        current_elo_meta = self.backend.session.query(Metadata).filter_by(key="elo").first()
+        if not current_elo_meta:
+             current_elo_meta = self.backend.session.query(Metadata).filter_by(key="lichess_elo").first()
+             
         if current_elo_meta and current_elo_meta.value:
             # If there's a comma-separated list, take the first valid entry
             vals = [v.strip() for v in current_elo_meta.value.split(",")]
@@ -3794,12 +2683,13 @@ class CreatorWindow(QMainWindow):
                     self.combo_lichess_cat.setCurrentText(v)
                     return # Successfully loaded from DB
 
+
         # If we reach here, there was no saved metadata, so we autoselect
         self._autoselect_elo_range()
 
     def _autoselect_elo_range(self):
         desc = self.backend.get_repertoire_description()
-        if not desc:
+        if not desc or not isinstance(desc, str):
             return
         
         desc_lower = desc.lower()
@@ -3901,7 +2791,11 @@ class CreatorWindow(QMainWindow):
 
     def set_board_to_fen(self, fen):
         self.save_current_details_now()
-        rf, ms = self.backend.get_path_to_fen(fen)
+        res = self.backend.get_path_to_fen(fen)
+        if isinstance(res, tuple) and len(res) == 2:
+            rf, ms = res
+        else:
+            rf, ms = None, []
         
         if not rf:
             from opening_fenix.core.logger import logger
@@ -3943,14 +2837,14 @@ class CreatorWindow(QMainWindow):
         # Only update details if not currently being edited by the user to avoid overwriting typing
         if not self.details_changed or force_details:
             self.block_signals_details(True)
-            if d:
-                self.i_v1.setText(d['variation_1'] if not d['v1_inherited'] else "")
-                self.i_v1.setPlaceholderText(d['variation_1'] if (d['v1_inherited'] and d['variation_1']) else "Variante 1")
-                self.i_v2.setText(d['variation_2'] if not d['v2_inherited'] else "")
-                self.i_v2.setPlaceholderText(d['variation_2'] if (d['v2_inherited'] and d['variation_2']) else "Variante 2")
-                self.i_v3.setText(d['variation_3'] if not d['v3_inherited'] else "")
-                self.i_v3.setPlaceholderText(d['variation_3'] if (d['v3_inherited'] and d['variation_3']) else "Variante 3")
-                self.txt_c.setPlainText(d['comment'])
+            if d and isinstance(d, dict):
+                self.i_v1.setText(str(d.get('variation_1','')) if not d.get('v1_inherited') else "")
+                self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else "Variante 1")
+                self.i_v2.setText(str(d.get('variation_2','')) if not d.get('v2_inherited') else "")
+                self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else "Variante 2")
+                self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
+                self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else "Variante 3")
+                self.txt_c.setPlainText(str(d.get('comment','')))
             else:
                 self.i_v1.setText(""); self.i_v1.setPlaceholderText("Variante 1")
                 self.i_v2.setText(""); self.i_v2.setPlaceholderText("Variante 2")
@@ -3967,6 +2861,7 @@ class CreatorWindow(QMainWindow):
         
         # This function was heavily optimized with eager loading!
         cs = self.backend.get_candidate_moves(f)
+        
         # Hide/show Aktiv column dynamically
         repo_color = self.backend.get_repertoire_color()
         is_my_turn = True if repo_color not in ['w', 'b'] else (self.board_widget.board.turn == (repo_color == 'w'))
@@ -3979,11 +2874,16 @@ class CreatorWindow(QMainWindow):
         l_map = {l['order']: l['name'] for l in lvls}
         large_font = QFont()
         large_font.setPointSize(16)
+        board = self.board_widget.board
+        move_num = board.fullmove_number
+        prefix = f"{move_num}. " if board.turn == chess.WHITE else f"{move_num}... "
+        
         for c in cs:
             nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
             nag_s = f" {nag_map[c['nag']]}" if c['nag'] in nag_map else ""
             
-            san_text = f"{c['san']}{nag_s}"
+            lang = self.get_notation_lang()
+            san_text = f"{prefix}{localize_san(c['san'], lang)}{nag_s}"
             
             # OVERHAUL V2: Add checkmark if branch is fully reviewed
             if self.overhaul_active and not self.overhaul_paused:
@@ -4031,7 +2931,8 @@ class CreatorWindow(QMainWindow):
         common_moves = self.backend.get_lichess_common_moves(f, cat)
         self.table_common_moves.setRowCount(len(common_moves))
         for r, mv in enumerate(common_moves):
-            item_san = QTableWidgetItem(mv['san'])
+            lang = self.get_notation_lang()
+            item_san = QTableWidgetItem(localize_san(mv['san'], lang))
             item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
             self.table_common_moves.setItem(r, 0, item_san)
             self.table_common_moves.setItem(r, 1, QTableWidgetItem(str(mv['total'])))
@@ -4040,6 +2941,25 @@ class CreatorWindow(QMainWindow):
             self.table_common_moves.setItem(r, 4, QTableWidgetItem(f"{mv['draw_pct']:.1f}%"))
 
         self.update_board_arrows()
+        
+        # --- TRANSPOSITION DETECTION ---
+        transpos_list = self.backend.check_immediate_transposition(f)
+        idx = self.tabs.indexOf(self.tab_transpositions)
+        if idx != -1:
+            if len(transpos_list) > 0:
+                # Vibrant Gold
+                self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
+                # Try to load icon, if not found, it stays empty
+                icon_path = os.path.join(get_base_path(), "assets", "Icons", "sync.png")
+                if os.path.exists(icon_path):
+                    self.tabs.setTabIcon(idx, QIcon(icon_path))
+            else:
+                self.tabs.tabBar().setTabTextColor(idx, QColor()) # Reset to palette default
+                self.tabs.setTabIcon(idx, QIcon())
+            
+            # If current tab is Transpositionen, refresh it
+            if self.tabs.currentIndex() == idx:
+                self.update_transpositions_tab()
 
     def block_signals_details(self, b):
         if not self._is_ui_valid():
@@ -4159,6 +3079,11 @@ class CreatorWindow(QMainWindow):
         
         # Fetch good_moves and depth from DB
         clean_fen = " ".join(fen.split(" ")[:4])
+        
+        if not self.backend.session:
+            QMessageBox.warning(self, "Debug Info", "Datenbank-Verbindung ist nicht aktiv. Bitte das Repertoire neu laden.")
+            return
+
         pos_entry = self.backend.session.query(Position).filter_by(fen=clean_fen).first()
 
         title = "Stellungs-Analyse (Debug)"
@@ -4238,7 +3163,11 @@ class CreatorWindow(QMainWindow):
         QMessageBox.information(self, "Erfolg", "Zug wurde hinzugefügt. Ändere nun das Level erneut, um die Kaskadierung zu triggern.")
 
     def delete_move_action(self, u):
-        m, p = self.backend.scan_and_get_impact(u, self.board_widget.board.fen())
+        res = self.backend.scan_and_get_impact(u, self.board_widget.board.fen())
+        if isinstance(res, (tuple, list)) and len(res) == 2:
+            m, p = res
+        else:
+            m, p = [], []
         if QMessageBox.question(self, "Löschen", f"Sicher? {m} Züge und {p} Positionen werden gelöscht.") == QMessageBox.StandardButton.Yes:
             self.backend.delete_move(u, self.board_widget.board.fen())
             self.update_ui_from_fen()
@@ -4252,7 +3181,11 @@ class CreatorWindow(QMainWindow):
         self.update_ui_from_fen()
 
     def set_level_strong_action(self, mid, l):
-        count, variations = self.backend.get_strong_level_impact(mid)
+        res = self.backend.get_strong_level_impact(mid)
+        if isinstance(res, (tuple, list)) and len(res) == 2:
+            count, variations = res
+        else:
+            count, variations = 0, []
         if count == 0:
             self.backend.update_move_level_strong(mid, l)
             self.update_ui_from_fen()
@@ -4298,6 +3231,16 @@ class CreatorWindow(QMainWindow):
             self.engine_thread.toggle_analysis(active)
             if active: 
                 self.engine_thread.set_position(self.board_widget.board.fen())
+        elif active:
+            # Situation 1: Engine thread was not initialized due to missing path
+            QMessageBox.warning(self, "Engine Fehler", 
+                "Kein gültiger Engine-Pfad gefunden.\n\nBitte setze einen gültigen Engine-Pfad in den Repertoire-Einstellungen (Werkzeuge-Tab), um die Analyse nutzen zu können.")
+            
+            # Reset button UI state
+            self.btn_engine_toggle.blockSignals(True)
+            self.btn_engine_toggle.setChecked(False)
+            self._on_engine_toggle_toggled(False)
+            self.btn_engine_toggle.blockSignals(False)
 
     def update_engine_output(self, d):
         if not d or isinstance(d[0], str): return
@@ -4322,6 +3265,114 @@ class CreatorWindow(QMainWindow):
 
     def _on_settings_closed(self):
         self.repo_settings_dialog = None
+
+    def delete_repertoire_action(self):
+        """Actual deletion of the active repertoire files and closing the window."""
+        repo_name = self.backend.active_repo_name
+        if not repo_name:
+            return
+            
+        # 1. Stop all threads in this window to release locks
+        if hasattr(self, 'engine_thread') and self.engine_thread:
+            self.engine_thread.running = False
+            self.engine_thread.is_active = False
+            self.engine_thread.wait(1000) # Wait up to 1 second
+            
+        # 2. Close backend to release database locks
+        self.backend.close()
+        
+        # 3. Small wait for the OS to finalize handle releases
+        time.sleep(0.3)
+        
+        # 4. Robust delete with retries
+        repo_dir = get_repertoire_dir(repo_name)
+        
+        def remove_readonly(func, path, _):
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+
+        success = False
+        last_err = ""
+        for attempt in range(3):
+            try:
+                if os.path.exists(repo_dir):
+                    shutil.rmtree(repo_dir, onerror=remove_readonly)
+                success = True
+                break
+            except Exception as e:
+                last_err = str(e)
+                time.sleep(0.5) # Wait longer between retries
+        
+        if success:
+            # 5. Notify application if possible
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "on_repertoire_deleted"):
+                    w.on_repertoire_deleted()
+            
+            # 6. Close the creator window
+            self.close()
+        else:
+            QMessageBox.critical(self, "Fehler beim Löschen", 
+                f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {last_err}")
+
+    def import_pgn_file_dialog(self):
+        """Opens a file dialog to select and import a PGN file."""
+        if not self.backend.active_repo_name: return
+        path, _ = QFileDialog.getOpenFileName(self, "PGN Datei wählen", "", "PGN Dateien (*.pgn)")
+        if not path: return
+        self._start_pgn_import(path)
+
+    def paste_pgn_dialog(self):
+        """Opens a multi-line input dialog to paste PGN text."""
+        if not self.backend.active_repo_name: return
+        text, ok = QInputDialog.getMultiLineText(self, "PGN Text einfügen", "PGN Inhalt:")
+        if not (ok and text.strip()): return
+        
+        # Save to temp file
+        temp_dir = os.path.join(get_user_dir(), "tmp")
+        if not os.path.exists(temp_dir): os.makedirs(temp_dir, exist_ok=True)
+        path = os.path.join(temp_dir, "temp_import.pgn")
+        with open(path, "w", encoding="utf-8") as f: f.write(text)
+        self._start_pgn_import(path)
+
+    def _start_pgn_import(self, pgn_path):
+        """Asks for target level and starts the import thread."""
+        levels = self.backend.get_repertoire_levels()
+        if not levels:
+            QMessageBox.warning(self, "Import", "Keine Level gefunden. Bitte erstelle zuerst ein Level in den Einstellungen.")
+            return
+            
+        level_choices = [f"Lvl {l['order']}: {l['name']}" for l in levels]
+        choice, ok = QInputDialog.getItem(self, "Ziel-Level", "In welches Level sollen die Züge importiert werden?", level_choices, 0, False)
+        if not ok: return
+        
+        idx = level_choices.index(choice)
+        target_lvl = levels[idx]
+        
+        self.p_pgn = QProgressDialog("Importiere PGN...", "Abbrechen", 0, 100, self)
+        self.p_pgn.setWindowModality(Qt.WindowModality.WindowModal)
+        self.p_pgn.show()
+        
+        side = self.backend.get_repertoire_color()
+        self.w_pgn = PGNImportThread(
+            pgn_path, 
+            self.backend.active_repo_name, 
+            side, 
+            target_lvl['name'], 
+            target_lvl['order']
+        )
+        self.w_pgn.progress_signal.connect(self.p_pgn.setValue)
+        self.w_pgn.finished_signal.connect(self._on_pgn_import_finished)
+        self.w_pgn.start()
+
+    def _on_pgn_import_finished(self, success, message):
+        if hasattr(self, 'p_pgn'): self.p_pgn.close()
+        if success:
+            QMessageBox.information(self, "Erfolg", message)
+            self.update_ui_from_fen()
+            self.update_structure_tree()
+        else:
+            QMessageBox.warning(self, "Import Fehler", message)
 
     def update_structure_tree(self):
         self.combo_structure.blockSignals(True)
@@ -4353,29 +3404,42 @@ class CreatorWindow(QMainWindow):
         self.combo_structure.blockSignals(False)
 
     def load_repertoire_dialog(self):
-        from opening_fenix.gui.dialogs.settings_dialog import LoadRepertoireDialog
-        d = LoadRepertoireDialog(self)
-        if d.exec() == QDialog.DialogCode.Accepted:
-            if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog:
-                self.repo_settings_dialog.close()
-            self.backend.load_repertoire(d.selected_repo)
-            self._load_saved_elo_or_autoselect()
+        from .repo_selection_dialog import RepoSelectionDialog
+        d = RepoSelectionDialog(self)
+        if d.exec():
+            self.load_repertoire(d.selected_repo)
             self.set_board_to_fen(chess.STARTING_FEN)
-            self.update_structure_tree()
-            self.init_management_slots()
-            self.setWindowTitle(f"Creator - {d.selected_repo}")
-            self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
-            self.board_widget.update()
             self.init_management_slots() # Refresh level dropdown
 
+    def load_repertoire(self, repo_name, training_manager=None, is_test=False):
+        """Switches the active repertoire and refreshes all UI components."""
+        if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog:
+            self.repo_settings_dialog.close()
+        
+        if training_manager:
+            self.training_manager = training_manager
+        
+        self.is_test = is_test
+        self.backend.load_repertoire(repo_name, is_test)
+        self._load_saved_elo_or_autoselect()
+        self.update_structure_tree()
+        self.init_management_slots()
+        self.setWindowTitle(f"Creator - {repo_name}")
+        self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
+        self.board_widget.update()
+
     def new_repertoire_dialog(self):
-        n, ok = QInputDialog.getText(self, "Neu", "Name:")
-        if ok and n:
-            if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog:
-                self.repo_settings_dialog.close()
-            self.backend.load_repertoire(n)
-            self.update_ui_from_fen()
-            self.init_management_slots() # Refresh level dropdown
+        d = NewRepertoireDialog(self)
+        if d.exec():
+            n, color = d.get_data()
+            if n:
+                self.load_repertoire(n)
+                # Set initial color metadata
+                self.backend.set_meta("color", color)
+                # Ensure UI reflects the color (flip board)
+                self.board_widget.flipped = (color == 'b')
+                self.board_widget.update()
+                self.set_board_to_fen(chess.STARTING_FEN)
 
     def update_board_arrows(self):
         self.board_widget.explorer_arrows = []
@@ -4471,12 +3535,34 @@ class CreatorWindow(QMainWindow):
             if event.key() == Qt.Key.Key_Right:
                 self.go_forward()
                 return True
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            # Check if click is on one of our settings boxes (now through the internal lineEdit)
+            from PyQt6.QtWidgets import QLineEdit
+            if isinstance(obj, QLineEdit) and obj.parent() in [self.combo_depth, self.combo_threads, self.combo_lines]:
+                # Trigger the dropdown menu
+                obj.parent().showPopup()
+                return True
+
         return super().eventFilter(obj, event)
 
     def repolish(self, widget):
         if widget:
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def open_repertoire_folder(self):
+        """Opens the active repertoire's folder in Windows Explorer."""
+        repo_name = self.backend.active_repo_name
+        if not repo_name:
+            return
+        
+        from opening_fenix.core.utils import get_repertoire_dir
+        path = get_repertoire_dir(repo_name)
+        
+        if os.path.exists(path):
+            os.startfile(path)
+        else:
+            QMessageBox.warning(self, "Ordner nicht gefunden", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}")
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
@@ -4500,13 +3586,16 @@ class CreatorWindow(QMainWindow):
         mode_layout = QHBoxLayout()
         mode_layout.addWidget(QLabel("<b>Such-Modus:</b>"))
         self.btn_mode_holes = QRadioButton("Lücken finden (Verschollene Züge)")
-        self.btn_mode_level = QRadioButton("Prioritäts-Check (Repertoire-Kontrolle)")
+        self.btn_mode_level = QRadioButton("Prioritäts-Check (Häufigkeit)")
+        self.btn_mode_level_check = QRadioButton("Level-Check (Aufstieg prüfen)")
         self.btn_mode_holes.setChecked(True)
         self.mode_group = QButtonGroup(self)
         self.mode_group.addButton(self.btn_mode_holes)
         self.mode_group.addButton(self.btn_mode_level)
+        self.mode_group.addButton(self.btn_mode_level_check)
         mode_layout.addWidget(self.btn_mode_holes)
         mode_layout.addWidget(self.btn_mode_level)
+        mode_layout.addWidget(self.btn_mode_level_check)
         mode_layout.addStretch()
         ctrl_layout.addLayout(mode_layout)
         
@@ -4538,13 +3627,19 @@ class CreatorWindow(QMainWindow):
         # Connect mode toggle to show/hide level selector
         def on_mode_toggle():
             is_level_mode = self.btn_mode_level.isChecked()
+            is_level_check = self.btn_mode_level_check.isChecked()
             self.combo_hole_level.setVisible(is_level_mode)
             self.lbl_hole_level.setVisible(is_level_mode)
-            self.lbl_hole_elo.setVisible(not is_level_mode)
-            self.combo_hole_elo.setVisible(not is_level_mode)
+            
+            # Hide threshold and ELO for Level Check
+            self.lbl_hole_threshold.setVisible(not is_level_check)
+            self.spin_hole_threshold.setVisible(not is_level_check)
+            self.lbl_hole_elo.setVisible(not is_level_mode and not is_level_check)
+            self.combo_hole_elo.setVisible(not is_level_mode and not is_level_check)
         
         self.btn_mode_holes.toggled.connect(on_mode_toggle)
         self.btn_mode_level.toggled.connect(on_mode_toggle)
+        self.btn_mode_level_check.toggled.connect(on_mode_toggle)
         
         # Initial state
         self.combo_hole_level.setVisible(False)
@@ -4609,7 +3704,7 @@ class CreatorWindow(QMainWindow):
         layout.addWidget(self.card_stats)
         
         # Settings Group
-        settings_group = QGroupBox("Filter & Einstellungen")
+        settings_group = QGroupBox("Filter && Einstellungen")
         settings_layout = QGridLayout(settings_group)
         settings_layout.setSpacing(scale(10))
         
@@ -4657,6 +3752,244 @@ class CreatorWindow(QMainWindow):
         
         layout.addStretch()
 
+    def init_transpositions_tab(self):
+        layout = QVBoxLayout(self.tab_transpositions)
+        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        layout.setSpacing(scale(15))
+        
+        # Header with Deep Search Button
+        h_header = QHBoxLayout()
+        lbl_head = QLabel("Gefundene Transpositionen")
+        lbl_head.setStyleSheet("font-size: 16px; font-weight: bold;")
+        h_header.addWidget(lbl_head)
+        h_header.addStretch()
+        
+        self.btn_deep_transpos = QPushButton("🔍 Deep Search (Engine)")
+        self.btn_deep_transpos.setMinimumHeight(scale(35))
+        self.btn_deep_transpos.setProperty("class", "GlassPill")
+        self.repolish(self.btn_deep_transpos)
+        self.btn_deep_transpos.clicked.connect(self.run_deep_transposition_search)
+        h_header.addWidget(self.btn_deep_transpos)
+        layout.addLayout(h_header)
+        
+        # Table for Results
+        self.table_transpositions = QTableWidget(0, 3)
+        self.table_transpositions.setHorizontalHeaderLabels(["Variante", "Ziellinie", "Eval"])
+        self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_transpositions.verticalHeader().setVisible(False)
+        self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
+        
+        header = self.table_transpositions.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        
+        layout.addWidget(self.table_transpositions)
+        
+        self.lbl_transpos_status = QLabel("Bereit.")
+        self.lbl_transpos_status.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-style: italic;")
+        layout.addWidget(self.lbl_transpos_status)
+
+    def update_transpositions_tab(self):
+        fen = self.board_widget.board.fen()
+        if not fen: return
+        
+        # 1. Potential Future Transpositions (Next moves starting from HERE)
+        future_transpos = self.backend.check_immediate_transposition(fen)
+        
+        self.table_transpositions.setRowCount(0)
+        
+        # Display Future ones (Immediate Alerts)
+        for ft in future_transpos:
+            row = self.table_transpositions.rowCount()
+            self.table_transpositions.insertRow(row)
+            
+            it_name = QTableWidgetItem(f"★ {ft['variation_name']}")
+            # Store full dict for execution
+            it_name.setData(Qt.ItemDataRole.UserRole, {
+                "type": "immediate",
+                "move_uci": ft['move_uci'],
+                "move_san": ft['move_san'],
+                "target_fen": ft['target_fen']
+            }) # FEN for jumping and move for saving
+            self.table_transpositions.setItem(row, 0, it_name)
+            
+            it_move = QTableWidgetItem(f"Zug: {ft['move_san']}")
+            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_transpositions.setItem(row, 1, it_move)
+            
+            it_info = QTableWidgetItem("Sofort")
+            it_info.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_info.setForeground(QColor("#FFD700")) # Highlight Gold
+            self.table_transpositions.setItem(row, 2, it_info)
+        
+        if self.table_transpositions.rowCount() == 0:
+            self.lbl_transpos_status.setText("Keine unmittelbaren Transpositionen gefunden. Nutze 'Deep Search' für längere Wege.")
+        else:
+            self.lbl_transpos_status.setText(f"{self.table_transpositions.rowCount()} Transpositions-Möglichkeiten erkannt.")
+            
+    def run_deep_transposition_search(self):
+        fen = self.board_widget.board.fen()
+        if not fen: return
+        
+        ep = self.config.get("engine_path")
+        if not ep or not os.path.exists(ep):
+            QMessageBox.warning(self, "Engine Fehler", "Kein Engine-Pfad in den Einstellungen hinterlegt.")
+            return
+            
+        self.btn_deep_transpos.setEnabled(False)
+        self.btn_deep_transpos.setText("⏳ Suche läuft...")
+        self.lbl_transpos_status.setText("Engine analysiert Stellung...")
+        
+        # Capture results found in real-time to avoid loss on early exit
+        self._captured_transpos_results = []
+        
+        from opening_fenix.core.threads import TranspositionSearchThread
+        t = TranspositionSearchThread(
+            fen, 
+            ep, 
+            threads=int(self.combo_threads.currentText()),
+            depth=22,
+            multipv=8
+        )
+        t.finished_signal.connect(self.on_deep_search_results)
+        t.info_signal.connect(self.on_transposition_info)
+        t.start()
+        # Keep reference
+        self._temp_transpos_thread = t
+
+    def on_transposition_info(self, partial_pvs):
+        """Called repeatedly during engine analysis to check for early transpositions."""
+        if not self._temp_transpos_thread or not self._temp_transpos_thread.isRunning():
+            return
+
+        fen = self.board_widget.board.fen()
+        results = self.backend.find_engine_approved_transpositions(fen, partial_pvs)
+        
+        if results:
+            # Capture the hit before stopping
+            self._captured_transpos_results.extend(results)
+            # Found one! Stop the engine early.
+            self._temp_transpos_thread.stop()
+            self.lbl_transpos_status.setText("Transposition gefunden! Präsentiere Ergebnisse...")
+
+    def on_deep_search_results(self, engine_pvs):
+        self.btn_deep_transpos.setEnabled(True)
+        self.btn_deep_transpos.setText("🔍 Deep Search (Engine)")
+        
+        if not engine_pvs:
+            self.lbl_transpos_status.setText("Keine Engine-Ergebnisse.")
+            return
+            
+        # Process through backend
+        fen = self.board_widget.board.fen()
+        engine_results = self.backend.find_engine_approved_transpositions(fen, engine_pvs)
+        
+        # Merge with captured results (ensures no loss on early exit)
+        final_results = engine_results
+        if hasattr(self, '_captured_transpos_results'):
+            # Simple merge: add unique targets
+            existing_fens = {r['target_fen'] for r in final_results}
+            for cr in self._captured_transpos_results:
+                if cr['target_fen'] not in existing_fens:
+                    final_results.append(cr)
+                    existing_fens.add(cr['target_fen'])
+
+        # Clear direct transpositions
+        self.table_transpositions.setRowCount(0)
+        
+        if not final_results:
+            self.lbl_transpos_status.setText("Keine engine-geprüften Wege zurück ins Repertoire gefunden.")
+            # Refresh direct ones
+            self.update_transpositions_tab()
+            return
+
+        for r in final_results:
+            row = self.table_transpositions.rowCount()
+            self.table_transpositions.insertRow(row)
+            
+            it_name = QTableWidgetItem(r["variation_name"])
+            # Deep search target FEN and full move path for execution
+            it_name.setData(Qt.ItemDataRole.UserRole, {
+                "type": "deep",
+                "move_ucis": r.get("move_ucis", []),
+                "move_sans": r.get("move_sans", []),
+                "target_fen": r["target_fen"]
+            })
+            self.table_transpositions.setItem(row, 0, it_name)
+            
+            it_seq = QTableWidgetItem(r["sequence"])
+            self.table_transpositions.setItem(row, 1, it_seq)
+            
+            ev = r["eval"] / 100.0
+            it_eval = QTableWidgetItem(f"{ev:+.2f}")
+            it_eval.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if ev > 0.5: it_eval.setForeground(QColor("#2ecc71"))
+            elif ev < -0.5: it_eval.setForeground(QColor("#e74c3c"))
+            self.table_transpositions.setItem(row, 2, it_eval)
+            
+        self.lbl_transpos_status.setText(f"{len(final_results)} engine-geprüfte Wege gefunden.")
+
+    def on_transposition_double_clicked(self, item):
+        tw = item.tableWidget()
+        if not tw: return
+        it0 = tw.item(item.row(), 0)
+        if not it0: return
+        data = it0.data(Qt.ItemDataRole.UserRole)
+        if not data: return
+        
+        if isinstance(data, dict):
+            # NEW LOGIC: Use move data for saving to repertoire
+            m_type = data.get("type")
+            target_fen = data.get("target_fen")
+            
+            if m_type == "immediate":
+                uci = data.get("move_uci")
+                if uci:
+                    move = chess.Move.from_uci(uci)
+                    # This call adds the move to the backend, plays sound, and updates UI
+                    self.on_board_move(move)
+                elif target_fen:
+                    self.set_board_to_fen(target_fen)
+            
+            elif m_type == "deep":
+                ucis = data.get("move_ucis", [])
+                sans = data.get("move_sans", [])
+                
+                if ucis and sans:
+                    # Execute move sequence
+                    self.save_current_details_now()
+                    for u, s in zip(ucis, sans):
+                        f_fen = self.board_widget.board.fen()
+                        try:
+                            m = chess.Move.from_uci(u)
+                            if m in self.board_widget.board.legal_moves:
+                                self.board_widget.board.push(m)
+                                # Save each move to the repertoire
+                                self.backend.add_move(f_fen, u, s)
+                            else:
+                                break
+                        except:
+                            break
+                    
+                    self.board_widget.update()
+                    self.play_sound("move")
+                    self.update_ui_from_fen()
+                    self.trigger_background_enrichment(self.board_widget.board.fen())
+                elif target_fen:
+                    self.set_board_to_fen(target_fen)
+        
+        elif isinstance(data, list): # Legacy Path (UCI list) support
+            self.go_start()
+            for uci in data:
+                m = chess.Move.from_uci(uci)
+                self.board_widget.board.push(m)
+            self.board_widget.update()
+            self.update_ui_from_fen()
+        elif isinstance(data, str): # Legacy FEN support
+            self.set_board_to_fen(data)
+
     def toggle_overhaul_pause(self):
         self.overhaul_paused = not self.overhaul_paused
         self._update_overhaul_ui_state()
@@ -4665,7 +3998,7 @@ class CreatorWindow(QMainWindow):
     def _update_overhaul_ui_state(self):
         if not self.overhaul_active:
             self.btn_overhaul_start.setText("▶ Session Starten")
-            self.btn_overhaul_start.setProperty("class", "")
+            self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
             self.btn_overhaul_pause.setVisible(False)
             self.btn_overhaul_next.setEnabled(False)
             self.lbl_overhaul_status.setText("Keine aktive Session")
@@ -4677,15 +4010,16 @@ class CreatorWindow(QMainWindow):
                 self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
                 self.btn_overhaul_pause.setVisible(False)
                 self.btn_overhaul_next.setEnabled(False)
-                self.lbl_overhaul_status.setText(f"Session Pausiert (Start: {self.overhaul_start.strftime('%d.%m. %H:%M')})")
+                self.lbl_overhaul_status.setText(f"Session Pausiert (Start: {self.overhaul_start.strftime('%H:%M:%S')})")
             else:
                 self.btn_overhaul_start.setText("⏹ Session Stoppen")
                 self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
                 self.btn_overhaul_pause.setVisible(True)
                 self.btn_overhaul_pause.setText("⏸ Pause")
                 self.btn_overhaul_next.setEnabled(True)
-                self.lbl_overhaul_status.setText(f"Session Aktiv (Seit: {self.overhaul_start.strftime('%d.%m. %H:%M')})")
+                self.lbl_overhaul_status.setText(f"Session Aktiv (Seit: {self.overhaul_start.strftime('%H:%M:%S')})")
             
+            # FILTERS REMAIN LOCKED AS LONG AS SESSION IS ACTIVE (including paused)
             self.combo_overhaul_level.setEnabled(False)
             self.combo_overhaul_variation.setEnabled(False)
         
@@ -4775,51 +4109,96 @@ class CreatorWindow(QMainWindow):
             self._update_overhaul_ui_state()
 
     def run_hole_scan(self):
-        self.btn_hole_scan.setEnabled(False)
-        self.btn_hole_scan.setText("Scanne...")
-        QApplication.processEvents()
+        if self.hole_thread and self.hole_thread.isRunning():
+            return
+            
+        is_hole_mode = self.btn_mode_holes.isChecked()
+        is_level_mode = self.btn_mode_level.isChecked()
+        is_level_check = self.btn_mode_level_check.isChecked()
         
-        try:
-            if self.btn_mode_holes.isChecked():
-                # Traditional Hole Finder
-                holes = self.backend.find_repertoire_holes(self.spin_hole_threshold.value(), self.combo_hole_elo.currentText())
-                self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
-                self.btn_hole_exempt.setVisible(True)
-            else:
-                # Priority Check
-                level = self.combo_hole_level.currentData()
-                if level is None:
-                    QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
-                    return
-                threshold = self.spin_hole_threshold.value()
-                holes = self.backend.find_priority_mismatches(level, threshold)
-                self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
-                self.btn_hole_exempt.setVisible(False)
+        if is_hole_mode: mode = "holes"
+        elif is_level_mode: mode = "priority"
+        else: mode = "level_check"
+        
+        threshold = self.spin_hole_threshold.value()
+        elo = self.combo_hole_elo.currentText()
+        level = self.combo_hole_level.currentData()
+        
+        if mode == "priority" and level is None:
+            QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+            return
 
-            self.table_holes.setRowCount(len(holes))
-            for i, h in enumerate(holes):
-                pop_val = h.get('popularity', 0)
-                item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
-                item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+        self.btn_hole_scan.setEnabled(False)
+        self.btn_hole_scan.setText("Scannend")
+        self._hole_dots = 0
+        self.hole_anim_timer.start(500)
+        
+        self.hole_thread = HoleFinderThread(
+            self.backend.active_repo_name,
+            self.backend.is_test,
+            threshold,
+            elo,
+            mode,
+            level
+        )
+        self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)
+        self.hole_thread.start()
+
+    def _animate_hole_button(self):
+        self._hole_dots = (self._hole_dots + 1) % 4
+        dots = "." * self._hole_dots
+        self.btn_hole_scan.setText(f"Scannend{dots}")
+
+    def _on_hole_scan_finished(self, holes, mode):
+        self.hole_anim_timer.stop()
+        self.btn_hole_scan.setEnabled(True)
+        self.btn_hole_scan.setText("🔎 Scan Repertoire")
+        
+        if mode == "holes":
+            self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
+            self.btn_hole_exempt.setVisible(True)
+        elif mode == "level_check":
+            self.table_holes.setHorizontalHeaderLabels(["Info", "Analyse", "Unser Zug"])
+            self.btn_hole_exempt.setVisible(False)
+        else:
+            self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
+            self.btn_hole_exempt.setVisible(False)
+
+        self.table_holes.setRowCount(len(holes))
+        for i, h in enumerate(holes):
+            pop_val = h.get('popularity', 0)
+            item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
+            item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+            if 'move_san' in h:
                 item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
-                
-                item_type = QTableWidgetItem(h['type'].upper())
-                if h['type'] == 'user':
-                    item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                    item_type.setText("BENUTZER")
-                elif h['type'] == 'opponent':
-                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText("GEGNER")
-                elif h['type'] == 'priority_check':
-                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                    item_type.setText("ZU WICHTIG?")
+            
+            item_type = QTableWidgetItem(h['type'].upper())
+            if h['type'] == 'user':
+                item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
+                item_type.setText("BENUTZER")
+            elif h['type'] == 'opponent':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText("GEGNER")
+            elif h['type'] == 'priority_check':
+                item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                item_type.setText("ZU WICHTIG?")
+            elif h['type'] == 'level_mismatch':
+                item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
+                item_type.setText("AUFSTIEG")
+                item_pop.setText("Unstimmig")
+                # Add diagnostic level info to the move text
+                if 'from_level' in h and 'to_level' in h:
+                    move_text = h.get('move_san', '—')
+                    h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
+            elif h['type'] == 'repertoire_gap':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText("LÜCKE")
+                item_pop.setText("Unfertig")
 
-                self.table_holes.setItem(i, 0, item_pop)
-                self.table_holes.setItem(i, 1, item_type)
-                self.table_holes.setItem(i, 2, QTableWidgetItem(h['move_san']))
-        finally:
-            self.btn_hole_scan.setEnabled(True)
-            self.btn_hole_scan.setText("🔎 Scan Repertoire")
+            self.table_holes.setItem(i, 0, item_pop)
+            self.table_holes.setItem(i, 1, item_type)
+            self.table_holes.setItem(i, 2, QTableWidgetItem(h.get('move_san', '—')))
+
 
     def on_hole_double_click(self, item):
         row = item.row()
@@ -4863,7 +4242,7 @@ class CreatorWindow(QMainWindow):
                 if QMessageBox.question(self, "Session beenden", "Möchtest du diese Session wirklich endgültig beenden?") == QMessageBox.StandardButton.No:
                     return
                 self.overhaul_active = False
-                self.overhaul_paused = True
+                self.overhaul_paused = False
                 self.overhaul_start = None
                 self.backend.save_overhaul_session_start(None)
         
@@ -4871,23 +4250,42 @@ class CreatorWindow(QMainWindow):
         self.update_ui_from_fen()
 
     def reset_overhaul_session(self):
-        if QMessageBox.question(self, "Reset", "Möchtest du den Fortschritt wirklich zurücksetzen?\n(Hinweis: Dies löscht nicht die Datenbank-Zeitstempel, sondern setzt nur den Startpunkt der aktuellen Session auf JETZT.)") == QMessageBox.StandardButton.Yes:
-            self.overhaul_start = datetime.datetime.now()
+        if not self.overhaul_active:
+            # If no session active, just reset progress bar to general total view
+            self.overhaul_start = None
             self.update_overhaul_progress()
+            self._update_overhaul_ui_state()
+            return
+
+        if QMessageBox.question(self, "Session beenden", "Möchtest du die aktuelle Session wirklich beenden?\nDies ermöglicht es dir, die Filter neu zu setzen.") == QMessageBox.StandardButton.Yes:
+            self.overhaul_active = False
+            self.overhaul_paused = False
+            self.overhaul_start = None
+            self.backend.save_overhaul_session_start(None)
+            self._update_overhaul_ui_state()
+            self.update_ui_from_fen()
 
     def update_overhaul_progress(self):
         if not self.overhaul_start: 
             # If no active session, calculate total reachable for current filter
             lvl = self.combo_overhaul_level.currentData()
             var = self.combo_overhaul_variation.currentData()
-            checked, total = self.backend.get_overhaul_stats(lvl, var)
+            res = self.backend.get_overhaul_stats(lvl, var)
+            if isinstance(res, (tuple, list)) and len(res) == 2:
+                checked, total = res
+            else:
+                checked, total = 0, 1
             self.pb_overhaul.setMaximum(total)
             self.pb_overhaul.setValue(checked)
             return
             
         lvl = self.combo_overhaul_level.currentData()
         var = self.combo_overhaul_variation.currentData()
-        checked, total = self.backend.get_overhaul_stats(lvl, var, self.overhaul_start)
+        res = self.backend.get_overhaul_stats(lvl, var, self.overhaul_start)
+        if isinstance(res, (tuple, list)) and len(res) == 2:
+            checked, total = res
+        else:
+            checked, total = 0, 1
         self.pb_overhaul.setMaximum(total)
         self.pb_overhaul.setValue(checked)
 

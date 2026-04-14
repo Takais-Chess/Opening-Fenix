@@ -13,16 +13,35 @@ class TreeNavigationService:
         self._variation_structure_cache: Optional[Dict[str, List[str]]] = None
         self._variation_filter_cache: Dict[str, Any] = {}
 
-    def get_history_for_move_recursive(self, move_id: int) -> List[Dict[str, Any]]:
+    def get_history_for_move_recursive(self, move_id: int, variation_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Uses a recursive CTE to find the sequence of moves that led to this one.
         Efficiently finds ancestors without loading the entire DB.
+        If variation_name is provided, it prioritizes moves belonging to that variation.
         """
         if not self.repo_session: return []
 
+        # Optional: build the set of valid move IDs for the variation to boost them in the query
+        v_ids_sql = ""
+        if variation_name:
+            # We use a subquery to get all move IDs belonging to the variation
+            # This is slightly expensive but ensures the path stays inside the variation
+            v_ids_query = text("""
+                SELECT m.id FROM moves m
+                JOIN positions p ON m.from_position_id = p.id
+                WHERE p.variation_1 = :v OR p.variation_2 = :v OR p.variation_3 = :v
+                   OR p.cached_v1 = :v OR p.cached_v2 = :v OR p.cached_v3 = :v
+            """)
+            try:
+                v_res = self.repo_session.execute(v_ids_query, {"v": variation_name}).fetchall()
+                v_ids = [r[0] for r in v_res]
+                if v_ids:
+                    v_ids_sql = f"CASE WHEN id IN ({','.join(map(str, v_ids))}) THEN 1 ELSE 0 END DESC,"
+            except: pass
+
         # Recursive CTE to find all ancestor moves
         # We start from move_id and work backwards
-        query = text("""
+        query = text(f"""
             WITH RECURSIVE ancestors(id, from_id, to_id, uci, san, level, nag) AS (
                 SELECT id, from_position_id, to_position_id, uci, san, 0, nag
                 FROM moves
@@ -31,7 +50,12 @@ class TreeNavigationService:
                 SELECT m.id, m.from_position_id, m.to_position_id, m.uci, m.san, a.level + 1, m.nag
                 FROM moves m
                 JOIN ancestors a ON m.to_position_id = a.from_id
-                WHERE m.id = (SELECT id FROM moves WHERE to_position_id = a.from_id ORDER BY priority_score DESC LIMIT 1)
+                WHERE m.id = (
+                    SELECT id FROM moves 
+                    WHERE to_position_id = a.from_id 
+                    ORDER BY {v_ids_sql} priority_score DESC 
+                    LIMIT 1
+                )
                 LIMIT 50 -- Safety limit for depth
             )
             SELECT a.*, p.fen, p.comment

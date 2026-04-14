@@ -1,3 +1,5 @@
+from PyQt6.QtWidgets import QDialog, QVBoxLayout, QPlainTextEdit, QLabel, QPushButton
+
 def show_debug_position_info(self):
     fen = self.board_widget.board.fen()
     incoming = self.backend.get_incoming_moves(fen)

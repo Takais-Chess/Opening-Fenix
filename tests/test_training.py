@@ -30,9 +30,10 @@ def test_register_success(training_manager, repertoire_manager):
     entry = training_manager.user_session.query(TrainingData).filter_by(move_uci="e2e4").first()
     entry.next_due = datetime.datetime.now() + datetime.timedelta(hours=1)
     training_manager.user_session.commit()
+    training_manager._td_cache = None
     
     # Check stats
-    new, due, dist = training_manager.get_stats()
+    new, due, dist = training_manager.get_stats(use_cache=False)
     assert new == 0
     assert due == 0
     assert dist[1] == 1 # Now it must be in box 1 and NOT due

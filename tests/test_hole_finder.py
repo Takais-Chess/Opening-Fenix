@@ -2,7 +2,9 @@ import pytest
 import chess
 import json
 from opening_fenix.creator.creator_window import CreatorBackend
-from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData
+from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
+from opening_fenix.core.services.hole_finder_service import find_repertoire_holes, find_priority_mismatches, find_level_mismatches
+
 
 def clean_fen(fen):
     return " ".join(fen.split(" ")[:4])
@@ -33,7 +35,8 @@ def test_user_holes_no_move(backend):
     backend.session.commit()
     
     # Scan with 10% threshold. Both e4 and d4 should be holes.
-    holes = backend.find_repertoire_holes(0.1, "high")
+    holes = find_repertoire_holes(backend.session, 0.1, "high")
+
     assert any(h['move_san'] == 'e4' and h['type'] == 'user' for h in holes)
     assert any(h['move_san'] == 'd4' and h['type'] == 'user' for h in holes)
 
@@ -53,7 +56,8 @@ def test_opponent_holes(backend):
     # Scan from start (threshold 10%)
     # Prob(e4) = 1.0 (User plays it)
     # Prob(e5 at e4) = 1.0 * 0.5 = 0.5 -> Hole.
-    holes = backend.find_repertoire_holes(0.1, "high")
+    holes = find_repertoire_holes(backend.session, 0.1, "high")
+
     
     assert any(h['move_san'] == 'e5' and h['type'] == 'opponent' for h in holes)
     assert any(h['move_san'] == 'c5' and h['type'] == 'opponent' for h in holes)
@@ -67,19 +71,22 @@ def test_hole_exemption(backend):
     backend.session.commit()
     
     # Check hole exists
-    holes = backend.find_repertoire_holes(0.01, "high")
+    holes = find_repertoire_holes(backend.session, 0.01, "high")
+
     assert any(h['move_san'] == 'e5' for h in holes)
     
     # Mark the POSITION (e4) as exempt
     backend.set_position_hole_exempt(e4_fen, True)
     
     # Check hole is gone
-    holes = backend.find_repertoire_holes(0.01, "high")
+    holes = find_repertoire_holes(backend.session, 0.01, "high")
+
     assert not any(h['move_san'] == 'e5' for h in holes)
     
     # Reset
     backend.reset_hole_exemptions()
-    holes = backend.find_repertoire_holes(0.01, "high")
+    holes = find_repertoire_holes(backend.session, 0.01, "high")
+
     assert any(h['move_san'] == 'e5' for h in holes)
 
 def test_deep_propagation(backend):
@@ -113,7 +120,8 @@ def test_deep_propagation(backend):
     backend.session.add_all([ld_start, ld_e4])
     backend.session.commit()
     
-    holes = backend.find_repertoire_holes(0.1, "high")
+    holes = find_repertoire_holes(backend.session, 0.1, "high")
+
     # Hole at e5 position (User side)
     assert any(h['fen'] == e5_fen and h['type'] == 'user' for h in holes)
     # Also hole at e4 position (Opponent side - move c5)
@@ -168,10 +176,303 @@ def test_transposition_handling(backend):
     ])
     backend.session.commit()
     
-    holes = backend.find_repertoire_holes(0.01, "high")
+    holes = find_repertoire_holes(backend.session, 0.01, "high")
+
     
     # P_fen (p_coll) isreached via both paths.
     # It should report the hole 'e6' at p_fen EXACTLY ONCE.
     p_holes = [h for h in holes if h['fen'].startswith(p_fen)]
     assert len(p_holes) == 1
     assert p_holes[0]['move_san'] == 'e6'
+
+def test_find_priority_mismatches(backend):
+    # Setup: 1.e4 is in RepertoireLevel 1.
+    # It has priority_score 1.0 (100%) in sample_repertoire fixture.
+    
+    # Scan for Level 1 with 50% threshold -> Should find 1.e4
+    mismatches = find_priority_mismatches(backend.session, 1, 50)
+
+    assert len(mismatches) == 1
+    assert mismatches[0]['move_san'] == 'e4'
+    assert mismatches[0]['type'] == 'priority_check'
+    assert "Start" in mismatches[0]['path']
+    
+    # Scan for Level 1 with 150% threshold -> Should find nothing
+    mismatches = find_priority_mismatches(backend.session, 1, 150)
+
+    assert len(mismatches) == 0
+    
+    # Scan for Level 2 (which doesn't exist/no moves) -> Should find nothing
+    mismatches = find_priority_mismatches(backend.session, 2, 10)
+
+
+def test_hole_finder_uses_san_dynamic(backend):
+    """Verify that hole finder calculates SAN if not present in LichessData."""
+    start_fen = clean_fen(chess.STARTING_FEN)
+    
+    # Lichess data with NO 'san' field, only UCI
+    ld_start = LichessData(fen=start_fen, elo_range="high", moves_json=json.dumps({
+        "e2e4": {"total": 1000} # Missing 'san'
+    }))
+    backend.session.add(ld_start)
+    backend.session.commit()
+    
+    # Scan – should find e4 as a hole for User (since start has no rep moves by default in some tests)
+    # We ensure no rep moves exist at start
+    backend.session.query(RepertoireMove).delete()
+    backend.session.commit()
+    
+    holes = find_repertoire_holes(backend.session, 1.0, "high") # 1% threshold
+    
+    # Find the 'e4' hole
+    e4_hole = next((h for h in holes if h['fen'] == start_fen), None)
+    assert e4_hole is not None
+    assert e4_hole['move_san'] == "e4" # Correctly calculated SAN instead of "e2e4"
+
+def get_or_create_pos(session, fen):
+    p = session.query(Position).filter(Position.fen.like(fen + "%")).first()
+    if not p:
+        p = Position(fen=fen)
+        session.add(p)
+        session.flush()
+    return p
+
+def test_find_level_mismatches_basic(backend):
+    """Verify that level increases on User moves are flagged as mismatches."""
+    session = backend.session
+    # Setup Color: White
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Repertoire Path:
+    # 1. e4 (User, Level 1)
+    # 1... e5 (Opponent, Level 1)
+    # 2. Nf3 (User, Level 2) <-- VIOLATION
+    
+    # FENs
+    root_fen = clean_fen(chess.STARTING_FEN)
+    e4_fen = clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -")
+    e5_fen = clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -")
+    nf3_fen = clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -")
+    
+    # 1. Ensure Positions exist
+    p_root = get_or_create_pos(session, root_fen)
+    p_e4 = get_or_create_pos(session, e4_fen)
+    p_e5 = get_or_create_pos(session, e5_fen)
+    p_nf3 = get_or_create_pos(session, nf3_fen)
+    
+    # 2. Add Moves (Avoid duplicates if possible)
+    def add_move_if_not_exists(f, t, u, s):
+        m = session.query(Move).filter_by(from_position_id=f, to_position_id=t, uci=u).first()
+        if not m:
+            m = Move(from_position_id=f, to_position_id=t, uci=u, san=s)
+            session.add(m)
+            session.flush()
+        return m
+
+    m_e4 = add_move_if_not_exists(p_root.id, p_e4.id, "e2e4", "e4")
+    m_e5 = add_move_if_not_exists(p_e4.id, p_e5.id, "e7e5", "e5")
+    m_nf3 = add_move_if_not_exists(p_e5.id, p_nf3.id, "g1f3", "Nf3")
+    
+    # 3. Add RepertoireMoves with levels
+    session.query(RepertoireMove).delete() # Clear existing to be sure
+    session.add(RepertoireMove(move_id=m_e4.id, level=1))
+    session.add(RepertoireMove(move_id=m_e5.id, level=1))
+    session.add(RepertoireMove(move_id=m_nf3.id, level=2)) # Transition 1 -> 2 on User move
+    session.commit()
+    
+    # Run Level Check
+    results = find_level_mismatches(session)
+    
+    # Assertions
+    assert len(results) >= 1 # Might be more if sample repo has other stuff, but at least ours
+    assert any(r['move_san'] == "Nf3" for r in results)
+    m = next(r for r in results if r['move_san'] == "Nf3")
+    assert m['type'] == "level_mismatch"
+    assert m['fen'] == nf3_fen
+
+def test_find_level_mismatches_opponent_ok(backend):
+    """Verify that level increases on Opponent moves are NOT flagged."""
+    session = backend.session
+    # Setup Color: White
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Repertoire Path:
+    # 1. e4 (User, Level 1)
+    # 1... e5 (Opponent, Level 2) <-- This is OK!
+    
+    root_fen = clean_fen(chess.STARTING_FEN)
+    e4_fen = clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -")
+    e5_fen = clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -")
+    
+    p_root = get_or_create_pos(session, root_fen)
+    p_e4 = get_or_create_pos(session, e4_fen)
+    p_e5 = get_or_create_pos(session, e5_fen)
+    
+    def add_move_if_not_exists(f, t, u, s):
+        m = session.query(Move).filter_by(from_position_id=f, to_position_id=t, uci=u).first()
+        if not m:
+            m = Move(from_position_id=f, to_position_id=t, uci=u, san=s)
+            session.add(m)
+            session.flush()
+        return m
+
+    m_e4 = add_move_if_not_exists(p_root.id, p_e4.id, "e2e4", "e4")
+    m_e5 = add_move_if_not_exists(p_e4.id, p_e5.id, "e7e5", "e5")
+    
+    session.query(RepertoireMove).delete() # Clear existing to be sure
+    session.add(RepertoireMove(move_id=m_e4.id, level=1))
+    session.add(RepertoireMove(move_id=m_e5.id, level=2)) # Increase on Opponent move
+    session.commit()
+    
+    results = find_level_mismatches(session)
+    
+    # We only care that there are NO level mismatches here.
+    # (There might be a gap reported because the test line ends, which is OK)
+    mismatches = [r for r in results if r['type'] == 'level_mismatch']
+    assert len(mismatches) == 0
+
+def test_find_level_mismatches_alternate_moves(backend):
+    """Verify that a level increase is NOT flagged if a lower or equal level move exists."""
+    session = backend.session
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Path: 1. e4 (L1) -> 1... e5 (L1) -> 2. Nf3 (L1) AND 2. d4 (L2)
+    p_root = get_or_create_pos(session, clean_fen(chess.STARTING_FEN))
+    p_e4 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    p_e5 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"))
+    p_nf3 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"))
+    p_d4 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -"))
+    
+    def add_move_if_not_exists(f, t, u, s):
+        m = session.query(Move).filter_by(from_position_id=f, to_position_id=t, uci=u).first()
+        if not m:
+            m = Move(from_position_id=f, to_position_id=t, uci=u, san=s)
+            session.add(m)
+            session.flush()
+        return m
+
+    m_e4 = add_move_if_not_exists(p_root.id, p_e4.id, "e2e4", "e4")
+    m_e5 = add_move_if_not_exists(p_e4.id, p_e5.id, "e7e5", "e5")
+    m_nf3 = add_move_if_not_exists(p_e5.id, p_nf3.id, "g1f3", "Nf3")
+    m_d4 = add_move_if_not_exists(p_e5.id, p_d4.id, "d2d4", "d4")
+    
+    session.query(RepertoireMove).delete()
+    session.add(RepertoireMove(move_id=m_e4.id, level=1))
+    session.add(RepertoireMove(move_id=m_e5.id, level=1))
+    session.add(RepertoireMove(move_id=m_nf3.id, level=1)) # Correct level move exists
+    session.add(RepertoireMove(move_id=m_d4.id, level=2))  # Sideline at higher level
+    session.commit()
+    
+    results = find_level_mismatches(session)
+    
+    # Should NOT have any level mismatches because Nf3 (L1) satisfies the Level 1 path
+    assert not any(r['type'] == 'level_mismatch' for r in results)
+
+def test_find_level_mismatches_gap(backend):
+    """Verify that a position where it's our turn but we have no moves is flagged as a gap."""
+    session = backend.session
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Path: 1. e4 (L1) -> 1... e5 (Opponant L1) -> (User turns, no move)
+    p_root = get_or_create_pos(session, clean_fen(chess.STARTING_FEN))
+    p_e4 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    p_e5 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"))
+    
+    def add_move_if_not_exists(f, t, u, s):
+        m = session.query(Move).filter_by(from_position_id=f, to_position_id=t, uci=u).first()
+        if not m:
+            m = Move(from_position_id=f, to_position_id=t, uci=u, san=s)
+            session.add(m)
+            session.flush()
+        return m
+
+    m_e4 = add_move_if_not_exists(p_root.id, p_e4.id, "e2e4", "e4")
+    m_e5 = add_move_if_not_exists(p_e4.id, p_e5.id, "e7e5", "e5")
+    
+    session.query(RepertoireMove).delete()
+    session.add(RepertoireMove(move_id=m_e4.id, level=1))
+    session.add(RepertoireMove(move_id=m_e5.id, level=1))
+    session.commit()
+    
+    results = find_level_mismatches(session)
+    
+    assert any(r['type'] == 'repertoire_gap' and r['fen'].startswith(p_e5.fen) for r in results)
+
+def test_find_level_mismatches_relaxed_transposition(backend):
+    """Verify that transpositions do NOT flag a jump if at least ONE incoming path justifies the level."""
+    session = backend.session
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Path 1: Root -> P (L1)
+    # Path 2: Root -> P (L2)
+    # User Move from P: P -> Q (L2)
+    # Under RELAXED logic, this is NOT a violation because Path 2 justifies L2.
+    
+    p_root = get_or_create_pos(session, clean_fen(chess.STARTING_FEN))
+    p_p = get_or_create_pos(session, "rnbqkbnr/ppp1pppp/8/3p4/8/8/PPPPPPPP/RNBQKBNR w KQkq -") 
+    p_q = get_or_create_pos(session, "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -")
+    
+    m_a = Move(from_position_id=p_root.id, to_position_id=p_p.id, uci="d2d4", san="d4")
+    m_b = Move(from_position_id=p_root.id, to_position_id=p_p.id, uci="c2c4", san="c4")
+    m_c = Move(from_position_id=p_p.id, to_position_id=p_q.id, uci="e2e4", san="e4")
+    session.add_all([m_a, m_b, m_c])
+    session.flush()
+    
+    session.query(RepertoireMove).delete()
+    session.add(RepertoireMove(move_id=m_a.id, level=1))
+    session.add(RepertoireMove(move_id=m_b.id, level=2))
+    session.add(RepertoireMove(move_id=m_c.id, level=2))
+    session.commit()
+    
+    results = find_level_mismatches(session)
+    # Should be NO level mismatch because the L2 path (m_b) justifies the L2 move (m_c)
+    assert not any(r['type'] == 'level_mismatch' for r in results)
+
+def test_find_level_mismatches_diagnostics(backend):
+    """Verify that level transitions include from_level and to_level info."""
+    session = backend.session
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="w"))
+    session.commit()
+    
+    # Path: 1. e4 (L1) -> 1... e5 (L1) -> 2. Nf3 (L2) 
+    # This should be a Level 1 -> Level 2 transition.
+    
+    root_fen = clean_fen(chess.STARTING_FEN)
+    p_root = get_or_create_pos(session, root_fen)
+    p_e4 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    p_e5 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"))
+    p_nf3 = get_or_create_pos(session, clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"))
+    
+    def add_move_if_not_exists(f, t, u, s):
+        m = session.query(Move).filter_by(from_position_id=f, to_position_id=t, uci=u).first()
+        if not m:
+            m = Move(from_position_id=f, to_position_id=t, uci=u, san=s)
+            session.add(m)
+            session.flush()
+        return m
+
+    m_1 = add_move_if_not_exists(p_root.id, p_e4.id, "e2e4", "e4")
+    m_2 = add_move_if_not_exists(p_e4.id, p_e5.id, "e7e5", "e5")
+    m_3 = add_move_if_not_exists(p_e5.id, p_nf3.id, "g1f3", "Nf3")
+    
+    session.query(RepertoireMove).delete()
+    session.add(RepertoireMove(move_id=m_1.id, level=1))
+    session.add(RepertoireMove(move_id=m_2.id, level=1))
+    session.add(RepertoireMove(move_id=m_3.id, level=2)) # L1 -> L2!
+    session.commit()
+    
+    results = find_level_mismatches(session)
+    mm = next(r for r in results if r['move_san'] == "Nf3")
+    assert mm['from_level'] == 1
+    assert mm['to_level'] == 2

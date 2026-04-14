@@ -6,6 +6,7 @@ from opening_fenix.core.db.models import Position, Move, RepertoireMove, Reperto
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets
+from opening_fenix.core.services.repair_service import repair_repertoire_health
 
 def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None) -> Tuple[bool, str]:
     """Imports a PGN file into a new or existing repertoire database using bulk operations."""
@@ -63,6 +64,7 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         new_positions_to_insert = {} 
         new_moves_to_insert = []     
         new_rep_moves_to_insert = [] 
+        rep_moves_to_update = {}
         comments_to_append = {} 
 
         max_pos_id = max(pos_cache.values()) if pos_cache else 0
@@ -131,14 +133,20 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                         Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=list(current_node.nags)[0] if current_node.nags else 0)
                     )
                 
-                turn = 'w' if board.turn == chess.BLACK else 'b'
-                if turn == current_repo_side:
-                    if move_id not in rep_move_cache:
-                         rep_move_cache[move_id] = level_order
-                         new_rep_moves_to_insert.append(
-                             RepertoireMove(move_id=move_id, level=level_order)
-                         )
-                         new_moves_count += 1
+                # REPERTOIRE MOVE LOGIC
+                # We now add ALL moves from the PGN to prevent holes, regardless of which side is being imported.
+                # We also ensure we keep the highest priority level (lowest numerical value).
+                if move_id not in rep_move_cache:
+                    rep_move_cache[move_id] = level_order
+                    new_rep_moves_to_insert.append(
+                        RepertoireMove(move_id=move_id, level=level_order)
+                    )
+                    new_moves_count += 1
+                elif level_order < rep_move_cache[move_id]:
+                    # User imported this move into a higher priority level than before
+                    rep_move_cache[move_id] = level_order
+                    rep_moves_to_update[move_id] = level_order
+                    new_moves_count += 1
                 
                 for variation in reversed(current_node.variations):
                     node_stack.append((variation, board.copy()))
@@ -150,6 +158,11 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             session.bulk_save_objects(new_moves_to_insert)
         if new_rep_moves_to_insert:
             session.bulk_save_objects(new_rep_moves_to_insert)
+        
+        if rep_moves_to_update:
+            # Efficiently update levels for existing repertoire moves
+            for mid, new_lvl in rep_moves_to_update.items():
+                session.query(RepertoireMove).filter_by(move_id=mid).update({"level": new_lvl}, synchronize_session=False)
             
         # 6. UPDATE COMMENTS 
         if comments_to_append:
@@ -167,6 +180,12 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                         pos.comment = new_c
 
         if new_moves_count > 0 or comments_to_append:
+            # 7. AUTOMATED HEALTH REPAIR
+            # This ensures no holes were created and levels are consistent.
+            repair_repertoire_health(session, fast=True)
+
+            set_meta(session, "ana_cache_count", "-1")
+            set_meta(session, "cov_cache_count", "-1")
             session.commit()
             return True, f"{new_moves_count} Züge erfolgreich importiert."
         else:

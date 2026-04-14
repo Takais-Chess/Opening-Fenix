@@ -42,7 +42,7 @@ class EngineThread(QThread):
 
                 self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path, creationflags=creationflags)
                 try:
-                    self.engine.configure({"Threads": self.threads, "MultiPV": self.multipv})
+                    self.engine.configure({"Threads": self.threads})
                 except Exception as e:
                     logger.warning(f"Engine configuration warning: {e}")
                     self.info_signal.emit([f"Config Warning: {e}"])
@@ -89,7 +89,7 @@ class EngineThread(QThread):
         
         if changed and self.engine:
             try:
-                self.engine.configure({"Threads": self.threads, "MultiPV": self.multipv})
+                self.engine.configure({"Threads": self.threads})
             except Exception as e:
                 logger.warning(f"Error updating engine configuration: {e}")
                 self.info_signal.emit([f"Update Config Error: {e}"])

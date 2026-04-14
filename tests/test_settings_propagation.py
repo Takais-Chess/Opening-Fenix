@@ -69,41 +69,41 @@ def test_volume_propagation(main_window, monkeypatch):
 
 def test_repertoire_visibility_toggle(main_window, qapp, monkeypatch):
     """Test toggling repertoire visibility."""
-    # Mock get_all_repertoires
-    monkeypatch.setattr(main_window.repertoire_manager, "get_all_repertoires", lambda: ["TestRepo"])
+    # Mock refresh_repertoire_buttons
+    monkeypatch.setattr(main_window, "refresh_repertoire_buttons", lambda: None)
     
     dialog = SettingsDialog(main_window)
     # Switch to Repo page
     dialog.sidebar.setCurrentRow(2)
     
-    # Trigger selection if not already set (e.g. if it's the only item, signal might not fire)
-    if dialog.selected_repo != "TestRepo":
-        dialog.on_repo_selected("TestRepo")
+    # Find the card for TestRepo
+    target_card = None
+    for i in range(dialog.card_layout.count()):
+        item = dialog.card_layout.itemAt(i)
+        if item.widget() and hasattr(item.widget(), "repo_name") and item.widget().repo_name == "TestRepo":
+            target_card = item.widget()
+            break
     
-    # Initially visible
-    assert dialog.chk_visible.isChecked() is True
+    assert target_card is not None
+    assert target_card.is_active is True
     
     # Toggle off
-    dialog.chk_visible.setChecked(False)
-    dialog.toggle_visibility()
+    target_card.toggle_active()
     
     assert main_window.training_manager.is_repo_visible("TestRepo") is False
 
 def test_reset_progress_dialog(main_window, monkeypatch, qapp):
     """Test triggering the reset progress dialog."""
-    # Mock get_all_repertoires
-    monkeypatch.setattr(main_window.repertoire_manager, "get_all_repertoires", lambda: ["TestRepo"])
-    
     dialog = SettingsDialog(main_window)
     dialog.sidebar.setCurrentRow(2)
     
-    if dialog.selected_repo != "TestRepo":
-        dialog.on_repo_selected("TestRepo")
-    
-    # Mock QMessageBox.question to return Yes
-    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    # Mock QMessageBox.warning to return Yes (for reset confirmation)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: QMessageBox.StandardButton.Yes)
     # Mock information box
     monkeypatch.setattr(QMessageBox, "information", lambda *args: None)
+    
+    # Select repo
+    dialog.on_repo_selected("TestRepo")
     
     # Trigger reset
     dialog.reset_repo_progress()

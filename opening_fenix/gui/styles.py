@@ -97,7 +97,63 @@ COLORS = {
     "arrow_blue": "rgba(20, 60, 150, 0.5)", # Deep rich blue with 50% opacity
     "glass_bg": "rgba(255, 255, 255, 0.4)",
     "glass_border": "rgba(255, 255, 255, 0.9)",
+    "bw_glass_bg": "rgba(255, 255, 255, 0.15)",
+    "bw_glass_border": "rgba(255, 255, 255, 0.25)",
+    "bw_text": "#111111",
+    "bw_sub_text": "#555555",
+    "bw_accent": "#000000",
 }
+
+def get_scrollbar_style():
+    """Returns a modern, slim scrollbar style string."""
+    return f"""
+    QScrollBar:vertical {{
+        border: none;
+        background: transparent;
+        width: {scale(8)}px;
+        margin: 0px;
+    }}
+    QScrollBar::handle:vertical {{
+        background: rgba(0, 0, 0, 0.15);
+        min-height: {scale(30)}px;
+        border-radius: {scale(4)}px;
+    }}
+    QScrollBar::handle:vertical:hover {{
+        background: rgba(211, 84, 0, 0.6);
+    }}
+    QScrollBar::handle:vertical:pressed {{
+        background: {COLORS['burnt_orange']};
+    }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+        height: 0px;
+        background: none;
+    }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+        background: none;
+    }}
+
+    QScrollBar:horizontal {{
+        border: none;
+        background: transparent;
+        height: {scale(8)}px;
+        margin: 0px;
+    }}
+    QScrollBar::handle:horizontal {{
+        background: rgba(0, 0, 0, 0.15);
+        min-width: {scale(30)}px;
+        border-radius: {scale(4)}px;
+    }}
+    QScrollBar::handle:horizontal:hover {{
+        background: rgba(211, 84, 0, 0.6);
+    }}
+    QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+        width: 0px;
+        background: none;
+    }}
+    QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+        background: none;
+    }}
+    """
 
 # Stylesheet for the MainWindow (Training Hub)
 def get_main_window_style():
@@ -178,12 +234,43 @@ def get_main_window_style():
     QPushButton#StartButton:hover {{ background-color: #e67e22; }}
     QPushButton#StartButton:disabled {{ background-color: #bdc3c7; }}
     
+    QMenu {{
+        background-color: {COLORS['beige']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(8)}px;
+        padding: {scale(4)}px 0px;
+    }}
+    QMenu::item {{
+        padding: {scale(8)}px {scale(20)}px;
+        color: {COLORS['brown_text']};
+        font-size: {scale(14)}px;
+    }}
+    QMenu::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
+        margin: 0px {scale(4)}px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background-color: {COLORS['glass_border']};
+        margin: {scale(4)}px {scale(10)}px;
+    }}
+    
     QToolTip {{ 
         background-color: {COLORS['white']}; 
         color: {COLORS['brown_text']}; 
         border: 1px solid {COLORS['border']}; 
         padding: {scale(5)}px; 
         border-radius: {scale(4)}px; 
+    }}
+    
+    /* Global Scrollbar Branding */
+    {get_scrollbar_style()}
+    
+    /* Ensure Notation View (QScrollArea) picks it up */
+    QScrollArea QScrollBar:vertical, QTextBrowser QScrollBar:vertical {{
+        width: {scale(10)}px;
     }}
     """
 
@@ -260,7 +347,6 @@ def get_creator_window_style():
     }}
     QTabBar::tab {{
         background: transparent;
-        color: {COLORS['brown_text']};
         padding: {scale(8)}px {scale(16)}px;
         margin-right: {scale(4)}px;
         border-radius: {scale(12)}px;
@@ -268,7 +354,6 @@ def get_creator_window_style():
     }}
     QTabBar::tab:selected {{
         background: rgba(255, 255, 255, 0.5);
-        color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
     }}
     QTabBar::tab:hover:!selected {{
@@ -315,8 +400,14 @@ def get_creator_window_style():
     }}
     *[class="SmallCombo"] {{
         border-radius: {scale(10)}px;
-        padding-right: {scale(8)}px;
-        padding-left: {scale(8)}px;
+        padding-right: {scale(2)}px;
+        padding-left: {scale(2)}px;
+    }}
+    *[class="SmallCombo"] QLineEdit {{
+        background: transparent;
+        border: none;
+        padding: 0px;
+        margin: 0px;
     }}
     QComboBox::drop-down {{
         border: none;
@@ -324,10 +415,16 @@ def get_creator_window_style():
         subcontrol-origin: padding;
         subcontrol-position: top right;
     }}
+    *[class="SmallCombo"]::drop-down {{
+        width: 0px;
+    }}
     QComboBox::down-arrow {{
         /* Remove image: none to allow default arrow */
         width: {scale(12)}px;
         height: {scale(12)}px;
+    }}
+    *[class="SmallCombo"]::down-arrow {{
+        image: none;
     }}
     QComboBox QAbstractItemView {{
         background-color: {COLORS['beige']};
@@ -375,6 +472,29 @@ def get_creator_window_style():
     }}
 
     QSplitter::handle {{ background-color: transparent; }}
+
+    QMenu {{
+        background-color: {COLORS['beige']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(8)}px;
+        padding: {scale(4)}px 0px;
+    }}
+    QMenu::item {{
+        padding: {scale(8)}px {scale(20)}px;
+        color: {COLORS['brown_text']};
+        font-size: {scale(14)}px;
+    }}
+    QMenu::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
+        margin: 0px {scale(4)}px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background-color: {COLORS['glass_border']};
+        margin: {scale(4)}px {scale(10)}px;
+    }}
 """
 
 
@@ -501,6 +621,114 @@ def get_export_dialog_style():
 """
 
 
+# BW Glass Style for Settings
+def get_bw_glass_style():
+    return f"""
+    QDialog {{ 
+        background-color: #f5f5f7; 
+    }}
+    QWidget {{ 
+        font-family: 'Segoe UI', 'Inter', 'Roboto'; 
+        font-size: {scale(14)}px; 
+        color: {COLORS['bw_text']}; 
+    }}
+    
+    QListWidget#Sidebar {{ 
+        background-color: rgba(0, 0, 0, 0.03); 
+        border: none; 
+        border-right: 1px solid rgba(0, 0, 0, 0.05); 
+        outline: none; 
+    }}
+    QListWidget#Sidebar::item {{ 
+        padding: {scale(15)}px; 
+        font-weight: 600; 
+        color: {COLORS['bw_sub_text']};
+        border-radius: {scale(8)}px;
+        margin: {scale(4)}px;
+    }}
+    QListWidget#Sidebar::item:hover {{
+        background-color: rgba(0, 0, 0, 0.05);
+    }}
+    QListWidget#Sidebar::item:selected {{ 
+        background-color: {COLORS['bw_accent']}; 
+        color: white; 
+    }}
+    
+    QGroupBox {{ 
+        border: 1px solid rgba(0, 0, 0, 0.1); 
+        border-radius: {scale(12)}px; 
+        margin-top: {scale(20)}px; 
+        font-weight: bold; 
+        background-color: white; 
+        padding: {scale(20)}px; 
+    }}
+    QGroupBox::title {{ 
+        subcontrol-origin: margin; 
+        left: {scale(10)}px; 
+        padding: 0 {scale(5)}px; 
+        color: {COLORS['bw_text']};
+    }}
+    
+    QPushButton {{ 
+        background-color: white; 
+        border: 1px solid rgba(0, 0, 0, 0.1); 
+        border-radius: {scale(8)}px; 
+        padding: {scale(8)}px {scale(16)}px; 
+        font-weight: 500; 
+    }}
+    QPushButton:hover {{ 
+        background-color: #f8f8f8; 
+        border-color: rgba(0, 0, 0, 0.2);
+    }}
+    QPushButton[class="Primary"] {{
+        background-color: {COLORS['bw_accent']};
+        color: white;
+        border: none;
+    }}
+    QPushButton[class="Primary"]:hover {{
+        background-color: #333333;
+    }}
+    QPushButton[class="Danger"] {{
+        color: {COLORS['error_red']};
+        border-color: {COLORS['error_red']};
+    }}
+    QPushButton[class="Danger"]:hover {{
+        background-color: rgba(231, 76, 60, 0.05);
+    }}
+    
+    QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {{ 
+        background-color: white; 
+        border: 1px solid rgba(0, 0, 0, 0.1); 
+        border-radius: {scale(8)}px; 
+        padding: {scale(6)}px {scale(10)}px; 
+        color: {COLORS['bw_text']};
+    }}
+    QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+        border-color: {COLORS['bw_accent']};
+    }}
+
+    QTableWidget {{
+        background-color: white;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        border-radius: {scale(8)}px;
+        gridline-color: rgba(0, 0, 0, 0.05);
+    }}
+    QHeaderView::section {{
+        background-color: #fafafa;
+        padding: {scale(8)}px;
+        border: none;
+        border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+        font-weight: bold;
+    }}
+
+    QLabel {{
+        color: {COLORS['bw_text']};
+    }}
+    
+    {get_scrollbar_style().replace('211, 84, 0', '0, 0, 0')}
+    """
+
+
 # Stylesheet for LoginDialog
 def get_login_dialog_style():
     return f"""
@@ -585,18 +813,5 @@ def get_login_dialog_style():
         background: transparent;
     }}
     
-    QScrollBar:vertical {{
-        border: none;
-        background: transparent;
-        width: {scale(8)}px;
-        margin: 0px;
-    }}
-    QScrollBar::handle:vertical {{
-        background: rgba(0, 0, 0, 0.1);
-        min-height: {scale(20)}px;
-        border-radius: {scale(4)}px;
-    }}
-    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-        height: 0px;
-    }}
+    {get_scrollbar_style()}
 """

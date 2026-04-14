@@ -129,3 +129,32 @@ Thumbs.db
 engines/*.exe
 dist/
 build/
+
+# AI Agent Metadata
+.antigravity/
+.gemini/
+
+# Temporary / Local Data
+backups/
+tmp/
+*.db
+test_cleanup_repo.db
+Compressed (zipped) folder/
+*.zip
+*.rar
+
+# Coverage & Reports
+coverage.json
+coverage_core.txt
+current_coverage*.txt
+final_coverage*.txt
+test_detail_*.txt
+pytest_output*.txt
+.pytest_cache/
+.coverage
+.coverage.*
+
+# Scripts (Local/Scratch)
+scripts/recover_db.py
+scripts/replace_db.py
+scripts/scan_all_dbs.py

@@ -117,3 +117,9 @@ class UserRepertoireSettings(UserBase):
     active_level = Column(Integer, default=1)
     rating = Column(Float, default=800.0)
     last_rating_update = Column(DateTime, nullable=True)
+    
+    # Caching columns for faster UI updates
+    last_new_count = Column(Integer, default=0)
+    last_due_count = Column(Integer, default=0)
+    last_dist_json = Column(String, nullable=True) # JSON representation of the box distribution
+    stats_updated_at = Column(DateTime, nullable=True)

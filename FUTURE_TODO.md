@@ -1,26 +1,12 @@
 # Opening Fenix V2 - Future Features & Ideas
 
-## 1. Multi-Language Support (English/German)
+## 1. Multi-Language Support (English/German) (IN PROGRESS)
 **Concept:**  
 Make the application accessible to an international audience by supporting multiple languages (starting with English and German) for both the UI and the repertoire content.
 
-**Implementation Ideas:**
-* **UI Translation:** Use PyQt's built-in `QTranslator` and `.ts`/`.qm` files to dynamically switch all buttons, labels, and menus between English and German.
-* **Bilingual Comments:** The database schema for `Position` needs to be extended. Instead of a single `comment` column, we could have `comment_de` and `comment_en`.
-* **Language Toggle:** A setting in the profile configuration that dictates which language is currently active. If a user switches to English, the UI updates, and the Candidate Moves table pulls from the `comment_en` column.
-
-## ~~2. "Repertoire Overhaul" Mode (Position Checklist)~~ (BASIC IMPLEMENTATION V1 - 2026-03-30)
-**Concept:**  
-Introductes a guided "Review Mode" to track which variations have been checked.
-
-**Current State:**
-* **Tab Integrated**: "Rep. KONTROLLE" tab added to the Creator.
-* **Basic Tracking**: Basic progress tracking implementation started.
-* **Navigation**: Basic "Next Unseen" logic in place.
-
-**Next Steps (V2):**
-* **Visual Cues**: Add checkmarks (✅) in the tree view for fully reviewed branches.
-* **Session Persistence**: Ensure review state is saved across application restarts.
+**Implementation Progress:**
+* **Multilingual Notation:** Successfully implemented English/German chess notation (`Nf3` vs `Sf3`) throughout the UI and backend. 
+* **UI Translation (Future):** Full dynamic UI translation using `QTranslator` is planned for a future release to localize all menus and dialogs.
 
 ## 4. Tactic & Endgame Trainer (Prebuilt Scenarios)
 **Concept:**  
@@ -39,39 +25,24 @@ Improve the overall look and feel of the application to make it more professiona
 * **UI Overhaul:** Implemented premium glassmorphism designs for the Login and Creator windows.
 * **Layout Optimization:** Refined the profile selection grid and aligned UI panels for better visual balance.
 
-## ~~6. Performance Optimization & AI Compatibility~~ (COMPLETED)
+## ~~6. Performance Optimization & AI Compatibility~~ (COMPLETED - 2026-04-14)
 **Concept:**  
 Revisit the codebase to ensure it runs smoothly and is structured in a way that is easily understandable for AI agents and future developers.
 
-*(Update: This was completed via the massive V2 architecture overhaul. Monoliths were broken into `core/services/` and `core/db/`, and PEP-484 typing/docstrings were added.)*
-* **Performance Audit:** Identify and fix bottlenecks in the UI rendering and database access.
-* **Refactoring for AI:** Improve code readability, add comprehensive docstrings, and ensure modularity to help AI agents (like Junie) understand and modify the project more effectively.
-* **Code Consistency:** Ensure all modules follow the same architectural patterns and naming conventions.
+*(Update: This was completed via the massive V2 architecture overhaul and a follow-up systematic performance audit.)*
+* **Performance Audit:** Conducted a segmented audit of database interactions, UI rendering, and engine communication to resolve bottlenecks.
+* **Refactoring for AI:** Improved code readability, added comprehensive docstrings, and ensured modularity to help AI agents understand and modify the project more effectively.
+* **Code Consistency:** All modules now follow consistent architectural patterns and naming conventions.
 
-## ~~7. Repertoire Hole Finder (Lichess Data Integration)~~ (BASIC IMPLEMENTATION V1 - 2026-03-30)
-**Concept:**  
-Identify "holes" in the repertoire—moves or positions not covered based on Lichess popularity.
 
-**Current State:**
-* **Tab Integrated**: "Rep. Loch Finder" tab added to the Creator.
-* **Lichess Query**: Integrated backend logic to fetch common moves and probabilities.
-* **Basic UI**: Results table with "Jump to position" functionality implemented.
-
-**Next Steps (V2):**
-* **Priority Matching**: Filter results by potential priority score impact.
-* **Bulk Enrichment**: Add a feature to "Cover all high-priority holes" in a single batch.
-
-## 9. User Documentation & Guides
+## ~~9. User Documentation & Guides~~ (COMPLETED - 2026-04-06)
 **Concept:**  
 Create comprehensive documentation to help both new and experienced users get the most out of Opening Fenix V2.
 
-**Implementation Ideas:**
-* **Quick Start Guide:** A concise "How-To" document (e.g., `QUICKSTART.md`) covering profile creation, repertoire importing, and starting your first training session.
-* **Deep Dive Technical Guide:** A detailed manual explaining the application's core logic:
-  * **Priority Scores:** How the "Potential Score" vs "Realized Score" is calculated based on Lichess data.
-  * **Level Inheritance:** The rules governing how move importance (Levels 1-N) propagates through branches and transpositions.
-  * **ELO Categories:** How the application selects relevant data based on the user's targeted ELO.
-  * **Move Processing:** What happens under the hood when a new move is added or a PGN is imported.
+**Achievements:**
+* **Quick Start Guide:** Created `QUICKSTART.md` covering the essentials.
+* **Technical Deep Dive:** Created `TECHNICAL_DEEP_DIVE.md` explaining probabilities, levels, and SRS logic.
+* **Onboarding Guided Tour:** Implemented an interactive in-app tour for new profiles to ensure a seamless first-time experience.
 
 ## ~~8. Robustness & Testing Suite~~ (COMPLETED - 2026-03-29)
 **Concept:**  
@@ -122,23 +93,6 @@ Eine Funktion in den Repertoire-Einstellungen des Creators, mit der man Züge ba
 * **Batch-Reorganisation:** Ermöglicht die schnelle Strukturierung eines großen Repertoires, indem wichtige (häufige) Züge priorisiert werden.
 * **Sicherheitsabfrage:** Anzeige der Anzahl der betroffenen Züge vor der Durchführung der Änderung.
 
-## 14. Full Course Export
-**Concept:**  
-Create a comprehensive "Course Export" feature that generates a structured folder containing everything needed to share or backup a complete opening course.
-
-**Export Package Contents:**
-* **README.md:** Automatically generated file containing the course description and technical instructions on how to import the course into Opening Fenix (e.g., target directories).
-* **Repertoire Database:** The actual `.db` file of the repertoire.
-* **Level-Specific PGNs:** Separate PGN files for each level (Level 1, Level 2, etc.) with transpositions marked and no duplicates.
-* **Instruction PGN:** A dedicated PGN file for verbal/textual instructions (Future Idea).
-* **Typical Ideas PGN:** PGN files illustrating strategic themes and typical plans (Future Idea).
-* **Model Games PGN:** A collection of high-level games illustrating the repertoire in practice (Future Idea).
-* **Tactical Motifs PGN:** A PGN file focusing on common tactical patterns specific to the opening (Future Idea).
-
-**Implementation Ideas:**
-* **Export Wizard:** A UI dialog to select which components (DB, PGNs, Ideas, Games) to include in the export.
-* **Folder Structure:** Clean organization (e.g., `/PGN/Levels/`, `/Games/`, `/Tactics/`).
-* **Zip Export:** Create a `.zip` archive of the entire repertoire folder for easy sharing.
 
 ## 16. Custom Repertoire Cover Images
 **Concept:**
@@ -167,3 +121,15 @@ Transition from a flat `.db` structure to dedicated repertoire subfolders to all
 ## 18. Create Example Repertoire(s)
 **Concept:**
 Provide users with one or two high-quality example repertoires (e.g., "The Italian Game - Core Variations") to showcase how to use the Creator, and to provide immediate training content for new users.
+
+
+## 20. Repertoire Game Analysis (Lichess Integration)
+**Concept:**  
+Analyze a player's real games on Lichess to identify when they deviate from their defined opening repertoire. This helps in pinpointing "holes" in their knowledge based on actual performance.
+
+**Implementation Ideas:**
+* **Game Fetching:** Integrate Lichess API to download games for a specific username, filtered by time period (date range) and time control (Blitz, Rapid, Classical).
+* **Automated Comparison:** The system iterates through the game's PGN and compares each position against the active repertoire database.
+* **Deviation Detection:** Identify the exact move where the game "left the opening" (i.e., the first move not recorded in the repertoire).
+* **Categorization:** Distinguish between "intentional deviations" (new lines to learn) and "mistakes" (lines that were in the repertoire but forgotten).
+* **Visual Feedback:** Show a summary report for each game: "Deviated at move 12 (Repertoire coverage: 85%)".

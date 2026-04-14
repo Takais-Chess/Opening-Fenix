@@ -96,3 +96,58 @@ def test_enrich_position_lichess(mock_urlopen, mock_user_dir, sample_repertoire)
     assert "e2e4" in data.moves_json
     session.close()
     db.close()
+
+@patch("chess.engine.SimpleEngine.popen_uci")
+def test_run_db_analysis_with_cancel(mock_popen, mock_user_dir, sample_repertoire):
+    mock_popen.return_value = MagicMock()
+    # Mock cancel becoming True immediately
+    check_cancel = lambda: True
+    success, msg = run_db_analysis(sample_repertoire, "dummy", depth=10, threads=1, check_cancel=check_cancel)
+    assert success is False
+    assert "abgebrochen" in msg
+
+@patch("chess.engine.SimpleEngine.popen_uci")
+def test_run_db_analysis_engine_error(mock_popen, mock_user_dir, sample_repertoire):
+    mock_popen.side_effect = Exception("Engine crash")
+    success, msg = run_db_analysis(sample_repertoire, "dummy", depth=10, threads=1)
+    assert success is False
+    assert "Fehler bei der Analyse: Engine crash" in msg
+
+def test_enrich_position_already_exists(mock_user_dir, sample_repertoire):
+    # Setup Lichess data already in DB
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    from opening_fenix.core.db.models import LichessData
+    e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    session.add(LichessData(fen=" ".join(e4_fen.split()[:4]), elo_range="1800", moves_json="{}"))
+    session.commit()
+    session.close()
+    
+    # Run enrich_position - should skip Lichess but might run engine if configured
+    success, msg = enrich_position(sample_repertoire, e4_fen, "1800", engine_path=None, depth=10)
+    assert success is True
+    assert "complete" in msg
+
+
+@patch("os.path.exists")
+@patch("chess.engine.SimpleEngine.popen_uci")
+def test_enrich_position_engine_only(mock_popen, mock_exists, mock_user_dir, sample_repertoire):
+    mock_exists.return_value = True
+    mock_engine = MagicMock()
+    mock_popen.return_value = mock_engine
+    
+    # Mocking result
+    mock_info = {"pv": [], "score": MagicMock(white=lambda: MagicMock(score=lambda x: 0))}
+    mock_engine.analyse.return_value = [mock_info]
+    # Options check
+    mock_engine.options = ["MultiPV"]
+    
+    fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+    # Set elo_category=None to skip Lichess
+    success, msg = enrich_position(sample_repertoire, f"{fen} 0 1", elo_category=None, engine_path="dummy")
+    
+    assert success is True
+    assert mock_popen.called
+
+

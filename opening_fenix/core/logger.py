@@ -1,6 +1,6 @@
 import logging
 import os
-from opening_fenix.core.data_tools import get_user_dir
+from opening_fenix.core.utils import get_user_dir
 
 def setup_logger(name="OpeningFenix"):
     """Configures and returns a logger for the application."""

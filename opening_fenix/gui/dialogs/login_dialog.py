@@ -4,10 +4,12 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, 
     QPushButton, QGroupBox, QFrame, QInputDialog, QMessageBox,
     QHBoxLayout, QCheckBox, QScrollArea, QWidget, QGridLayout, QMenu,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect, QButtonGroup
 )
 from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QGraphicsOpacityEffect
+
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
 # Import centralized styles
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
@@ -35,18 +37,20 @@ class RepertoireButton(QPushButton):
                     border-radius: {scale(12)}px;
                     font-size: {scale(16)}px;
                     font-weight: bold;
+                    padding: {scale(2)}px 0;
                 }}
 
             """)
         else:
             self.setStyleSheet(f"""
                 QPushButton {{
-                    background-color: rgba(255, 255, 255, 0.1);
-                    color: white;
+                    background-color: rgba(255, 255, 255, 0.3);
+                    color: black;
                     border: 1px solid rgba(255, 255, 255, 0.2);
                     border-radius: {scale(12)}px;
                     font-size: {scale(16)}px;
                     font-weight: bold;
+                    padding: {scale(2)}px 0;
                 }}
 
                 QPushButton:hover {{
@@ -59,8 +63,9 @@ class RepertoireSelectionDialog(QDialog):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle("Repertoires wählen")
-        self.setMinimumSize(scale(450), scale(500))
+        self.setMinimumSize(scale(560), scale(600))
         self.selected_repos = []
+        self.selected_language = None
 
         self.repo_buttons = []
         
@@ -87,8 +92,9 @@ class RepertoireSelectionDialog(QDialog):
 
         # Scroll Area for Buttons
         self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("RepoScrollArea")
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.scroll_area.setStyleSheet("QScrollArea#RepoScrollArea { background: transparent; border: none; }")
         
         scroll_widget = QWidget()
         scroll_widget.setStyleSheet("background: transparent;")
@@ -115,17 +121,110 @@ class RepertoireSelectionDialog(QDialog):
         
         layout.addSpacing(scale(20))
 
+        # Notation Language Selection
+        lang_layout = QHBoxLayout()
+        lbl_lang = QLabel("Notation Sprache:")
+        lbl_lang.setStyleSheet(f"font-size: {scale(16)}px; color: black; font-weight: bold;")
+        
+        self.lang_group = QButtonGroup(self)
+        btn_en = QPushButton("English (EN)")
+        btn_en.setObjectName("LangBtn_en")
+        btn_de = QPushButton("Deutsch (DE)")
+        btn_de.setObjectName("LangBtn_de")
+        
+        for btn, code in [(btn_en, "en"), (btn_de, "de")]:
+            btn.setCheckable(True)
+            btn.setProperty("lang_code", code)
+            btn.setFixedHeight(scale(50))
+            btn.setMinimumWidth(scale(140))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            
+            # Apply similar style to RepertoireButton
+            style = f"""
+                QPushButton {{
+                    background-color: rgba(255, 255, 255, 0.3);
+                    color: black;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    border-radius: {scale(12)}px;
+                    font-size: {scale(16)}px;
+                    font-weight: bold;
+                    padding: {scale(2)}px {scale(15)}px;
+                }}
+                QPushButton:checked {{
+                    background-color: {COLORS['burnt_orange']};
+                    color: white;
+                    border: 2px solid #e67e22;
+                }}
+                QPushButton:hover:!checked {{
+                    background-color: rgba(255, 255, 255, 0.2);
+                }}
+            """
+            btn.setStyleSheet(style)
+            self.lang_group.addButton(btn)
+            lang_layout.addWidget(btn)
+            
+        self.lang_group.buttonClicked.connect(self.validate_selection)
+        
+        lang_layout.insertWidget(0, lbl_lang)
+        lang_layout.addStretch()
+        layout.addLayout(lang_layout)
+        
+        layout.addSpacing(scale(20))
 
-        btn_ok = QPushButton("✔ Profil erstellen")
-        btn_ok.setObjectName("PrimaryAction")
-        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_ok.clicked.connect(self.on_accept)
-        layout.addWidget(btn_ok)
+        self.btn_ok = QPushButton("✔ Profil erstellen")
+        self.btn_ok.setObjectName("PrimaryAction")
+        self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ok.setEnabled(True) # Always enabled, validate on click
+        self.btn_ok.clicked.connect(self.on_accept)
+        layout.addWidget(self.btn_ok)
+
+    def flash_widget(self, widget):
+        """Creates a bold red flash effect to draw attention."""
+        original_style = widget.styleSheet()
+        obj_name = widget.objectName()
+        class_name = widget.metaObject().className()
+        
+        # Use selector if objectName exists, otherwise fallback to class name
+        selector = f"#{obj_name}" if obj_name else class_name
+        
+        # Flash: Bold red border using !important to override existing styles
+        flash_style = original_style + f" {selector} {{ border: 4px solid #e74c3c !important; }}"
+        widget.setStyleSheet(flash_style)
+        
+        # Reset after a short delay (slightly longer for visibility)
+        QTimer.singleShot(800, lambda: widget.setStyleSheet(original_style))
+
+    def validate_selection(self):
+        """Visual feedback when language is selected."""
+        # We could add a checkmark or something here later
+        pass
 
     def on_accept(self):
+        selected_repos = []
         for btn in self.repo_buttons:
             if btn.isChecked():
-                self.selected_repos.append(btn.repo_name)
+                selected_repos.append(btn.repo_name)
+        
+        checked_lang = self.lang_group.checkedButton()
+        
+        # VALIDATION
+        has_error = False
+        if not selected_repos:
+            # Flash the scroll area or buttons
+            self.flash_widget(self.scroll_area)
+            has_error = True
+            
+        if not checked_lang:
+            # Flash the language buttons (we'll find the buttons in the group)
+            for btn in self.lang_group.buttons():
+                self.flash_widget(btn)
+            has_error = True
+            
+        if has_error:
+            return
+
+        self.selected_repos = selected_repos
+        self.selected_language = checked_lang.property("lang_code")
         self.accept()
 
 class ProfileGridButton(QPushButton):
@@ -139,12 +238,15 @@ class ProfileGridButton(QPushButton):
 
 
 class LoginDialog(QDialog):
+    profile_selected = pyqtSignal(str)
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Opening Fenix - Login")
         set_consistent_icon(self)
         self.setMinimumSize(scale(700), scale(520))
         self.selected_profile = None
+        self.login_in_progress = False
 
         self.open_creator_requested = False
 
@@ -237,6 +339,45 @@ class LoginDialog(QDialog):
 
         # Load initial profiles
         self.load_profiles()
+        
+        # Loading Overlay (initially hidden)
+        self.loading_overlay = QFrame(self)
+        self.loading_overlay.setObjectName("LoadingOverlay")
+        self.loading_overlay.setStyleSheet(f"""
+            QFrame#LoadingOverlay {{
+                background-color: rgba(255, 255, 255, 0.85);
+                border-radius: {scale(15)}px;
+            }}
+        """)
+        overlay_layout = QVBoxLayout(self.loading_overlay)
+        overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        
+        self.lbl_loading = QLabel("Wird geladen...")
+        self.lbl_loading.setStyleSheet(f"font-size: {scale(22)}px; font-weight: bold; color: {COLORS['brown_text']};")
+        overlay_layout.addWidget(self.lbl_loading)
+        
+        self.loading_overlay.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'loading_overlay'):
+            self.loading_overlay.setGeometry(self.rect())
+
+    def show_loading_state(self, profile_name):
+        """Displays a loading message and disables interaction."""
+        self.login_in_progress = True
+        self.lbl_loading.setText(f"Trainer wird geladen...\n({profile_name})")
+        self.loading_overlay.show()
+        self.loading_overlay.raise_()
+        self.setEnabled(True) # Ensure dialog is enabled to show overlay, but we'll block buttons
+        
+        # Disable all buttons manually for safety
+        self.btn_creator.setEnabled(False)
+        self.btn_new.setEnabled(False)
+        for btn in self.findChildren(QPushButton):
+            btn.setEnabled(False)
+            
+        QApplication.processEvents()
 
     def _get_relative_time(self, iso_date_str):
         """Helper to format ISO date string into a relative time like 'Vor 2 Stunden'."""
@@ -328,11 +469,10 @@ class LoginDialog(QDialog):
         self.profile_grid.setRowStretch(row + 1, 1)
 
     def select_profile(self, name):
+        if self.login_in_progress: return
         self.selected_profile = name
-        self.setEnabled(False)
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        self.accept()
+        self.profile_selected.emit(name)
+        # We don't call self.accept() here anymore, WindowManager will decide when to close us
 
     def show_context_menu(self, pos, name):
         # We need to find the button that sent the event to map coordinates
@@ -385,6 +525,19 @@ class LoginDialog(QDialog):
                 session.commit()
                 session.close()
                 db.close()
+                
+                # Create initial settings file with selected notation language
+                settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
+                initial_settings = {
+                    "notation_language": sel_dialog.selected_language,
+                    "stop_at_variation_end": True
+                }
+                try:
+                    with open(settings_path, "w") as f:
+                        json.dump(initial_settings, f, indent=4)
+                except Exception as e:
+                    from opening_fenix.core.logger import logger
+                    logger.error(f"Failed to create profile settings: {e}")
                 
                 self.load_profiles()
                 self.select_profile(name)

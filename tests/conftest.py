@@ -3,7 +3,8 @@ import os
 import shutil
 import tempfile
 import chess
-from opening_fenix.core.models import DatabaseManager, Base, UserBase, Position, Move, RepertoireMove, RepertoireLevel
+from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, Base, UserBase
+from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.repertoire import RepertoireManager
 from opening_fenix.core.training import TrainingManager
 
@@ -56,7 +57,8 @@ def _apply_mock_user_dir(monkeypatch, temp_dir):
         "opening_fenix.core.services.import_service.get_user_dir",
         "opening_fenix.core.services.repertoire_core_service.get_user_dir",
         "opening_fenix.core.services.tree_navigation_service.get_user_dir",
-        "opening_fenix.core.services.explorer_service.get_user_dir"
+        "opening_fenix.core.services.explorer_service.get_user_dir",
+        "opening_fenix.core.services.profile_service.get_user_dir"
     ]
     for path in paths_to_mock:
         try:
@@ -99,9 +101,11 @@ def _create_sample_repertoire(user_dir):
     e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
     e5_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
     
-    p1 = Position(fen=start_fen)
-    p2 = Position(fen=e4_fen)
-    p3 = Position(fen=e5_fen)
+    def norm(f): return " ".join(f.split()[:4])
+    
+    p1 = Position(fen=norm(start_fen))
+    p2 = Position(fen=norm(e4_fen))
+    p3 = Position(fen=norm(e5_fen))
     session.add_all([p1, p2, p3])
     session.flush()
     
@@ -114,6 +118,11 @@ def _create_sample_repertoire(user_dir):
     session.add(rm1)
     
     session.commit()
+    
+    # Verification
+    count = session.query(Position).count()
+    print(f"DEBUG: Created sample repertoire with {count} positions at {db_path}")
+    
     session.close()
     db.close()
     return repo_name
@@ -136,3 +145,49 @@ def training_manager(mock_user_dir, repertoire_manager):
         tm.user_session.close()
     if tm.user_db:
         tm.user_db.close()
+
+@pytest.fixture
+def complex_backend(mock_user_dir, sample_repertoire):
+    """Fixture for CreatorBackend with sample repertoire."""
+    from opening_fenix.creator.creator_window import CreatorBackend
+    backend = CreatorBackend(is_test=True)
+    backend.load_repertoire("TestRepo")
+    yield backend
+    backend.close()
+
+@pytest.fixture
+def creator_window(qapp, complex_backend):
+    """Fixture for CreatorWindow using a complex backend."""
+    from opening_fenix.creator.creator_window import CreatorWindow
+    win = CreatorWindow("TestRepo")
+    win.show()
+    yield win
+    win.close()
+
+@pytest.fixture(autouse=True)
+def silence_ui(monkeypatch):
+    """Globally silence interactive dialogs during tests to prevent hangs."""
+    from PyQt6.QtWidgets import QMessageBox, QInputDialog
+    
+    # Mock QMessageBox functions to always return "Yes" or "Ok"
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
+    monkeypatch.setattr(QMessageBox, "critical", lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
+    
+    # Mock QInputDialog.getText to return a fixed name and True
+    monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Test Name", True))
+
+    # Mock CreatorWindow.new_repertoire_dialog
+    try:
+        from opening_fenix.creator.creator_window import CreatorWindow
+        monkeypatch.setattr(CreatorWindow, "new_repertoire_dialog", lambda *args, **kwargs: None)
+    except (ImportError, AttributeError):
+        pass
+    
+    # Mock MainWindow.check_for_onboarding
+    try:
+        from opening_fenix.gui.main_window import MainWindow
+        monkeypatch.setattr(MainWindow, "check_for_onboarding", lambda *args, **kwargs: None)
+    except (ImportError, AttributeError):
+        pass

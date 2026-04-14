@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.3.0] - 2026-04-14
+
+### Added
+- **Database Recovery System**: Automatic detection of malformed/corrupted SQLite databases with a built-in recovery and repair mechanism.
+- **Enhanced Hole Finder**:
+    - **Popularity Sorting**: Suggested moves are now sorted by frequency (Lichess data) by default.
+    - **Transposition Awareness**: Better handling of transpositions for structural consistency.
+    - **Smart Level Consistency**: Refined logic for tracking minimum reached levels to avoid false positives.
+- **Automated Repertoire Integrity**: Integrated move-linking and integrity validation directly into the PGN import workflow.
+- **Candidate Table Move Counter**: Added a numeric column to the Candidate Moves table in the Creator for better traceability.
+- **Repertoire Color Management**: Added ability to select and update the user's color for each repertoire (Black/White), including board flipping logic.
+- **Default Level Initialization**: New repertoires now automatically start with three default levels (Grundlagen, Tiefe Theorie, Nachschlagewerk).
+
+### Fixed
+- **Repertoire Index Error**: Resolved a `TypeError` in the `add_repertoire_level` method.
+- **Transposition Search Data**: Fixed the transposition finder to return full move data (UCI/SAN) for direct repertoire integration.
+- **Performance Audit**: Conducted a systematic audit and optimization of database and UI rendering segments.
+
+## [2.2.0] - 2026-04-06
+
+### Added
+- **Onboarding Guided Tour**: Interactive step-by-step walkthrough for new users and profiles to ensure a smooth start.
+- **Multilingual Notation**: Full support for English and German chess notation (`Nf3` vs `Sf3`) across the entire UI.
+- **Lichess Elo Import Logic**: Enhanced Elo category mapping (Low/Mid/High) for more accurate move probability calculations.
+- **Micro-Animations**: Added board piece "lifting" and shadow effects for a premium feel.
+
+### Fixed
+- **Trainer Move Filtering**: Resolved a critical issue where the variation filter incorrectly handled moves across variation entry points.
+- **Executable Build Stability**: Fixed `build_executable.bat` to correctly package all repertoire subfolders and sound assets.
+- **Repertoire Settings Stability**: Fixed multiple crashes (TypeError/RuntimeError) related to background maintenance threads.
+- **Creator Engine UI**: Simplified and polished the analysis engine settings (depth, threads, Multi-PV) for better responsiveness.
+- **Notation Selection Logic**: Improved contrast and layout for the new profile creation dialog.
+
 ## [2.1.0] - 2026-04-03
 
 ### Added

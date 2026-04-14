@@ -27,7 +27,12 @@ class TrainingManager:
         
         self.user_db = None
         self.user_session = None
-        self.settings = { "auto_delay": 200, "anim_speed": 300, "stop_at_variation_end": False }
+        self.settings = { 
+            "auto_delay": 200, 
+            "anim_speed": 300, 
+            "stop_at_variation_end": True,
+            "notation_language": "en"
+        }
         
         # Optimization Caches
         self._variation_move_ids = set()
@@ -40,6 +45,10 @@ class TrainingManager:
         # O(1) index caches for hot-path lookups
         self._move_by_id_cache: Optional[Dict[int, Move]] = None
         self._move_by_fen_uci_cache: Optional[Dict[Tuple[str, str], Move]] = None
+        
+        # New: Stat Caching
+        self._reachable_moves_cache = None # List of (fen, uci) reachable for current repo/level
+        self._last_stats_cache = None # (new, due, dist)
         
         self.init_user_db()
         self.load_settings()
@@ -146,6 +155,8 @@ class TrainingManager:
         self._td_cache = None
         self._move_by_id_cache = None
         self._move_by_fen_uci_cache = None
+        self._reachable_moves_cache = None
+        self._last_stats_cache = None
 
     def reset_repertoire_progress(self) -> Tuple[bool, str]:
         if not self.repertoire_manager.active_repertoire_name: return False, "Kein Repertoire aktiv."
@@ -350,23 +361,38 @@ class TrainingManager:
 
         return self._variation_move_ids
 
-    def get_stats(self, variation_filter=None):
-        if not self.repertoire_manager.repo_session: return 0, 0, {}
+    def _ensure_reachable_moves_cache(self, variation_filter=None):
+        """
+        Calculates and caches the list of reachable moves for the current repertoire and level.
+        Only runs BFS if the cache is empty or the level/filter changed.
+        """
+        # If we have a variation filter, we don't cache globally (too many combinations)
+        if variation_filter:
+            return self._calculate_reachable_moves(variation_filter)
+            
+        # Check if we already have the cache for the active level
+        active_level = self.get_active_level()
+        cache_key = (self.repertoire_manager.active_repertoire_name, active_level)
+        
+        if getattr(self, "_reachable_moves_cache_key", None) == cache_key and self._reachable_moves_cache is not None:
+            return self._reachable_moves_cache
+            
+        # Re-calculate
+        self._reachable_moves_cache = self._calculate_reachable_moves(None)
+        self._reachable_moves_cache_key = cache_key
+        return self._reachable_moves_cache
+
+    def _calculate_reachable_moves(self, variation_filter):
+        """Internal BFS to find all reachable moves for a given configuration."""
         max_lvl = self.get_active_level()
         side = self.repertoire_manager.get_repertoire_color()
-        
         self._ensure_forward_cache()
-        self._ensure_td_cache()
-        valid_move_ids = self._build_variation_move_set(variation_filter) if variation_filter else None
-
-        # Reachability Analysis: find all active player-turn repertoire moves that are reachable from the root
-        # and not blocked by any inactive/out-of-repertoire player-side move.
-        reachable_repo_moves = []
         
-        # Start from positions with no parents (usually the initial position)
+        valid_move_ids = self._build_variation_move_set(variation_filter) if variation_filter else None
+        reachable = []
+        
         root_positions = [pos_id for pos_id in self._pos_cache if pos_id not in self._move_parent_cache]
         if not root_positions and self._pos_cache:
-            # Fallback for very complex transpositions that might create a loop at the very top (unlikely)
             root_positions = [min(self._pos_cache.keys())]
 
         queue = deque(root_positions)
@@ -384,18 +410,51 @@ class TrainingManager:
                 if is_player:
                     rep = self._rep_move_cache.get(m.id)
                     if rep and rep.level <= max_lvl:
-                        # Found a valid player-turn move in the active repertoire
                         if valid_move_ids is None or m.id in valid_move_ids:
-                            reachable_repo_moves.append((pos.fen, m.uci))
-                        
-                        # Only follow if this branch is active
+                            reachable.append((pos.fen, m.uci))
                         if m.to_position_id not in visited:
                             visited.add(m.to_position_id); queue.append(m.to_position_id)
                 else:
-                    # Always follow opponent moves to find more player moves
                     if m.to_position_id not in visited:
                         visited.add(m.to_position_id); queue.append(m.to_position_id)
+        return reachable
+
+    def get_stats_for_repertoire(self, repo_name: str) -> Tuple[int, int, Dict[int, int]]:
+        """Fast path for checking persistent stats cache without full repertoire switch."""
+        if not self.user_session: return 0, 0, {}
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        if settings and settings.last_dist_json:
+            try:
+                dist = json.loads(settings.last_dist_json)
+                dist = {int(k): v for k, v in dist.items()}
+                return settings.last_new_count, settings.last_due_count, dist
+            except: pass
+        return 0, 0, {}
+
+    def get_stats(self, variation_filter=None, use_cache=True):
+        if not self.repertoire_manager.repo_session: return 0, 0, {}
         
+        # 1. Check persistent DB cache first if no variation filter and use_cache is True
+        if not variation_filter and use_cache:
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(
+                repertoire_name=self.repertoire_manager.active_repertoire_name
+            ).first()
+            
+            if settings and settings.last_dist_json and settings.stats_updated_at:
+                # Basic check: only use if updated in the last 1 minute (for due moves)
+                # This ensures "due" status is somewhat fresh.
+                if (datetime.datetime.now() - settings.stats_updated_at).total_seconds() < 60:
+                    try:
+                        dist = json.loads(settings.last_dist_json)
+                        # Box keys in JSON are strings, convert back to int
+                        dist = {int(k): v for k, v in dist.items()}
+                        return settings.last_new_count, settings.last_due_count, dist
+                    except: pass
+
+        # 2. Use "Smart Incremental" local cache approach
+        reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
+        
+        self._ensure_td_cache()
         user_map = self._td_cache
         new_c, due_c = 0, 0
         done_dist = {i: 0 for i in range(1, 8)} 
@@ -404,13 +463,35 @@ class TrainingManager:
         for fen, uci in reachable_repo_moves:
             entry = user_map.get((fen, uci))
             if self.profile_name == "Freies Training":
-                if not entry: due_c += 1 # Moves not yet trained successfully are due
-                else: done_dist[7] = done_dist.get(7, 0) + 1 # Use box 7 to show progress
+                if not entry: due_c += 1
+                else: done_dist[7] = done_dist.get(7, 0) + 1
             else:
                 if not entry: new_c += 1
                 elif entry.next_due <= lookahead: due_c += 1
                 else: done_dist[entry.box] = done_dist.get(entry.box, 0) + 1
+        
+        # 3. Update persistent cache if no filter
+        if not variation_filter:
+            self._update_persistent_stats_cache(new_c, due_c, done_dist)
+            
         return new_c, due_c, done_dist
+
+    def _update_persistent_stats_cache(self, new_c, due_c, dist):
+        """Saves stats to the UserRepertoireSettings table."""
+        if not self.user_session or not self.repertoire_manager.active_repertoire_name: return
+        try:
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(
+                repertoire_name=self.repertoire_manager.active_repertoire_name
+            ).first()
+            if settings:
+                settings.last_new_count = new_c
+                settings.last_due_count = due_c
+                settings.last_dist_json = json.dumps(dist)
+                settings.stats_updated_at = datetime.datetime.now()
+                self.user_session.commit()
+        except Exception as e:
+            logger.error(f"Error updating stats cache: {e}")
+            self.user_session.rollback()
 
     def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None):
         if not self.repertoire_manager.repo_session: return None, []
@@ -469,6 +550,30 @@ class TrainingManager:
 
         # 3. New Mode
         elif mode == 'new':
+            if variation_filter:
+                self._ensure_forward_cache()
+                learned_keys = set(self._td_cache.keys())
+                filter_info = self.repertoire_manager._prepare_variation_filter(variation_filter)
+                lead_up_pos_ids = filter_info.get('lead_up', set())
+                
+                lead_up_candidates = []
+                for pos_id in lead_up_pos_ids:
+                    pos = self._pos_cache.get(pos_id)
+                    if not pos: continue
+                    pos_fen = pos.fen
+                    if f' {side} ' not in pos_fen: continue
+                    
+                    for m in self._forward_moves_cache.get(pos_id, []):
+                        rep_move = self._rep_move_cache.get(m.id)
+                        if not rep_move or rep_move.level > max_lvl: continue
+                        if (pos_fen, m.uci) not in learned_keys:
+                            lead_up_candidates.append(m)
+                
+                if lead_up_candidates:
+                    # Prioritize the earliest unlearned lead-up move (highest priority first)
+                    lead_up_candidates.sort(key=lambda x: x.priority_score, reverse=True)
+                    return self._get_ancestor(lead_up_candidates[0], check_due=False, variation_filter=None), []
+
             learned_keys = set(self._td_cache.keys())
 
             candidates = []
@@ -509,34 +614,40 @@ class TrainingManager:
         target_entry_fen = clean_fen(entry_fen) if entry_fen else None
 
         for _ in range(50): # Safety limit
-            # Stop if we are already at the variation entry point
+            # 1. Stop if the CURRENT move already starts at the variation boundary
             if target_entry_fen:
                 curr_fen = clean_fen(self._pos_cache[curr_move.from_position_id].fen)
                 if curr_fen == target_entry_fen:
                     break
 
-            # Parent cache is pre-sorted by priority_score descending
+            # 2. Look at the parent move (usually an opponent move)
             parents = self._move_parent_cache.get(curr_move.from_position_id, [])
             if not parents: break
             parent_move = parents[0]
             
-            # Check if parent_move is at the boundary
+            # 3. If the PARENT move starts at the boundary, we must stop here!
             if target_entry_fen:
                 parent_fen = clean_fen(self._pos_cache[parent_move.from_position_id].fen)
                 if parent_fen == target_entry_fen:
                     break
 
+            # 4. Look at the grandparent move (usually the previous player move)
             grandparents = self._move_parent_cache.get(parent_move.from_position_id, [])
             if not grandparents: break
             grandparent_move = grandparents[0]
             
+            # 5. Check library status
             key = (self._pos_cache[grandparent_move.from_position_id].fen, grandparent_move.uci)
             if check_due:
                 p_data = self._td_cache.get(key)
-                if p_data and p_data.next_due <= datetime.datetime.now(): curr_move = grandparent_move; continue
+                if p_data and p_data.next_due <= datetime.datetime.now(): 
+                    curr_move = grandparent_move
+                    continue
             else:
                 is_learned = key in self._td_cache
-                if not is_learned: curr_move = grandparent_move; continue
+                if not is_learned: 
+                    curr_move = grandparent_move
+                    continue
             break
         return curr_move
 
@@ -718,6 +829,9 @@ class TrainingManager:
         # Update cache in-place instead of full invalidation
         if self._td_cache is not None:
             self._td_cache[(fen, move.uci)] = entry
+
+        # New: Trigger immediate (smart) cache update for the current repertoire
+        self.get_stats(use_cache=False) 
 
     def is_move_new(self, move_id):
         self._ensure_forward_cache()

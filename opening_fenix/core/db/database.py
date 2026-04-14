@@ -40,7 +40,23 @@ class DatabaseManager:
             cursor.close()
         
         base.metadata.create_all(self.engine)
+        self._check_integrity()
         self._migrate_schema(base)
+
+    def _check_integrity(self) -> None:
+        """Verifies the physical integrity of the database file."""
+        try:
+            with self.engine.connect() as conn:
+                # Use quick_check for startup to avoid long delays on large DBs
+                result = conn.execute(text("PRAGMA quick_check")).scalar()
+                if result != "ok":
+                    from opening_fenix.core.logger import logger
+                    logger.error(f"Database integrity check failed: {result}")
+                    # We don't raise here yet to allow the app to try and load, 
+                    # but we logged it. A more aggressive approach would be raising.
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Error during integrity check: {e}")
 
     def _migrate_schema(self, base: Type) -> None:
         """
@@ -96,6 +112,14 @@ class DatabaseManager:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN rating FLOAT DEFAULT 800.0"))
                         if 'last_rating_update' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN last_rating_update DATETIME"))
+                        if 'last_new_count' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN last_new_count INTEGER DEFAULT 0"))
+                        if 'last_due_count' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN last_due_count INTEGER DEFAULT 0"))
+                        if 'last_dist_json' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN last_dist_json VARCHAR"))
+                        if 'stats_updated_at' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN stats_updated_at DATETIME"))
                         conn.commit()
 
         except Exception as e:

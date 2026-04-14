@@ -5,12 +5,13 @@ import subprocess
 import chess
 import chess.engine
 from typing import Tuple, Callable, Optional
-from sqlalchemy import or_
+from sqlalchemy import or_, func
+from sqlalchemy.orm import Session
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove
 from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.db.meta_utils import get_meta
-from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, get_repertoire_db_path
+from opening_fenix.core.db.meta_utils import get_meta, set_meta
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
 from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
 import urllib.request
@@ -54,9 +55,9 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             repertoire_uci = repertoire_move.uci if repertoire_move else None
 
             try:
-                # Check if engine supports MultiPV
-                analyze_kwargs = {"multipv": 20} if "MultiPV" in engine.options else {}
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
+                # MultiPV is automatically managed by the analysis context manager in python-chess.
+                # Setting it manually via configure can cause warnings or errors depending on the engine.
+                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=20 if "MultiPV" in engine.options else 1)
                 
                 if not result:
                     continue
@@ -90,6 +91,10 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
                  session.commit()
         
+        # Invalidate cache after successful analysis
+        set_meta(session, "ana_cache_count", "-1")
+        session.commit()
+        
         return True, f"Analyse von {total_positions} Positionen abgeschlossen."
 
     except Exception as e:
@@ -101,58 +106,76 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         session.close()
         db.close()
 
-def get_repertoire_analysis_status(repo_name: str) -> str:
-    db_path = get_repertoire_db_path(repo_name)
-    if not os.path.exists(db_path):
-        return "Repertoire nicht gefunden"
-
-    db = DatabaseManager(db_path)
-    session = db.get_session()
+def get_repertoire_analysis_status(repo_name: str, session: Optional[Session] = None) -> str:
+    db = None
+    if session is None:
+        db_path = get_repertoire_db_path(repo_name)
+        if not os.path.exists(db_path):
+            return "Repertoire nicht gefunden"
+        db = DatabaseManager(db_path)
+        session = db.get_session()
     
     try:
         player_color = get_meta(session, "color", "w")
         turn_filter = Position.fen.like(f'% {player_color} %')
         
-        positions = session.query(Position.analysis_depth).filter(turn_filter).all()
-        total_positions = len(positions)
+        # Performance check: Compare with cache
+        total_p = session.query(func.count(Position.id)).scalar() or 0
+        cached_count = get_meta(session, "ana_cache_count", "-1")
+        cached_status = get_meta(session, "ana_cache_status", "")
         
-        if total_positions == 0:
-            return "Keine Spielerzüge"
+        if str(total_p) == str(cached_count) and cached_status:
+            return cached_status
 
-        analyzed_depths = [d.analysis_depth for d in positions if d.analysis_depth is not None]
+        # If no valid cache, calculate with FAST SQL
+        # We need: total positions for player, count of analyzed, min depth, max depth
+        stats = session.query(
+            func.count(Position.id),
+            func.count(Position.analysis_depth),
+            func.min(Position.analysis_depth),
+            func.max(Position.analysis_depth)
+        ).filter(turn_filter).first()
         
-        analyzed_count = len(analyzed_depths)
-
-        if analyzed_count == 0:
-            return "Nicht analysiert"
+        total_player_pos, analyzed_count, min_depth, max_depth = stats
         
-        if analyzed_count < total_positions:
-            return "Teilweise analysiert"
-        
-        min_depth = min(analyzed_depths)
-        max_depth = max(analyzed_depths)
-        
-        if min_depth == max_depth:
-            return f"Tiefe: {min_depth}"
+        status = ""
+        if not total_player_pos or total_player_pos == 0:
+            status = "Keine Spielerzüge"
+        elif not analyzed_count or analyzed_count == 0:
+            status = "Nicht analysiert"
+        elif analyzed_count < total_player_pos:
+            status = "Teilweise analysiert"
+        elif min_depth == max_depth:
+            status = f"Tiefe: {min_depth}"
         else:
-            return f"Tiefe: Zwischen {min_depth} und {max_depth}"
+            status = f"Tiefe: Zwischen {min_depth} und {max_depth}"
+
+        # Save to cache
+        set_meta(session, "ana_cache_count", total_p)
+        set_meta(session, "ana_cache_status", status)
+        session.commit()
+        return status
 
     except Exception as e:
         print(f"Error getting analysis status for {repo_name}: {e}")
         return "Fehler bei Statusprüfung"
     finally:
-        session.close()
-        db.close()
+        if db:
+            session.close()
+            db.close()
 
 def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: str, depth: int = 10) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
+    from opening_fenix.core.logger import logger
+    logger.info(f"enrich_position: Using DB at {db_path}")
     db = DatabaseManager(db_path)
     session = db.get_session()
     
     try:
-        clean_fen = " ".join(fen.split(" ")[:4])
+        clean_fen = " ".join(fen.strip().split()[:4])
         pos = session.query(Position).filter_by(fen=clean_fen).first()
         if not pos:
+            # Fallback for old databases that might have full FENs or slightly different spacing
             pos = session.query(Position).filter(Position.fen.like(f"{clean_fen}%")).first()
             if not pos:
                 return False, "Position not found in DB."
@@ -217,34 +240,35 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                 engine.configure({"Threads": 1})
                 board = chess.Board(pos.fen) 
                 
-                # Check if engine supports MultiPV
-                analyze_kwargs = {"multipv": 10} if "MultiPV" in engine.options else {}
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
-                
-                if result:
-                    best_score_info = result[0]['score'].white()
-                    best_score_val = best_score_info.score(mate_score=100000)
+                try:
+                    # Use actual MultiPV from engine options if available, capped at 10 for speed
+                    analyze_kwargs = {"multipv": 10} if "MultiPV" in engine.options else {}
+                    result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
                     
-                    good_moves = []
-                    rep_moves = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).all()
-                    for rm in rep_moves:
-                        good_moves.append(rm.uci)
+                    if result:
+                        best_score_info = result[0]['score'].white()
+                        best_score_val = best_score_info.score(mate_score=100000)
+                        
+                        good_moves = []
+                        rep_moves = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).all()
+                        for rm in rep_moves:
+                            good_moves.append(rm.uci)
 
-                    for info in result:
-                        if 'pv' not in info or not info['pv']: continue
-                        move = info['pv'][0]
-                        score = info['score'].white()
-                        score_val = score.score(mate_score=100000)
-                        # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
-                        threshold = 50 if depth <= 17 else 30
-                        if abs(best_score_val - score_val) <= threshold:
-                            good_moves.append(move.uci())
-                    
-                    pos.good_moves = json.dumps(list(set(good_moves)))
-                    pos.analysis_depth = depth
-                    session.flush()
-            except Exception as e:
-                print(f"Engine analysis failed for enrichment: {e}")
+                        for info in result:
+                            if 'pv' not in info or not info['pv']: continue
+                            move = info['pv'][0]
+                            score = info['score'].white()
+                            score_val = score.score(mate_score=100000)
+                            # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
+                            threshold = 50 if depth <= 17 else 30
+                            if abs(best_score_val - score_val) <= threshold:
+                                good_moves.append(move.uci())
+                        
+                        pos.good_moves = json.dumps(list(set(good_moves)))
+                        pos.analysis_depth = depth
+                        session.flush()
+                except Exception as e:
+                    print(f"Engine analysis failed for enrichment: {e}")
             finally:
                 if engine: engine.quit()
 

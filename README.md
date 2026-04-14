@@ -1,129 +1,109 @@
-# Opening Fenix V2
+# 🦅 Opening-Fenix
 
-Opening Fenix V2 is a powerful chess repertoire management and training application. It allows users to build, analyze, and train their openings using local engine analysis, statistical Lichess data, and a custom Spaced Repetition System (SRS).
+[![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
+[![Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
+[![License](https://img.shields.io/badge/license-MIT-yellow.svg)](#license)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-## Features
+Opening-Fenix is a professional chess repertoire management and training platform. Designed for both competitive players and enthusiasts, it combines a **premium Glassmorphism UI** with advanced **Spaced Repetition (SRS)** training, local engine analysis, and Lichess statistical data to help you master your openings with ease.
 
-- **Premium Glassmorphism UI**: Modern, high-contrast interface with native Qt animations for smooth piece movement and interactions.
-- **High-DPI & 4K Support**: Fully responsive design with resolution-relative scaling for a sharp experience on any monitor.
-- **Robust Repertoire Creator**: Interactive chess board with move validation, hierarchical variation naming, and automated name propagation. Includes a **Lichess Analysis Shortcut** to instantly open the current position on lichess.org.
-- **Engine Integration**: Live position evaluation using UCI engines (e.g., Stockfish). Bulk analysis tools to automatically evaluate entire databases.
-- **Lichess Data Integration**: Statistical win rates and move frequencies across multiple ELO categories.
-- **Spaced Repetition Training**: Advanced SRS training schedules based on mastery levels. Includes a stateless **"Freies Training"** (Free Training) profile for immediate, progress-free practice.
-- **Course Introduction Onboarding**: A welcoming splash screen that introduces new repertoires to the user before they start learning.
-- **Secure Input Handling**: Comprehensive validation for PGN imports and database operations to ensure repertoire integrity.
-- **Flexible Import/Export**: Import from PGN files or export your repertoire (entirely or specific branches) for use in other software.
-- **Profile Management**: Support for multiple user profiles to track individual progress and settings.
+---
 
-## Requirements
+## ✨ Key Features
 
-- **Python**: 3.14+
-- **Platform**: Windows (primary support for executable builds)
-- **Dependencies**: PyQt6, SQLAlchemy, python-chess, pytest
+### 🎨 Premium Aesthetics
+*   **Glassmorphism Design**: A stunning, high-contrast interface featuring semi-transparent backgrounds, vibrant gradients, and native Qt animations.
+*   **4K Ready**: Fully responsive resolution-relative scaling for a crisp experience on any monitor, regardless of DPI settings.
+*   **Smooth Piece Movement**: Cubic easing animations and piece "lifting" effects for a natural, high-end feel.
 
-## Setup & Installation
+### 🧠 Advanced Training (SRS)
+*   **Spaced Repetition System**: A custom mastery-level algorithm (Levels 0-5) that intelligently schedules your move reviews.
+*   **Onboarding Guided Tour**: Interactive walkthrough for new profiles to ensure a smooth introduction to all features.
+*   **Freies Training (Free Practice)**: Instant, progress-free practice sessions using in-memory databases.
+*   **Smart Variation Filtering**: Target specific lines or sub-variations seamlessly within the trainer.
 
-1. **Clone the repository**:
-   ```powershell
-   git clone https://github.com/felixbrunner12-lab/Opening-Fenix.git
-   cd Opening-Fenix
-   ```
+### 🛠️ Repertoire Management (Creator)
+*   **Interactive Tree Editor**: Build deep move trees with validation, hierarchical variation naming, and automated name propagation.
+*   **Hole Finder 2.0**: Advanced gap detection with transposition awareness, smart level consistency rules, and popularity-based prioritization.
+*   **Lichess Data Integration**: Real-time win rates and move frequencies across multiple Elo categories (Low, Mid, High, Masters).
+*   **Bulk Analysis**: Automated Stockfish integration to analyze entire repertoires and automatically highlight "Good Moves".
+*   **Flexible Import/Export**: Robust PGN handling with automated integrity repair and move-linking during bulk imports.
 
-2. **Set up a Virtual Environment**:
-   ```powershell
-   python -m venv .venv
-   .\.venv\Scripts\activate
-   ```
+### 🌐 Integrations & Services
+*   **UCI Engine Support**: Deep integration with local UCI engines (e.g., Stockfish) for live evaluation.
+*   **Lichess API**: Native support for fetching explorer data and instantly opening positions on Lichess for further analysis.
+*   **Robust Persistence**: Automatic detection and recovery system for malformed SQLite databases to prevent data loss.
+*   **Multilingual Notation**: Support for localized chess notation (English/German) across the interface.
 
-3. **Install dependencies**:
-   ```powershell
-   pip install -r requirements.txt
-   ```
+---
 
-4. **Install Chess Engine**:
-   - Place your chess engine executable (e.g., `stockfish.exe`) in the `engines/` directory.
-   - The application looks for `stockfish*.exe` by default, but you can configure the exact path in `config.json`.
+## 🚀 Quick Start
 
-## Documentation
+Get running in less than 2 minutes:
 
-For a detailed guide on how to use the application and its underlying logic, refer to:
-- [**Quick Start Guide**](QUICKSTART.md): Learn how to set up profiles, import repertoires, and start training.
-- [**Technical Deep Dive**](TECHNICAL_DEEP_DIVE.md): Understand the mathematics behind priority scores, level reachability, and architecture internals.
+1.  **Clone & Enter**:
+    ```powershell
+    git clone https://github.com/felixbrunner12-lab/Opening-Fenix.git
+    cd Opening-Fenix
+    ```
+2.  **Environment Setup**:
+    ```powershell
+    python -m venv .venv
+    .\.venv\Scripts\activate
+    ```
+3.  **Install Dependencies**:
+    ```powershell
+    pip install -r requirements.txt
+    ```
+4.  **Launch**:
+    ```powershell
+    python main.py
+    ```
 
-## Usage
+---
 
-### Running from Source
-To start the application during development:
+## 📖 Documentation
+
+For more detailed information, please refer to:
+*   [**QUICKSTART.md**](QUICKSTART.md): Step-by-step guide on creating your first repertoire and starting your SRS training.
+*   [**TECHNICAL_DEEP_DIVE.md**](TECHNICAL_DEEP_DIVE.md): Detailed explanation of Priority Scores, Level Reachability, and the internal architecture.
+*   [**CHANGELOG.md**](CHANGELOG.md): History of updates and new features.
+
+---
+
+## 💻 Development & Deployment
+
+### Testing
+We maintain a robust test suite covering core services and UI components.
 ```powershell
-.\.venv\Scripts\python.exe main.py
+pytest --cov=opening_fenix
 ```
-Upon startup, the application presents a **Login Dialog**. From there, you can choose a profile to enter the **Trainer (Main Window)** or open the **Repertoire Creator**.
 
-### Configuration
-The global configuration is stored in `config.json`. Key settings include:
-- `engine_path`: Full path to the UCI engine executable.
-- `lichess_token`: (Optional) Your Lichess API token for higher rate limits.
-- `theme`: The visual board theme (e.g., "Blau (Turnier)").
-- `last_profile`: The last active user profile.
-
-The application automatically searches for a `stockfish*.exe` file within the `engines/` directory if no `engine_path` is configured.
-
-## Scripts & Development Tools
-
-### Building the Executable
-Use the provided batch script to create a standalone Windows application:
+### Building Executables
+Create a standalone Windows `.exe` using the optimized build script:
 ```powershell
 .\build_executable.bat
 ```
-The output will be generated in `dist\Opening Fenix`.
 
-## Testing & Coverage
+---
 
-Tests are managed via `pytest` with `pytest-cov` for coverage analysis. The suite includes robust cleanup logic for Windows and covers critical UI and backend services.
+## 📂 Project Structure
 
-### Running Tests
-```powershell
-# Run all tests
-.\.venv\Scripts\python.exe -m pytest
+*   `opening_fenix/`: Main package containing the core logic and GUI.
+*   `assets/`: UI assets, including SVG pieces and board themes.
+*   `engines/`: Recommended location for UCI engine executables.
+*   `repertoires/`: Local storage for your opening databases.
+*   `profiles/`: User-specific settings and SRS progress data.
 
-# Run tests with coverage report
-.\.venv\Scripts\python.exe -m pytest --cov=opening_fenix
-```
+---
 
-### Current Status
-- **Overall Coverage**: ~65%
-- **Critical Modules**:
-  - `MainWindow`: 78%
-  - `BoardWidget`: 69%
-  - `CreatorWindow`: 43%
-- **Total Tests**: 147 passing
+## 🤝 Contributing
 
-## Project Structure
+Contributions are welcome! Whether it's bug reports, feature suggestions, or pull requests, please feel free to contribute to the project.
 
-- `main.py`: The main entry point of the application.
-- `opening_fenix/`: Source code directory.
-  - `core/`: Application backend logic.
-    - `services/`: Modular services for training (SRS), Lichess API integration, engine analysis, and repertoire tree logic.
-    - `db/`: Database management, connection pooling, and SQLAlchemy models.
-  - `gui/`: Main training interface and UI components (Glassmorphism, Scaling).
-  - `creator/`: UI for the repertoire editing and management tool.
-- `assets/`: Icons, Logos, Piece Sets (SVG/PNG), and Sounds.
-- `engines/`: Folder for UCI chess engine executables (e.g., Stockfish).
-- `profiles/`: User-specific profiles and SRS training data (`.db` files).
-- `repertoires/`: Stores opening repertoires. Each repertoire has its own subfolder containing the SQLite `.db` database and its associated assets (`.pgn` files, specialized folders).
-- `tests/`: Automated test suite with unit and integration tests.
-- `Opening Fenix.spec`: PyInstaller configuration for building the application.
+## 📄 License
 
-## License
+This project is licensed under the MIT License - see the `LICENSE` file for details (or TODO: Add license file).
 
-TODO: Add license information.
-
-## Future Work
-
-See [FUTURE_TODO.md](FUTURE_TODO.md) for planned features:
-- Multi-language support (English/German).
-- Repertoire Overhaul Mode (Position Checklist) with filtering.
-- Repertoire Hole Finder (Lichess Data Integration).
-- Creator UI Polish (Kontrolle & Hole Finder tabs).
-- Tactics and Endgame Trainer.
-- Dynamic Rating System (Opening Elo).
+---
+*Built with ❤️ for the Chess Community*

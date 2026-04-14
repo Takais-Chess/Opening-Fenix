@@ -31,7 +31,7 @@ def test_start_engine_success(mock_engine_thread):
         mock_engine_thread.start_engine()
         
         mock_popen.assert_called_once()
-        mock_engine.configure.assert_called_with({"Threads": 2, "MultiPV": 2})
+        mock_engine.configure.assert_called_with({"Threads": 2})
         assert mock_engine_thread.running is True
         mock_engine_thread.info_signal.emit.assert_any_call(["Engine geladen."])
 
@@ -93,7 +93,7 @@ def test_update_config(mock_engine_thread):
     mock_engine_thread.update_config(threads=4, depth=20, use_depth_limit=True, multipv=3)
     assert mock_engine_thread.threads == 4
     assert mock_engine_thread.multipv == 3
-    mock_engine.configure.assert_called_with({"Threads": 4, "MultiPV": 3})
+    mock_engine.configure.assert_called_with({"Threads": 4})
 
 def test_process_info_throttling(mock_engine_thread):
     mock_engine_thread._emit_interval = 100 # ms

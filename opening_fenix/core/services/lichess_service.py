@@ -50,6 +50,8 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
 
         if not positions_to_query:
             set_meta(session, "lichess_elo", elo_category)
+            # Invalidate coverage cache to force recalculation with new Elo if changed
+            set_meta(session, "cov_cache_count", "-1")
             session.commit()
             return True, f"Alle Positionen haben bereits Lichess-Daten für ELO '{elo_category}'."
 
@@ -288,3 +290,38 @@ def verify_lichess_token(token: str) -> Tuple[bool, str]:
             return False, f"HTTP Fehler {e.code}: {e.reason}"
     except Exception as e:
         return False, f"Netzwerkfehler: {str(e)}"
+
+def run_lichess_orphan_cleanup(repo_name: str, progress_callback: Optional[Callable[[int], None]] = None) -> Tuple[bool, str]:
+    """Removes all LichessData entries that are no longer referenced by any Position."""
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return False, "Datenbank nicht gefunden."
+        
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    try:
+        # Fetch all Lichess FENs and check existence in the position table.
+        all_lichess_fens = session.query(LichessData.fen).distinct().all()
+        total = len(all_lichess_fens)
+        deleted_count = 0
+        
+        for idx, (l_fen,) in enumerate(all_lichess_fens):
+            # Check if any position matches this FEN prefix
+            exists = session.query(Position.id).filter(Position.fen.like(l_fen + "%")).first()
+            if not exists:
+                n = session.query(LichessData).filter_by(fen=l_fen).delete()
+                deleted_count += n
+            
+            if progress_callback and total > 0:
+                progress_callback(int((idx + 1) * 100 / total))
+                
+        if deleted_count > 0:
+            session.commit()
+            
+        return True, f"{deleted_count} Einträge bereinigt."
+    except Exception as e:
+        session.rollback()
+        return False, str(e)
+    finally:
+        session.close()
+        db.close()
