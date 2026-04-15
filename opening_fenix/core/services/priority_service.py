@@ -3,6 +3,7 @@ import json
 from collections import deque
 import chess
 from typing import Tuple, Callable, Optional
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
@@ -214,21 +215,56 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         if start_prob <= 0 and clean_start_fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
             return True, "No probability to propagate."
 
+        from sqlalchemy import text
+        # ── 1. Use Recursive CTE to find all reachable position IDs instantly ──
+        sql_reachable = text("""
+            WITH RECURSIVE descendants(id) AS (
+                SELECT :start_id
+                UNION
+                SELECT m.to_position_id
+                FROM moves m
+                INNER JOIN descendants d ON m.from_position_id = d.id
+                WHERE m.to_position_id IS NOT NULL
+            )
+            SELECT id FROM descendants
+        """)
+        reachable_ids = {row[0] for row in session.execute(sql_reachable, {"start_id": start_pos_id}).fetchall()}
+        
+        # ── 2. Bulk fetch all relevant Moves efficiently (handling SQLite limits) ──
+        # Avoid parameter limitations by chunking the IN clause or joining against the CTE.
+        # The simplest way without repeating the CTE is to fetch ALL moves if the DB is small, 
+        # or chunk the reachable_ids if we want to be memory efficient. We'll chunk.
+        all_moves_in_subtree = []
+        seen_move_ids = set()
+        reachable_list = list(reachable_ids)
+        chunk_size = 900
+        for i in range(0, len(reachable_list), chunk_size):
+            chunk = reachable_list[i:i + chunk_size]
+            moves_chunk = (
+                session.query(Move)
+                .filter(or_(Move.from_position_id.in_(chunk), Move.to_position_id.in_(chunk)))
+                .all()
+            )
+            for m in moves_chunk:
+                if m.id not in seen_move_ids:
+                    all_moves_in_subtree.append(m)
+                    seen_move_ids.add(m.id)
+            
+        # Build memory models
+        outgoing_moves_cache = {pid: [] for pid in reachable_ids}
+        incoming_moves_cache = {pid: [] for pid in reachable_ids}
+        
+        for m in all_moves_in_subtree:
+            if m.from_position_id in outgoing_moves_cache:
+                outgoing_moves_cache[m.from_position_id].append(m)
+            if m.to_position_id in incoming_moves_cache:
+                incoming_moves_cache[m.to_position_id].append(m)
+
+        # ── 3. Build queue dynamically (BFS in memory) ──
         subtree_positions_by_depth = []
         visited_pos_ids = set()
-        
-        reachable_ids = set()
-        temp_queue = deque([start_pos_id])
-        while temp_queue:
-            pid = temp_queue.popleft()
-            if pid in reachable_ids: continue
-            reachable_ids.add(pid)
-            out_moves = session.query(Move).filter_by(from_position_id=pid).all()
-            for m in out_moves:
-                if m.to_position_id:
-                    temp_queue.append(m.to_position_id)
-        
         queue = deque([(start_pos_id, 0)])
+        
         while queue:
             pos_id, depth = queue.popleft()
             if pos_id in visited_pos_ids: continue
@@ -238,8 +274,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                 subtree_positions_by_depth.append([])
             subtree_positions_by_depth[depth].append(pos_id)
             
-            out_moves = session.query(Move).filter_by(from_position_id=pos_id).all()
-            for m in out_moves:
+            for m in outgoing_moves_cache.get(pos_id, []):
                 if m.to_position_id and m.to_position_id not in visited_pos_ids:
                     queue.append((m.to_position_id, depth + 1))
         
@@ -248,7 +283,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         
         for pid in reachable_ids:
             if pid == start_pos_id: continue
-            incoming = session.query(Move).filter_by(to_position_id=pid).all()
+            incoming = incoming_moves_cache.get(pid, [])
             ext_prob = sum(m.priority_score for m in incoming if m.from_position_id not in reachable_ids)
             id_probabilities[pid] = ext_prob
 
@@ -272,7 +307,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                 clean_fen = " ".join(fen.split(" ")[:4])
                 is_user_turn = clean_fen.split(" ")[1] == user_turn_char
                 
-                out_moves = session.query(Move).filter_by(from_position_id=pos_id).all()
+                out_moves = outgoing_moves_cache.get(pos_id, [])
                 if not out_moves: continue
                 
                 if is_user_turn:

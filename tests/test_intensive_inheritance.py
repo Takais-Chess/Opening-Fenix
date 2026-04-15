@@ -8,10 +8,12 @@ def backend(mock_user_dir):
     """Fixture to provide a clean CreatorBackend for each test."""
     b = CreatorBackend()
     b.load_repertoire("IntensiveInheritanceTest")
-    # Add standard levels
-    b.session.add(RepertoireLevel(name="Level 1", order=1))
-    b.session.add(RepertoireLevel(name="Level 2", order=2))
-    b.session.add(RepertoireLevel(name="Level 3", order=3))
+    # load_repertoire auto-seeds 3 default levels (order 1, 2, 3).
+    # Rename them to the expected names for these tests to avoid UNIQUE constraint errors.
+    levels = b.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+    expected_names = ["Level 1", "Level 2", "Level 3"]
+    for lvl, name in zip(levels, expected_names):
+        lvl.name = name
     b.session.commit()
     return b
 

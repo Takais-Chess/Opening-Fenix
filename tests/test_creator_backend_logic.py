@@ -162,7 +162,8 @@ def test_find_repertoire_holes_pruning(backend):
     backend.session.commit()
     
     # Higher threshold should find holes (it finds e5 as a hole at p2)
-    holes = backend.find_repertoire_holes(threshold=0.1, elo_range="high")
+    from opening_fenix.core.services.hole_finder_service import find_repertoire_holes
+    holes = find_repertoire_holes(backend.session, threshold=0.1, elo_range="high")
     assert len(holes) > 0
 
 def test_deduplicate_comments(backend):

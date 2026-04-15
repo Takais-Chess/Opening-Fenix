@@ -58,9 +58,13 @@ def test_hole_finder_ui_trigger(creator_window, qapp, monkeypatch):
     qapp.processEvents()
     
     mock_holes = [{'fen': 'f1', 'move_uci': 'e2e4', 'move_san': 'e4', 'prob': 0.5, 'type': 'user'}]
-    monkeypatch.setattr(creator_window.backend, "find_repertoire_holes", lambda *args, **kwargs: mock_holes)
+    import opening_fenix.core.threads
+    monkeypatch.setattr("opening_fenix.core.threads.run_hole_finder_task", lambda *args, **kwargs: mock_holes)
     
     creator_window.run_hole_scan()
+    # The QThread might need to run, so process events and wait briefly to let finished_signal fire
+    import time
+    time.sleep(0.1)
     qapp.processEvents()
     assert creator_window.table_holes.rowCount() >= 1
 

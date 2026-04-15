@@ -35,7 +35,7 @@ from sqlalchemy.orm import joinedload
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
 from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san
-from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, TranspositionSearchThread
+from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.engine import EngineThread
@@ -1031,26 +1031,39 @@ class CreatorBackend:
         self.session.commit()
         self.clear_cache()
 
+    def get_delete_impact(self, from_pos_id, uci):
+        """Iteratively built set of move_ids and pos_ids that will be orphaned."""
+        move = self.session.query(Move).filter_by(from_position_id=from_pos_id, uci=uci).first()
+        if not move: return set(), set()
+        
+        dm = set()
+        dp = set()
+        
+        # BFS using queries. Can be optimized further but usually < 50ms.
+        queue = [move]
+        while queue:
+            curr_move = queue.pop(0)
+            if curr_move.id in dm: continue
+            dm.add(curr_move.id)
+            
+            # If all incoming moves to the target position are being deleted
+            incoming_ids = [m_id for (m_id,) in self.session.query(Move.id).filter_by(to_position_id=curr_move.to_position_id).all()]
+            if all(inc_id in dm for inc_id in incoming_ids):
+                if curr_move.to_position_id not in dp:
+                    dp.add(curr_move.to_position_id)
+                    out_moves = self.session.query(Move).filter_by(from_position_id=curr_move.to_position_id).all()
+                    for out in out_moves:
+                        queue.append(out)
+                        
+        return dm, dp
+
     def preview_delete_impact(self, uci, fen):
         if not self.session: return 0, 0
         clean_fen = " ".join(fen.strip().split(" ")[:4])
         pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return 0, 0
-        move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
-        if not move: return 0, 0
-        dm, dp = set(), set()
-        self._simulate_delete_recursive(move, dm, dp)
+        dm, dp = self.get_delete_impact(pos.id, uci)
         return len(dm), len(dp)
-
-    def _simulate_delete_recursive(self, move, dm, dp):
-        if move.id in dm: return
-        dm.add(move.id)
-        incoming = self.session.query(Move).filter_by(to_position_id=move.to_position_id).all()
-        if all(inc.id in dm for inc in incoming):
-            if move.to_position_id not in dp:
-                dp.add(move.to_position_id)
-                for out in self.session.query(Move).filter_by(from_position_id=move.to_position_id).all():
-                    self._simulate_delete_recursive(out, dm, dp)
 
     def delete_move(self, uci, fen):
         if not self.session: return
@@ -1060,13 +1073,44 @@ class CreatorBackend:
         move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
         if move:
             parent_pos_id = move.from_position_id
-            self._delete_move_recursive(move)
+            
+            # ── BULK DELETE EXACTLY WHAT WILL BE ORPHANED ──
+            dm, dp = self.get_delete_impact(pos.id, uci)
+            
+            if dm:
+                # Chunk IDs to avoid SQLite limit
+                dm_list = list(dm)
+                for i in range(0, len(dm_list), 900):
+                    chunk = dm_list[i:i+900]
+                    self.session.query(RepertoireMove).filter(RepertoireMove.move_id.in_(chunk)).delete(synchronize_session=False)
+                    self.session.query(Move).filter(Move.id.in_(chunk)).delete(synchronize_session=False)
+                    
+            if dp:
+                dp_list = list(dp)
+                # First fetch FENs for Lichess cleanup
+                fens_to_delete = []
+                for i in range(0, len(dp_list), 900):
+                    chunk = dp_list[i:i+900]
+                    fens = self.session.query(Position.fen).filter(Position.id.in_(chunk)).all()
+                    fens_to_delete.extend([" ".join(f[0].split(" ")[:4]) for f in fens])
+                    
+                # Delete LichessData
+                for i in range(0, len(fens_to_delete), 900):
+                    chunk = fens_to_delete[i:i+900]
+                    self.session.query(LichessData).filter(LichessData.fen.in_(chunk)).delete(synchronize_session=False)
+
+                # Delete Positions
+                for i in range(0, len(dp_list), 900):
+                    chunk = dp_list[i:i+900]
+                    self.session.query(Position).filter(Position.id.in_(chunk)).delete(synchronize_session=False)
+            
             self.session.commit()
 
             # After deletion, update local priority scores for the affected subtree
             try:
                 elo_meta = self.session.query(Metadata).filter_by(key="lichess_elo").first()
                 elo_category = (elo_meta.value if elo_meta and elo_meta.value in ["low", "mid", "high", "masters"] else "high")
+                from opening_fenix.core.services.priority_service import calculate_local_priority_scores
                 calculate_local_priority_scores(self.session, parent_pos_id, elo_category)
                 self.session.commit()
             except Exception:
@@ -1148,29 +1192,8 @@ class CreatorBackend:
         return changed
 
     def _delete_move_recursive(self, move):
-        self.session.query(RepertoireMove).filter_by(move_id=move.id).delete()
-        next_id = move.to_position_id
-        
-        # Determine FEN of the position being deleted to clean up LichessData
-        pos_to_delete = self.session.get(Position, next_id)
-        fen_to_cleanup = None
-        if pos_to_delete:
-            fen_to_cleanup = " ".join(pos_to_delete.fen.split(" ")[:4])
-
-        self.session.delete(move)
-        self.session.flush()
-        
-        if self.session.query(Move).filter_by(to_position_id=next_id).count() == 0:
-            # Re-fetch position to be sure (though we already have it)
-            if pos_to_delete:
-                for out in self.session.query(Move).filter_by(from_position_id=next_id).all():
-                    self._delete_move_recursive(out)
-                
-                # Clean up LichessData for this FEN
-                if fen_to_cleanup:
-                    self.session.query(LichessData).filter(LichessData.fen.like(fen_to_cleanup + "%")).delete(synchronize_session=False)
-                
-                self.session.delete(pos_to_delete)
+        # REMOVED: Replaced by the much faster bulk iterative approach inside `delete_move` directly.
+        pass
 
     def set_nag(self, uci, fen, nag):
         if not self.session: return
@@ -1441,6 +1464,10 @@ class CreatorBackend:
             return game.accept(LocalizedExporter(language=language, headers=True, variations=True, comments=True))
         except InterruptedError: return None
 
+    def _normalize_fen(self, fen: str) -> str:
+        """Return the canonical 4-part FEN (strips halfmove/fullmove)."""
+        return " ".join(fen.strip().split()[:4])
+
     def _get_history_for_pos(self, pid):
         path = []; curr = pid
         for _ in range(200):
@@ -1450,136 +1477,189 @@ class CreatorBackend:
         return path
 
     def check_immediate_transposition(self, current_fen):
-        """Fast check if any legal move leads to a position already in the repertoire."""
+        """Fast check if any legal move leads to a position already in the repertoire.
+        Returns outgoing transpositions (moves from HERE that reach existing repertoire positions)."""
+        return self.find_outgoing_transpositions(current_fen)
+
+    def find_outgoing_transpositions(self, current_fen):
+        """Find all legal moves from current_fen that land on an existing repertoire position,
+        excluding moves already explicitly in the repertoire from this position."""
         if not self.session: return []
-        
+
         board = chess.Board(current_fen)
-        
-        # 1. Identify moves already explicitly in the repertoire from this position
-        clean_current = " ".join(current_fen.split()[:4])
-        current_pos_db = self.session.query(Position).filter(Position.fen.like(f"{clean_current}%")).first()
+        clean_current = self._normalize_fen(current_fen)
+
+        # Find moves already in the repertoire FROM this position (skip those)
+        current_pos_db = self.session.query(Position).filter(
+            Position.fen.op('GLOB')(clean_current + "*")
+        ).first()
         ignored_ucis = set()
         if current_pos_db:
-            existing_moves = self.session.query(Move.uci).join(RepertoireMove).filter(Move.from_position_id == current_pos_db.id).all()
-            ignored_ucis = {m.uci for m in existing_moves}
+            existing = self.session.query(Move.uci).join(RepertoireMove).filter(
+                Move.from_position_id == current_pos_db.id
+            ).all()
+            ignored_ucis = {m.uci for m in existing}
 
         results = []
         for move in board.legal_moves:
             uci = move.uci()
             if uci in ignored_ucis:
                 continue
-            
+
             san = board.san(move)
             board.push(move)
-            next_fen = " ".join(board.fen().split()[:4])
+            next_fen = self._normalize_fen(board.fen())
             board.pop()
-            
-            # Check if this FEN exists in the DB (Case-sensitive!)
-            next_fen_short = " ".join(next_fen.split()[:4])
-            pos = self.session.query(Position).filter(Position.fen.op('GLOB')(next_fen_short + "*")).first()
-            
+
+            pos = self.session.query(Position).filter(
+                Position.fen.op('GLOB')(next_fen + "*")
+            ).first()
             if pos:
-                has_variation = any([pos.variation_1, pos.variation_2, pos.variation_3, pos.cached_v1, pos.cached_v2])
-                incoming_repo = self.session.query(RepertoireMove).join(Move).filter(Move.to_position_id == pos.id).count() > 0
-                outgoing_repo = self.session.query(RepertoireMove).join(Move).filter(Move.from_position_id == pos.id).count() > 0
-                
+                has_variation = any([pos.variation_1, pos.variation_2, pos.variation_3,
+                                     pos.cached_v1, pos.cached_v2])
+                incoming_repo = self.session.query(RepertoireMove).join(Move).filter(
+                    Move.to_position_id == pos.id).count() > 0
+                outgoing_repo = self.session.query(RepertoireMove).join(Move).filter(
+                    Move.from_position_id == pos.id).count() > 0
+
                 if has_variation or incoming_repo or outgoing_repo:
-                    v_name = pos.variation_1 or pos.cached_v1 or pos.variation_2 or pos.cached_v2 or "Variante"
+                    v_name = (pos.variation_1 or pos.cached_v1 or
+                              pos.variation_2 or pos.cached_v2 or "Variante")
                     results.append({
                         "move_uci": uci,
                         "move_san": san,
                         "target_fen": next_fen,
-                        "variation_name": v_name
+                        "variation_name": v_name,
                     })
         return results
 
-    def find_direct_transpositions(self, fen, exclude_path=None):
-        """Finds all distinct repertoire paths that lead to the given FEN."""
+    def find_incoming_transpositions(self, current_fen):
+        """Find all repertoire paths (from other move orders) that also reach current_fen.
+        Excludes the 'main' path that the current board history represents.
+        Returns list of {variation_name, arriving_move_san, arriving_move_uci,
+                          parent_variation_name, path_length}."""
         if not self.session: return []
-        
-        clean_fen = " ".join(fen.strip().split()[:4])
-        # Use GLOB for case-sensitive prefix matching in SQLite
-        positions = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).all()
-        
-        paths = []
-        for p in positions:
-            # Find all incoming REPERTOIRE moves
-            incoming_moves = self.session.query(Move).join(RepertoireMove).filter(Move.to_position_id == p.id).all()
-            for m in incoming_moves:
-                path_ucis = self._get_history_for_pos(m.from_position_id)
-                path_ucis.append(m.uci)
-                
-                # Exclusion Logic: Skip the path if it's identical to the current history
-                if exclude_path and path_ucis == exclude_path:
-                    continue
-                
-                # Get variation names for the target position
-                v_name = p.variation_1 or p.cached_v1 or p.variation_2 or p.cached_v2 or "Variante"
-                
-                paths.append({
-                    "path": path_ucis,
-                    "variation_name": v_name,
-                    "target_san": m.san,
-                    "priority": m.priority_score
-                })
-        
-        # Sort by priority
-        paths.sort(key=lambda x: x["priority"], reverse=True)
-        return paths
 
-    def find_engine_approved_transpositions(self, start_fen, pvs, threshold=0.3):
+        clean_fen = self._normalize_fen(current_fen)
+        positions = self.session.query(Position).filter(
+            Position.fen.op('GLOB')(clean_fen + "*")
+        ).all()
+
+        results = []
+        seen_move_ids = set()
+        for pos in positions:
+            # All RepertoireMoves that lead INTO this position
+            incoming = (
+                self.session.query(Move)
+                .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                .filter(Move.to_position_id == pos.id)
+                .all()
+            )
+            for m in incoming:
+                if m.id in seen_move_ids:
+                    continue
+                seen_move_ids.add(m.id)
+
+                # Get the parent position's variation name for context
+                parent_pos = self.session.query(Position).filter(
+                    Position.id == m.from_position_id
+                ).first()
+                parent_vname = ""
+                if parent_pos:
+                    parent_vname = (parent_pos.variation_1 or parent_pos.cached_v1 or
+                                    parent_pos.variation_2 or parent_pos.cached_v2 or "")
+
+                # The target variation name
+                target_vname = (pos.variation_1 or pos.cached_v1 or
+                                pos.variation_2 or pos.cached_v2 or "Variante")
+
+                # Count how many moves in the repertoire lead to this position's parent
+                # as a rough proxy for path depth
+                depth = self.session.query(RepertoireMove).join(Move).filter(
+                    Move.to_position_id == m.from_position_id
+                ).count()
+
+                results.append({
+                    "variation_name": target_vname,
+                    "parent_variation_name": parent_vname,
+                    "arriving_move_san": m.san,
+                    "arriving_move_uci": m.uci,
+                    "from_position_id": m.from_position_id,
+                    "priority": m.priority_score or 0,
+                    "depth": depth,
+                })
+
+        # Sort by priority descending so most-played paths come first
+        results.sort(key=lambda x: x["priority"], reverse=True)
+        return results
+
+    def find_direct_transpositions(self, fen, exclude_path=None):
+        """Legacy wrapper — delegates to find_incoming_transpositions."""
+        return self.find_incoming_transpositions(fen)
+
+    def find_engine_approved_transpositions(self, start_fen, pvs):
         """
         Takes a list of engine PVs and checks if any FEN in those paths exists in the repertoire.
-        Each PV is expected to be a list of UCI move strings.
-        Returns a list of matching sequences.
+        Each PV is a dict: {score (cp), moves (list of UCI strings)}.
+        Returns a de-duplicated list of matching sequences, sorted by eval descending.
         """
         if not self.session: return []
-        
+
+        seen_fens = set()
         results = []
         for pv_data in pvs:
-            score = pv_data.get("score", 0) # Expected in cp
+            score = pv_data.get("score", 0)
             moves = pv_data.get("moves", [])
-            
+
             board = chess.Board(start_fen)
-            current_path = []
-            
+            current_path_sans = []
+            current_path_ucis = []
+
             for move_uci in moves:
                 try:
                     move = chess.Move.from_uci(move_uci)
                     san = board.san(move)
                     board.push(move)
-                    current_path.append(san)
-                    
-                    target_fen = " ".join(board.fen().split()[:4])
-                    
-                    # Store Move Data for UI Execution
-                    m_ucis = moves[:len(current_path)]
-                    m_sans = list(current_path)
+                    current_path_sans.append(san)
+                    current_path_ucis.append(move_uci)
 
-                    # Check if target FEN is in repo (Case-sensitive!)
-                    pos = self.session.query(Position).filter(Position.fen.op('GLOB')(target_fen + "*")).first()
+                    target_fen = self._normalize_fen(board.fen())
+
+                    # Skip if we already found this target FEN from another PV
+                    if target_fen in seen_fens:
+                        continue
+
+                    pos = self.session.query(Position).filter(
+                        Position.fen.op('GLOB')(target_fen + "*")
+                    ).first()
                     if pos:
-                        is_in_repo = self.session.query(RepertoireMove).join(Move).filter(Move.to_position_id == pos.id).count() > 0
+                        is_in_repo = (
+                            self.session.query(RepertoireMove)
+                            .join(Move)
+                            .filter(Move.to_position_id == pos.id)
+                            .count() > 0
+                        )
                         if is_in_repo:
-                            # Found a way back!
-                            v_name = pos.variation_1 or pos.cached_v1 or pos.variation_2 or pos.cached_v2 or "Variante"
+                            v_name = (pos.variation_1 or pos.cached_v1 or
+                                      pos.variation_2 or pos.cached_v2 or "Variante")
                             results.append({
-                                "sequence": " ".join(current_path),
-                                "move_ucis": m_ucis,
-                                "move_sans": m_sans,
+                                "sequence": " ".join(current_path_sans),
+                                "move_ucis": list(current_path_ucis),
+                                "move_sans": list(current_path_sans),
                                 "target_fen": target_fen,
                                 "variation_name": v_name,
                                 "eval": score,
-                                "moves_count": len(current_path)
+                                "moves_count": len(current_path_ucis),
                             })
-                            # We stop at the first hit in this PV
+                            seen_fens.add(target_fen)
+                            # Stop at first hit within this PV so we don't find
+                            # a transposition deeper than necessary
                             break
                 except Exception as e:
                     import logging
                     logging.error(f"Error in transposition path verification: {e}")
                     break
-        
-        # Sort by evaluation descending (highest first) as requested by user
+
         results.sort(key=lambda x: x["eval"], reverse=True)
         return results
 
@@ -1800,9 +1880,7 @@ class CreatorBackend:
         clean_fen = " ".join(fen.strip().split(" ")[:4])
         pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
         if not pos: return 0, 0
-        move = self.session.query(Move).filter_by(from_position_id=pos.id, uci=uci).first()
-        if not move: return 0, 0
-        dm, dp = set(), set(); self._simulate_delete_recursive(move, dm, dp)
+        dm, dp = self.get_delete_impact(pos.id, uci)
         return len(dm), len(dp)
 
     def get_incoming_moves(self, fen):
@@ -2942,24 +3020,25 @@ class CreatorWindow(QMainWindow):
 
         self.update_board_arrows()
         
-        # --- TRANSPOSITION DETECTION ---
-        transpos_list = self.backend.check_immediate_transposition(f)
+        # --- TRANSPOSITION DETECTION (badge update) ---
+        outgoing_list = self.backend.find_outgoing_transpositions(f)
+        total_transpos = len(outgoing_list)
         idx = self.tabs.indexOf(self.tab_transpositions)
         if idx != -1:
-            if len(transpos_list) > 0:
-                # Vibrant Gold
+            if total_transpos > 0:
+                # Vibrant Gold badge
                 self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
-                # Try to load icon, if not found, it stays empty
                 icon_path = os.path.join(get_base_path(), "assets", "Icons", "sync.png")
                 if os.path.exists(icon_path):
                     self.tabs.setTabIcon(idx, QIcon(icon_path))
             else:
-                self.tabs.tabBar().setTabTextColor(idx, QColor()) # Reset to palette default
+                self.tabs.tabBar().setTabTextColor(idx, QColor())  # Reset to palette default
                 self.tabs.setTabIcon(idx, QIcon())
             
             # If current tab is Transpositionen, refresh it
             if self.tabs.currentIndex() == idx:
                 self.update_transpositions_tab()
+
 
     def block_signals_details(self, b):
         if not self._is_ui_valid():
@@ -3427,6 +3506,10 @@ class CreatorWindow(QMainWindow):
         self.setWindowTitle(f"Creator - {repo_name}")
         self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
         self.board_widget.update()
+        # Rebuild FEN index on the next idle tick (after UI is fully rendered)
+        # singleShot(0) = "as soon as current call stack finishes" — no blocking, no arbitrary wait
+        self.backend._fen_index = None   # invalidate old index immediately
+        QTimer.singleShot(0, self._build_fen_index)
 
     def new_repertoire_dialog(self):
         d = NewRepertoireDialog(self)
@@ -3753,242 +3836,439 @@ class CreatorWindow(QMainWindow):
         layout.addStretch()
 
     def init_transpositions_tab(self):
-        layout = QVBoxLayout(self.tab_transpositions)
-        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
-        layout.setSpacing(scale(15))
-        
-        # Header with Deep Search Button
-        h_header = QHBoxLayout()
-        lbl_head = QLabel("Gefundene Transpositionen")
-        lbl_head.setStyleSheet("font-size: 16px; font-weight: bold;")
-        h_header.addWidget(lbl_head)
-        h_header.addStretch()
-        
-        self.btn_deep_transpos = QPushButton("🔍 Deep Search (Engine)")
-        self.btn_deep_transpos.setMinimumHeight(scale(35))
+        outer = QVBoxLayout(self.tab_transpositions)
+        outer.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
+        outer.setSpacing(scale(10))
+
+        def _section_lbl(text):
+            l = QLabel(text)
+            l.setStyleSheet(
+                f"font-size: {scale(12)}px; font-weight: bold; color: #1a1a2e;"
+            )
+            return l
+
+        def _status_lbl(text):
+            l = QLabel(text)
+            l.setStyleSheet("color: #333355; font-style: italic; font-size: 11px;")
+            return l
+
+        def _table(cols, headers, max_h=160):
+            t = QTableWidget(0, cols)
+            t.setHorizontalHeaderLabels(headers)
+            t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+            t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+            t.verticalHeader().setVisible(False)
+            t.setAlternatingRowColors(True)
+            t.setMaximumHeight(scale(max_h))
+            hdr = t.horizontalHeader()
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+            for i in range(1, cols):
+                hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+            return t
+
+        def _pill_card():
+            card = QFrame()
+            card.setProperty("class", "GlassPill")
+            self.repolish(card)
+            inner = QVBoxLayout(card)
+            inner.setContentsMargins(scale(14), scale(12), scale(14), scale(12))
+            inner.setSpacing(scale(8))
+            return card, inner
+
+        # ── Card 1: Instant 1-move outgoing ──────────────────────────────────────
+        card1, lay1 = _pill_card()
+        lay1.addWidget(_section_lbl("→ Von hier direkt erreichbar (1 Zug):"))
+        self.table_transpositions = _table(3, ["Variante", "Zug", "Ranking"])
+        self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
+        lay1.addWidget(self.table_transpositions)
+        self.lbl_outgoing_status = _status_lbl("—")
+        lay1.addWidget(self.lbl_outgoing_status)
+        outer.addWidget(card1)
+
+        # ── Card 2: BFS Deep Search ───────────────────────────────────────────────
+        card2, lay2 = _pill_card()
+        h_deep = QHBoxLayout()
+        h_deep.addWidget(_section_lbl("🔍 Tiefe Suche (alle möglichen Wege):"))
+        h_deep.addStretch()
+        self.btn_deep_transpos = QPushButton("🔍 Tiefe Suche starten")
+        self.btn_deep_transpos.setMinimumHeight(scale(30))
         self.btn_deep_transpos.setProperty("class", "GlassPill")
         self.repolish(self.btn_deep_transpos)
-        self.btn_deep_transpos.clicked.connect(self.run_deep_transposition_search)
-        h_header.addWidget(self.btn_deep_transpos)
-        layout.addLayout(h_header)
-        
-        # Table for Results
-        self.table_transpositions = QTableWidget(0, 3)
-        self.table_transpositions.setHorizontalHeaderLabels(["Variante", "Ziellinie", "Eval"])
-        self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_transpositions.verticalHeader().setVisible(False)
-        self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
-        
-        header = self.table_transpositions.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        
-        layout.addWidget(self.table_transpositions)
-        
-        self.lbl_transpos_status = QLabel("Bereit.")
-        self.lbl_transpos_status.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-style: italic;")
-        layout.addWidget(self.lbl_transpos_status)
+        self.btn_deep_transpos.setEnabled(False)
+        self.btn_deep_transpos.clicked.connect(self.on_deep_transpos_button_clicked)
+        h_deep.addWidget(self.btn_deep_transpos)
+        lay2.addLayout(h_deep)
+
+        self.table_transpos_deep = _table(4, ["Variante", "Zugfolge", "Tiefe", "Qualität"], max_h=220)
+        self.table_transpos_deep.itemDoubleClicked.connect(self.on_transposition_double_clicked)
+        lay2.addWidget(self.table_transpos_deep)
+
+        self.lbl_transpos_status = _status_lbl("FEN-Index wird aufgebaut…")
+        lay2.addWidget(self.lbl_transpos_status)
+        outer.addWidget(card2)
+
+        outer.addStretch()
+
+        # Internal BFS state
+        self._bfs_thread = None
+        self._fen_index_thread = None
+        self._path_quality_thread = None
+        self._instant_multipv_thread = None
+        self._bfs_next_depth = 3           # first click searches depth 3
+        self._bfs_start_fen = None         # FEN at time BFS was started
+        self._bfs_running = False
+
+        # FEN index is built lazily after each repertoire load (see load_repertoire)
 
     def update_transpositions_tab(self):
         fen = self.board_widget.board.fen()
-        if not fen: return
-        
-        # 1. Potential Future Transpositions (Next moves starting from HERE)
-        future_transpos = self.backend.check_immediate_transposition(fen)
-        
+        if not fen:
+            return
+
+        # ── Outgoing immediate transpositions (1-move) ───────────────────────────
+        outgoing = self.backend.find_outgoing_transpositions(fen)
         self.table_transpositions.setRowCount(0)
-        
-        # Display Future ones (Immediate Alerts)
-        for ft in future_transpos:
+        for ot in outgoing:
             row = self.table_transpositions.rowCount()
             self.table_transpositions.insertRow(row)
-            
-            it_name = QTableWidgetItem(f"★ {ft['variation_name']}")
-            # Store full dict for execution
-            it_name.setData(Qt.ItemDataRole.UserRole, {
-                "type": "immediate",
-                "move_uci": ft['move_uci'],
-                "move_san": ft['move_san'],
-                "target_fen": ft['target_fen']
-            }) # FEN for jumping and move for saving
-            self.table_transpositions.setItem(row, 0, it_name)
-            
-            it_move = QTableWidgetItem(f"Zug: {ft['move_san']}")
-            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpositions.setItem(row, 1, it_move)
-            
-            it_info = QTableWidgetItem("Sofort")
-            it_info.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_info.setForeground(QColor("#FFD700")) # Highlight Gold
-            self.table_transpositions.setItem(row, 2, it_info)
-        
-        if self.table_transpositions.rowCount() == 0:
-            self.lbl_transpos_status.setText("Keine unmittelbaren Transpositionen gefunden. Nutze 'Deep Search' für längere Wege.")
+
+            name_item = QTableWidgetItem(f"★ {ot['variation_name']}")
+            name_item.setData(Qt.ItemDataRole.UserRole, {
+                "type": "outgoing",
+                "move_uci": ot["move_uci"],
+                "move_san": ot["move_san"],
+                "target_fen": ot["target_fen"],
+            })
+            self.table_transpositions.setItem(row, 0, name_item)
+
+            move_item = QTableWidgetItem(ot["move_san"])
+            move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            move_item.setForeground(QColor("#FFD700"))
+            self.table_transpositions.setItem(row, 1, move_item)
+
+            # Ranking: placeholder until InstantMultiPVThread finishes
+            rank_item = QTableWidgetItem("⏳ lädt…")
+            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            rank_item.setForeground(QColor("rgba(255,255,255,0.4)"))
+            self.table_transpositions.setItem(row, 2, rank_item)
+
+        if outgoing:
+            self.lbl_outgoing_status.setText(
+                f"✦ {len(outgoing)} Transposition(en) — Doppelklick um Zug zu spielen."
+            )
+            # Launch ranking thread if engine available
+            ep = self.config.get("engine_path", "")
+            if ep and os.path.exists(ep):
+                t_ucis = [ot["move_uci"] for ot in outgoing]
+                if hasattr(self, "_instant_multipv_thread") and self._instant_multipv_thread and self._instant_multipv_thread.isRunning():
+                    self._instant_multipv_thread.terminate()
+                th = InstantMultiPVThread(
+                    fen, t_ucis, ep,
+                    threads_count=int(self.combo_threads.currentText())
+                )
+                th.finished.connect(self._on_instant_ranking_ready)
+                th.start()
+                self._instant_multipv_thread = th
         else:
-            self.lbl_transpos_status.setText(f"{self.table_transpositions.rowCount()} Transpositions-Möglichkeiten erkannt.")
-            
-    def run_deep_transposition_search(self):
+            self.lbl_outgoing_status.setText("Kein einzelner Zug führt zu einer anderen bekannten Stellung.")
+            self.table_transpositions.setRowCount(0)
+
+        # Clear deep table + reset button state when position changes
+        self.table_transpos_deep.setRowCount(0)
+        self._bfs_start_fen = None
+        self._bfs_next_depth = 3
+        self._bfs_running = False
+        self._update_deep_button_state()
+
+    # ── BFS Deep Search helpers ─────────────────────────────────────────────────
+
+    def _build_fen_index(self):
+        """Launch a background thread to build the FEN index — zero main-thread blocking."""
+        if not self.backend.session:
+            return
+        db_path = get_repertoire_db_path(
+            self.backend.active_repo_name, self.backend.is_test
+        )
+        # Stop any previous build still running
+        if hasattr(self, "_fen_index_thread") and self._fen_index_thread and self._fen_index_thread.isRunning():
+            self._fen_index_thread.terminate()
+        t = FenIndexBuilderThread(db_path)
+        t.ready.connect(self._on_fen_index_ready)
+        t.start()
+        self._fen_index_thread = t
+
+    def _on_fen_index_ready(self, fen_set, repo_adj):
+        """Receive completed FEN index + repo adjacency from background thread."""
+        self.backend._fen_index = fen_set
+        self.backend._repo_adjacency = repo_adj
+        if hasattr(self, "btn_deep_transpos"):
+            self._update_deep_button_state()
+
+    def _update_deep_button_state(self):
+        """Sync the deep search button label and enabled-state with current BFS state."""
+        index_ready = getattr(self.backend, "_fen_index", None) is not None
+        if not index_ready:
+            self.btn_deep_transpos.setEnabled(False)
+            self.btn_deep_transpos.setText("⏳ Index wird aufgebaut…")
+            self.lbl_transpos_status.setText("FEN-Index wird aufgebaut…")
+            return
+
+        if self._bfs_running:
+            depth = self._bfs_next_depth  # depth currently being searched
+            self.btn_deep_transpos.setEnabled(True)
+            self.btn_deep_transpos.setText(f"⏹ Tiefe {depth} — Stoppen")
+        elif self._bfs_start_fen is None:
+            # Not yet started for this position
+            self.btn_deep_transpos.setEnabled(True)
+            self.btn_deep_transpos.setText("🔍 Tiefe Suche starten")
+        else:
+            # Completed at least one depth level
+            next_d = self._bfs_next_depth
+            self.btn_deep_transpos.setEnabled(True)
+            self.btn_deep_transpos.setText(f"⬇ Tiefe {next_d} suchen")
+
+    def on_deep_transpos_button_clicked(self):
+        """Handle deep search button: start, stop, or go one depth deeper."""
+        if self._bfs_running:
+            # Act as stop button
+            if self._bfs_thread:
+                self._bfs_thread.stop()
+            if hasattr(self, "_path_quality_thread") and self._path_quality_thread:
+                self._path_quality_thread.stop()
+            self._bfs_running = False
+            self._update_deep_button_state()
+            self.lbl_transpos_status.setText("Suche gestoppt.")
+            return
+
         fen = self.board_widget.board.fen()
-        if not fen: return
-        
-        ep = self.config.get("engine_path")
+        if not fen:
+            return
+        if not getattr(self.backend, "_fen_index", None):
+            return
+
+        ep = self.config.get("engine_path", "")
         if not ep or not os.path.exists(ep):
             QMessageBox.warning(self, "Engine Fehler", "Kein Engine-Pfad in den Einstellungen hinterlegt.")
             return
-            
-        self.btn_deep_transpos.setEnabled(False)
-        self.btn_deep_transpos.setText("⏳ Suche läuft...")
-        self.lbl_transpos_status.setText("Engine analysiert Stellung...")
-        
-        # Capture results found in real-time to avoid loss on early exit
-        self._captured_transpos_results = []
-        
-        from opening_fenix.core.threads import TranspositionSearchThread
-        t = TranspositionSearchThread(
-            fen, 
-            ep, 
-            threads=int(self.combo_threads.currentText()),
-            depth=22,
-            multipv=8
+
+        # First click: reset start FEN and accumulated results
+        if self._bfs_start_fen is None:
+            self._bfs_start_fen = fen
+            self.table_transpos_deep.setRowCount(0)
+
+        target_depth = self._bfs_next_depth
+        self._bfs_running = True
+        self._update_deep_button_state()
+        self.lbl_transpos_status.setText(f"Suche bis Tiefe {target_depth}…")
+
+        t = BfsTranspositionThread(
+            self._bfs_start_fen,
+            self.backend._fen_index,
+            target_depth,
+            # Repo adjacency is used inside the thread to compute exclusions
+            # with zero main-thread blocking
+            repo_adjacency=getattr(self.backend, "_repo_adjacency", {}),
         )
-        t.finished_signal.connect(self.on_deep_search_results)
-        t.info_signal.connect(self.on_transposition_info)
+        t.depth_complete.connect(self._on_bfs_depth_complete)
+        t.progress_update.connect(self._on_bfs_progress)
         t.start()
-        # Keep reference
-        self._temp_transpos_thread = t
+        self._bfs_thread = t
 
-    def on_transposition_info(self, partial_pvs):
-        """Called repeatedly during engine analysis to check for early transpositions."""
-        if not self._temp_transpos_thread or not self._temp_transpos_thread.isRunning():
+    def _on_bfs_progress(self, depth):
+        """Show progress as the BFS thread moves from one depth to another."""
+        self.lbl_transpos_status.setText(f"Suche Tiefe {depth}…")
+
+    def _on_bfs_depth_complete(self, depth, raw_paths):
+        """Called by BfsTranspositionThread ONLY when target_depth is finished."""
+        self._bfs_running = False
+        
+        n = len(raw_paths)
+        if n == 0:
+            # We finished the FULL search up to target_depth and found nothing
+            self.lbl_transpos_status.setText(f"Keine Transpositionen bis Tiefe {depth} gefunden.")
+            # ONLY move to the next depth if everything was empty
+            self._bfs_next_depth = depth + 1
+            self._update_deep_button_state()
             return
 
-        fen = self.board_widget.board.fen()
-        results = self.backend.find_engine_approved_transpositions(fen, partial_pvs)
-        
-        if results:
-            # Capture the hit before stopping
-            self._captured_transpos_results.extend(results)
-            # Found one! Stop the engine early.
-            self._temp_transpos_thread.stop()
-            self.lbl_transpos_status.setText("Transposition gefunden! Präsentiere Ergebnisse...")
+        # If we found items, we keep the next_depth at the current successful depth + 1
+        # so the next search starts "cleanly" from there
+        self._bfs_next_depth = depth + 1
+        self._update_deep_button_state()
 
-    def on_deep_search_results(self, engine_pvs):
-        self.btn_deep_transpos.setEnabled(True)
-        self.btn_deep_transpos.setText("🔍 Deep Search (Engine)")
-        
-        if not engine_pvs:
-            self.lbl_transpos_status.setText("Keine Engine-Ergebnisse.")
-            return
-            
-        # Process through backend
-        fen = self.board_widget.board.fen()
-        engine_results = self.backend.find_engine_approved_transpositions(fen, engine_pvs)
-        
-        # Merge with captured results (ensures no loss on early exit)
-        final_results = engine_results
-        if hasattr(self, '_captured_transpos_results'):
-            # Simple merge: add unique targets
-            existing_fens = {r['target_fen'] for r in final_results}
-            for cr in self._captured_transpos_results:
-                if cr['target_fen'] not in existing_fens:
-                    final_results.append(cr)
-                    existing_fens.add(cr['target_fen'])
+        self.lbl_transpos_status.setText(
+            f"Tiefe {depth} fertig — {n} Pfad/Pfade gefunden. Qualität wird bewertet…"
+        )
+        self._update_deep_button_state()
 
-        # Clear direct transpositions
-        self.table_transpositions.setRowCount(0)
-        
-        if not final_results:
-            self.lbl_transpos_status.setText("Keine engine-geprüften Wege zurück ins Repertoire gefunden.")
-            # Refresh direct ones
-            self.update_transpositions_tab()
+        ep = self.config.get("engine_path", "")
+        if not ep or not os.path.exists(ep) or not raw_paths:
+            # Show without classification
+            self._populate_deep_table([
+                {**p, "quality": "möglich", "quality_label": "🟡 Möglich"} for p in raw_paths
+            ])
             return
 
-        for r in final_results:
-            row = self.table_transpositions.rowCount()
-            self.table_transpositions.insertRow(row)
-            
-            it_name = QTableWidgetItem(r["variation_name"])
-            # Deep search target FEN and full move path for execution
-            it_name.setData(Qt.ItemDataRole.UserRole, {
-                "type": "deep",
-                "move_ucis": r.get("move_ucis", []),
-                "move_sans": r.get("move_sans", []),
-                "target_fen": r["target_fen"]
+        if hasattr(self, "_path_quality_thread") and self._path_quality_thread and self._path_quality_thread.isRunning():
+            self._path_quality_thread.stop()
+            self._path_quality_thread.wait(500)
+
+        # Pre-populate table with unclassified paths to provide instant user feedback
+        loading_paths = [{**p, "quality": "loading", "quality_label": "⏳ Laden..."} for p in raw_paths]
+        self._populate_deep_table(loading_paths)
+        self.lbl_transpos_status.setText(f"Tiefe {depth} fertig — {n} Pfad/Pfade gefunden. Engine lädt (0 / ?)…")
+
+        pq = PathQualityEvalThread(
+            raw_paths,
+            self._bfs_start_fen,
+            ep,
+            threads_count=int(self.combo_threads.currentText()),
+        )
+        pq.progress.connect(self._on_path_quality_progress)
+        pq.finished.connect(self._on_path_quality_ready)
+        pq.start()
+        self._path_quality_thread = pq
+
+    def _on_path_quality_progress(self, current_pos, total_pos):
+        """Update the progress label with current eval status."""
+        self.lbl_transpos_status.setText(
+            f"Bewerte Pfade... {current_pos} / {total_pos} Zwischenstellungen analysiert."
+        )
+
+    def _on_path_quality_ready(self, classified_paths):
+        """Called by PathQualityEvalThread when classification is complete."""
+        n_ok = sum(1 for p in classified_paths if p["quality"] == "möglich")
+        n_err = len(classified_paths) - n_ok
+        self.lbl_transpos_status.setText(
+            f"✦ {len(classified_paths)} Transposition(en): {n_ok} 🟡 Möglich, {n_err} 🔴 mit Fehlern"
+        )
+        self._populate_deep_table(classified_paths)
+
+    def _populate_deep_table(self, classified_paths):
+        """Fill the deep results table with classified BFS paths."""
+        self.table_transpos_deep.setRowCount(0)
+        for p in classified_paths:
+            row = self.table_transpos_deep.rowCount()
+            self.table_transpos_deep.insertRow(row)
+
+            # Derive a variation name from the target FEN
+            var_name = p.get("variation_name") or ("/".join(p["path_sans"]) if p["path_sans"] else p["target_fen"][:20])
+            name_item = QTableWidgetItem(var_name)
+            name_item.setData(Qt.ItemDataRole.UserRole, {
+                "type": "bfs",
+                "search_fen": self._bfs_start_fen,
+                "path_ucis": p["path_ucis"],
+                "path_sans": p["path_sans"],
+                "target_fen": p["target_fen"],
             })
-            self.table_transpositions.setItem(row, 0, it_name)
-            
-            it_seq = QTableWidgetItem(r["sequence"])
-            self.table_transpositions.setItem(row, 1, it_seq)
-            
-            ev = r["eval"] / 100.0
-            it_eval = QTableWidgetItem(f"{ev:+.2f}")
-            it_eval.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if ev > 0.5: it_eval.setForeground(QColor("#2ecc71"))
-            elif ev < -0.5: it_eval.setForeground(QColor("#e74c3c"))
-            self.table_transpositions.setItem(row, 2, it_eval)
-            
-        self.lbl_transpos_status.setText(f"{len(final_results)} engine-geprüfte Wege gefunden.")
+            self.table_transpos_deep.setItem(row, 0, name_item)
+
+            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
+            self.table_transpos_deep.setItem(row, 1, seq_item)
+
+            depth_item = QTableWidgetItem(str(p["depth"]))
+            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_transpos_deep.setItem(row, 2, depth_item)
+
+            quality_label = p.get("quality_label", "🟡 Möglich")
+            qual_item = QTableWidgetItem(quality_label)
+            qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if p.get("quality") == "fehler":
+                qual_item.setForeground(QColor("#e74c3c"))
+            elif p.get("quality") == "loading":
+                qual_item.setForeground(QColor("rgba(255,255,255,0.4)"))
+            else:
+                qual_item.setForeground(QColor("#f1c40f"))
+            self.table_transpos_deep.setItem(row, 3, qual_item)
+
+    def _on_instant_ranking_ready(self, ranking: dict):
+        """Fill the Ranking column in the instant table after MultiPV finishes."""
+        for row in range(self.table_transpositions.rowCount()):
+            it0 = self.table_transpositions.item(row, 0)
+            if not it0:
+                continue
+            data = it0.data(Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            uci = data.get("move_uci")
+            info = ranking.get(uci)
+            if info is None:
+                continue
+
+            rank = info["rank"]
+            delta = info["delta"]
+            best_san = info["best_san"]
+
+            if rank == 1:
+                label = "⭐ Bester Zug"
+                color = "#2ecc71"
+            elif rank <= 3 and delta >= -0.2:
+                label = f"✓ #{rank} ({delta:+.2f})"
+                color = "#f1c40f"
+            elif delta < -0.3:
+                label = f"⚠ #{rank} ({delta:+.2f})"
+                color = "#e74c3c"
+            else:
+                label = f"#{rank} ({delta:+.2f})"
+                color = "rgba(255,255,255,0.6)"
+
+            rank_item = QTableWidgetItem(label)
+            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            rank_item.setForeground(QColor(color))
+            self.table_transpositions.setItem(row, 2, rank_item)
+
+    # ── Double-click handler ─────────────────────────────────────────────────────
 
     def on_transposition_double_clicked(self, item):
         tw = item.tableWidget()
-        if not tw: return
+        if not tw:
+            return
         it0 = tw.item(item.row(), 0)
-        if not it0: return
+        if not it0:
+            return
         data = it0.data(Qt.ItemDataRole.UserRole)
-        if not data: return
-        
-        if isinstance(data, dict):
-            # NEW LOGIC: Use move data for saving to repertoire
-            m_type = data.get("type")
-            target_fen = data.get("target_fen")
-            
-            if m_type == "immediate":
-                uci = data.get("move_uci")
-                if uci:
-                    move = chess.Move.from_uci(uci)
-                    # This call adds the move to the backend, plays sound, and updates UI
-                    self.on_board_move(move)
-                elif target_fen:
-                    self.set_board_to_fen(target_fen)
-            
-            elif m_type == "deep":
-                ucis = data.get("move_ucis", [])
-                sans = data.get("move_sans", [])
-                
-                if ucis and sans:
-                    # Execute move sequence
-                    self.save_current_details_now()
-                    for u, s in zip(ucis, sans):
-                        f_fen = self.board_widget.board.fen()
-                        try:
-                            m = chess.Move.from_uci(u)
-                            if m in self.board_widget.board.legal_moves:
-                                self.board_widget.board.push(m)
-                                # Save each move to the repertoire
-                                self.backend.add_move(f_fen, u, s)
-                            else:
-                                break
-                        except:
+        if not data or not isinstance(data, dict):
+            return
+
+        m_type = data.get("type")
+
+        if m_type == "outgoing":
+            # Play the single move and save it to the repertoire
+            uci = data.get("move_uci")
+            if uci:
+                move = chess.Move.from_uci(uci)
+                self.on_board_move(move)
+
+        elif m_type == "bfs":
+            # Replay move sequence from the FEN when BFS was launched
+            search_fen = data.get("search_fen") or self._bfs_start_fen
+            ucis = data.get("path_ucis", [])
+            sans = data.get("path_sans", [])
+
+            if search_fen and ucis and sans:
+                self.save_current_details_now()
+                self.set_board_to_fen(search_fen)
+
+                for u, s in zip(ucis, sans):
+                    f_fen = self.board_widget.board.fen()
+                    try:
+                        m = chess.Move.from_uci(u)
+                        if m in self.board_widget.board.legal_moves:
+                            self.board_widget.board.push(m)
+                            self.backend.add_move(f_fen, u, s)
+                        else:
                             break
-                    
-                    self.board_widget.update()
-                    self.play_sound("move")
-                    self.update_ui_from_fen()
-                    self.trigger_background_enrichment(self.board_widget.board.fen())
-                elif target_fen:
-                    self.set_board_to_fen(target_fen)
-        
-        elif isinstance(data, list): # Legacy Path (UCI list) support
-            self.go_start()
-            for uci in data:
-                m = chess.Move.from_uci(uci)
-                self.board_widget.board.push(m)
-            self.board_widget.update()
-            self.update_ui_from_fen()
-        elif isinstance(data, str): # Legacy FEN support
-            self.set_board_to_fen(data)
+                    except Exception:
+                        break
+
+                self.board_widget.update()
+                self.play_sound("move")
+                self.update_ui_from_fen()
+                self.trigger_background_enrichment(self.board_widget.board.fen())
+            elif data.get("target_fen"):
+                self.set_board_to_fen(data["target_fen"])
+
+
 
     def toggle_overhaul_pause(self):
         self.overhaul_paused = not self.overhaul_paused

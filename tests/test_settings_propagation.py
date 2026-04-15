@@ -16,7 +16,7 @@ def qapp():
 @pytest.fixture
 def main_window(qapp, mock_user_dir, sample_repertoire):
     """Fixture for MainWindow with visible repertoire."""
-    profile_name = "TestUser"
+    profile_name = "test"
     from opening_fenix.core.training import TrainingManager
     from opening_fenix.core.repertoire import RepertoireManager
     rm = RepertoireManager(profile_name=profile_name)
@@ -69,8 +69,8 @@ def test_volume_propagation(main_window, monkeypatch):
 
 def test_repertoire_visibility_toggle(main_window, qapp, monkeypatch):
     """Test toggling repertoire visibility."""
-    # Mock refresh_repertoire_buttons
-    monkeypatch.setattr(main_window, "refresh_repertoire_buttons", lambda: None)
+    # Mock refresh_repertoire_buttons (legacy) or tabs_widget.refresh_tabs
+    monkeypatch.setattr(main_window, "refresh_repertoire_buttons", lambda: None, raising=False)
     
     dialog = SettingsDialog(main_window)
     # Switch to Repo page

@@ -132,4 +132,13 @@ Analyze a player's real games on Lichess to identify when they deviate from thei
 * **Automated Comparison:** The system iterates through the game's PGN and compares each position against the active repertoire database.
 * **Deviation Detection:** Identify the exact move where the game "left the opening" (i.e., the first move not recorded in the repertoire).
 * **Categorization:** Distinguish between "intentional deviations" (new lines to learn) and "mistakes" (lines that were in the repertoire but forgotten).
-* **Visual Feedback:** Show a summary report for each game: "Deviated at move 12 (Repertoire coverage: 85%)".
+* **Visual Feedback**: Show a summary report for each game: "Deviated at move 12 (Repertoire coverage: 85%)".
+
+## 21. Repertoire Schema Versioning
+**Concept:**
+The current migration system uses `PRAGMA table_info` checks. Implementing a dedicated `SchemaVersion` table would allow for more robust migrations and better tracking of data structure evolution.
+
+## 22. Database Cleanup & Optimization
+**Concept:**
+Remove dead columns such as `Position.good_moves`, `Position.popularity`, and `Position.popularity_elo` identified during the version 2.4.0 audit.
+Implement a custom `DatabaseCorruptionError` to handle malformed files more gracefully than a generic `sqlite3.DatabaseError`.

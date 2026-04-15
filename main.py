@@ -62,7 +62,7 @@ def ensure_default_engine_path():
         engines_dir = os.path.join(get_base_path(), "engines")
         if os.path.exists(engines_dir):
             for f in os.listdir(engines_dir):
-                if f.lower().startswith("stockfish") and f.lower().endswith(".exe"):
+                if f.lower().endswith(".exe"):
                     config["engine_path"] = os.path.abspath(os.path.join(engines_dir, f))
                     try:
                         with open(config_path, "w") as f_out:

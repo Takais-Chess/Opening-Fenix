@@ -123,7 +123,8 @@ class DatabaseManager:
                         conn.commit()
 
         except Exception as e:
-            print(f"Migration warning: {e}")
+            from opening_fenix.core.logger import logger
+            logger.warning(f"Migration warning: {e}")
 
     def get_session(self) -> Session:
         """

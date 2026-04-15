@@ -130,7 +130,7 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                     move_id = max_move_id
                     move_cache[(from_pos_id, uci_str)] = move_id
                     new_moves_to_insert.append(
-                        Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=list(current_node.nags)[0] if current_node.nags else 0)
+                        Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=next(iter(current_node.nags), 0))
                     )
                 
                 # REPERTOIRE MOVE LOGIC

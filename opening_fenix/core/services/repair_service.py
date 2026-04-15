@@ -27,12 +27,16 @@ def repair_repertoire_health(session, fast=False):
             break
             
         for g in gaps:
-            # Assign the minimum level (highest priority) of its children
-            min_child_level = session.query(func.min(RepertoireMove.level))\
-                .join(Move, RepertoireMove.move_id == Move.id)\
-                .filter(Move.from_position_id == g.to_position_id).scalar()
+            # Find the minimum level among parents AND children of this move
+            min_related_level = session.query(func.min(RepertoireMove.level))\
+                .filter(Move.id == RepertoireMove.move_id)\
+                .filter(
+                    (Move.from_position_id == g.to_position_id) | 
+                    # If g.from_position_id is missing, default to no parent check. Safeline.
+                    (Move.to_position_id == g.from_position_id)
+                ).scalar()
             
-            lvl = min_child_level if min_child_level is not None else 1
+            lvl = min_related_level if min_related_level is not None else 1
             session.add(RepertoireMove(move_id=g.id, level=lvl))
             gaps_fixed += 1
         

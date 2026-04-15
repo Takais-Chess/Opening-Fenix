@@ -3,6 +3,7 @@ import json
 import datetime
 from opening_fenix.core.models import DatabaseManager, UserBase, TrainingData, UserRepertoireSettings
 from opening_fenix.core.data_tools import get_user_dir
+from opening_fenix.core.logger import logger
 
 def migrate_legacy_profiles():
     """
@@ -23,7 +24,7 @@ def migrate_legacy_profiles():
         if os.path.exists(db_path):
             continue
             
-        print(f"Migrating profile '{profile_name}'...")
+        logger.info(f"Migrating profile '{profile_name}'...")
         
         try:
             # 1. Load JSON data
@@ -144,7 +145,7 @@ def migrate_legacy_profiles():
                                 continue
                                 
                     except Exception as e:
-                        print(f"Error processing repo {repo_name}: {e}")
+                        logger.error(f"Error processing repo {repo_name}: {e}")
             
             session.commit()
             session.close()
@@ -152,10 +153,10 @@ def migrate_legacy_profiles():
             
             # Rename old JSON to .json.bak to prevent re-migration
             os.rename(os.path.join(profiles_dir, json_file), os.path.join(profiles_dir, json_file + ".bak"))
-            print(f"Profile '{profile_name}' migrated successfully.")
+            logger.info(f"Profile '{profile_name}' migrated successfully.")
             
         except Exception as e:
-            print(f"Failed to migrate profile '{profile_name}': {e}")
+            logger.error(f"Failed to migrate profile '{profile_name}': {e}")
             # Clean up partial DB
             if os.path.exists(db_path):
                 try:

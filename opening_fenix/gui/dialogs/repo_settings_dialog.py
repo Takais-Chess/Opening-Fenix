@@ -88,13 +88,17 @@ class SingleRepoStatsWorker(QThread):
     
     def __init__(self, backend):
         super().__init__()
-        self.backend = backend
+        self.repo_name = backend.active_repo_name
         
     def run(self):
         try:
-            # This triggers the slow queries in the background
-            info = self.backend.get_repertoire_info(fast_only=False)
-            self.stats_ready.emit(info)
+            from opening_fenix.creator.creator_window import CreatorBackend
+            temp_backend = CreatorBackend(is_test=True)
+            if self.repo_name:
+                temp_backend.load_repertoire(self.repo_name)
+                info = temp_backend.get_repertoire_info(fast_only=False)
+                temp_backend.close()
+                self.stats_ready.emit(info)
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Error in SingleRepoStatsWorker: {e}")

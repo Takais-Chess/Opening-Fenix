@@ -68,10 +68,16 @@ class RepertoireService:
 
     def close(self) -> None:
         if self.repo_session:
-            self.repo_session.close()
+            try:
+                self.repo_session.close()
+            except Exception:
+                pass
             self.repo_session = None
         if self.repo_db:
-            self.repo_db.close()
+            try:
+                self.repo_db.close()
+            except Exception:
+                pass
             self.repo_db = None
 
     def delete_repertoire(self, repo_name: str) -> bool:

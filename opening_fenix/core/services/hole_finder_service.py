@@ -112,8 +112,6 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
     for depth_list in pos_by_depth:
         for pid in depth_list:
             p_reach = reach_probs.get(pid, 0.0)
-            if p_reach < threshold_val: continue
-
             fen = id_to_fen.get(pid)
             if not fen: continue
             clean_fen = " ".join(fen.split(" ")[:4])
@@ -122,9 +120,26 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
             parts = clean_fen.split(" ")
             is_user = len(parts) > 1 and parts[1] == user_turn_char
             rep_moves = rep_moves_from.get(pid, [])
+            
+            # --- FEATURE: REPERTOIRE GAP DETECTION (User turn but no moves) ---
+            # These should show up regardless of threshold_val
+            if is_user and not rep_moves:
+                if not is_exempt:
+                   holes.append({
+                        "fen": clean_fen,
+                        "move_san": "—",
+                        "type": "repertoire_gap",
+                        "popularity": p_reach * 100,
+                    })
+                # We skip candidate move search if it's a gap (user should decide what to play first)
+                # or we can continue if we want to show Lichess suggestions too. 
+
+            if p_reach < threshold_val:
+                continue
 
             if is_user:
                 if not rep_moves:
+                    # User candidate logic (Lichess suggestions)
                     if not is_exempt:
                         lichess_moves = lichess_cache.get(clean_fen, {})
                         total_games = sum(v.get('total', 0) for v in lichess_moves.values())
@@ -150,10 +165,6 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                                         "type": "user",
                                         "popularity": p_total * 100,
                                     })
-                        else:
-                            holes.append({
-                                "fen": clean_fen, "move_san": "—", "type": "user", "popularity": p_reach * 100,
-                            })
                 else:
                     p_next = p_reach / len(rep_moves)
                     for m in rep_moves:
@@ -255,18 +266,9 @@ def find_level_mismatches(session: Session):
         out_moves = moves_from.get(curr_id, [])
         
         if is_user_turn:
-            # GAP DETECTION
-            if not out_moves:
-                key = (curr_id, "repertoire_gap")
-                if key not in seen_mismatches:
-                    seen_mismatches.add(key)
-                    mismatches.append({
-                        "fen": curr_fen,
-                        "move_san": "—",
-                        "type": "repertoire_gap",
-                        "popularity": 0
-                    })
-            else:
+            # GAP DETECTION is now handled in 'holes' mode (find_repertoire_holes)
+            # to keep Level-Check focused on level consistency.
+            if out_moves:
                 # RELAXED LOGIC: Only flag if ALL moves are higher level than the MAX incoming level
                 all_higher = True
                 for move, rm in out_moves:

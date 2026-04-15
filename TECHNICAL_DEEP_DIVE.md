@@ -13,6 +13,7 @@ Opening Fenix includes a robust system for handling SQLite database corruption (
     3. Data is extracted into a new SQL dump and re-imported into a clean database file.
     4. The original malformed file is backed up before being replaced by the healthy recovered version.
 
+
 ## 2. Priority Scores (The BFS Probability Algorithm)
 Opening Fenix uses a **Breadth-First Search (BFS)** traversal to calculate a **Priority Score** (Probability) for every move in the database.
 
@@ -71,7 +72,26 @@ The application fetches population-level move frequencies from Lichess. To ensur
 
 ---
 
-## 9. Development & Persistence
+## 9. Thread Management & UI Stability
+To maintain a responsive "Glassmorphism" interface, Opening Fenix utilizes a strict background execution model for all CPU or I/O bound tasks.
+
+### Worker Threads (`threads.py`)
+- **AnalysisThread**: Wraps the Stockfish UCI bridge. It uses cooperative cancellation (`_is_canceled`) to ensure engine processes are killed before the GUI deletes the thread object.
+- **HoleFinderThread**: Runs heavy BFS traversals. It is fully decoupled from the `CreatorWindow` to prevent UI freezing during large repertoire scans.
+- **LichessLoaderThread**: Handles the asynchronous data fetching for the statistics dialogs.
+
+### Lifecycle Protection
+- **WindowManager Loop**: A centralized state machine (`opening_fenix/gui/window_manager.py`) manages the hand-off between the Login, Trainer, and Creator windows. 
+- **Graceful Teardown**: `MainWindow` overrides `closeEvent` to ensure all SQLAlchemy sessions and background engines are flushed and terminated before the process exits, preventing persistent file locks on Windows.
+
+## 10. Lichess API Backoff Controller
+The Lichess integration features an intelligent "tempo" controller to comply with API rate limits:
+- **Exponential Backoff**: If a `429 Too Many Requests` status is returned, the system immediately suspends operations for 60 seconds and increases the base delay logic (`delay * 1.5`).
+- **Adaptive Recovery**: For every 50 successful requests, the system cautiously reduces the delay by 5%, allowing it to settle on the most optimal network throughput (minimum `0.05s`).
+
+---
+
+## 11. Development & Persistence
 
 ### Database Architecture
 - **ORM**: Managed via **SQLAlchemy** in `opening_fenix/core/models.py`.
@@ -85,7 +105,7 @@ The application fetches population-level move frequencies from Lichess. To ensur
 - Main application logic: `opening_fenix/gui/main_window.py`.
 - Repertoire management: `opening_fenix/creator/creator_window.py`.
 
-## 10. Testing Suite
+## 12. Testing Suite
 
 ### Running Tests
 Tests use `pytest`. On Windows, ensure the project root is in `PYTHONPATH`:

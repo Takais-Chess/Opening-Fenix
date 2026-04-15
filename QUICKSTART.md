@@ -10,7 +10,7 @@ When you first launch the application, you'll need to create or select a **Profi
 
 ## 2. Create or Select a Repertoire
 Once inside, you'll see a list of repertoires.
-- **New Repertoire**: Click **"Neues Repertoire"** to create a blank slate. New repertoires are automatically initialized with three default levels: **1. Grundlagen**, **2. Tiefe Theorie**, and **3. Nachschlagewerk**.
+- **New Repertoire**: Click **"Neues Repertoire"** to create a blank slate. New repertoires are automatically initialized with three default levels: **1. Grundlagen**, **2. Tiefe Theorie**, and **3. Nachschlagewerk**. Each move progresses through 7 maturity boxes based on your training performance.
 - **Settings**: Use the **"Einstellungen"** button to set your target Lichess API Token, ELO range, and repertoire color (Black/White).
 
 ## 3. Importing Moves

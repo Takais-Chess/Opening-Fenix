@@ -42,9 +42,11 @@ class EngineThread(QThread):
 
                 self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path, creationflags=creationflags)
                 try:
-                    self.engine.configure({"Threads": self.threads})
+                    # Check if 'Threads' is a supported option before setting it
+                    if "Threads" in self.engine.options:
+                        self.engine.configure({"Threads": self.threads})
                 except Exception as e:
-                    logger.warning(f"Engine configuration warning: {e}")
+                    logger.warning(f"Engine configuration warning (Threads): {e}")
                     self.info_signal.emit([f"Config Warning: {e}"])
                 self.running = True
                 self.info_signal.emit(["Engine geladen."])
@@ -89,7 +91,13 @@ class EngineThread(QThread):
         
         if changed and self.engine:
             try:
-                self.engine.configure({"Threads": self.threads})
+                config = {}
+                if "Threads" in self.engine.options:
+                    config["Threads"] = self.threads
+                # MultiPV is handled in the analysis loop, but some engines might 
+                # allow/require it as a global option. Usually not needed via popen_uci analysis.
+                if config:
+                    self.engine.configure(config)
             except Exception as e:
                 logger.warning(f"Error updating engine configuration: {e}")
                 self.info_signal.emit([f"Update Config Error: {e}"])

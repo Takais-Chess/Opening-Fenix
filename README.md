@@ -1,11 +1,10 @@
 # 🦅 Opening-Fenix
++ **Version 2.4.0 (Stabilized Edition)**
 
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
-[![License](https://img.shields.io/badge/license-MIT-yellow.svg)](#license)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
 
-Opening-Fenix is a professional chess repertoire management and training platform. Designed for both competitive players and enthusiasts, it combines a **premium Glassmorphism UI** with advanced **Spaced Repetition (SRS)** training, local engine analysis, and Lichess statistical data to help you master your openings with ease.
+Opening-Fenix is a professional chess repertoire management and training platform. Following a **comprehensive 2026 Codebase Audit**, the platform now features enhanced background thread stability, robust Lichess API handling, and a zero-latency database architecture. Designed for both competitive players and enthusiasts, it combines a **premium Glassmorphism UI** with advanced **Spaced Repetition (SRS)** training, local engine analysis, and Lichess statistical data to help you master your openings with ease.
 
 ---
 

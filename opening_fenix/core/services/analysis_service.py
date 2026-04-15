@@ -57,7 +57,14 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             try:
                 # MultiPV is automatically managed by the analysis context manager in python-chess.
                 # Setting it manually via configure can cause warnings or errors depending on the engine.
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=20 if "MultiPV" in engine.options else 1)
+                multi_pv = 1
+                if "MultiPV" in engine.options:
+                    # Limit to whatever the engine supports or 20
+                    opt = engine.options["MultiPV"]
+                    max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 20
+                    multi_pv = min(20, max_allowed)
+                
+                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multi_pv)
                 
                 if not result:
                     continue
@@ -194,7 +201,9 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                     with open(config_path, "r") as f:
                         conf = json.load(f)
                         lichess_token = conf.get("lichess_token")
-                except: pass
+                except Exception as e:
+                    from opening_fenix.core.logger import logger
+                    logger.debug(f"Could not read config.json for Lichess token: {e}")
 
         for p_obj in positions_to_check:
             p_clean = " ".join(p_obj.fen.split(" ")[:4])
@@ -242,7 +251,12 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                 
                 try:
                     # Use actual MultiPV from engine options if available, capped at 10 for speed
-                    analyze_kwargs = {"multipv": 10} if "MultiPV" in engine.options else {}
+                    analyze_kwargs = {}
+                    if "MultiPV" in engine.options:
+                        opt = engine.options["MultiPV"]
+                        max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 10
+                        analyze_kwargs["multipv"] = min(10, max_allowed)
+                    
                     result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
                     
                     if result:

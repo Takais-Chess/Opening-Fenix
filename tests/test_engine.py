@@ -26,6 +26,7 @@ def test_engine_init(mock_engine_thread):
 def test_start_engine_success(mock_engine_thread):
     with patch('chess.engine.SimpleEngine.popen_uci') as mock_popen:
         mock_engine = MagicMock()
+        mock_engine.options = {"Threads": True}
         mock_popen.return_value = mock_engine
         
         mock_engine_thread.start_engine()
@@ -82,6 +83,7 @@ def test_toggle_analysis(mock_engine_thread):
 
 def test_update_config(mock_engine_thread):
     mock_engine = MagicMock()
+    mock_engine.options = {"Threads": True}
     mock_engine_thread.engine = mock_engine
     
     # Update without engine change (only depth/limit)

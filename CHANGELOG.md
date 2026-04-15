@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.4.0] - 2026-04-15
+
+### Fixed
+- **Critical Session Handling**: Resolved `IllegalStateChangeError` during application teardown by ensuring SQLAlchemy sessions are closed only after active commits are finalized.
+- **Data Integrity (Meta Utils)**: Fixed a bug in `meta_utils.py` where `None` values were being incorrectly serialized as the string `"None"`, causing logic errors in coverage calculations.
+- **PGN Import Crash**: Fixed an `IndexError` in the PGN import service that occurred when parsing malformed files with empty NAG (Annotation) sets.
+- **Dynamic Repair Logic**: Enhanced `repair_service.py` to trace repertoire levels through both parent and child moves, ensuring side-lines are correctly categorized during mass-repairs.
+- **Engine Configuration**: Updated `EngineThread` to safely handle modern Stockfish thread options, resolving failures in the engine test suite.
+- **Lichess API Stability**: Verified and documented the backoff controller and throttling algorithms in the Lichess service for 100% compliance with API terms.
+- **Test Suite Stabilization**: Fixed race conditions in `test_creator_ui.py` by correctly mocking the new asynchronous `HoleFinderThread` architecture.
+
 ## [2.3.0] - 2026-04-14
 
 ### Added

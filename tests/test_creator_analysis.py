@@ -71,7 +71,8 @@ def test_hole_finder_backend(creator_backend, monkeypatch):
     mock_response.__enter__.return_value = mock_response
     monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: mock_response)
     
-    holes = creator_backend.find_repertoire_holes(threshold=0.01, elo_range="high")
+    from opening_fenix.core.services.hole_finder_service import find_repertoire_holes
+    holes = find_repertoire_holes(creator_backend.session, threshold=0.01, elo_range="high")
     assert isinstance(holes, list)
 
 # Batch 1: PGN Import & Export

@@ -9,10 +9,12 @@ class TestInheritance:
         """Setup a clean CreatorBackend for the tests in this class."""
         self.backend = CreatorBackend()
         self.backend.load_repertoire("InheritanceTest")
-        # Add standard levels
-        self.backend.session.add(RepertoireLevel(name="Main", order=1))
-        self.backend.session.add(RepertoireLevel(name="Side", order=2))
-        self.backend.session.add(RepertoireLevel(name="Deep", order=3))
+        # load_repertoire auto-seeds 3 default levels (order 1, 2, 3).
+        # Rename them to the expected names for these tests to avoid UNIQUE constraint errors.
+        levels = self.backend.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+        names = ["Main", "Side", "Deep"]
+        for lvl, name in zip(levels, names):
+            lvl.name = name
         self.backend.session.commit()
 
     def test_basic_variation_inheritance(self):

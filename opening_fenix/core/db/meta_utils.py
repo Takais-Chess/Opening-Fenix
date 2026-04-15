@@ -13,9 +13,16 @@ def get_meta(session: Session, key: str, default: Optional[str] = None) -> Optio
     return m.value if m else default
 
 def set_meta(session: Session, key: str, value: Any) -> None:
-    """Sets or updates a metadata value in the database."""
+    """Sets or updates a metadata value in the database.
+    
+    If value is None, the key is deleted from metadata (rather than storing
+    the string 'None', which would be truthy and mislead downstream callers).
+    """
     m = session.query(Metadata).filter_by(key=key).first()
-    if m:
+    if value is None:
+        if m:
+            session.delete(m)
+    elif m:
         m.value = str(value)
     else:
         session.add(Metadata(key=key, value=str(value)))

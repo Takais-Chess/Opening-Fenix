@@ -158,3 +158,6 @@ pytest_output*.txt
 scripts/recover_db.py
 scripts/replace_db.py
 scripts/scan_all_dbs.py
+parse_test.py
+opening_fenix/gui/scratch/
+pytest_out*.txt
