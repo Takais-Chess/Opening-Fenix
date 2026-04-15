@@ -1505,3 +1505,21 @@ class RepoSettingsDialog(QDialog):
         else:
             QMessageBox.information(self, "Bereinigung fertig", "Keine verwaisten Lichess-Daten gefunden.")
         self.refresh_info()
+
+    def closeEvent(self, event):
+        """Clean up background threads before closing."""
+        workers = [
+            getattr(self, 'stats_worker', None),
+            getattr(self, 'w_eng', None),
+            getattr(self, 'w_lich', None),
+            getattr(self, 'm_thread', None),
+            getattr(self, 'stats_loader', None)
+        ]
+        
+        for w in workers:
+            if w and w.isRunning():
+                if hasattr(w, 'stop'): w.stop()
+                if hasattr(w, 'cancel'): w.cancel()
+                w.wait(300) # Short wait to join
+                
+        super().closeEvent(event)

@@ -152,19 +152,27 @@ class RepertoireStatsWorker(QThread):
         """
         super().__init__()
         self.repo_data_list = repo_data_list
+        self._is_stopped = False
+
+    def stop(self):
+        self._is_stopped = True
 
     def run(self):
         from opening_fenix.core.services.repertoire_core_service import RepertoireService
         service = RepertoireService()
         for item in self.repo_data_list:
+            if self._is_stopped:
+                break
             try:
                 service.set_active_repertoire(item['name'])
                 info = service.get_repertoire_info()
+                if self._is_stopped: break
                 self.stats_ready.emit(item['row'], info.get('depth', 'Error'), info.get('coverage_pct', 0.0), info.get('elo', 'high'))
                 service.close()
             except Exception as e:
                 print(f"DEBUG: StatsWorker Error for {item['name']}: {e}")
-                self.stats_ready.emit(item['row'], "Error", 0.0, "high")
+                if not self._is_stopped:
+                    self.stats_ready.emit(item['row'], "Error", 0.0, "high")
         self.finished.emit()
 
 class HoleFinderThread(QThread):
