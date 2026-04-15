@@ -4588,6 +4588,26 @@ class CreatorWindow(QMainWindow):
             QMessageBox.information(self, "Fertig!", msg)
             if not variation_filter:
                 self.toggle_overhaul_session()
+    def closeEvent(self, event):
+        """Clean up background resources before closing."""
+        if hasattr(self, 'engine_thread') and self.engine_thread:
+            try:
+                self.engine_thread.stop_engine()
+                self.engine_thread.running = False
+                self.engine_thread.wait(500)
+            except: pass
+            
+        if hasattr(self, 'backend') and self.backend:
+            try:
+                self.backend.close()
+            except: pass
+            
+        if hasattr(self, 'training_manager') and self.training_manager:
+            try:
+                self.training_manager.close()
+            except: pass
+
+        super().closeEvent(event)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

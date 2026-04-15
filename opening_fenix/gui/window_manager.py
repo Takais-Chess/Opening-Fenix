@@ -70,9 +70,19 @@ class WindowManager:
                 if self.main_window and getattr(self.main_window, 'switch_requested', False):
                     self.current_profile = None
                     # Clean up old window
-                    if not sip.isdeleted(self.main_window):
+                    is_mock = hasattr(self.main_window, "__unittest_mock__") or "Mock" in str(type(self.main_window))
+                    if is_mock or not sip.isdeleted(self.main_window):
+                        self.main_window.close() # Trigger closeEvent for cleanup
                         self.main_window.deleteLater()
+                    
                     self.main_window = None
+                    
+                    # Force event processing to ensure deletion of C++ objects (and DB sessions)
+                    # on Windows before the next loop starts the same DB connection.
+                    for _ in range(5):
+                        QApplication.processEvents()
+                    import time
+                    time.sleep(0.1) # Small buffer for Windows file locks
                     continue
                 else:
                     # User closed the app

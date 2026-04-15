@@ -191,3 +191,25 @@ def silence_ui(monkeypatch):
         monkeypatch.setattr(MainWindow, "check_for_onboarding", lambda *args, **kwargs: None)
     except (ImportError, AttributeError):
         pass
+
+@pytest.fixture(autouse=True)
+def window_cleanup(qapp):
+    """Ensure all top-level widgets are closed and event loop is processed after each test."""
+    yield
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6 import sip
+    
+    # Close all windows
+    for widget in QApplication.topLevelWidgets():
+        if not sip.isdeleted(widget):
+            widget.close()
+            widget.deleteLater()
+            
+    # Process events to allow deletion to occur
+    for _ in range(5):
+        QApplication.processEvents()
+    
+    import time
+    # On Windows, we need to be extra careful with file locks
+    if os.name == 'nt':
+        time.sleep(0.05)

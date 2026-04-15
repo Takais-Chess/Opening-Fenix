@@ -600,7 +600,7 @@ class TrainingManager:
             repo_name = self.repertoire_manager.active_repertoire_name
         if not repo_name: return 0
         settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-        return settings.active_level if settings else 0
+        return settings.active_level if settings else 1
 
     def _get_rating_settings(self):
         repo_name = self.repertoire_manager.active_repertoire_name
