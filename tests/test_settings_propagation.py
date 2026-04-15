@@ -41,6 +41,7 @@ def test_theme_propagation(main_window):
     # Verify MainWindow and BoardWidget updated
     assert main_window.training_manager.get_setting("theme") == target_theme
     assert main_window.board_widget.light_color.name() == THEMES[target_theme][0].name()
+    dialog.close()
 
 def test_animation_speed_propagation(main_window):
     """Test that changing animation speed updates the setting."""
@@ -50,6 +51,7 @@ def test_animation_speed_propagation(main_window):
     dialog.spin_anim.setValue(target_speed)
     
     assert main_window.training_manager.get_setting("anim_speed") == target_speed
+    dialog.close()
 
 def test_volume_propagation(main_window, monkeypatch):
     """Test that changing volume updates the main window."""
@@ -66,6 +68,7 @@ def test_volume_propagation(main_window, monkeypatch):
     
     assert volume_set == 75
     assert main_window.training_manager.get_setting("master_volume") == 75
+    dialog.close()
 
 def test_repertoire_visibility_toggle(main_window, qapp, monkeypatch):
     """Test toggling repertoire visibility."""
@@ -91,6 +94,7 @@ def test_repertoire_visibility_toggle(main_window, qapp, monkeypatch):
     target_card.toggle_active()
     
     assert main_window.training_manager.is_repo_visible("TestRepo") is False
+    dialog.close()
 
 def test_reset_progress_dialog(main_window, monkeypatch, qapp):
     """Test triggering the reset progress dialog."""
@@ -110,3 +114,4 @@ def test_reset_progress_dialog(main_window, monkeypatch, qapp):
     
     # Verify
     assert dialog.selected_repo == "TestRepo"
+    dialog.close()

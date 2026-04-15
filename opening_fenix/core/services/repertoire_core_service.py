@@ -2,8 +2,9 @@ import os
 import sqlite3
 import gc
 import time
-from sqlalchemy import func
-from typing import List, Dict, Any, Optional, Tuple
+from sqlalchemy import func, or_
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any, Optional, Tuple, Set
 from opening_fenix.core.db.models import RepertoireLevel, Base, Move, RepertoireMove, Position, LichessData
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.data_tools import get_user_dir, get_meta, set_meta, delete_repertoire_db
@@ -11,6 +12,81 @@ from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path
 from opening_fenix.core.services.analysis_service import get_repertoire_analysis_status
 from opening_fenix.core.services.profile_service import update_repertoire_name_globally
 from opening_fenix.core.logger import logger
+import json
+
+def fetch_repertoire_levels(session: Session) -> List[Dict[str, Any]]:
+    """Standalone function to fetch repertoire levels using a provided session."""
+    if not session: return []
+    lvls = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+    return [{"id": l.id, "name": l.name, "order": l.order, "target_elo": l.target_elo} for l in lvls]
+
+def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = False) -> Dict[str, Any]:
+    """Standalone function to fetch repertoire info using a provided session. Safe for background threads."""
+    if not session:
+        return {"name": repo_name, "levels": [], "moves": "N/A", "level_details": []}
+
+    levels_objs = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+    levels = [{"name": l.name, "order": l.order, "target_elo": l.target_elo} for l in levels_objs]
+    
+    if fast_only:
+        return {
+            "name": get_meta(session, "name", repo_name),
+            "levels": [lvl['name'] for lvl in levels],
+            "level_details": [], # Defer counts
+            "depth": "Laden...", 
+            "elo": get_meta(session, "lichess_elo", "N/A"),
+            "coverage_pct": 0,
+            "moves": "Laden...",
+            "description": get_meta(session, "description", "")
+        }
+
+    level_details = []
+    for lvl in levels:
+        count = session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True, RepertoireMove.level <= lvl['order']).distinct().count()
+        level_details.append({
+            "name": lvl['name'],
+            "order": lvl['order'],
+            "target_elo": lvl['target_elo'],
+            "moves": count
+        })
+
+    total_moves = session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True).distinct().count()
+    
+    # Calculate coverage %
+    total_pos = session.query(func.count(Position.id)).scalar() or 0
+    elo_cat = get_meta(session, "lichess_elo", "N/A")
+    
+    cached_count = get_meta(session, "cov_cache_count", "-1")
+    cached_pct = get_meta(session, "cov_cache_pct", "")
+    cached_elo = get_meta(session, "cov_cache_elo", "")
+    
+    if str(total_pos) == str(cached_count) and cached_elo == elo_cat and cached_pct:
+        coverage_pct = float(cached_pct)
+    else:
+        covered_pos = session.query(func.count(func.distinct(Position.id)))\
+            .join(LichessData, Position.fen.like(LichessData.fen + "%"))\
+            .filter(LichessData.elo_range == elo_cat).scalar() or 0
+        
+        coverage_pct = (covered_pos / total_pos * 100) if total_pos > 0 else 0
+        coverage_pct = min(100.0, coverage_pct) # Hard cap at 100%
+        
+        # Save to cache
+        set_meta(session, "cov_cache_count", total_pos)
+        set_meta(session, "cov_cache_pct", coverage_pct)
+        set_meta(session, "cov_cache_elo", elo_cat)
+        session.commit()
+    
+
+    return {
+        "name": get_meta(session, "name", repo_name),
+        "levels": [lvl['name'] for lvl in levels],
+        "level_details": level_details,
+        "depth": get_repertoire_analysis_status(repo_name, session),
+        "elo": elo_cat,
+        "coverage_pct": coverage_pct,
+        "moves": total_moves,
+        "description": get_meta(session, "description", "")
+    }
 
 class RepertoireService:
     def __init__(self):
@@ -161,9 +237,7 @@ class RepertoireService:
             return False, f"Fehler beim Umbenennen: {str(e)}"
 
     def get_repertoire_levels(self) -> List[Dict[str, Any]]:
-        if not self.repo_session: return []
-        levels = self.repo_session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
-        return [{"name": lvl.name, "order": lvl.order, "target_elo": lvl.target_elo} for lvl in levels]
+        return fetch_repertoire_levels(self.repo_session)
 
     def get_level_info(self, level_order: int) -> Optional[RepertoireLevel]:
         if not self.repo_session: return None
@@ -177,71 +251,7 @@ class RepertoireService:
             self.repo_session.commit()
 
     def get_repertoire_info(self, fast_only=False) -> Dict[str, Any]:
-        if not self.repo_session:
-            return {"name": self.active_repertoire_name, "levels": [], "moves": "N/A", "level_details": []}
-
-        from opening_fenix.core.db.models import RepertoireMove
-        levels = self.get_repertoire_levels()
-        
-        if fast_only:
-            return {
-                "name": get_meta(self.repo_session, "name", self.active_repertoire_name),
-                "levels": [lvl['name'] for lvl in levels],
-                "level_details": [], # Defer counts
-                "depth": "Laden...", 
-                "elo": get_meta(self.repo_session, "lichess_elo", "N/A"),
-                "coverage_pct": 0,
-                "moves": "Laden...",
-                "description": get_meta(self.repo_session, "description", "")
-            }
-
-        level_details = []
-        for lvl in levels:
-            count = self.repo_session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True, RepertoireMove.level <= lvl['order']).distinct().count()
-            level_details.append({
-                "name": lvl['name'],
-                "order": lvl['order'],
-                "target_elo": lvl['target_elo'],
-                "moves": count
-            })
-
-        total_moves = self.repo_session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True).distinct().count()
-        
-        # Calculate coverage % - Join with positions to ensure we only count what belongs to this repo
-        total_pos = self.repo_session.query(func.count(Position.id)).scalar() or 0
-        elo_cat = get_meta(self.repo_session, "lichess_elo", "N/A")
-        
-        cached_count = get_meta(self.repo_session, "cov_cache_count", "-1")
-        cached_pct = get_meta(self.repo_session, "cov_cache_pct", "")
-        cached_elo = get_meta(self.repo_session, "cov_cache_elo", "")
-        
-        if str(total_pos) == str(cached_count) and cached_elo == elo_cat and cached_pct:
-            coverage_pct = float(cached_pct)
-        else:
-            covered_pos = self.repo_session.query(func.count(func.distinct(Position.id)))\
-                .join(LichessData, Position.fen.like(LichessData.fen + "%"))\
-                .filter(LichessData.elo_range == elo_cat).scalar() or 0
-            
-            coverage_pct = (covered_pos / total_pos * 100) if total_pos > 0 else 0
-            coverage_pct = min(100.0, coverage_pct) # Hard cap at 100%
-            
-            # Save to cache
-            set_meta(self.repo_session, "cov_cache_count", total_pos)
-            set_meta(self.repo_session, "cov_cache_pct", coverage_pct)
-            set_meta(self.repo_session, "cov_cache_elo", elo_cat)
-            self.repo_session.commit()
-        
-
-        return {
-            "name": get_meta(self.repo_session, "name", self.active_repertoire_name),
-            "levels": [lvl['name'] for lvl in levels],
-            "level_details": level_details,
-            "depth": get_repertoire_analysis_status(self.active_repertoire_name, self.repo_session),
-            "elo": elo_cat,
-            "coverage_pct": coverage_pct,
-            "moves": total_moves,
-            "description": get_meta(self.repo_session, "description", "")
-        }
+        return fetch_repertoire_info(self.repo_session, self.active_repertoire_name, fast_only=fast_only)
 
     def set_repertoire_description(self, description: str) -> None:
         if not self.repo_session: return

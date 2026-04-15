@@ -111,21 +111,28 @@ class TrainerRepoStatsWorker(QThread):
 
     def __init__(self, main_window, repo_name):
         super().__init__()
-        self.main_window = main_window
+        # We store repo_name but avoid touching main_window during run() to be thread-safe
         self.repo_name = repo_name
 
     def run(self):
-        # We need to temporarily switch to the repo to get stats, 
-        # then switch back if it wasn't the active one.
-        original_repo = self.main_window.repertoire_manager.active_repertoire_name
-        self.main_window.repertoire_manager.set_active_repertoire(self.repo_name)
+        from opening_fenix.core.db.database import DatabaseManager
+        from opening_fenix.core.utils import get_repertoire_db_path
+        from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
         
-        info = self.main_window.repertoire_manager.get_repertoire_info(fast_only=False)
+        db_path = get_repertoire_db_path(self.repo_name)
+        db_manager = DatabaseManager(db_path)
+        session = db_manager.get_session()
         
-        if original_repo and original_repo != self.repo_name:
-            self.main_window.repertoire_manager.set_active_repertoire(original_repo)
-            
-        self.stats_ready.emit(info)
+        try:
+            info = fetch_repertoire_info(session, self.repo_name, fast_only=False)
+            self.stats_ready.emit(info)
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"TrainerRepoStatsWorker error for {self.repo_name}: {e}")
+            self.stats_ready.emit({"name": self.repo_name, "levels": [], "moves": "Fehler", "level_details": []})
+        finally:
+            session.close()
+            db_manager.close()
 
 
 class SettingsDialog(QDialog):
@@ -461,17 +468,27 @@ class SettingsDialog(QDialog):
             self.stats_loader.wait()
 
         # 1. Fast Load (Metadata only)
-        # We handle the repo switch manually for metadata to be fast
-        original_repo = self.main_window.repertoire_manager.active_repertoire_name
-        self.main_window.repertoire_manager.set_active_repertoire(repo_name)
-        info = self.main_window.repertoire_manager.get_repertoire_info(fast_only=True)
-        if original_repo and original_repo != repo_name:
-            self.main_window.repertoire_manager.set_active_repertoire(original_repo)
+        # We use a local session to avoid race conditions with the global repertoire_manager
+        from opening_fenix.core.db.database import DatabaseManager
+        from opening_fenix.core.utils import get_repertoire_db_path
+        from opening_fenix.core.data_tools import get_meta
+        from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
+        
+        db_path = get_repertoire_db_path(repo_name)
+        db_manager = DatabaseManager(db_path)
+        session = db_manager.get_session()
+        try:
+            info = fetch_repertoire_info(session, repo_name, fast_only=True)
+            color = get_meta(session, "color", "w")
+        except:
+            info = {"name": repo_name, "description": ""}
+            color = 'w'
+        finally:
+            session.close()
+            db_manager.close()
 
         self.lbl_name.setText(info.get("name", "-"))
-        self.lbl_color.setText(
-            "Weiß ♟️" if self.main_window.repertoire_manager.get_repertoire_color() == 'w' else "Schwarz ♟️"
-        )
+        self.lbl_color.setText("Weiß ♟️" if color == 'w' else "Schwarz ♟️")
         self.txt_description.setPlainText(info.get("description", ""))
 
         # Set placeholders
@@ -595,22 +612,28 @@ class RepertoireConfigCard(QFrame):
         else: self.setMinimumHeight(scale(55))
 
     def populate_levels(self):
-        original_repo = self.main_window.repertoire_manager.active_repertoire_name
-        self.main_window.repertoire_manager.set_active_repertoire(self.repo_name)
-        levels = self.main_window.repertoire_manager.get_repertoire_levels()
+        from opening_fenix.core.db.database import DatabaseManager
+        from opening_fenix.core.utils import get_repertoire_db_path
+        from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
         
-        self.combo_level.blockSignals(True)
-        self.combo_level.clear()
-        for lvl in levels:
-            self.combo_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+        db_path = get_repertoire_db_path(self.repo_name)
+        db_manager = DatabaseManager(db_path)
+        session = db_manager.get_session()
+        try:
+            levels = fetch_repertoire_levels(session)
+            active_lvl = self.main_window.training_manager.get_active_level(self.repo_name)
+
+            self.combo_level.blockSignals(True)
+            self.combo_level.clear()
+            for lvl in levels:
+                self.combo_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
             
-        active_lvl = self.main_window.training_manager.get_active_level()
-        idx = self.combo_level.findData(active_lvl)
-        if idx != -1: self.combo_level.setCurrentIndex(idx)
-        self.combo_level.blockSignals(False)
-        
-        if original_repo:
-            self.main_window.repertoire_manager.set_active_repertoire(original_repo)
+            idx = self.combo_level.findData(active_lvl)
+            if idx != -1: self.combo_level.setCurrentIndex(idx)
+            self.combo_level.blockSignals(False)
+        finally:
+            session.close()
+            db_manager.close()
 
     def toggle_active(self):
         self.is_active = not self.is_active
@@ -628,11 +651,7 @@ class RepertoireConfigCard(QFrame):
     def on_level_changed(self):
         level = self.combo_level.currentData()
         if level is not None:
-            original_repo = self.main_window.repertoire_manager.active_repertoire_name
-            self.main_window.repertoire_manager.set_active_repertoire(self.repo_name)
-            self.main_window.training_manager.set_active_level(level)
-            if original_repo:
-                self.main_window.repertoire_manager.set_active_repertoire(original_repo)
+            self.main_window.training_manager.set_active_level(level, self.repo_name)
 
     def update_style(self):
         # Using a more premium glassmorphic/flat hybrid look

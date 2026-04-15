@@ -128,16 +128,24 @@ class TrainingManager:
             settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).first()
             return settings.active_level if settings else 1
 
-    def set_active_level(self, level_order: int) -> None:
-        if not self.user_session or not self.repertoire_manager.active_repertoire_name: return
-        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).first()
+    def set_active_level(self, level_order: int, repo_name: Optional[str] = None) -> None:
+        if not self.user_session: return
+        if not repo_name:
+            repo_name = self.repertoire_manager.active_repertoire_name
+        if not repo_name: return
+
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
         if not settings:
-            settings = UserRepertoireSettings(repertoire_name=self.repertoire_manager.active_repertoire_name, active_level=level_order)
+            settings = UserRepertoireSettings(repertoire_name=repo_name, active_level=level_order)
             self.user_session.add(settings)
         else:
             settings.active_level = level_order
         self.user_session.commit()
         # Invalidate caches
+        if repo_name == self.repertoire_manager.active_repertoire_name:
+            self._variation_move_ids = set()
+            self._rep_move_cache = None
+            self._last_stats_cache = None
         self._td_cache = None
         
     def close(self) -> None:
@@ -586,6 +594,13 @@ class TrainingManager:
                     if m.to_position_id not in visited:
                         visited.add(m.to_position_id); queue.append((m.to_position_id, depth + 1, path + [m.san]))
         return None, []
+
+    def get_active_level(self, repo_name: Optional[str] = None) -> int:
+        if not repo_name:
+            repo_name = self.repertoire_manager.active_repertoire_name
+        if not repo_name: return 0
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        return settings.active_level if settings else 0
 
     def _get_rating_settings(self):
         repo_name = self.repertoire_manager.active_repertoire_name
