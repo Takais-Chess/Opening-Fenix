@@ -105,8 +105,9 @@ def test_transposition_branch_local_inheritance(backend):
     
     # Merge at Target FEN
     # Path A: ... -> e6_fen_from_e4 (Pos A) --2. d4--> TargetPos
-    # Path B: ... -> e6_fen_from_d4 (Pos B) --2. e4--> TargetPos
+    backend.add_move(e6_fen_from_e4, "d2d4", "d4", level_order=2)
     
+    # Path B: ... -> e6_fen_from_d4 (Pos B) --2. e4--> TargetPos
     backend.add_move(e6_fen_from_d4, "e2e4", "e4", level_order=1) # Path B now merges into TargetPos
     target_pos_id = get_move_by_uci(backend, e6_fen_from_d4, "e2e4").to_position_id
     
@@ -123,12 +124,13 @@ def test_transposition_branch_local_inheritance(backend):
     assert get_rep_move(backend, d5_move.id).level == 1
     
     # Now, change Path B's last move (2. e4) to Level 3.
-    # It leads to TargetPos, where d7d5 is the ONLY move.
-    # d7d5 should become Level 3, even if Path A reached TargetPos with Level 2.
     move_b = get_move_by_uci(backend, e6_fen_from_d4, "e2e4")
     backend.update_move_level(move_b.id, 3)
-    
-    assert get_rep_move(backend, d5_move.id).level == 3, "Should follow the modified branch and update the shared child"
+
+    # NEW BEHAVIOR: Protection (Transpositions) works! 
+    # d7d5 is reached by Path A (L2) and Path B (L3). 
+    # It stays L2 because Path A is a stronger access.
+    assert get_rep_move(backend, d5_move.id).level == 2, "Should protect the shared child and keep the stronger access level (L2)"
 
 def test_circular_dependency_stability(backend):
     """

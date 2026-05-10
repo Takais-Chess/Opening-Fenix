@@ -284,3 +284,49 @@ class RepertoireService:
         updated_count = self.repo_session.query(RepertoireMove).filter(RepertoireMove.is_active == True).update({"level": level})
         self.repo_session.commit()
         return updated_count
+
+    def check_logical_integrity(self) -> int:
+        """
+        Checks for orphaned moves in the database (moves pointing to missing positions).
+        Returns the number of orphaned moves found.
+        """
+        if not self.repo_session: return 0
+        try:
+            from sqlalchemy import text
+            with self.repo_session.bind.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT COUNT(*) FROM moves WHERE from_position_id NOT IN (SELECT id FROM positions) "
+                    "OR to_position_id NOT IN (SELECT id FROM positions)"
+                )).scalar()
+                return int(result or 0)
+        except Exception as e:
+            logger.error(f"Error checking logical integrity: {e}")
+            return 0
+
+    def repair_logical_integrity(self) -> int:
+        """
+        Deletes orphaned moves to restore database consistency.
+        Returns the number of deleted moves.
+        """
+        if not self.repo_session: return 0
+        try:
+            from sqlalchemy import text
+            with self.repo_session.bind.connect() as conn:
+                # 1. Delete associated repertoire_moves first
+                conn.execute(text(
+                    "DELETE FROM repertoire_moves WHERE move_id IN ("
+                    "SELECT id FROM moves WHERE from_position_id NOT IN (SELECT id FROM positions) "
+                    "OR to_position_id NOT IN (SELECT id FROM positions))"
+                ))
+                # 2. Delete the orphaned moves
+                result = conn.execute(text(
+                    "DELETE FROM moves WHERE from_position_id NOT IN (SELECT id FROM positions) "
+                    "OR to_position_id NOT IN (SELECT id FROM positions)"
+                ))
+                conn.commit()
+                deleted = result.rowcount
+                logger.info(f"Repaired logical integrity: {deleted} orphaned moves deleted.")
+                return deleted
+        except Exception as e:
+            logger.error(f"Error repairing logical integrity: {e}")
+            return 0

@@ -11,6 +11,7 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QIcon, QFont
 from PyQt6 import sip
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
+from opening_fenix.core.utils import get_elo_display
 from opening_fenix.gui.widgets.board_widget import THEMES
 
 # Import centralized styles
@@ -266,7 +267,7 @@ class SettingsDialog(QDialog):
         self.spin_delay.setRange(0, 2000)
         self.spin_delay.setSuffix(" ms")
         self.spin_delay.setValue(
-            self.main_window.training_manager.get_setting("auto_delay") or 200
+            self.main_window.training_manager.get_setting("auto_delay") if self.main_window.training_manager.get_setting("auto_delay") is not None else 0
         )
         self.spin_delay.valueChanged.connect(
             lambda v: self.main_window.training_manager.set_setting("auto_delay", v)
@@ -275,7 +276,7 @@ class SettingsDialog(QDialog):
             "Wartezeit (Millisekunden) nach einem korrekten Zug, "
             "bis die nächste Aufgabe automatisch geladen wird."
         )
-        f_behavior.addRow("Auto-Weiter Verzögerung:", self.spin_delay)
+        f_behavior.addRow("Verzögerung bei Variantenwechsel (Auto-Weiter):", self.spin_delay)
         layout.addWidget(g_behavior)
 
         layout.addStretch()
@@ -511,15 +512,9 @@ class SettingsDialog(QDialog):
         
         self.lbl_depth.setText(info.get("depth", "-"))
 
-        elo_map = {
-            "low": "800–1400 (Hobby)",
-            "mid": "1600–1800 (Club)",
-            "high": "2000–2500 (Expert)",
-            "masters": "Lichess Masters"
-        }
         elo_cat = info.get("elo", "-")
         coverage = info.get("coverage_pct", 0)
-        rating_info = elo_map.get(elo_cat, elo_cat)
+        rating_info = get_elo_display(elo_cat)
         self.lbl_elo.setText(f"{rating_info} [{coverage:.1f}% Abdeckung]")
         
         self.lbl_moves.setText(str(info.get("moves", "0")))

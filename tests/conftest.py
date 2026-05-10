@@ -167,7 +167,7 @@ def creator_window(qapp, complex_backend):
 @pytest.fixture(autouse=True)
 def silence_ui(monkeypatch):
     """Globally silence interactive dialogs during tests to prevent hangs."""
-    from PyQt6.QtWidgets import QMessageBox, QInputDialog
+    from PyQt6.QtWidgets import QMessageBox, QInputDialog, QFileDialog, QDialog
     
     # Mock QMessageBox functions to always return "Yes" or "Ok"
     monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
@@ -177,6 +177,19 @@ def silence_ui(monkeypatch):
     
     # Mock QInputDialog.getText to return a fixed name and True
     monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Test Name", True))
+
+    # Mock RepoSettingsDialog and DiagnosticDialog exec to prevent hangs
+    try:
+        from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+        monkeypatch.setattr(RepoSettingsDialog, "exec", lambda *args, **kwargs: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(DiagnosticDialog, "exec", lambda *args, **kwargs: QDialog.DialogCode.Accepted)
+    except (ImportError, AttributeError):
+        pass
+
+    # Mock QFileDialog methods
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: ("/path/to/file.pgn", "PGN Files (*.pgn)"))
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: ("/path/to/save.pgn", "PGN Files (*.pgn)"))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args, **kwargs: "/path/to/dir")
 
     # Mock CreatorWindow.new_repertoire_dialog
     try:

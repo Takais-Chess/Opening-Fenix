@@ -1,11 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
+is_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
+app_name = 'Opening Fenix Public' if is_share else 'Opening Fenix'
+
+datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
+if not is_share:
+    datas_list.append(('engines', 'engines'))
 
 a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets'), ('engines', 'engines'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')],
+    datas=datas_list,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -21,7 +28,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='Opening Fenix',
+    name=app_name,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -41,5 +48,5 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='Opening Fenix',
+    name=app_name,
 )

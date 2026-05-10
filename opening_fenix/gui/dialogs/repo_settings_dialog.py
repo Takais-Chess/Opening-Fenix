@@ -72,7 +72,7 @@ class NoWheelSpinBox(QSpinBox):
 from opening_fenix.core.models import (
     Position, Move, RepertoireMove, RepertoireLevel
 )
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, localize_san
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, localize_san, ELO_DISPLAY_MAP, get_elo_display, get_elo_internal
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.data_tools import get_base_path, get_user_dir
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, PGNImportThread, MaintenanceThread, RepertoireStatsWorker
@@ -290,27 +290,6 @@ class RepoSettingsDialog(QDialog):
         self.start_loading_animation()
         self.start_slow_stats_fetch()
 
-    def closeEvent(self, event):
-        # Stop background stats loader
-        if self.stats_loader and self.stats_loader.isRunning():
-            self.stats_loader.terminate()
-            self.stats_loader.wait()
-            
-        if self.loading_timer:
-            self.loading_timer.stop()
-
-        # Stop other background threads
-        for thread_attr in ['w_eng', 'w_lich', 'stats_worker', 'm_thread']:
-            if hasattr(self, thread_attr):
-                t = getattr(self, thread_attr)
-                if t and t.isRunning():
-                    try: t.disconnect()
-                    except: pass
-                    t.terminate()
-                    t.wait()
-                    
-        super().closeEvent(event)
-
     def init_ui(self):
         main_layout = QHBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -421,8 +400,8 @@ class RepoSettingsDialog(QDialog):
         lbl_elo_h.setFixedWidth(scale(120))
         
         self.combo_repertoire_elo = NoWheelComboBox()
-        self.combo_repertoire_elo.addItems(["low", "mid", "high", "masters"])
-        self.combo_repertoire_elo.setFixedWidth(scale(140))
+        self.combo_repertoire_elo.addItems(list(ELO_DISPLAY_MAP.values()))
+        self.combo_repertoire_elo.setFixedWidth(scale(200))
         self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
         
         h_elo_row.addWidget(lbl_elo_h)
@@ -559,7 +538,7 @@ class RepoSettingsDialog(QDialog):
         self.chk_details = QCheckBox("📋 Details (Position-Infos)")
         self.chk_analysis = QCheckBox("🧠 Analyse (Engine && Lichess)")
         self.chk_transpositions = QCheckBox("🔄 Transpositionen (Varianten-Überschneidungen)")
-        self.chk_holes = QCheckBox("🕳️ Loch Finder (Repertoire-Lücken)")
+        self.chk_holes = QCheckBox("🕳️ Such Modus (Repertoire-Lücken)")
         self.chk_kontrolle = QCheckBox("✅ Kontrolle (Variation Filtering)")
         
         for chk, key in [(self.chk_details, "DETAILS"), (self.chk_analysis, "ANALYSIS"), 
@@ -862,7 +841,8 @@ class RepoSettingsDialog(QDialog):
 
     def save_repertoire_elo(self, value):
         if not self.backend or not getattr(self.backend, 'session', None): return
-        self.backend.set_meta("elo", value)
+        internal_val = get_elo_internal(value)
+        self.backend.set_meta("elo", internal_val)
         self.backend.session.commit()
 
     def save_repertoire_color(self, _=None):
@@ -1062,7 +1042,8 @@ class RepoSettingsDialog(QDialog):
             
         if hasattr(self, "lbl_db_cov") and not sip.isdeleted(self.lbl_db_cov):
             cov = info.get("coverage_pct", 0)
-            self.lbl_db_cov.setText(f"{info.get('elo', 'N/A').capitalize()} [{cov:.1f}% Abdeckung]")
+            elo_display = get_elo_display(info.get('elo', 'N/A'))
+            self.lbl_db_cov.setText(f"{elo_display} [{cov:.1f}% Abdeckung]")
 
     def refresh_info(self, fast_only=False): 
         if not self.backend: return
@@ -1076,7 +1057,7 @@ class RepoSettingsDialog(QDialog):
         
         elo = self.backend.get_meta("elo", "high").lower()
         self.combo_repertoire_elo.blockSignals(True)
-        self.combo_repertoire_elo.setCurrentText(elo)
+        self.combo_repertoire_elo.setCurrentText(get_elo_display(elo))
         self.combo_repertoire_elo.blockSignals(False)
         
         color = self.backend.get_meta("color", "w")
@@ -1092,13 +1073,15 @@ class RepoSettingsDialog(QDialog):
         else:
             self.lbl_ana_status.setText(info.get('depth', '-'))
             cov = info.get("coverage_pct", 0)
-            self.lbl_db_cov.setText(f"{info.get('elo', 'N/A').capitalize()} [{cov:.1f}% Abdeckung]")
+            elo_display = get_elo_display(info.get('elo', 'N/A'))
+            self.lbl_db_cov.setText(f"{elo_display} [{cov:.1f}% Abdeckung]")
         
         # Sync Lichess UI
+        elo_display = get_elo_display(elo)
         if hasattr(self, 'lbl_lichess_target_elo'):
-            self.lbl_lichess_target_elo.setText(f"Ziel-Elo: {elo.capitalize()}")
+            self.lbl_lichess_target_elo.setText(f"Ziel-Elo: {elo_display}")
         if hasattr(self, 'btn_wipe_lichess'):
-            self.btn_wipe_lichess.setText(f"🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [{elo.capitalize()}]")
+            self.btn_wipe_lichess.setText(f"🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [{elo_display}]")
 
         # Refresh Table
         self.tbl_levels.setRowCount(0)
@@ -1283,7 +1266,8 @@ class RepoSettingsDialog(QDialog):
 
     def start_fetch(self):
         # Use repertoire-specific Elo category instead of global config
-        target_elo = self.combo_repertoire_elo.currentText().lower()
+        target_elo_display = self.combo_repertoire_elo.currentText()
+        target_elo = get_elo_internal(target_elo_display)
         self.w_lich = LichessImportThread(self.backend.active_repo_name, target_elo)
         self.pb_lich.setRange(0, 100)
         self.pb_lich.setValue(0)
@@ -1303,8 +1287,9 @@ class RepoSettingsDialog(QDialog):
 
     def delete_lichess_action(self):
         from PyQt6.QtWidgets import QMessageBox
-        target_elo = self.combo_repertoire_elo.currentText().lower()
-        ans = QMessageBox.question(self, "Löschen", f"Sollen alle Lichess-Daten für '{target_elo.capitalize()}' wirklich gelöscht werden?")
+        target_elo_display = self.combo_repertoire_elo.currentText()
+        target_elo = get_elo_internal(target_elo_display)
+        ans = QMessageBox.question(self, "Löschen", f"Sollen alle Lichess-Daten für '{target_elo_display}' wirklich gelöscht werden?")
         if ans == QMessageBox.StandardButton.Yes:
             from opening_fenix.core.db.database import DatabaseManager
             from opening_fenix.core.db.models import LichessData
@@ -1319,7 +1304,7 @@ class RepoSettingsDialog(QDialog):
                 session.commit()
                 session.close()
                 db.close()
-                QMessageBox.information(self, "Erfolg", f"{count} Einträge für '{target_elo.capitalize()}' gelöscht.")
+                QMessageBox.information(self, "Erfolg", f"{count} Einträge für '{target_elo_display}' gelöscht.")
                 self.refresh_info()
             except Exception as e:
                 QMessageBox.critical(self, "Fehler", f"Löschen fehlgeschlagen: {e}")
@@ -1327,9 +1312,10 @@ class RepoSettingsDialog(QDialog):
     
     def wipe_other_lichess_data_action(self):
         """Deletes Lichess data from the database for all Elo categories except the current one."""
-        target_elo = self.combo_repertoire_elo.currentText().lower()
+        target_elo_display = self.combo_repertoire_elo.currentText()
+        target_elo = get_elo_internal(target_elo_display)
         confirm = QMessageBox.question(self, "Bereinigen", 
-            f"Möchtest du wirklich alle Lichess-Daten löschen, die NICHT für '{target_elo.capitalize()}' sind?\nDies spart Speicherplatz.",
+            f"Möchtest du wirklich alle Lichess-Daten löschen, die NICHT für '{target_elo_display}' sind?\nDies spart Speicherplatz.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if confirm == QMessageBox.StandardButton.Yes:
@@ -1359,7 +1345,7 @@ class RepoSettingsDialog(QDialog):
         self.main_table.setItem(row, 4, it_cov)
         
         # Update Prio Elo (which is "Laden..." initially)
-        it_elo = QTableWidgetItem(elo.capitalize())
+        it_elo = QTableWidgetItem(get_elo_display(elo))
         it_elo.setFlags(Qt.ItemFlag.ItemIsEnabled)
         self.main_table.setItem(row, 2, it_elo)
 
@@ -1371,7 +1357,8 @@ class RepoSettingsDialog(QDialog):
             cb_item = self.main_table.cellWidget(row, 0)
             if cb_item and cb_item.isChecked():
                 repo_name = self.main_table.item(row, 1).text()
-                prio_elo = self.main_table.item(row, 2).text().split(" ")[0].lower() # e.g. "Masters" -> "masters"
+                prio_elo_display = self.main_table.item(row, 2).text().split(" [")[0] # Strip potential coverage info
+                prio_elo = get_elo_internal(prio_elo_display)
                 configs.append({'name': repo_name, 'elo': prio_elo})
         
         if not configs:
@@ -1457,7 +1444,7 @@ class RepoSettingsDialog(QDialog):
             self.main_table.setItem(row, 1, it_name)
             
             # Prio Elo
-            it_elo = QTableWidgetItem(r['elo'].capitalize())
+            it_elo = QTableWidgetItem(get_elo_display(r['elo']))
             it_elo.setFlags(Qt.ItemFlag.ItemIsEnabled) # No selection
             self.main_table.setItem(row, 2, it_elo)
             
@@ -1507,7 +1494,10 @@ class RepoSettingsDialog(QDialog):
         self.refresh_info()
 
     def closeEvent(self, event):
-        """Clean up background threads before closing."""
+        """Clean up background threads and timers before closing."""
+        if self.loading_timer:
+            self.loading_timer.stop()
+
         workers = [
             getattr(self, 'stats_worker', None),
             getattr(self, 'w_eng', None),
@@ -1518,8 +1508,14 @@ class RepoSettingsDialog(QDialog):
         
         for w in workers:
             if w and w.isRunning():
+                try: w.disconnect()
+                except: pass
+                
                 if hasattr(w, 'stop'): w.stop()
                 if hasattr(w, 'cancel'): w.cancel()
-                w.wait(300) # Short wait to join
-                
+                w.wait(500) # Wait for clean exit
+                if w.isRunning():
+                    w.terminate()
+                    w.wait()
+                    
         super().closeEvent(event)

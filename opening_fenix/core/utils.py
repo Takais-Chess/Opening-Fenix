@@ -2,6 +2,23 @@ import os
 import sys
 import json
 
+ELO_DISPLAY_MAP = {
+    "low": "Hobby Spieler",
+    "mid": "Vereins Spieler",
+    "high": "Lichess Meister Elo",
+    "masters": "Meister Datenbank"
+}
+
+ELO_INTERNAL_MAP = {v: k for k, v in ELO_DISPLAY_MAP.items()}
+
+def get_elo_display(internal_key):
+    if not internal_key:
+        return "N/A"
+    return ELO_DISPLAY_MAP.get(internal_key.lower(), internal_key.capitalize())
+
+def get_elo_internal(display_name):
+    return ELO_INTERNAL_MAP.get(display_name, "high")
+
 def get_base_path():
     """Gibt den Basispfad der Anwendung zurück, um Probleme mit dem Arbeitsverzeichnis zu vermeiden."""
     if getattr(sys, 'frozen', False):

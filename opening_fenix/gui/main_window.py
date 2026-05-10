@@ -44,6 +44,7 @@ from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consiste
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.logger import logger
+from opening_fenix.core.db.database import DatabaseCorruptedException
 
 
 class MainWindow(QMainWindow):
@@ -120,7 +121,8 @@ class MainWindow(QMainWindow):
                 if h > 0:
                     total_w = self.main_splitter.width()
                     # Only suggest if we have enough space for tools too
-                    if total_w > h + scale(350):
+                    # Reduced threshold from 350 to 250 to favor board size on small screens
+                    if total_w > h + scale(250):
                         self.main_splitter.setSizes([h, total_w - h])
             
             self.board_panel.adjust_size()
@@ -447,6 +449,7 @@ class MainWindow(QMainWindow):
         side_container_layout = QVBoxLayout(self.side_container)
         side_container_layout.setContentsMargins(scale(5), 0, 0, 0)
         side_container_layout.addWidget(self.side_panel)
+        self.side_container.setMinimumWidth(scale(250))
         self.main_splitter.addWidget(self.side_container)
         
         # Initial proportions: 3:2
@@ -499,7 +502,26 @@ class MainWindow(QMainWindow):
             return
 
         # Reset all caches and trainer state
-        self.repertoire_manager.set_active_repertoire(repo_name)
+        try:
+            self.repertoire_manager.set_active_repertoire(repo_name)
+        except DatabaseCorruptedException as e:
+            QMessageBox.critical(self, "Datenbank defekt", f"Das Repertoire '{repo_name}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}")
+            self.repertoire_manager.set_active_repertoire(None)
+            self.lbl_elo.setText("🎓 800")
+            self.progress_bar.update_stats(0, 0, {})
+            
+            # Remove from sorted_repo_names and refresh UI
+            if self.sorted_repo_names and repo_name in self.sorted_repo_names:
+                self.sorted_repo_names.remove(repo_name)
+            
+            next_repo = self.sorted_repo_names[0] if self.sorted_repo_names else None
+            
+            if next_repo:
+                QTimer.singleShot(0, lambda: self.change_repertoire(next_repo))
+            else:
+                self.refresh_repertoire_buttons()
+            return
+            
         self.training_manager.on_repertoire_changed()
         
         if reset_filter:
@@ -523,6 +545,24 @@ class MainWindow(QMainWindow):
             self.refresh_repertoire_buttons()
         
         self._check_for_course_intro(repo_name)
+        
+        # Check for logical corruption
+        if repo_name:
+            orphaned = self.repertoire_manager.core.check_logical_integrity()
+            if orphaned > 0:
+                reply = QMessageBox.warning(
+                    self, 
+                    "Inkonsistenz gefunden", 
+                    f"In diesem Repertoire wurden {orphaned} verwaiste (beschädigte) Züge gefunden.\n"
+                    "Dies geschieht meist durch Reparaturen der Datenbank. Wenn sie nicht entfernt werden, "
+                    "können Fehler beim Training auftreten.\n\nSollen die defekten Züge jetzt entfernt werden?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.repertoire_manager.core.repair_logical_integrity()
+                    self._do_update_stats_display()
+                    self.change_repertoire(repo_name, reset_filter=reset_filter, refresh_buttons=False)
 
     def _check_for_course_intro(self, repo_name):
         # Handle Course Intro and Learning Modes
@@ -683,18 +723,23 @@ class MainWindow(QMainWindow):
                 self.current_move_obj = None # Reset so next start loads a new challenge
                 return
             else:
+                # Auto-Weiter: Jump to next variation with delay
                 self.current_move_obj = None
+                delay = self.training_manager.get_setting("auto_delay") or 0
+                if delay > 0:
+                    QTimer.singleShot(delay, self._load_new_challenge_sequence)
+                    return
 
+        self._load_new_challenge_sequence(path_to_animate)
+
+    def _load_new_challenge_sequence(self, path_to_animate=None):
         if not self.current_move_obj:
             self.current_move_obj, _ = self.training_manager.get_next_move(mode=self.training_mode, variation_filter=self.active_variation_filter)
 
         if self.current_move_obj:
-            self.start_animation(path_to_animate)
-            # Fix: when learning new moves, we always want to see the move we are supposed to learn.
-            # In due mode, we hide it to test the user.
+            self.start_animation(path_to_animate or [])
             reveal = (self.training_mode == 'new')
             self.update_notation_display(reveal_move=reveal)
-            
         else:
             self.btn_smart.setText("🎉 FERTIG!")
             self.btn_smart.setEnabled(False)
@@ -782,7 +827,8 @@ class MainWindow(QMainWindow):
 
             self.set_button_state('correct')
             self.update_notation_display(reveal_move=True)
-            QTimer.singleShot(self.training_manager.get_setting("auto_delay") or 200, lambda: self.load_next_challenge(True, self.current_move_obj))
+            # Move-to-move delay is now always 0ms. auto_delay is now used for variation jumps.
+            QTimer.singleShot(0, lambda: self.load_next_challenge(True, self.current_move_obj))
         else:
             if self.repertoire_manager.check_if_alternative_good_move(self.current_move_obj, move.uci()):
                 self.play_sound("move")

@@ -119,13 +119,18 @@ class TrainingManager:
         if not self.user_session: return False
         return self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).count() > 0
 
-    def get_active_level(self) -> int:
+    def get_active_level(self, repo_name: Optional[str] = None) -> int:
         if self.profile_name == "Freies Training":
             return 999 # All levels active
             
-        if not self.user_session or not self.repertoire_manager.active_repertoire_name: return 1
+        if not repo_name:
+            repo_name = self.repertoire_manager.active_repertoire_name
+            
+        if not self.user_session or not repo_name: 
+            return 1
+            
         with self.user_session.no_autoflush:
-            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).first()
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
             return settings.active_level if settings else 1
 
     def set_active_level(self, level_order: int, repo_name: Optional[str] = None) -> None:
@@ -329,8 +334,33 @@ class TrainingManager:
             try:
                 dist = json.loads(settings.last_dist_json)
                 dist = {int(k): v for k, v in dist.items()}
-                return settings.last_new_count, settings.last_due_count, dist
-            except: pass
+                new_c = settings.last_new_count
+                due_c = settings.last_due_count
+                
+                # CATCH-UP: If time has passed since the last full update, some "learned" moves
+                # might have become "due". We update our counts to reflect this.
+                if settings.stats_updated_at:
+                    now = datetime.datetime.now()
+                    lookahead = now + datetime.timedelta(minutes=5)
+                    
+                    # Find moves for this repertoire that are now due but weren't during the last check
+                    # We query the TrainingData table directly (available in user_session)
+                    newly_due = self.user_session.query(TrainingData).filter(
+                        TrainingData.repertoire_name == repo_name,
+                        TrainingData.next_due > settings.stats_updated_at,
+                        TrainingData.next_due <= lookahead
+                    ).all()
+                    
+                    for td in newly_due:
+                        # Remove from learned distribution and add to due count
+                        if td.box in dist and dist[td.box] > 0:
+                            dist[td.box] -= 1
+                            due_c += 1
+                
+                return new_c, due_c, dist
+            except Exception as e:
+                from opening_fenix.core.logger import logger
+                logger.error(f"Error in fast-path stats catch-up: {e}")
         return 0, 0, {}
 
     def get_stats(self, variation_filter=None, use_cache=True):
@@ -437,7 +467,9 @@ class TrainingManager:
                 learned_keys = set(self._td_cache.keys())
                 candidates = []
                 for from_pos_id, m_list in self._forward_moves_cache.items():
-                    pos_fen = self._pos_cache[from_pos_id].fen
+                    pos = self._pos_cache.get(from_pos_id)
+                    if not pos: continue
+                    pos_fen = pos.fen
                     if f' {side} ' not in pos_fen: continue
                     for m in m_list:
                         rep_move = self._rep_move_cache.get(m.id)
@@ -480,7 +512,9 @@ class TrainingManager:
 
             candidates = []
             for from_pos_id, m_list in self._forward_moves_cache.items():
-                pos_fen = self._pos_cache[from_pos_id].fen
+                pos = self._pos_cache.get(from_pos_id)
+                if not pos: continue
+                pos_fen = pos.fen
                 if f' {side} ' not in pos_fen: continue
                 
                 for m in m_list:
@@ -518,8 +552,8 @@ class TrainingManager:
         for _ in range(50): # Safety limit
             # 1. Stop if the CURRENT move already starts at the variation boundary
             if target_entry_fen:
-                curr_fen = clean_fen(self._pos_cache[curr_move.from_position_id].fen)
-                if curr_fen == target_entry_fen:
+                pos = self._pos_cache.get(curr_move.from_position_id)
+                if pos and clean_fen(pos.fen) == target_entry_fen:
                     break
 
             # 2. Look at the parent move (usually an opponent move)
@@ -529,8 +563,8 @@ class TrainingManager:
             
             # 3. If the PARENT move starts at the boundary, we must stop here!
             if target_entry_fen:
-                parent_fen = clean_fen(self._pos_cache[parent_move.from_position_id].fen)
-                if parent_fen == target_entry_fen:
+                pos = self._pos_cache.get(parent_move.from_position_id)
+                if pos and clean_fen(pos.fen) == target_entry_fen:
                     break
 
             # 4. Look at the grandparent move (usually the previous player move)
@@ -539,7 +573,9 @@ class TrainingManager:
             grandparent_move = grandparents[0]
             
             # 5. Check library status
-            key = (self._pos_cache[grandparent_move.from_position_id].fen, grandparent_move.uci)
+            gp_pos = self._pos_cache.get(grandparent_move.from_position_id)
+            if not gp_pos: break
+            key = (gp_pos.fen, grandparent_move.uci)
             if check_due:
                 p_data = self._td_cache.get(key)
                 if p_data and p_data.next_due <= datetime.datetime.now(): 
@@ -595,12 +631,7 @@ class TrainingManager:
                         visited.add(m.to_position_id); queue.append((m.to_position_id, depth + 1, path + [m.san]))
         return None, []
 
-    def get_active_level(self, repo_name: Optional[str] = None) -> int:
-        if not repo_name:
-            repo_name = self.repertoire_manager.active_repertoire_name
-        if not repo_name: return 0
-        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-        return settings.active_level if settings else 1
+
 
     def _get_rating_settings(self):
         repo_name = self.repertoire_manager.active_repertoire_name
@@ -704,7 +735,9 @@ class TrainingManager:
             self._ensure_td_cache()
             move = self._move_by_id_cache.get(move_id)
             if not move: return
-            fen = self._pos_cache[move.from_position_id].fen
+            pos = self._pos_cache.get(move.from_position_id)
+            if not pos: return
+            fen = pos.fen
             
             entry = TrainingData(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci, box=7, next_due=datetime.datetime.max)
             self.user_session.add(entry)
@@ -720,7 +753,9 @@ class TrainingManager:
             
         if not move: return
         
-        fen = self._pos_cache[move.from_position_id].fen
+        pos = self._pos_cache.get(move.from_position_id)
+        if not pos: return
+        fen = pos.fen
         
         entry = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci).first()
         now = datetime.datetime.now()
@@ -751,7 +786,9 @@ class TrainingManager:
             
         if not move: return False
         
-        fen = self._pos_cache[move.from_position_id].fen
+        pos = self._pos_cache.get(move.from_position_id)
+        if not pos: return False
+        fen = pos.fen
         return (fen, move.uci) not in self._td_cache
     
     def get_box_distribution(self):

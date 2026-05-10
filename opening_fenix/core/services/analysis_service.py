@@ -17,7 +17,7 @@ from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
 import urllib.request
 import urllib.parse
 
-def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None, hash_size: int = 256) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
@@ -39,10 +39,11 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
 
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NO_WINDOW
+            # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
+            creationflags = 0x08000000 | 0x00004000
 
         engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
-        engine.configure({"Threads": threads})
+        engine.configure({"Threads": threads, "Hash": hash_size})
 
         for i, pos in enumerate(positions_to_analyze):
             if check_cancel and check_cancel():
@@ -55,16 +56,31 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             repertoire_uci = repertoire_move.uci if repertoire_move else None
 
             try:
-                # MultiPV is automatically managed by the analysis context manager in python-chess.
-                # Setting it manually via configure can cause warnings or errors depending on the engine.
-                multi_pv = 1
+                # --- STAGE 1: DISCOVERY ---
+                # Quick search to see if we actually need high MultiPV
+                discovery_depth = min(depth, 10)
+                discovery_multipv = 5
                 if "MultiPV" in engine.options:
-                    # Limit to whatever the engine supports or 20
                     opt = engine.options["MultiPV"]
-                    max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 20
-                    multi_pv = min(20, max_allowed)
+                    max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
+                    discovery_multipv = min(5, max_allowed)
                 
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=multi_pv)
+                # Fast look
+                discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
+                
+                # --- STAGE 2: DECISION & DEEPENING ---
+                final_multipv = 1
+                if len(discovery_res) > 1:
+                    best_discover = discovery_res[0]['score'].white().score(mate_score=100000)
+                    second_discover = discovery_res[1]['score'].white().score(mate_score=100000)
+                    
+                    # If the gap is small (< 150cp), we keep looking at multiple moves.
+                    # Otherwise, we focus resources on the best move to reach depth faster.
+                    if abs(best_discover - second_discover) < 150:
+                        final_multipv = discovery_multipv
+
+                # Full analysis to target depth
+                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
                 
                 if not result:
                     continue
@@ -234,8 +250,15 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                                     'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
                                 } for move in moves_data if 'uci' in move
                             }
-                            session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=json.dumps(moves_dict)))
-                            session.flush()
+                            # Double check to prevent race condition during long network request
+                            if not session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first():
+                                session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=json.dumps(moves_dict)))
+                                try:
+                                    session.flush()
+                                except Exception as inner_e:
+                                    session.rollback()
+                                    from opening_fenix.core.logger import logger
+                                    logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
                 except Exception as e:
                     print(f"Lichess fetch failed for enrichment of {p_clean}: {e}")
 
@@ -244,20 +267,33 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
             try:
                 creationflags = 0
                 if sys.platform == "win32":
-                    creationflags = subprocess.CREATE_NO_WINDOW
+                    # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
+                    creationflags = 0x08000000 | 0x00004000
                 engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
                 engine.configure({"Threads": 1})
                 board = chess.Board(pos.fen) 
                 
                 try:
-                    # Use actual MultiPV from engine options if available, capped at 10 for speed
-                    analyze_kwargs = {}
+                    # --- STAGE 1: DISCOVERY ---
+                    discovery_depth = min(depth, 10)
+                    discovery_multipv = 5
                     if "MultiPV" in engine.options:
                         opt = engine.options["MultiPV"]
-                        max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 10
-                        analyze_kwargs["multipv"] = min(10, max_allowed)
+                        max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
+                        discovery_multipv = min(5, max_allowed)
                     
-                    result = engine.analyse(board, chess.engine.Limit(depth=depth), **analyze_kwargs)
+                    discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
+
+                    # --- STAGE 2: DECISION & DEEPENING ---
+                    final_multipv = 1
+                    if len(discovery_res) > 1:
+                        best_discover = discovery_res[0]['score'].white().score(mate_score=100000)
+                        second_discover = discovery_res[1]['score'].white().score(mate_score=100000)
+                        
+                        if abs(best_discover - second_discover) < 150:
+                            final_multipv = discovery_multipv
+
+                    result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
                     
                     if result:
                         best_score_info = result[0]['score'].white()
@@ -276,7 +312,8 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                             # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
                             threshold = 50 if depth <= 17 else 30
                             if abs(best_score_val - score_val) <= threshold:
-                                good_moves.append(move.uci())
+                                if move.uci() not in good_moves:
+                                    good_moves.append(move.uci())
                         
                         pos.good_moves = json.dumps(list(set(good_moves)))
                         pos.analysis_depth = depth

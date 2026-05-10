@@ -129,10 +129,10 @@ class TestRepoSettingsGeneralPage:
             settings_dialog.combo_repertoire_elo.itemText(i)
             for i in range(settings_dialog.combo_repertoire_elo.count())
         ]
-        assert "low" in elo_texts
-        assert "mid" in elo_texts
-        assert "high" in elo_texts
-        assert "masters" in elo_texts
+        assert "Hobby Spieler" in elo_texts
+        assert "Vereins Spieler" in elo_texts
+        assert "Lichess Meister Elo" in elo_texts
+        assert "Meister Datenbank" in elo_texts
 
     def test_level_table_populated(self, settings_dialog):
         """Level-Tabelle ist nach dem Laden befüllt."""

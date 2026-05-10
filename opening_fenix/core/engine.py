@@ -10,13 +10,14 @@ class EngineThread(QThread):
     info_signal = pyqtSignal(object) # Can be list of strings (status) or list of dicts (analysis)
     db_update_signal = pyqtSignal(str, int, int) # fen, depth, eval (cp)
 
-    def __init__(self, engine_path, threads=4, depth=20, use_depth_limit=True, multipv=3):
+    def __init__(self, engine_path, threads=4, depth=20, use_depth_limit=True, multipv=3, hash_size=256):
         super().__init__()
         self.engine_path = engine_path
         self.threads = threads
         self.target_depth = depth
         self.use_depth_limit = use_depth_limit
         self.multipv = multipv
+        self.hash_size = hash_size
         self.engine = None
         self.board = None
         self.running = False
@@ -42,14 +43,20 @@ class EngineThread(QThread):
 
                 self.engine = chess.engine.SimpleEngine.popen_uci(self.engine_path, creationflags=creationflags)
                 try:
-                    # Check if 'Threads' is a supported option before setting it
+                    config = {}
+                    # Check if options are supported before setting them
                     if "Threads" in self.engine.options:
-                        self.engine.configure({"Threads": self.threads})
+                        config["Threads"] = self.threads
+                    if "Hash" in self.engine.options:
+                        config["Hash"] = self.hash_size
+                        
+                    if config:
+                        self.engine.configure(config)
                 except Exception as e:
-                    logger.warning(f"Engine configuration warning (Threads): {e}")
+                    logger.warning(f"Engine configuration warning: {e}")
                     self.info_signal.emit([f"Config Warning: {e}"])
                 self.running = True
-                self.info_signal.emit(["Engine geladen."])
+                self.info_signal.emit(["Engine bereit."])
             except Exception as e:
                 logger.error(f"Failed to start engine: {e}")
                 self.info_signal.emit([f"Engine Fehler: {e}"])
@@ -79,23 +86,26 @@ class EngineThread(QThread):
         if active and self._target_fen:
             self.board = chess.Board(self._target_fen)
 
-    def update_config(self, threads, depth, use_depth_limit, multipv):
+    def update_config(self, threads, depth, use_depth_limit, multipv, hash_size=None):
         changed = False
-        if self.threads != threads or self.multipv != multipv:
+        if self.threads != threads or self.multipv != multipv or (hash_size is not None and self.hash_size != hash_size):
             changed = True
             
         self.threads = threads
         self.target_depth = depth
         self.use_depth_limit = use_depth_limit
         self.multipv = multipv
+        if hash_size is not None:
+            self.hash_size = hash_size
         
         if changed and self.engine:
             try:
                 config = {}
                 if "Threads" in self.engine.options:
                     config["Threads"] = self.threads
-                # MultiPV is handled in the analysis loop, but some engines might 
-                # allow/require it as a global option. Usually not needed via popen_uci analysis.
+                if "Hash" in self.engine.options:
+                    config["Hash"] = self.hash_size
+                
                 if config:
                     self.engine.configure(config)
             except Exception as e:
@@ -111,7 +121,15 @@ class EngineThread(QThread):
         current_depth = None
         
         while self.running:
-            if self.is_active and self.board and self.engine:
+            if self.is_active and self.board:
+                # LAZY START: Only start the process when actually analyzing
+                if not self.engine:
+                    self.start_engine()
+                
+                if not self.engine: # Failed to start
+                    self.msleep(1000)
+                    continue
+
                 # Check if we need to start a new analysis
                 settings_changed = (self.multipv != current_multipv) or (self.target_depth != current_depth)
                 position_changed = (self._target_fen != current_board_fen)
@@ -128,6 +146,7 @@ class EngineThread(QThread):
                     
                     legal_moves_count = self.board.legal_moves.count()
                     if legal_moves_count == 0:
+                        self.info_signal.emit(["Partieende / Keine legalen Züge"])
                         self.msleep(100)
                         continue
                         
@@ -150,18 +169,29 @@ class EngineThread(QThread):
                                 
                         # One final flush to ensure the UI gets the very last evaluation 
                         # even if it happened faster than our 100ms throttle timer
-                        self._emit_current_cache(self.board)
+                        if self._target_fen == current_board_fen:
+                            self._emit_current_cache(self.board)
                         self._is_analyzing = False
                         
                     except Exception as e:
                         self._is_analyzing = False
                         logger.error(f"Analysis error at {current_board_fen}: {e}")
                         self.info_signal.emit([f"Analysis Error: {e}"])
+                        
+                        was_active = self.is_active
+                        self.stop_engine()
+                        self.start_engine()
+                        self.is_active = was_active
+                        
+                        current_board_fen = None # Force restart on next loop
                         self.msleep(1000)
                 else:
                     self.msleep(50)
             else:
                 current_board_fen = None 
+                # LAZY STOP: Release RAM when not analyzing
+                if self.engine:
+                    self.stop_engine()
                 self.msleep(100)
                 
         self.stop_engine()

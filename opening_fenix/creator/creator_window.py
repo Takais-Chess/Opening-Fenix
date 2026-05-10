@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QTabWidget, QProgressBar, QProgressDialog, QListWidget,
     QTableWidget, QTableWidgetItem, QApplication, QToolBar, QStyle, QListWidgetItem, QStackedWidget, QPlainTextEdit,
-    QGraphicsDropShadowEffect, QAbstractItemView
+    QGraphicsDropShadowEffect, QAbstractItemView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QUrl, QRectF, QSize, QEvent
 from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont
@@ -34,7 +34,7 @@ from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -181,6 +181,23 @@ class CreatorBackend:
         if m: m.value = text
         else: self.session.add(Metadata(key="description", value=text))
         self.session.commit()
+
+    def get_parent_moves_for_fen(self, fen):
+        if not self.session: return []
+        clean_fen = " ".join(fen.strip().split(" ")[:4])
+        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        if not pos: return []
+        moves = self.session.query(Move).filter_by(to_position_id=pos.id).all()
+        result = []
+        for m in moves:
+            from_pos = self.session.get(Position, m.from_position_id)
+            if from_pos:
+                result.append({
+                    "move_san": m.san,
+                    "move_uci": m.uci,
+                    "parent_fen": from_pos.fen
+                })
+        return result
 
     def get_path_to_fen(self, fen):
         if not self.session: return None, []
@@ -945,7 +962,8 @@ class CreatorBackend:
         # If we are the main path being updated, we take new_level.
         # But we must never be stronger than effective_level.
         # Wait, if we are in a forced line, effective_level is either new_level or something else.
-        target_level = max(new_level, effective_level)
+        # target_level = max(new_level, effective_level) # BUG: This demoted moves even if a stronger path existed.
+        target_level = effective_level
         
         if rm.level != target_level:
             rm.level = target_level
@@ -2393,7 +2411,7 @@ class CreatorWindow(QMainWindow):
         
         # Upper Right - Tree
         self.tree_group = QWidget()
-        self.tree_group.setProperty("class", "GlassPill")
+        self.tree_group.setObjectName("KandidatenPill")
         t_layout = QVBoxLayout(self.tree_group)
         t_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10)) # Reverted to 10px in previous step
         t_layout.setSpacing(scale(10))
@@ -2409,7 +2427,15 @@ class CreatorWindow(QMainWindow):
         self.repolish(self.chk_a)
         self.chk_a.toggled.connect(self.update_board_arrows)
         
+        self.btn_back = QPushButton("←")
+        self.btn_back.setProperty("class", "GlassPill")
+        self.repolish(self.btn_back)
+        self.btn_back.setStyleSheet("font-size: 40px; font-weight: bold;")
+        self.btn_back.setToolTip("Einen Zug zurück")
+        self.btn_back.clicked.connect(self.on_back_button_clicked)
+
         h_header.addWidget(lbl_title)
+        h_header.addWidget(self.btn_back)
         h_header.addStretch()
         h_header.addWidget(self.chk_a)
         t_layout.addLayout(h_header)
@@ -2431,6 +2457,10 @@ class CreatorWindow(QMainWindow):
 
         # Lower Right - Tabs
         self.tabs = QTabWidget()
+        self._last_tab_index = 0
+        
+        self.tabs.tabBar().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tabs.tabBar().customContextMenuRequested.connect(self.show_tab_context_menu)
         
         # Tab 1: Stellungs Details
         self.tab_details = QWidget()
@@ -2512,13 +2542,16 @@ class CreatorWindow(QMainWindow):
 
         # Left Column: Engine (GlassPill)
         engine_container = QFrame()
-        engine_container.setProperty("class", "GlassPill")
+        engine_container.setObjectName("EngineAnalysisPill")
         self.repolish(engine_container)
         evl = QVBoxLayout(engine_container)
+        evl.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
+        evl.setSpacing(scale(8))
         
         # Engine Settings (Dropdowns)
         h_eng_settings = QHBoxLayout()
         h_eng_settings.setSpacing(scale(5))
+        h_eng_settings.addStretch() # Center alignment
         
         self.combo_depth = QComboBox()
         self.combo_depth.setEditable(True)
@@ -2540,10 +2573,23 @@ class CreatorWindow(QMainWindow):
         max_threads = multiprocessing.cpu_count()
         self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
         self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
-        self.combo_threads.setFixedWidth(scale(48))
+        self.combo_threads.setFixedWidth(scale(55))
         self.combo_threads.setProperty("class", "SmallCombo")
         self.repolish(self.combo_threads)
         self.combo_threads.lineEdit().installEventFilter(self)
+
+        # HASH COMBO
+        self.combo_hash = QComboBox()
+        self.combo_hash.setEditable(True)
+        self.combo_hash.lineEdit().setReadOnly(True)
+        self.combo_hash.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_hash.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_hash.addItems(["16", "64", "128", "256", "512", "1024", "2048"])
+        self.combo_hash.setCurrentText(self.config.get("engine_hash", "256"))
+        self.combo_hash.setFixedWidth(scale(65))
+        self.combo_hash.setProperty("class", "SmallCombo")
+        self.repolish(self.combo_hash)
+        self.combo_hash.lineEdit().installEventFilter(self)
         
         self.combo_lines = QComboBox()
         self.combo_lines.setEditable(True)
@@ -2551,15 +2597,15 @@ class CreatorWindow(QMainWindow):
         self.combo_lines.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combo_lines.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_lines.addItems([str(i) for i in range(1, 11)])
-        self.combo_lines.setCurrentText("5")
+        self.combo_lines.setCurrentText("3")
         self.combo_lines.setFixedWidth(scale(48))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
         
-        lbl_depth = QLabel("Depth:")
-        lbl_threads = QLabel("Threads:")
-        lbl_lines = QLabel("Lines:")
+        lbl_depth = QLabel("Tiefe:")
+        lbl_threads = QLabel("Kerne:")
+        lbl_lines = QLabel("Züge:")
         
         h_eng_settings.addWidget(lbl_depth)
         h_eng_settings.addWidget(self.combo_depth)
@@ -2567,12 +2613,12 @@ class CreatorWindow(QMainWindow):
         h_eng_settings.addWidget(self.combo_threads)
         h_eng_settings.addWidget(lbl_lines)
         h_eng_settings.addWidget(self.combo_lines)
-        h_eng_settings.addStretch()
+        h_eng_settings.addStretch() # Center alignment
         evl.addLayout(h_eng_settings)
         
         self.btn_engine_toggle = QPushButton("▶ Analyse Starten")
         self.btn_engine_toggle.setCheckable(True)
-        self.btn_engine_toggle.setMinimumHeight(scale(40))
+        self.btn_engine_toggle.setMinimumHeight(scale(35))
         self.btn_engine_toggle.setProperty("class", "GlassPill")
         self.repolish(self.btn_engine_toggle)
         self.btn_engine_toggle.toggled.connect(self._on_engine_toggle_toggled)
@@ -2589,29 +2635,30 @@ class CreatorWindow(QMainWindow):
         header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         evl.addWidget(self.table_engine)
-        al.addWidget(engine_container, 2) # Engine part now more compact
-
+        al.addWidget(engine_container) # Removed stretch factor 2
+        
         # Right Column: Common Moves (GlassPill)
         common_container = QFrame()
-        common_container.setProperty("class", "GlassPill")
+        common_container.setObjectName("CommonMovesPill")
+        common_container.setMinimumWidth(scale(420)) # Prevent horizontal jittering when Lichess loads
         self.repolish(common_container)
         cvl = QVBoxLayout(common_container)
+        cvl.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
+        cvl.setSpacing(scale(8))
         
-        h_cat = QHBoxLayout()
-        h_cat.addWidget(QLabel("Database:"))
+        # Database Label centered at top
+        self.lbl_lichess_cat_display = QLabel(f"Datenbank: {get_elo_display('high')}")
+        self.lbl_lichess_cat_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_lichess_cat_display.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['light_text']};")
+        cvl.addWidget(self.lbl_lichess_cat_display)
+        
+        # Keep combo box hidden so existing logic works perfectly without backend changes
         self.combo_lichess_cat = QComboBox()
         self.combo_lichess_cat.addItems(["low", "mid", "high", "masters"])
-        self.combo_lichess_cat.setToolTip("<b>Lichess ELO-Kategorien:</b><br>"
-                                          "• <b>low</b>: Spieler <1400 ELO<br>"
-                                          "• <b>mid</b>: Spieler 1400-2000 ELO<br>"
-                                          "• <b>high</b>: Spieler >2000 ELO<br>"
-                                          "• <b>masters</b>: Lichess Masters Datenbank (Titelträger)")
         self.combo_lichess_cat.setCurrentText("high")
         self.combo_lichess_cat.currentTextChanged.connect(self.update_ui_from_fen)
-        
-        h_cat.addWidget(self.combo_lichess_cat)
-        h_cat.addStretch()
-        cvl.addLayout(h_cat)
+        self.combo_lichess_cat.currentTextChanged.connect(lambda t: self.lbl_lichess_cat_display.setText(f"Datenbank: {get_elo_display(t)}"))
+        self.combo_lichess_cat.hide()
         
         self.table_common_moves = QTableWidget(0, 5)
         self.table_common_moves.setHorizontalHeaderLabels(["Move", "Played", "White %", "Black %", "Draw %"])
@@ -2621,9 +2668,15 @@ class CreatorWindow(QMainWindow):
         self.table_common_moves.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table_common_moves.cellDoubleClicked.connect(self.on_common_move_double_click)
         header_cm = self.table_common_moves.horizontalHeader()
-        header_cm.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        
+        self.table_common_moves.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        # Use fixed width for stats and stretch for move name to stabilize layout
+        header_cm.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for i in range(1, 5):
+            header_cm.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+            
         cvl.addWidget(self.table_common_moves)
-        al.addWidget(common_container, 5) # Common moves now significantly wider
+        al.addWidget(common_container) # Removed stretch factor 5, allowed to grow naturally
         
         # Rep. Loch Finder Tab
         self.tab_holes = QWidget()
@@ -2641,7 +2694,7 @@ class CreatorWindow(QMainWindow):
         self._all_tabs = {
             "DETAILS": (self.tab_details, "DETAILS"),
             "ANALYSIS": (self.tab_analysis, "ANALYSIS"),
-            "HOLES": (self.tab_holes, "Rep. Loch Finder"),
+            "HOLES": (self.tab_holes, "Such Modus"),
             "KONTROLLE": (self.tab_kontrolle, "Rep. Kontrolle"),
             "TRANSPOSITIONS": (self.tab_transpositions, "Transpositionen")
         }
@@ -2685,10 +2738,55 @@ class CreatorWindow(QMainWindow):
     def _on_tab_changed(self, index):
         if not self._is_ui_valid(): return
         widget = self.tabs.widget(index)
+        
+        if getattr(self, 'tab_add_dummy', None) and widget == self.tab_add_dummy:
+            # We clicked the + tab! Revert silently to the previous index
+            self.tabs.blockSignals(True)
+            if hasattr(self, '_last_tab_index') and self._last_tab_index < self.tabs.count() - 1:
+                self.tabs.setCurrentIndex(self._last_tab_index)
+            else:
+                self.tabs.setCurrentIndex(0)
+            self.tabs.blockSignals(False)
+            self.open_tab_settings()
+            return
+            
+        self._last_tab_index = index
+        
         if widget == self.tab_transpositions:
             self.update_transpositions_tab()
         elif widget == self.tab_kontrolle:
             self.update_overhaul_progress()
+
+    def open_tab_settings(self):
+        from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog
+        dialog = RepoSettingsDialog(self, self.backend)
+        dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
+        dialog.exec()
+
+    def show_tab_context_menu(self, pos):
+        index = self.tabs.tabBar().tabAt(pos)
+        if index >= 0 and self.tabs.widget(index) != getattr(self, 'tab_add_dummy', None):
+            menu = QMenu(self)
+            menu.setStyleSheet(self.styleSheet())
+            hide_action = menu.addAction(f"Tab '{self.tabs.tabText(index)}' ausblenden")
+            action = menu.exec(self.tabs.tabBar().mapToGlobal(pos))
+            if action == hide_action:
+                self.hide_tab_by_index(index)
+
+    def hide_tab_by_index(self, index):
+        tab_title = self.tabs.tabText(index)
+        target_key = None
+        for key, (widget, title) in self._all_tabs.items():
+            if title == tab_title:
+                target_key = key
+                break
+        
+        if target_key:
+            active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+            if target_key in active_tabs:
+                active_tabs.remove(target_key)
+                self.set_setting("creator_active_tabs", active_tabs)
+                self.apply_tab_visibility()
 
     def apply_tab_visibility(self):
         # Determine which tabs should be visible
@@ -2709,6 +2807,11 @@ class CreatorWindow(QMainWindow):
             if key in active_tabs and key in self._all_tabs:
                 widget, title = self._all_tabs[key]
                 self.tabs.addTab(widget, title)
+                
+        # Add the + dummy tab at the end
+        if not hasattr(self, 'tab_add_dummy'):
+            self.tab_add_dummy = QWidget()
+        self.tabs.addTab(self.tab_add_dummy, " + ")
                 
         # Restore index if possible
         if current_text:
@@ -2847,12 +2950,41 @@ class CreatorWindow(QMainWindow):
         self.enrichment_threads.append(t)
         t.start()
 
+    def on_back_button_clicked(self):
+        self.save_current_details_now()
+        current_fen = self.board_widget.board.fen()
+        parents = self.backend.get_parent_moves_for_fen(current_fen)
+        
+        if len(parents) == 0:
+            self.go_back()
+        elif len(parents) == 1:
+            parent = parents[0]
+            self.play_sound("capture" if 'x' in parent['move_san'] else "move")
+            self.set_board_to_fen(parent['parent_fen'])
+        else:
+            menu = QMenu(self)
+            menu.setStyleSheet(self.styleSheet())
+            for parent in parents:
+                action = menu.addAction(f"Zug aus: {parent['move_san']}")
+                # Capture values in lambda
+                p_fen = parent['parent_fen']
+                p_san = parent['move_san']
+                action.triggered.connect(lambda checked=False, p=p_fen, s=p_san: self._on_back_action_triggered(p, s))
+            
+            menu.exec(self.btn_back.mapToGlobal(QPoint(0, self.btn_back.height())))
+
+    def _on_back_action_triggered(self, parent_fen, move_san):
+        self.play_sound("capture" if 'x' in move_san else "move")
+        self.set_board_to_fen(parent_fen)
+
     def go_back(self):
         self.save_current_details_now()
         if len(self.board_widget.board.move_stack) > 0:
+            last_move = self.board_widget.board.peek()
+            is_cap = self.board_widget.board.is_capture(last_move)
             self.board_widget.board.pop()
             self.board_widget.update()
-            self.play_sound("move")
+            self.play_sound("capture" if is_cap else "move")
             self.update_ui_from_fen()
 
     def go_start(self):
@@ -3305,10 +3437,28 @@ class CreatorWindow(QMainWindow):
         self.toggle_engine(checked)
 
     def toggle_engine(self, active):
+        if self.engine_thread and not self.engine_thread.isRunning():
+            self.init_engine()
+            
         if self.engine_thread:
-            self.engine_thread.update_config(int(self.combo_threads.currentText()), int(self.combo_depth.currentText()), True, int(self.combo_lines.currentText()))
+            # SAVE SETTINGS TO CONFIG
+            self.config["engine_threads"] = self.combo_threads.currentText()
+            # Hash is now fixed at 256MB to keep UI clean, but we keep it in config
+            self.config["engine_hash"] = self.config.get("engine_hash", "256")
+            self.config["engine_depth"] = self.combo_depth.currentText()
+            self.config["engine_multipv"] = self.combo_lines.currentText()
+            self.save_config()
+
+            self.engine_thread.update_config(
+                int(self.combo_threads.currentText()), 
+                int(self.combo_depth.currentText()), 
+                True, 
+                int(self.combo_lines.currentText()),
+                hash_size=int(self.config["engine_hash"])
+            )
             self.engine_thread.toggle_analysis(active)
             if active: 
+                self.table_engine.setRowCount(0)
                 self.engine_thread.set_position(self.board_widget.board.fen())
         elif active:
             # Situation 1: Engine thread was not initialized due to missing path
@@ -3562,7 +3712,11 @@ class CreatorWindow(QMainWindow):
     def init_engine(self):
         ep = self.config.get("engine_path", "")
         if ep and os.path.exists(ep):
-            self.engine_thread = EngineThread(ep, multipv=int(self.combo_lines.currentText()))
+            threads = int(self.combo_threads.currentText())
+            hash_size = int(self.config.get("engine_hash", "256"))
+            multipv = int(self.combo_lines.currentText())
+            
+            self.engine_thread = EngineThread(ep, threads=threads, hash_size=hash_size, multipv=multipv)
             self.engine_thread.info_signal.connect(self.update_engine_output)
             self.engine_thread.db_update_signal.connect(self.on_db_update)
             self.engine_thread.start()
@@ -3592,6 +3746,7 @@ class CreatorWindow(QMainWindow):
             self.board_widget.update()
 
     def eventFilter(self, obj, event):
+        from PyQt6.QtWidgets import QLineEdit
         if hasattr(self, '_processing_event') and self._processing_event:
             return False
             
@@ -3599,6 +3754,10 @@ class CreatorWindow(QMainWindow):
             if event.key() in [Qt.Key.Key_Up, Qt.Key.Key_Down]:
                 focus_w = self.focusWidget()
                 if focus_w not in [self.i_v1, self.i_v2, self.i_v3, self.txt_c]:
+                    # Exclude combos lineEdits
+                    if isinstance(focus_w, QLineEdit) and focus_w.parent() in [self.combo_depth, self.combo_threads, self.combo_lines, self.combo_hash]:
+                        return False
+                    
                     if obj != self.tree_widget:
                         if focus_w != self.tree_widget:
                             self.tree_widget.setFocus()
@@ -3620,7 +3779,6 @@ class CreatorWindow(QMainWindow):
                 return True
         if event.type() == QEvent.Type.MouseButtonRelease:
             # Check if click is on one of our settings boxes (now through the internal lineEdit)
-            from PyQt6.QtWidgets import QLineEdit
             if isinstance(obj, QLineEdit) and obj.parent() in [self.combo_depth, self.combo_threads, self.combo_lines]:
                 # Trigger the dropdown menu
                 obj.parent().showPopup()
@@ -3655,259 +3813,316 @@ class CreatorWindow(QMainWindow):
 
     def init_hole_finder_tab(self):
         layout = QVBoxLayout(self.tab_holes)
-        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        layout.setContentsMargins(0, scale(5), 0, 0)
         layout.setSpacing(scale(15))
         
-        # Upper Glass Card for Controls
-        self.card_hole_controls = QFrame()
-        self.card_hole_controls.setProperty("class", "GlassPill")
-        self.repolish(self.card_hole_controls)
-        ctrl_layout = QVBoxLayout(self.card_hole_controls)
-        ctrl_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        # Main Container (no hover effect)
+        self.card_hole_main = QFrame()
+        self.card_hole_main.setObjectName("HoleFinderMainCard")
+        # Custom styling to mimic GlassPill without the hover effect that causes issues
+        self.card_hole_main.setStyleSheet(f"""
+            #HoleFinderMainCard {{
+                background-color: {COLORS['glass_bg']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(15)}px;
+            }}
+        """)
+        main_layout = QVBoxLayout(self.card_hole_main)
+        main_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
+        main_layout.setSpacing(scale(15))
         
-        # Mode Selection
-        mode_layout = QHBoxLayout()
-        mode_layout.addWidget(QLabel("<b>Such-Modus:</b>"))
-        self.btn_mode_holes = QRadioButton("Lücken finden (Verschollene Züge)")
-        self.btn_mode_level = QRadioButton("Prioritäts-Check (Häufigkeit)")
-        self.btn_mode_level_check = QRadioButton("Level-Check (Aufstieg prüfen)")
-        self.btn_mode_holes.setChecked(True)
-        self.mode_group = QButtonGroup(self)
-        self.mode_group.addButton(self.btn_mode_holes)
-        self.mode_group.addButton(self.btn_mode_level)
-        self.mode_group.addButton(self.btn_mode_level_check)
-        mode_layout.addWidget(self.btn_mode_holes)
-        mode_layout.addWidget(self.btn_mode_level)
-        mode_layout.addWidget(self.btn_mode_level_check)
-        mode_layout.addStretch()
-        ctrl_layout.addLayout(mode_layout)
+        # --- MODE SELECTION ---
+        mode_layout = QVBoxLayout()
+        mode_layout.setSpacing(scale(5))
         
-        ctrl_layout.addSpacing(scale(10))
+        # Scan Button (Defined early to be placed in combo_layout)
+        self.btn_hole_scan = QPushButton("🔎 Suchen")
+        self.btn_hole_scan.setMinimumHeight(scale(40))
+        self.btn_hole_scan.setProperty("class", "GlassPill")
+        self.repolish(self.btn_hole_scan)
+        self.btn_hole_scan.clicked.connect(self.run_hole_scan)
         
-        # Parameters
-        param_layout = QHBoxLayout()
+        # Scan Results Label (Empty initially)
+        self.lbl_hole_scan_res = QLabel("")
+        self.lbl_hole_scan_res.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-weight: bold;")
         
+        combo_layout = QHBoxLayout()
+        combo_layout.addWidget(QLabel("<b>Such-Modus:</b>"))
+        
+        self.combo_hole_mode = QComboBox()
+        self.combo_hole_mode.addItem("unanalysierte populäre Züge finden", "holes")
+        self.combo_hole_mode.addItem("Level Aufstieg prüfen", "priority")
+        self.combo_hole_mode.addItem("Level Abstieg prüfen", "level_down")
+        self.combo_hole_mode.addItem("Level Gesundheits Check", "level_check")
+        
+        self.combo_hole_mode.setItemData(0, "Sucht nach Zügen, die noch nicht im Repertoire sind.", Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(1, "Prüft, ob Züge im Repertoire das richtige Level haben.", Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(2, "Findet Züge, die abstellen sollten, weil sie selten vorkommen.", Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(3, "Findet Repertoire-Lücken zwischen Leveln.", Qt.ItemDataRole.ToolTipRole)
+        
+        combo_layout.addWidget(self.combo_hole_mode)
+        combo_layout.addStretch()
+        combo_layout.addWidget(self.lbl_hole_scan_res)
+        combo_layout.addWidget(self.btn_hole_scan)
+        mode_layout.addLayout(combo_layout)
+        
+        self.lbl_mode_desc = QLabel("Findet Züge, die in Master/Lichess Partien oft gespielt werden, aber im Repertoire fehlen.")
+        self.lbl_mode_desc.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; margin-left: 10px;")
+        mode_layout.addWidget(self.lbl_mode_desc)
+        main_layout.addLayout(mode_layout)
+        
+        # --- PARAMETERS ---
+        # Parameters Grid/Row 1
+        param_row1 = QHBoxLayout()
+        param_row1.setSpacing(scale(20))
+        
+        # Threshold
+        h_threshold = QHBoxLayout()
         self.lbl_hole_threshold = QLabel("Min. Popularität:")
-        self.spin_hole_threshold = QDoubleSpinBox()
-        self.spin_hole_threshold.setRange(0.1, 100.0)
-        self.spin_hole_threshold.setValue(1.0)
-        self.spin_hole_threshold.setSuffix("%")
-        param_layout.addWidget(self.lbl_hole_threshold)
-        param_layout.addWidget(self.spin_hole_threshold)
+        self.combo_hole_threshold = QComboBox()
+        self.combo_hole_threshold.addItem("0.1%", 0.1)
+        self.combo_hole_threshold.addItem("0.5%", 0.5)
+        self.combo_hole_threshold.addItem("1.0%", 1.0)
+        self.combo_hole_threshold.addItem("2.0%", 2.0)
+        self.combo_hole_threshold.addItem("5.0%", 5.0)
+        self.combo_hole_threshold.addItem("10.0%", 10.0)
+        self.combo_hole_threshold.setCurrentText("1.0%")
+        h_threshold.addWidget(self.lbl_hole_threshold)
+        h_threshold.addWidget(self.combo_hole_threshold)
+        param_row1.addLayout(h_threshold)
         
-        self.lbl_hole_elo = QLabel("Elo-Bereich:")
-        self.combo_hole_elo = QComboBox()
-        self.combo_hole_elo.addItems(["low", "mid", "high", "masters"])
-        self.combo_hole_elo.setCurrentText("high")
-        param_layout.addWidget(self.lbl_hole_elo)
-        param_layout.addWidget(self.combo_hole_elo)
-        
+        # Level
+        h_level = QHBoxLayout()
         self.lbl_hole_level = QLabel("Ziel-Level:")
         self.combo_hole_level = QComboBox()
-        param_layout.addWidget(self.lbl_hole_level)
-        param_layout.addWidget(self.combo_hole_level)
+        h_level.addWidget(self.lbl_hole_level)
+        h_level.addWidget(self.combo_hole_level)
+        param_row1.addLayout(h_level)
         
-        # Connect mode toggle to show/hide level selector
-        def on_mode_toggle():
-            is_level_mode = self.btn_mode_level.isChecked()
-            is_level_check = self.btn_mode_level_check.isChecked()
-            self.combo_hole_level.setVisible(is_level_mode)
-            self.lbl_hole_level.setVisible(is_level_mode)
-            
-            # Hide threshold and ELO for Level Check
-            self.lbl_hole_threshold.setVisible(not is_level_check)
-            self.spin_hole_threshold.setVisible(not is_level_check)
-            self.lbl_hole_elo.setVisible(not is_level_mode and not is_level_check)
-            self.combo_hole_elo.setVisible(not is_level_mode and not is_level_check)
+        param_row1.addStretch()
+        main_layout.addLayout(param_row1)
         
-        self.btn_mode_holes.toggled.connect(on_mode_toggle)
-        self.btn_mode_level.toggled.connect(on_mode_toggle)
-        self.btn_mode_level_check.toggled.connect(on_mode_toggle)
+        # Parameters Grid/Row 2
+        param_row2 = QHBoxLayout()
+        param_row2.setSpacing(scale(20))
         
-        # Initial state
-        self.combo_hole_level.setVisible(False)
-        self.lbl_hole_level.setVisible(False)
+        self.chk_prio_rare = QCheckBox("Seltene Züge prüfen")
+        self.chk_prio_rare.setVisible(False)
+        param_row2.addWidget(self.chk_prio_rare)
         
-        param_layout.addStretch()
+        param_row2.addStretch()
         
-        self.btn_hole_scan = QPushButton("🔎 Scan Repertoire")
-        self.btn_hole_scan.setMinimumHeight(scale(40))
-        self.btn_hole_scan.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(20)}px;")
-        self.btn_hole_scan.clicked.connect(self.run_hole_scan)
-        param_layout.addWidget(self.btn_hole_scan)
+        main_layout.addLayout(param_row2)
         
-        ctrl_layout.addLayout(param_layout)
-        layout.addWidget(self.card_hole_controls)
+        # Connect mode change
+        self.combo_hole_mode.currentIndexChanged.connect(self.on_hole_mode_change)
         
+        # Initial state setup
+        self.on_hole_mode_change()
+        
+        # --- TABLE ---
         self.table_holes = QTableWidget(0, 3)
         self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
         self.table_holes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_holes.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_holes.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_holes.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.table_holes.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_holes.verticalHeader().setVisible(False)
         self.table_holes.itemDoubleClicked.connect(self.on_hole_double_click)
-        layout.addWidget(self.table_holes)
+        main_layout.addWidget(self.table_holes)
         
+        # --- BOTTOM ROW ---
         h_btm = QHBoxLayout()
         self.btn_hole_exempt = QPushButton("🚫 Auswahl ignorieren")
         self.btn_hole_exempt.clicked.connect(self.exempt_selected_hole)
         h_btm.addWidget(self.btn_hole_exempt)
         h_btm.addStretch()
-        layout.addLayout(h_btm)
+        main_layout.addLayout(h_btm)
+        
+        layout.addWidget(self.card_hole_main)
+
+    def on_hole_mode_change(self):
+        mode = self.combo_hole_mode.currentData()
+        
+        if mode == "holes":
+            self.lbl_mode_desc.setText("Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben.")
+            self.combo_hole_level.setVisible(False)
+            self.lbl_hole_level.setVisible(False)
+            self.lbl_hole_threshold.setVisible(True)
+            self.combo_hole_threshold.setVisible(True)
+        elif mode == "priority":
+            self.lbl_mode_desc.setText("Findet Züge in einem Level, die häufiger als die angegebene Popularität gespielt werden.")
+            self.combo_hole_level.setVisible(True)
+            self.lbl_hole_level.setVisible(True)
+            self.lbl_hole_threshold.setVisible(True)
+            self.combo_hole_threshold.setVisible(True)
+        elif mode == "level_down":
+            self.lbl_mode_desc.setText("Findet Züge in einem Level, die seltener als die angegebene Popularität gespielt werden.")
+            self.combo_hole_level.setVisible(True)
+            self.lbl_hole_level.setVisible(True)
+            self.lbl_hole_threshold.setVisible(True)
+            self.combo_hole_threshold.setVisible(True)
+        elif mode == "level_check":
+            self.lbl_mode_desc.setText("Findet Probleme mit der Level einstufung")
+            self.combo_hole_level.setVisible(False)
+            self.lbl_hole_level.setVisible(False)
+            self.lbl_hole_threshold.setVisible(False)
+            self.combo_hole_threshold.setVisible(False)
 
     def init_kontrolle_tab(self):
         layout = QVBoxLayout(self.tab_kontrolle)
-        layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        layout.setContentsMargins(0, scale(5), 0, 0)
         layout.setSpacing(scale(15))
         
-        # Glass Dashboard Card for Stats
-        self.card_stats = QFrame()
-        self.card_stats.setObjectName("OverhaulStatsCard")
-        self.card_stats.setProperty("class", "GlassPill")
-        self.repolish(self.card_stats)
-        card_layout = QVBoxLayout(self.card_stats)
-        card_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        # Single Unified Glass Dashboard Card
+        self.card_main = QFrame()
+        self.card_main.setObjectName("OverhaulMainCard")
+        self.repolish(self.card_main)
         
-        lbl_title = QLabel("Repertoire Überarbeitung")
-        lbl_title.setStyleSheet("font-size: 18px; font-weight: bold; color: white;")
-        card_layout.addWidget(lbl_title)
+        main_layout = QVBoxLayout(self.card_main)
+        main_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
+        main_layout.setSpacing(scale(20))
+        
+        # HEADER
+        header_layout = QHBoxLayout()
+        lbl_title = QLabel("Repertoire Kontrolle")
+        lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['brown_text']};")
+        header_layout.addWidget(lbl_title)
         
         self.lbl_overhaul_status = QLabel("Keine aktive Session")
-        self.lbl_overhaul_status.setStyleSheet("color: rgba(255, 255, 255, 0.7);")
-        card_layout.addWidget(self.lbl_overhaul_status)
+        self.lbl_overhaul_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic;")
+        header_layout.addWidget(self.lbl_overhaul_status)
+        header_layout.addStretch()
+        main_layout.addLayout(header_layout)
         
-        card_layout.addSpacing(scale(10))
-        
+        # PROGRESS BAR
         self.pb_overhaul = QProgressBar()
         self.pb_overhaul.setValue(0)
         self.pb_overhaul.setFormat("%v / %m Stellungen (%p%)")
-        self.pb_overhaul.setMinimumHeight(scale(25))
-        card_layout.addWidget(self.pb_overhaul)
+        self.pb_overhaul.setMinimumHeight(scale(30))
+        # Use custom styling for progress bar to match burnt-orange palette
+        self.pb_overhaul.setStyleSheet(f"""
+            QProgressBar {{
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: {scale(15)}px;
+                background-color: rgba(0, 0, 0, 0.2);
+                text-align: center;
+                color: white;
+                font-weight: bold;
+            }}
+            QProgressBar::chunk {{
+                background-color: {COLORS['burnt_orange']};
+                border-radius: {scale(15)}px;
+            }}
+        """)
+        main_layout.addWidget(self.pb_overhaul)
         
-        layout.addWidget(self.card_stats)
+        # SETTINGS (No longer a group box, just integrated)
+        settings_layout = QHBoxLayout()
+        settings_layout.setSpacing(scale(15))
         
-        # Settings Group
-        settings_group = QGroupBox("Filter && Einstellungen")
-        settings_layout = QGridLayout(settings_group)
-        settings_layout.setSpacing(scale(10))
-        
-        # Row 1: Level
-        settings_layout.addWidget(QLabel("Prüf-Level:"), 0, 0)
+        settings_layout.addWidget(QLabel("Prüf-Level:"))
         self.combo_overhaul_level = QComboBox()
-        settings_layout.addWidget(self.combo_overhaul_level, 0, 1)
+        self.combo_overhaul_level.setMinimumWidth(scale(150))
+        settings_layout.addWidget(self.combo_overhaul_level)
         
-        # Row 2: Variation Filter
-        settings_layout.addWidget(QLabel("Variante filtern:"), 1, 0)
+        settings_layout.addWidget(QLabel("Variante:"))
         self.combo_overhaul_variation = QComboBox()
         self.combo_overhaul_variation.addItem("Alle Varianten", userData=None)
-        settings_layout.addWidget(self.combo_overhaul_variation, 1, 1)
+        self.combo_overhaul_variation.setMinimumWidth(scale(200))
+        settings_layout.addWidget(self.combo_overhaul_variation)
         
-        layout.addWidget(settings_group)
+        settings_layout.addStretch()
+        main_layout.addLayout(settings_layout)
         
-        # Controls Group
+        main_layout.addSpacing(scale(10))
+        
+        # CONTROLS
         h_btns = QHBoxLayout()
-        h_btns.setSpacing(scale(10))
+        h_btns.setSpacing(scale(15))
         
         self.btn_overhaul_start = QPushButton("▶ Session Starten")
-        self.btn_overhaul_start.setMinimumHeight(scale(45))
+        self.btn_overhaul_start.setMinimumHeight(scale(50))
+        self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_start.clicked.connect(self.toggle_overhaul_session)
         h_btns.addWidget(self.btn_overhaul_start, 2)
         
         self.btn_overhaul_pause = QPushButton("⏸ Pause")
-        self.btn_overhaul_pause.setMinimumHeight(scale(45))
+        self.btn_overhaul_pause.setMinimumHeight(scale(50))
+        self.btn_overhaul_pause.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_pause.clicked.connect(self.toggle_overhaul_pause)
         self.btn_overhaul_pause.setVisible(False)
         h_btns.addWidget(self.btn_overhaul_pause, 1)
         
         self.btn_overhaul_reset = QPushButton("🔄 Reset")
-        self.btn_overhaul_reset.setMinimumHeight(scale(40))
+        self.btn_overhaul_reset.setMinimumHeight(scale(50))
+        self.btn_overhaul_reset.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_reset.clicked.connect(self.reset_overhaul_session)
         h_btns.addWidget(self.btn_overhaul_reset, 1)
         
-        layout.addLayout(h_btns)
+        main_layout.addLayout(h_btns)
         
+        main_layout.addSpacing(scale(15))
+        
+        # NEXT BUTTON
         self.btn_overhaul_next = QPushButton("⏭ Nächste unkontrollierte Stellung")
         self.btn_overhaul_next.clicked.connect(self.jump_to_next_unchecked)
         self.btn_overhaul_next.setEnabled(False)
-        self.btn_overhaul_next.setMinimumHeight(scale(50))
-        self.btn_overhaul_next.setStyleSheet("font-weight: bold; font-size: 14px;")
-        layout.addWidget(self.btn_overhaul_next)
+        self.btn_overhaul_next.setMinimumHeight(scale(55))
+        self.btn_overhaul_next.setStyleSheet(f"background-color: rgba(20, 60, 150, 0.8); color: white; font-weight: bold; font-size: 16px; border-radius: {scale(27)}px;")
+        main_layout.addWidget(self.btn_overhaul_next)
         
-        layout.addStretch()
+        main_layout.addStretch()
+        
+        layout.addWidget(self.card_main)
 
     def init_transpositions_tab(self):
         outer = QVBoxLayout(self.tab_transpositions)
-        outer.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
-        outer.setSpacing(scale(10))
+        outer.setContentsMargins(0, scale(5), 0, 0)
+        outer.setSpacing(scale(15))
 
-        def _section_lbl(text):
-            l = QLabel(text)
-            l.setStyleSheet(
-                f"font-size: {scale(12)}px; font-weight: bold; color: #1a1a2e;"
-            )
-            return l
+        # ── Single GlassPill Card ──────────────────────────────────────
+        card = QFrame()
+        card.setObjectName("TranspositionPill")
+        self.repolish(card)
+        inner = QVBoxLayout(card)
+        inner.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
+        inner.setSpacing(scale(15))
 
-        def _status_lbl(text):
-            l = QLabel(text)
-            l.setStyleSheet("color: #333355; font-style: italic; font-size: 11px;")
-            return l
-
-        def _table(cols, headers, max_h=160):
-            t = QTableWidget(0, cols)
-            t.setHorizontalHeaderLabels(headers)
-            t.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-            t.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-            t.verticalHeader().setVisible(False)
-            t.setAlternatingRowColors(True)
-            t.setMaximumHeight(scale(max_h))
-            hdr = t.horizontalHeader()
-            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-            for i in range(1, cols):
-                hdr.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
-            return t
-
-        def _pill_card():
-            card = QFrame()
-            card.setProperty("class", "GlassPill")
-            self.repolish(card)
-            inner = QVBoxLayout(card)
-            inner.setContentsMargins(scale(14), scale(12), scale(14), scale(12))
-            inner.setSpacing(scale(8))
-            return card, inner
-
-        # ── Card 1: Instant 1-move outgoing ──────────────────────────────────────
-        card1, lay1 = _pill_card()
-        lay1.addWidget(_section_lbl("→ Von hier direkt erreichbar (1 Zug):"))
-        self.table_transpositions = _table(3, ["Variante", "Zug", "Ranking"])
+        # Combined table for Direct and Deep search
+        self.table_transpositions = QTableWidget(0, 3)
+        self.table_transpositions.setHorizontalHeaderLabels(["Zug / Zugfolge", "Tiefe", "Ranking / Qualität"])
+        self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_transpositions.verticalHeader().setVisible(False)
+        self.table_transpositions.setAlternatingRowColors(True)
         self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
-        lay1.addWidget(self.table_transpositions)
-        self.lbl_outgoing_status = _status_lbl("—")
-        lay1.addWidget(self.lbl_outgoing_status)
-        outer.addWidget(card1)
+        
+        hdr = self.table_transpositions.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        inner.addWidget(self.table_transpositions)
 
-        # ── Card 2: BFS Deep Search ───────────────────────────────────────────────
-        card2, lay2 = _pill_card()
-        h_deep = QHBoxLayout()
-        h_deep.addWidget(_section_lbl("🔍 Tiefe Suche (alle möglichen Wege):"))
-        h_deep.addStretch()
+        # Bottom layout for deep search button
+        h_deep_bottom = QHBoxLayout()
+        
+        self.lbl_transpos_status = QLabel("") 
+        self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: 12px;")
+        h_deep_bottom.addWidget(self.lbl_transpos_status)
+        h_deep_bottom.addStretch()
+        
         self.btn_deep_transpos = QPushButton("🔍 Tiefe Suche starten")
-        self.btn_deep_transpos.setMinimumHeight(scale(30))
+        self.btn_deep_transpos.setMinimumHeight(scale(40))
         self.btn_deep_transpos.setProperty("class", "GlassPill")
         self.repolish(self.btn_deep_transpos)
         self.btn_deep_transpos.setEnabled(False)
         self.btn_deep_transpos.clicked.connect(self.on_deep_transpos_button_clicked)
-        h_deep.addWidget(self.btn_deep_transpos)
-        lay2.addLayout(h_deep)
-
-        self.table_transpos_deep = _table(4, ["Variante", "Zugfolge", "Tiefe", "Qualität"], max_h=220)
-        self.table_transpos_deep.itemDoubleClicked.connect(self.on_transposition_double_clicked)
-        lay2.addWidget(self.table_transpos_deep)
-
-        self.lbl_transpos_status = _status_lbl("FEN-Index wird aufgebaut…")
-        lay2.addWidget(self.lbl_transpos_status)
-        outer.addWidget(card2)
-
-        outer.addStretch()
+        h_deep_bottom.addWidget(self.btn_deep_transpos)
+        
+        inner.addLayout(h_deep_bottom)
+        outer.addWidget(card, 1)
 
         # Internal BFS state
         self._bfs_thread = None
@@ -3927,35 +4142,9 @@ class CreatorWindow(QMainWindow):
 
         # ── Outgoing immediate transpositions (1-move) ───────────────────────────
         outgoing = self.backend.find_outgoing_transpositions(fen)
-        self.table_transpositions.setRowCount(0)
-        for ot in outgoing:
-            row = self.table_transpositions.rowCount()
-            self.table_transpositions.insertRow(row)
-
-            name_item = QTableWidgetItem(f"★ {ot['variation_name']}")
-            name_item.setData(Qt.ItemDataRole.UserRole, {
-                "type": "outgoing",
-                "move_uci": ot["move_uci"],
-                "move_san": ot["move_san"],
-                "target_fen": ot["target_fen"],
-            })
-            self.table_transpositions.setItem(row, 0, name_item)
-
-            move_item = QTableWidgetItem(ot["move_san"])
-            move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            move_item.setForeground(QColor("#FFD700"))
-            self.table_transpositions.setItem(row, 1, move_item)
-
-            # Ranking: placeholder until InstantMultiPVThread finishes
-            rank_item = QTableWidgetItem("⏳ lädt…")
-            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            rank_item.setForeground(QColor("rgba(255,255,255,0.4)"))
-            self.table_transpositions.setItem(row, 2, rank_item)
-
+        self._populate_outgoing_table(outgoing)
+        
         if outgoing:
-            self.lbl_outgoing_status.setText(
-                f"✦ {len(outgoing)} Transposition(en) — Doppelklick um Zug zu spielen."
-            )
             # Launch ranking thread if engine available
             ep = self.config.get("engine_path", "")
             if ep and os.path.exists(ep):
@@ -3969,16 +4158,92 @@ class CreatorWindow(QMainWindow):
                 th.finished.connect(self._on_instant_ranking_ready)
                 th.start()
                 self._instant_multipv_thread = th
-        else:
-            self.lbl_outgoing_status.setText("Kein einzelner Zug führt zu einer anderen bekannten Stellung.")
-            self.table_transpositions.setRowCount(0)
-
-        # Clear deep table + reset button state when position changes
-        self.table_transpos_deep.setRowCount(0)
+        
+        # Clear deep state + reset button state when position changes
         self._bfs_start_fen = None
         self._bfs_next_depth = 3
         self._bfs_running = False
         self._update_deep_button_state()
+
+    def _populate_outgoing_table(self, items):
+        self.table_transpositions.setRowCount(0)
+        
+        if not items:
+            self.table_transpositions.setRowCount(1)
+            item = QTableWidgetItem("Kein unbekannter Zug führt direkt in eine bekannte Stellung")
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item.setForeground(QColor(COLORS['light_text']))
+            self.table_transpositions.setItem(0, 0, item)
+            self.table_transpositions.setSpan(0, 0, 1, 3)
+            return
+
+        for i, it in enumerate(items):
+            self.table_transpositions.insertRow(i)
+            
+            # Col 0: Zug / Zugfolge
+            move_item = QTableWidgetItem(it['move_san'])
+            move_item.setData(Qt.ItemDataRole.UserRole, {
+                "type": "direct",
+                "target_fen": it['target_fen'],
+                "move_uci": it['move_uci'],
+                "move_san": it['move_san']
+            })
+            self.table_transpositions.setItem(i, 0, move_item)
+            
+            # Col 1: Tiefe (Always 1 for direct)
+            depth_item = QTableWidgetItem("1")
+            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_transpositions.setItem(i, 1, depth_item)
+            
+            # Col 2: Ranking / Qualität
+            rank_item = QTableWidgetItem("Bewerte...")
+            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_transpositions.setItem(i, 2, rank_item)
+
+    def _populate_deep_table(self, classified_paths):
+        """Fill the deep results table with classified BFS paths."""
+        # Remove existing BFS rows before adding new ones
+        rows_to_remove = []
+        for row in range(self.table_transpositions.rowCount()):
+            item = self.table_transpositions.item(row, 0)
+            if item:
+                data = item.data(Qt.ItemDataRole.UserRole)
+                if data and isinstance(data, dict) and data.get("type") in ("bfs", "loading"):
+                    rows_to_remove.append(row)
+        for row in reversed(rows_to_remove):
+            self.table_transpositions.removeRow(row)
+
+        for p in classified_paths:
+            row = self.table_transpositions.rowCount()
+            self.table_transpositions.insertRow(row)
+
+            # Col 0: Zug / Zugfolge
+            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
+            seq_item.setData(Qt.ItemDataRole.UserRole, {
+                "type": "bfs",
+                "search_fen": self._bfs_start_fen,
+                "path_ucis": p["path_ucis"],
+                "path_sans": p["path_sans"],
+                "target_fen": p["target_fen"],
+            })
+            self.table_transpositions.setItem(row, 0, seq_item)
+
+            # Col 1: Tiefe
+            depth_item = QTableWidgetItem(str(p["depth"]))
+            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_transpositions.setItem(row, 1, depth_item)
+
+            # Col 2: Ranking / Qualität
+            quality_label = p.get("quality_label", "🟡 Möglich")
+            qual_item = QTableWidgetItem(quality_label)
+            qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if p.get("quality") == "fehler":
+                qual_item.setForeground(QColor("#e74c3c"))
+            elif p.get("quality") == "loading":
+                qual_item.setForeground(QColor("rgba(255,255,255,0.4)"))
+            else:
+                qual_item.setForeground(QColor("#f1c40f"))
+            self.table_transpositions.setItem(row, 2, qual_item)
 
     # ── BFS Deep Search helpers ─────────────────────────────────────────────────
 
@@ -4012,6 +4277,9 @@ class CreatorWindow(QMainWindow):
             self.btn_deep_transpos.setText("⏳ Index wird aufgebaut…")
             self.lbl_transpos_status.setText("FEN-Index wird aufgebaut…")
             return
+
+        if self.lbl_transpos_status.text() == "FEN-Index wird aufgebaut…":
+            self.lbl_transpos_status.setText("")
 
         if self._bfs_running:
             depth = self._bfs_next_depth  # depth currently being searched
@@ -4054,7 +4322,16 @@ class CreatorWindow(QMainWindow):
         # First click: reset start FEN and accumulated results
         if self._bfs_start_fen is None:
             self._bfs_start_fen = fen
-            self.table_transpos_deep.setRowCount(0)
+            # We don't want to clear direct transpositions, only BFS ones
+            rows_to_remove = []
+            for row in range(self.table_transpositions.rowCount()):
+                item = self.table_transpositions.item(row, 0)
+                if item:
+                    data = item.data(Qt.ItemDataRole.UserRole)
+                    if data and isinstance(data, dict) and data.get("type") == "bfs":
+                        rows_to_remove.append(row)
+            for row in reversed(rows_to_remove):
+                self.table_transpositions.removeRow(row)
 
         target_depth = self._bfs_next_depth
         self._bfs_running = True
@@ -4144,42 +4421,7 @@ class CreatorWindow(QMainWindow):
         )
         self._populate_deep_table(classified_paths)
 
-    def _populate_deep_table(self, classified_paths):
-        """Fill the deep results table with classified BFS paths."""
-        self.table_transpos_deep.setRowCount(0)
-        for p in classified_paths:
-            row = self.table_transpos_deep.rowCount()
-            self.table_transpos_deep.insertRow(row)
 
-            # Derive a variation name from the target FEN
-            var_name = p.get("variation_name") or ("/".join(p["path_sans"]) if p["path_sans"] else p["target_fen"][:20])
-            name_item = QTableWidgetItem(var_name)
-            name_item.setData(Qt.ItemDataRole.UserRole, {
-                "type": "bfs",
-                "search_fen": self._bfs_start_fen,
-                "path_ucis": p["path_ucis"],
-                "path_sans": p["path_sans"],
-                "target_fen": p["target_fen"],
-            })
-            self.table_transpos_deep.setItem(row, 0, name_item)
-
-            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
-            self.table_transpos_deep.setItem(row, 1, seq_item)
-
-            depth_item = QTableWidgetItem(str(p["depth"]))
-            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpos_deep.setItem(row, 2, depth_item)
-
-            quality_label = p.get("quality_label", "🟡 Möglich")
-            qual_item = QTableWidgetItem(quality_label)
-            qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if p.get("quality") == "fehler":
-                qual_item.setForeground(QColor("#e74c3c"))
-            elif p.get("quality") == "loading":
-                qual_item.setForeground(QColor("rgba(255,255,255,0.4)"))
-            else:
-                qual_item.setForeground(QColor("#f1c40f"))
-            self.table_transpos_deep.setItem(row, 3, qual_item)
 
     def _on_instant_ranking_ready(self, ranking: dict):
         """Fill the Ranking column in the instant table after MultiPV finishes."""
@@ -4188,7 +4430,7 @@ class CreatorWindow(QMainWindow):
             if not it0:
                 continue
             data = it0.data(Qt.ItemDataRole.UserRole)
-            if not data:
+            if not data or data.get("type") != "direct":
                 continue
             uci = data.get("move_uci")
             info = ranking.get(uci)
@@ -4232,7 +4474,7 @@ class CreatorWindow(QMainWindow):
 
         m_type = data.get("type")
 
-        if m_type == "outgoing":
+        if m_type == "direct" or m_type == "outgoing":
             # Play the single move and save it to the repertoire
             uci = data.get("move_uci")
             if uci:
@@ -4392,26 +4634,31 @@ class CreatorWindow(QMainWindow):
         if self.hole_thread and self.hole_thread.isRunning():
             return
             
-        is_hole_mode = self.btn_mode_holes.isChecked()
-        is_level_mode = self.btn_mode_level.isChecked()
-        is_level_check = self.btn_mode_level_check.isChecked()
-        
-        if is_hole_mode: mode = "holes"
-        elif is_level_mode: mode = "priority"
-        else: mode = "level_check"
-        
-        threshold = self.spin_hole_threshold.value()
-        elo = self.combo_hole_elo.currentText()
-        level = self.combo_hole_level.currentData()
-        
-        if mode == "priority" and level is None:
-            QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+        if not self.backend.active_repo_name:
+            QMessageBox.warning(self, "Fehler", "Bitte lade zuerst ein Repertoire.")
             return
+            
+        mode = self.combo_hole_mode.currentData()
+        
+        threshold = self.combo_hole_threshold.currentData() if self.combo_hole_threshold.isVisible() else 1.0
+        
+        if self.combo_hole_level.isVisible():
+            level = self.combo_hole_level.currentData()
+            if mode == "priority" and level is None:
+                QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+                return
+        else:
+            level = None
 
         self.btn_hole_scan.setEnabled(False)
         self.btn_hole_scan.setText("Scannend")
         self._hole_dots = 0
         self.hole_anim_timer.start(500)
+        self.lbl_hole_scan_res.setText("Scan läuft...")
+        self.table_holes.setRowCount(0)
+        
+        # We don't have the elo combo box anymore in the UI redesign, we default to the globally selected Lichess Category
+        elo = self.combo_lichess_cat.currentText()
         
         self.hole_thread = HoleFinderThread(
             self.backend.active_repo_name,
@@ -4419,7 +4666,8 @@ class CreatorWindow(QMainWindow):
             threshold,
             elo,
             mode,
-            level
+            level,
+            find_rare=(mode == "level_down" or (mode == "priority" and self.chk_prio_rare.isChecked()))
         )
         self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)
         self.hole_thread.start()
@@ -4432,7 +4680,12 @@ class CreatorWindow(QMainWindow):
     def _on_hole_scan_finished(self, holes, mode):
         self.hole_anim_timer.stop()
         self.btn_hole_scan.setEnabled(True)
-        self.btn_hole_scan.setText("🔎 Scan Repertoire")
+        
+        # Reset button text
+        self.btn_hole_scan.setText("🔎 Suchen")
+        
+        count = len(holes)
+        self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
         
         if mode == "holes":
             self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
@@ -4460,11 +4713,18 @@ class CreatorWindow(QMainWindow):
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
                 item_type.setText("GEGNER")
             elif h['type'] == 'priority_check':
-                item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                item_type.setText("ZU WICHTIG?")
+                if mode == "level_down":
+                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                    item_type.setText("ZU SELTEN?")
+                else:
+                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                    item_type.setText("ZU WICHTIG?")
             elif h['type'] == 'level_mismatch':
                 item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
                 item_type.setText("AUFSTIEG")
+            elif h['type'] == 'orphaned_move':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText("ISOLIERT")
                 item_pop.setText("Unstimmig")
                 # Add diagnostic level info to the move text
                 if 'from_level' in h and 'to_level' in h:
@@ -4552,11 +4812,11 @@ class CreatorWindow(QMainWindow):
             var = self.combo_overhaul_variation.currentData()
             res = self.backend.get_overhaul_stats(lvl, var)
             if isinstance(res, (tuple, list)) and len(res) == 2:
-                checked, total = res
+                _, total = res
             else:
-                checked, total = 0, 1
+                _, total = 0, 1
             self.pb_overhaul.setMaximum(total)
-            self.pb_overhaul.setValue(checked)
+            self.pb_overhaul.setValue(0)
             return
             
         lvl = self.combo_overhaul_level.currentData()

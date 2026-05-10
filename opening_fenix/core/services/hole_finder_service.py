@@ -6,7 +6,7 @@ from opening_fenix.core.models import Position, Move, RepertoireMove, LichessDat
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.utils import get_repertoire_db_path
 
-def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None):
+def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -21,7 +21,7 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
         elif mode == "level_check":
             return find_level_mismatches(session)
         else:
-            return find_priority_mismatches(session, level, threshold)
+            return find_priority_mismatches(session, level, threshold, find_rare=find_rare)
     finally:
         session.close()
         db_manager.close()
@@ -220,15 +220,12 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
 def find_level_mismatches(session: Session):
     """
     Finds:
-    1. Level Mismatches: Positions reached at Level L where ALL user moves are Level > L.
-       (If at least one user move is Level <= L, it is considered a valid continuation for that level).
-    2. Repertoire Gaps: Positions where it is the User's turn but there are zero moves.
+    1. Level Mismatches (Gaps): Positions reached at Path Level L where ALL user moves are Level > L.
+    2. Orphaned Moves: Moves that are assigned a level < Path Level L (e.g., Level 1 move trapped behind Level 3).
     """
-    # Get Repertoire Color
     m = session.query(Metadata).filter_by(key="color").first()
     player_color = m.value if m else 'w'
 
-    # 1. Pre-fetch
     all_rep_moves = session.query(Move, RepertoireMove).join(
         RepertoireMove, Move.id == RepertoireMove.move_id
     ).filter(RepertoireMove.is_active == True).all()
@@ -237,90 +234,112 @@ def find_level_mismatches(session: Session):
     for move, rm in all_rep_moves:
         moves_from[move.from_position_id].append((move, rm))
 
-    # 2. BFS Traversal with min_level tracking
-    # Start at root
     sp = session.query(Position.id).filter(
         Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
     ).first()
     if not sp: return []
     root_id = sp[0]
     
-    mismatches = []
-    # max_lvl[pos_id] = highest level reached by an incoming OPPONENT move (or 0 for root)
-    # We use 'max' because if ANY path justifies the current level, it's not a violation.
-    max_lvl = {root_id: 0}
+    # Pre-fetch all FENs for active positions
+    # It's fast enough to just fetch all of them
+    id_to_fen = dict(session.query(Position.id, Position.fen).all())
+    
+    root_fen = id_to_fen.get(root_id)
+    if not root_fen: return []
+    root_norm = " ".join(root_fen.split(" ")[:4])
+    
+    # path_lvl[fen_norm] = the minimum required level to reach this exact board state
+    path_lvl = {root_norm: 0}
     bfs_queue = collections.deque([root_id])
     
-    # To avoid reporting the same mismatch multiple times
-    seen_mismatches = set() # (pos_id, type)
-
     while bfs_queue:
         curr_id = bfs_queue.popleft()
-        prev_level = max_lvl[curr_id]
-        
-        curr_fen = session.query(Position.fen).filter_by(id=curr_id).scalar()
+        curr_fen = id_to_fen.get(curr_id)
         if not curr_fen: continue
+        curr_norm = " ".join(curr_fen.split(" ")[:4])
+        curr_lvl = path_lvl.get(curr_norm, 0)
+        
+        for move, rm in moves_from.get(curr_id, []):
+            tid = move.to_position_id
+            if tid:
+                tfen = id_to_fen.get(tid)
+                if not tfen: continue
+                tnorm = " ".join(tfen.split(" ")[:4])
+                
+                new_lvl = max(curr_lvl, rm.level)
+                if tnorm not in path_lvl or new_lvl < path_lvl[tnorm]:
+                    path_lvl[tnorm] = new_lvl
+                    bfs_queue.append(tid)
+
+    # 2. Check for mismatches
+    mismatches = []
+    seen_mismatches = set() # (fen_norm, move_san, type)
+    
+    for curr_id, out_moves in moves_from.items():
+        curr_fen = id_to_fen.get(curr_id)
+        if not curr_fen: continue
+        curr_norm = " ".join(curr_fen.split(" ")[:4])
+        
+        # If position is completely unreachable from root, skip
+        if curr_norm not in path_lvl: continue
+        lvl = path_lvl[curr_norm]
+        
         parts = curr_fen.split(" ")
         is_user_turn = len(parts) > 1 and parts[1] == player_color
         
-        out_moves = moves_from.get(curr_id, [])
-        
         if is_user_turn:
-            # GAP DETECTION is now handled in 'holes' mode (find_repertoire_holes)
-            # to keep Level-Check focused on level consistency.
-            if out_moves:
-                # RELAXED LOGIC: Only flag if ALL moves are higher level than the MAX incoming level
-                all_higher = True
+            all_higher = True
+            for move, rm in out_moves:
+                if rm.level <= lvl or lvl == 0:
+                    all_higher = False
+                    break
+            
+            if all_higher:
                 for move, rm in out_moves:
-                    if rm.level <= prev_level or prev_level == 0:
-                        all_higher = False
-                        break
-                
-                if all_higher:
-                    key = (curr_id, "level_mismatch")
+                    key = (curr_norm, move.san, "level_mismatch")
                     if key not in seen_mismatches:
                         seen_mismatches.add(key)
-                        for move, rm in out_moves:
-                            mismatches.append({
-                                "fen": session.query(Position.fen).filter_by(id=move.to_position_id).scalar(),
-                                "move_san": move.san,
-                                "type": "level_mismatch",
-                                "from_level": prev_level,
-                                "to_level": rm.level,
-                                "popularity": 0
-                            })
-            
-            # Continue BFS for all user moves
-            for move, rm in out_moves:
-                tid = move.to_position_id
-                if tid:
-                    if tid not in max_lvl or rm.level > max_lvl[tid]:
-                        max_lvl[tid] = rm.level
-                        bfs_queue.append(tid)
-        else:
-            # Opponent turn: propagate max level
-            for move, rm in out_moves:
-                tid = move.to_position_id
-                if tid:
-                    if tid not in max_lvl or rm.level > max_lvl[tid]:
-                        max_lvl[tid] = rm.level
-                        bfs_queue.append(tid)
+                        mismatches.append({
+                            "fen": curr_norm,  # Return BEFORE position FEN
+                            "move_san": move.san,
+                            "type": "level_mismatch",
+                            "from_level": lvl,
+                            "to_level": rm.level,
+                            "popularity": 0
+                        })
+        
+        for move, rm in out_moves:
+            if rm.level < lvl and lvl > 0:
+                key = (curr_norm, move.san, "orphaned_move")
+                if key not in seen_mismatches:
+                    seen_mismatches.add(key)
+                    mismatches.append({
+                        "fen": curr_norm,  # Return BEFORE position FEN
+                        "move_san": move.san,
+                        "type": "orphaned_move",
+                        "from_level": lvl,
+                        "to_level": rm.level,
+                        "popularity": 0
+                    })
 
     return mismatches
 
-def find_priority_mismatches(session: Session, level: int, threshold_pct: float):
+def find_priority_mismatches(session: Session, level: int, threshold_pct: float, find_rare: bool = False):
     """Ported logic from CreatorBackend.find_priority_mismatches"""
     threshold = threshold_pct / 100.0
     
     mismatches = []
     
-    # Query for RepertoireMoves joined with Moves where priority score is high
+    # Selection criteria: >= threshold (too important) OR <= threshold (too rare)
+    op = Move.priority_score <= threshold if find_rare else Move.priority_score >= threshold
+
+    # Query for RepertoireMoves joined with Moves
     moves_with_rm = session.query(Move, RepertoireMove).join(
         RepertoireMove, Move.id == RepertoireMove.move_id
     ).filter(
         RepertoireMove.is_active == True,
         RepertoireMove.level == level,
-        Move.priority_score >= threshold
+        op
     ).all()
 
 

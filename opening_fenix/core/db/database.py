@@ -4,7 +4,12 @@ from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.decl_api import DeclarativeMeta
 from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy.exc import DatabaseError
 from opening_fenix.core.db.models import Base, UserBase
+
+class DatabaseCorruptedException(Exception):
+    """Raised when a SQLite database is physically corrupted or malformed."""
+    pass
 
 class DatabaseManager:
     """
@@ -35,13 +40,27 @@ class DatabaseManager:
             cursor = dbapi_connection.cursor()
             # Reverted to WAL for maximum performance
             cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA synchronous=NORMAL")
+            # FULL synchronous provides maximum safety against corruption during crashes
+            cursor.execute("PRAGMA synchronous=FULL")
             cursor.execute("PRAGMA cache_size=-64000")
             cursor.close()
         
-        base.metadata.create_all(self.engine)
-        self._check_integrity()
-        self._migrate_schema(base)
+        try:
+            base.metadata.create_all(self.engine)
+            self._check_integrity()
+            self._migrate_schema(base)
+        except DatabaseError as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Database error during initialization: {e}")
+            raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
+        except Exception as e:
+            # Check if it's the raw sqlite3 DatabaseError which sometimes escapes SQLAlchemy
+            import sqlite3
+            if isinstance(e, sqlite3.DatabaseError):
+                from opening_fenix.core.logger import logger
+                logger.error(f"SQLite error during initialization: {e}")
+                raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
+            raise
 
     def _check_integrity(self) -> None:
         """Verifies the physical integrity of the database file."""
@@ -52,11 +71,15 @@ class DatabaseManager:
                 if result != "ok":
                     from opening_fenix.core.logger import logger
                     logger.error(f"Database integrity check failed: {result}")
-                    # We don't raise here yet to allow the app to try and load, 
-                    # but we logged it. A more aggressive approach would be raising.
+                    raise DatabaseCorruptedException(f"Integrity check failed: {result}")
+        except DatabaseCorruptedException:
+            raise
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Error during integrity check: {e}")
+            import sqlite3
+            if isinstance(e, sqlite3.DatabaseError) or "database disk image is malformed" in str(e).lower():
+                raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
 
     def _migrate_schema(self, base: Type) -> None:
         """

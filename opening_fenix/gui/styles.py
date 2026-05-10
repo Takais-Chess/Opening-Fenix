@@ -180,6 +180,18 @@ def get_main_window_style():
     *[class="GlassPill"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
     }}
+    #KandidatenPill {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(15)}px;
+        padding: {scale(5)}px {scale(20)}px;
+    }}
+    #EngineAnalysisPill, #CommonMovesPill, #TranspositionPill, #OverhaulMainCard {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(15)}px;
+        padding: {scale(5)}px {scale(20)}px;
+    }}
     
     QPushButton#RepoTab {{ 
         background-color: transparent; 
@@ -302,6 +314,20 @@ def get_creator_window_style():
     }}
     *[class="GlassPill"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
+    }}
+    #KandidatenPill {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(15)}px;
+        padding: {scale(4)}px {scale(20)}px;
+        min-height: {scale(32)}px;
+    }}
+    #EngineAnalysisPill, #CommonMovesPill, #TranspositionPill, #OverhaulMainCard {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(15)}px;
+        padding: {scale(4)}px {scale(20)}px;
+        min-height: {scale(32)}px;
     }}
     #OverhaulStatsCard:hover {{
         background-color: rgba(255, 255, 255, 0.4);

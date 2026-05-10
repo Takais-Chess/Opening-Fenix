@@ -291,7 +291,7 @@ def test_find_level_mismatches_basic(backend):
     assert any(r['move_san'] == "Nf3" for r in results)
     m = next(r for r in results if r['move_san'] == "Nf3")
     assert m['type'] == "level_mismatch"
-    assert m['fen'] == nf3_fen
+    assert m['fen'] == e5_fen
 
 def test_find_level_mismatches_opponent_ok(backend):
     """Verify that level increases on Opponent moves are NOT flagged."""
@@ -408,18 +408,18 @@ def test_find_level_mismatches_gap(backend):
     
     assert any(r['type'] == 'repertoire_gap' and r['fen'].startswith(p_e5.fen) for r in results)
 
-def test_find_level_mismatches_relaxed_transposition(backend):
-    """Verify that transpositions do NOT flag a jump if at least ONE incoming path justifies the level."""
+def test_find_level_mismatches_strict_transposition(backend):
+    """Verify that transpositions flag a jump if the LOWEST incoming path doesn't justify the level."""
     session = backend.session
     session.query(Metadata).filter_by(key="color").delete()
     session.add(Metadata(key="color", value="w"))
     session.commit()
-    
+
     # Path 1: Root -> P (L1)
     # Path 2: Root -> P (L2)
     # User Move from P: P -> Q (L2)
-    # Under RELAXED logic, this is NOT a violation because Path 2 justifies L2.
-    
+    # Under STRICT logic, this IS a violation because the L1 path reaches P but has no L1 move.
+
     p_root = get_or_create_pos(session, clean_fen(chess.STARTING_FEN))
     p_p = get_or_create_pos(session, "rnbqkbnr/ppp1pppp/8/3p4/8/8/PPPPPPPP/RNBQKBNR w KQkq -") 
     p_q = get_or_create_pos(session, "rnbqkbnr/ppp1pppp/8/3p4/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -")
@@ -437,8 +437,8 @@ def test_find_level_mismatches_relaxed_transposition(backend):
     session.commit()
     
     results = find_level_mismatches(session)
-    # Should be NO level mismatch because the L2 path (m_b) justifies the L2 move (m_c)
-    assert not any(r['type'] == 'level_mismatch' for r in results)
+    # Should HAVE a level mismatch because the L1 path (m_a) doesn't justify the L2 move (m_c)
+    assert any(r['type'] == 'level_mismatch' and r['move_san'] == 'e4' for r in results)
 
 def test_find_level_mismatches_diagnostics(backend):
     """Verify that level transitions include from_level and to_level info."""

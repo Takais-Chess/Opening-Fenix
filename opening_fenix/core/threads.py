@@ -1,4 +1,7 @@
 from PyQt6.QtCore import QThread, pyqtSignal
+import time
+import sys
+import subprocess
 from opening_fenix.core.data_tools import run_db_analysis, run_lichess_import_and_calculate_scores, detect_islands, enrich_position
 from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
@@ -178,7 +181,7 @@ class RepertoireStatsWorker(QThread):
 class HoleFinderThread(QThread):
     finished_signal = pyqtSignal(list, str)
     
-    def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None):
+    def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
@@ -186,6 +189,7 @@ class HoleFinderThread(QThread):
         self.elo_range = elo_range
         self.mode = mode
         self.level = level
+        self.find_rare = find_rare
 
     def run(self):
         try:
@@ -195,11 +199,9 @@ class HoleFinderThread(QThread):
                 self.threshold, 
                 self.elo_range, 
                 self.mode, 
-                self.level
+                self.level,
+                find_rare=self.find_rare
             )
-            self.finished_signal.emit(results, self.mode)
-        except Exception as e:
-            print(f"DEBUG: HoleFinderThread Error: {e}")
             self.finished_signal.emit(results, self.mode)
         except Exception as e:
             print(f"DEBUG: HoleFinderThread Error: {e}")
@@ -271,7 +273,7 @@ class BfsTranspositionThread(QThread):
     from results so we never show already-connected positions as transpositions.
     (No DB queries inside the thread — zero main-thread contention.)
     """
-    depth_complete = pyqtSignal(int, list)   # Emitted ONLY when target_depth is reached
+    depth_complete = pyqtSignal(int, list, bool)   # Emitted when target_depth is reached OR limit hit
     progress_update = pyqtSignal(int)        # Emitted for each intermediate depth
 
     def __init__(self, start_fen, fen_index, target_depth, repo_adjacency=None, parent=None):
@@ -281,6 +283,7 @@ class BfsTranspositionThread(QThread):
         self.target_depth = target_depth
         self.repo_adjacency = repo_adjacency or {}
         self._stop = False
+        self.MAX_NODES = 500_000
 
     def stop(self):
         self._stop = True
@@ -332,6 +335,7 @@ class BfsTranspositionThread(QThread):
         expanded = {start_norm}          # FENs already expanded — prevents BFS cycles
         all_results = []
         seen_targets = set()             # target FENs already reported
+        nodes_explored = 0
 
         for depth in range(1, self.target_depth + 1):
             if self._stop:
@@ -341,8 +345,9 @@ class BfsTranspositionThread(QThread):
             next_frontier = []
 
             for base_fen, path_ucis, path_sans in frontier:
-                if self._stop:
+                if self._stop or nodes_explored > self.MAX_NODES:
                     break
+                
                 try:
                     board = chess.Board(base_fen)
                 except Exception:
@@ -350,6 +355,14 @@ class BfsTranspositionThread(QThread):
 
                 for move in board.legal_moves:
                     if self._stop:
+                        break
+                    
+                    nodes_explored += 1
+                    # Yield slightly every 1000 nodes to keep UI responsive
+                    if nodes_explored % 1000 == 0:
+                        time.sleep(0.001)
+                    
+                    if nodes_explored > self.MAX_NODES:
                         break
 
                     uci = move.uci()
@@ -384,9 +397,14 @@ class BfsTranspositionThread(QThread):
                         next_frontier.append((new_fen, new_ucis, new_sans))
 
             frontier = next_frontier
+            if nodes_explored > self.MAX_NODES:
+                limit_reached = True
+                break
+        else:
+            limit_reached = False
 
         if not self._stop:
-            self.depth_complete.emit(self.target_depth, list(all_results))
+            self.depth_complete.emit(self.target_depth, list(all_results), limit_reached)
 
 
 class InstantMultiPVThread(QThread):
@@ -515,10 +533,12 @@ class PathQualityEvalThread(QThread):
 
         engine = None
         classified = []
+        MAX_EVAL_POSITIONS = 100
         try:
             creationflags = 0
             if sys.platform == "win32":
-                creationflags = subprocess.CREATE_NO_WINDOW
+                # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
+                creationflags = subprocess.CREATE_NO_WINDOW | 0x00004000
 
             engine = chess.engine.SimpleEngine.popen_uci(
                 self.engine_path, creationflags=creationflags
@@ -554,10 +574,15 @@ class PathQualityEvalThread(QThread):
             current = 0
 
             for fn, ucis_needed in fen_to_ucis.items():
-                if self._stop:
-                    break
-                current += 1
-                self.progress.emit(current, total)
+                if current > MAX_EVAL_POSITIONS:
+                    # Skip engine analysis if we hit the cap to prevent freezing
+                    for uci in ucis_needed:
+                        move_ok[(fn, uci)] = True # Assume OK if not evaluated
+                    continue
+
+                if current % 5 == 0:
+                    self.progress.emit(current, total)
+                
                 full_fen = fen_norm_to_full[fn]
                 try:
                     board = chess.Board(full_fen)
