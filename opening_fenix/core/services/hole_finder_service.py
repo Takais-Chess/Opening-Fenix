@@ -333,29 +333,38 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
     # Selection criteria: >= threshold (too important) OR <= threshold (too rare)
     op = Move.priority_score <= threshold if find_rare else Move.priority_score >= threshold
 
+    from sqlalchemy.orm import joinedload
     # Query for RepertoireMoves joined with Moves
     moves_with_rm = session.query(Move, RepertoireMove).join(
         RepertoireMove, Move.id == RepertoireMove.move_id
-    ).filter(
+    ).options(joinedload(Move.from_position)).filter(
         RepertoireMove.is_active == True,
         RepertoireMove.level == level,
         op
     ).all()
 
+    # Pre-build in-memory parent map to construct path strings for UI context without query overhead
+    parent_map = {}
+    for from_pos_id, to_pos_id, san, prio in session.query(Move.from_position_id, Move.to_position_id, Move.san, Move.priority_score).all():
+        prio_val = prio or 0.0
+        existing = parent_map.get(to_pos_id)
+        if not existing or prio_val > existing[2]:
+            parent_map[to_pos_id] = (from_pos_id, san, prio_val)
 
-    # Build path strings for UI context
+    # Build path strings in memory
     def get_path_to_pos(pid, visited=None):
         if visited is None: visited = set()
         if pid in visited: return "..."
         visited.add(pid)
         
-        m_in = session.query(Move).filter_by(to_position_id=pid).first()
-        if not m_in: return "Start"
-        return get_path_to_pos(m_in.from_position_id, visited) + " -> " + m_in.san
+        parent_info = parent_map.get(pid)
+        if not parent_info: return "Start"
+        parent_id, san, _ = parent_info
+        return get_path_to_pos(parent_id, visited) + " -> " + san
 
     for move, rm in moves_with_rm:
         mismatches.append({
-            "fen": session.query(Position.fen).filter_by(id=move.from_position_id).scalar(),
+            "fen": move.from_position.fen if move.from_position else None,
             "move_san": move.san,
             "type": "priority_check",
             "popularity": move.priority_score * 100,

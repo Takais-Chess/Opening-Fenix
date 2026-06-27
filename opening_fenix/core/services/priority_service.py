@@ -156,6 +156,10 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                                         if weight < 1: weight = 1
                             rare_moves_with_weights.append((move, weight))
                     
+                    if moves_with_stats:
+                        min_lichess_total = min(stats['total'] for _, stats in moves_with_stats)
+                        rare_moves_with_weights = [(m, min(w, min_lichess_total)) for m, w in rare_moves_with_weights]
+                    
                     # TOTAL GAMES = SUM(LICHESS TOP 12) + SUM(PROPAGATED RARE WEIGHTS)
                     total_rare_weight = sum(w for m, w in rare_moves_with_weights)
                     effective_total = total_from_lichess + total_rare_weight
@@ -355,6 +359,10 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                                         weight = sum(m_info.get('total', 0) for m_info in child_data.values())
                                         if weight < 1: weight = 1
                             rare_moves_with_weights.append((m, weight))
+                    
+                    if moves_with_stats:
+                        min_lichess_total = min(stats['total'] for _, stats in moves_with_stats)
+                        rare_moves_with_weights = [(m, min(w, min_lichess_total)) for m, w in rare_moves_with_weights]
                     
                     # TOTAL GAMES = SUM(LICHESS TOP 12) + SUM(PROPAGATED RARE WEIGHTS)
                     total_rare_weight = sum(w for m, w in rare_moves_with_weights)

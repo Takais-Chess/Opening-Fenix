@@ -40,9 +40,15 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
             "description": get_meta(session, "description", "")
         }
 
+    # 1. Fetch move counts for all levels in a single query
+    level_counts = session.query(RepertoireMove.level, func.count(RepertoireMove.move_id))\
+        .filter(RepertoireMove.is_active == True)\
+        .group_by(RepertoireMove.level).all()
+    counts_map = {lvl_order: count for lvl_order, count in level_counts}
+
     level_details = []
     for lvl in levels:
-        count = session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True, RepertoireMove.level <= lvl['order']).distinct().count()
+        count = sum(cnt for ord, cnt in counts_map.items() if ord <= lvl['order'])
         level_details.append({
             "name": lvl['name'],
             "order": lvl['order'],
@@ -50,7 +56,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
             "moves": count
         })
 
-    total_moves = session.query(RepertoireMove.move_id).filter(RepertoireMove.is_active == True).distinct().count()
+    total_moves = sum(counts_map.values())
     
     # Calculate coverage %
     total_pos = session.query(func.count(Position.id)).scalar() or 0
@@ -64,7 +70,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         coverage_pct = float(cached_pct)
     else:
         covered_pos = session.query(func.count(func.distinct(Position.id)))\
-            .join(LichessData, Position.fen.like(LichessData.fen + "%"))\
+            .join(LichessData, Position.fen == LichessData.fen)\
             .filter(LichessData.elo_range == elo_cat).scalar() or 0
         
         coverage_pct = (covered_pos / total_pos * 100) if total_pos > 0 else 0

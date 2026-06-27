@@ -120,20 +120,34 @@ class TrainerRepoStatsWorker(QThread):
         from opening_fenix.core.utils import get_repertoire_db_path
         from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
         
+        if self.isInterruptionRequested():
+            return
+
         db_path = get_repertoire_db_path(self.repo_name)
         db_manager = DatabaseManager(db_path)
         session = db_manager.get_session()
         
         try:
+            if self.isInterruptionRequested():
+                return
             info = fetch_repertoire_info(session, self.repo_name, fast_only=False)
+            if self.isInterruptionRequested():
+                return
             self.stats_ready.emit(info)
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"TrainerRepoStatsWorker error for {self.repo_name}: {e}")
-            self.stats_ready.emit({"name": self.repo_name, "levels": [], "moves": "Fehler", "level_details": []})
+            if not self.isInterruptionRequested():
+                self.stats_ready.emit({"name": self.repo_name, "levels": [], "moves": "Fehler", "level_details": []})
         finally:
-            session.close()
-            db_manager.close()
+            try:
+                session.close()
+            except Exception:
+                pass
+            try:
+                db_manager.close()
+            except Exception:
+                pass
 
 
 class SettingsDialog(QDialog):
@@ -436,7 +450,7 @@ class SettingsDialog(QDialog):
 
     def closeEvent(self, event):
         if self.stats_loader and self.stats_loader.isRunning():
-            self.stats_loader.terminate()
+            self.stats_loader.requestInterruption()
             self.stats_loader.wait()
         if self.loading_timer:
             self.loading_timer.stop()
@@ -465,7 +479,7 @@ class SettingsDialog(QDialog):
 
         # Stop existing loader if any
         if self.stats_loader and self.stats_loader.isRunning():
-            self.stats_loader.terminate()
+            self.stats_loader.requestInterruption()
             self.stats_loader.wait()
 
         # 1. Fast Load (Metadata only)

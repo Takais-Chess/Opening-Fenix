@@ -226,39 +226,65 @@ class FenIndexBuilderThread(QThread):
 
     def run(self):
         import sqlite3
+        con = None
         try:
+            if self.isInterruptionRequested():
+                return
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
 
             # ── 1. All position FENs ──────────────────────────────────────────────
+            if self.isInterruptionRequested():
+                return
             cur.execute("SELECT fen FROM positions")
-            fen_set = {
-                " ".join(row[0].strip().split()[:4])
-                for row in cur.fetchall() if row[0]
-            }
+            fen_set = set()
+            while True:
+                if self.isInterruptionRequested():
+                    return
+                rows = cur.fetchmany(1000)
+                if not rows:
+                    break
+                for row in rows:
+                    if row[0]:
+                        fen_set.add(" ".join(row[0].strip().split()[:4]))
 
             # ── 2. Repertoire move adjacency (one JOIN, one query) ────────────────
-            # from_fen_norm → [uci, uci, ...] for every existing repertoire move
             repo_adj: dict = {}
             try:
+                if self.isInterruptionRequested():
+                    return
                 cur.execute("""
                     SELECT p.fen, m.uci
                     FROM moves m
                     JOIN positions p ON m.from_position_id = p.id
                     INNER JOIN repertoire_moves rm ON rm.move_id = m.id
                 """)
-                for fen, uci in cur.fetchall():
-                    fn = " ".join(fen.strip().split()[:4])
-                    repo_adj.setdefault(fn, []).append(uci)
+                while True:
+                    if self.isInterruptionRequested():
+                        return
+                    rows = cur.fetchmany(1000)
+                    if not rows:
+                        break
+                    for fen, uci in rows:
+                        fn = " ".join(fen.strip().split()[:4])
+                        repo_adj.setdefault(fn, []).append(uci)
             except Exception:
                 pass   # schema mismatch — fall back to no exclusions
 
-            con.close()
+            if self.isInterruptionRequested():
+                return
             self.ready.emit(fen_set, repo_adj)
         except Exception as e:
             import logging
             logging.error(f"FenIndexBuilderThread error: {e}")
-            self.ready.emit(set(), {})
+            if not self.isInterruptionRequested():
+                self.ready.emit(set(), {})
+        finally:
+            if con:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
 
 class BfsTranspositionThread(QThread):
@@ -427,10 +453,14 @@ class InstantMultiPVThread(QThread):
         import chess.engine
         import subprocess
         import sys
+        import time
 
         results = {}
         engine = None
         try:
+            if self.isInterruptionRequested():
+                return
+
             creationflags = 0
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW
@@ -443,23 +473,31 @@ class InstantMultiPVThread(QThread):
             board = chess.Board(self.current_fen)
             multipv = max(10, len(self.transposition_ucis) + 5)
 
-            info_list = engine.analyse(
-                board,
-                chess.engine.Limit(time=1.5),
-                multipv=multipv,
-            )
+            best_info_per_multipv = {}
+            if not self.isInterruptionRequested():
+                with engine.analysis(board, multipv=multipv) as analysis:
+                    start_time = time.time()
+                    for info in analysis:
+                        if self.isInterruptionRequested() or (time.time() - start_time > 1.5):
+                            break
+                        if "multipv" in info:
+                            best_info_per_multipv[info["multipv"]] = info
+                        elif "pv" in info:
+                            best_info_per_multipv[1] = info
 
             # Build ranked list: [(rank, uci, score_cp)]
             ranked = []
             best_score = None
-            for i, info in enumerate(info_list):
-                if "pv" in info and info["pv"]:
-                    m_uci = info["pv"][0].uci()
-                    score_obj = info.get("score")
-                    s = score_obj.white().score(mate_score=10000) if score_obj else 0
-                    if best_score is None:
-                        best_score = s
-                    ranked.append((i + 1, m_uci, s))
+            if not self.isInterruptionRequested() and best_info_per_multipv:
+                sorted_infos = [best_info_per_multipv[k] for k in sorted(best_info_per_multipv.keys())]
+                for i, info in enumerate(sorted_infos):
+                    if "pv" in info and info["pv"]:
+                        m_uci = info["pv"][0].uci()
+                        score_obj = info.get("score")
+                        s = score_obj.white().score(mate_score=10000) if score_obj else 0
+                        if best_score is None:
+                            best_score = s
+                        ranked.append((i + 1, m_uci, s))
 
             best_san = ""
             if ranked:
@@ -489,7 +527,8 @@ class InstantMultiPVThread(QThread):
                 except Exception:
                     pass
         finally:
-            self.finished.emit(results)
+            if not self.isInterruptionRequested():
+                self.finished.emit(results)
 
 
 class PathQualityEvalThread(QThread):

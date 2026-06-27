@@ -91,17 +91,31 @@ class SingleRepoStatsWorker(QThread):
         self.repo_name = backend.active_repo_name
         
     def run(self):
+        temp_backend = None
         try:
             from opening_fenix.creator.creator_window import CreatorBackend
+            if self.isInterruptionRequested():
+                return
             temp_backend = CreatorBackend(is_test=True)
+            if self.isInterruptionRequested():
+                return
             if self.repo_name:
                 temp_backend.load_repertoire(self.repo_name)
+                if self.isInterruptionRequested():
+                    return
                 info = temp_backend.get_repertoire_info(fast_only=False)
-                temp_backend.close()
+                if self.isInterruptionRequested():
+                    return
                 self.stats_ready.emit(info)
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Error in SingleRepoStatsWorker: {e}")
+        finally:
+            if temp_backend:
+                try:
+                    temp_backend.close()
+                except Exception:
+                    pass
 
 
 class DiagnosticDialog(QDialog):
@@ -511,7 +525,11 @@ class RepoSettingsDialog(QDialog):
         
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100)
-        self.slider_vol.setValue(self.main_window.config.get("master_volume", 100))
+        try:
+            vol_val = int(self.main_window.config.get("master_volume", 100))
+        except (ValueError, TypeError):
+            vol_val = 100
+        self.slider_vol.setValue(vol_val)
         self.slider_vol.valueChanged.connect(self.change_volume)
         f_sound.addRow("Lautstärke:", self.slider_vol)
         
@@ -809,7 +827,11 @@ class RepoSettingsDialog(QDialog):
         
         self.spin_m_depth = QSpinBox()
         self.spin_m_depth.setRange(10, 40)
-        self.spin_m_depth.setValue(self.main_window.config.get("engine_depth", 20))
+        try:
+            depth_val = int(self.main_window.config.get("engine_depth", 20))
+        except (ValueError, TypeError):
+            depth_val = 20
+        self.spin_m_depth.setValue(depth_val)
         f_conf.addRow("Engine Tiefe:", self.spin_m_depth)
         
         self.spin_m_threads = QSpinBox()
@@ -1513,9 +1535,7 @@ class RepoSettingsDialog(QDialog):
                 
                 if hasattr(w, 'stop'): w.stop()
                 if hasattr(w, 'cancel'): w.cancel()
-                w.wait(500) # Wait for clean exit
-                if w.isRunning():
-                    w.terminate()
-                    w.wait()
+                w.requestInterruption()
+                w.wait()
                     
         super().closeEvent(event)

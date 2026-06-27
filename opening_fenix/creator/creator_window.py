@@ -1365,7 +1365,7 @@ class CreatorBackend:
         # Calculate coverage % - Join with positions to ensure we only count what belongs to this repo
         total_p = self.session.query(Position.id).count()
         # Ensure we only count LichessData that corresponds to a position actually in our DB
-        covered_p = self.session.query(Position.id).join(LichessData, Position.fen.like(LichessData.fen + "%")).filter(LichessData.elo_range == elo_cat).count()
+        covered_p = self.session.query(Position.id).join(LichessData, Position.fen == LichessData.fen).filter(LichessData.elo_range == elo_cat).count()
 
         coverage_pct = (covered_p / total_p * 100.0) if total_p > 0 else 0.0
 
@@ -2538,7 +2538,9 @@ class CreatorWindow(QMainWindow):
         self.tab_analysis = QWidget()
         al = QHBoxLayout(self.tab_analysis)
         al.setContentsMargins(0, scale(5), 0, 0)
-        al.setSpacing(scale(15))
+        al.setSpacing(0)
+
+        self.analysis_splitter = QSplitter(Qt.Orientation.Horizontal)
 
         # Left Column: Engine (GlassPill)
         engine_container = QFrame()
@@ -2635,12 +2637,12 @@ class CreatorWindow(QMainWindow):
         header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         evl.addWidget(self.table_engine)
-        al.addWidget(engine_container) # Removed stretch factor 2
+        self.analysis_splitter.addWidget(engine_container)
         
         # Right Column: Common Moves (GlassPill)
         common_container = QFrame()
         common_container.setObjectName("CommonMovesPill")
-        common_container.setMinimumWidth(scale(420)) # Prevent horizontal jittering when Lichess loads
+        common_container.setMinimumWidth(scale(280)) # Allow narrower panel to keep board square, prevents jittering
         self.repolish(common_container)
         cvl = QVBoxLayout(common_container)
         cvl.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
@@ -2670,13 +2672,41 @@ class CreatorWindow(QMainWindow):
         header_cm = self.table_common_moves.horizontalHeader()
         
         self.table_common_moves.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-        # Use fixed width for stats and stretch for move name to stabilize layout
-        header_cm.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for i in range(1, 5):
-            header_cm.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_common_moves.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Apply compact styling to table and headers to maximize space
+        self.table_common_moves.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: white;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: {scale(8)}px;
+            }}
+            QHeaderView::section {{
+                background-color: #fafafa;
+                padding-left: {scale(2)}px;
+                padding-right: {scale(2)}px;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+                font-weight: bold;
+                border: none;
+                border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            }}
+            QTableWidget::item {{
+                padding-left: {scale(2)}px;
+                padding-right: {scale(2)}px;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+            }}
+        """)
+        
+        for i in range(5):
+            header_cm.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+        self.table_common_moves.installEventFilter(self)
             
         cvl.addWidget(self.table_common_moves)
-        al.addWidget(common_container) # Removed stretch factor 5, allowed to grow naturally
+        self.analysis_splitter.addWidget(common_container)
+        self.analysis_splitter.setSizes([300, 300]) # Equal default horizontal split
+        al.addWidget(self.analysis_splitter)
         
         # Rep. Loch Finder Tab
         self.tab_holes = QWidget()
@@ -2763,6 +2793,8 @@ class CreatorWindow(QMainWindow):
         dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
         dialog.exec()
 
+
+
     def show_tab_context_menu(self, pos):
         index = self.tabs.tabBar().tabAt(pos)
         if index >= 0 and self.tabs.widget(index) != getattr(self, 'tab_add_dummy', None):
@@ -2797,6 +2829,9 @@ class CreatorWindow(QMainWindow):
         if self.tabs.count() > 0:
             current_text = self.tabs.tabText(self.tabs.currentIndex())
 
+        # Block signals to prevent triggering currentChanged (and thus open_tab_settings)
+        self.tabs.blockSignals(True)
+
         # Clear current tabs without deleting the widgets
         while self.tabs.count() > 0:
             self.tabs.removeTab(0)
@@ -2819,6 +2854,8 @@ class CreatorWindow(QMainWindow):
                 if self.tabs.tabText(i) == current_text:
                     self.tabs.setCurrentIndex(i)
                     break
+
+        self.tabs.blockSignals(False)
 
     def on_details_changed(self):
         if not self._is_ui_valid() or not self.backend.current_fen: return
@@ -2902,6 +2939,67 @@ class CreatorWindow(QMainWindow):
                     self.trigger_background_enrichment(self.board_widget.board.fen())
             except:
                 pass
+
+    def resize_common_moves_columns(self):
+        if not hasattr(self, 'table_common_moves'):
+            return
+        total_width = self.table_common_moves.viewport().width()
+        if total_width <= 0:
+            return
+            
+        # Determine dynamic font size based on width
+        if total_width < scale(200):
+            fs = 8
+        elif total_width < scale(240):
+            fs = 9
+        elif total_width < scale(280):
+            fs = 10
+        elif total_width < scale(320):
+            fs = 11
+        elif total_width < scale(360):
+            fs = 12
+        else:
+            fs = 13
+            
+        scaled_fs = scale(fs)
+        
+        # Apply font size to the table
+        font = self.table_common_moves.font()
+        if font.pointSize() != scaled_fs:
+            font.setPointSize(scaled_fs)
+            self.table_common_moves.setFont(font)
+            
+        # Apply font size to horizontal header
+        header = self.table_common_moves.horizontalHeader()
+        header_font = header.font()
+        if header_font.pointSize() != scaled_fs:
+            header_font.setPointSize(scaled_fs)
+            header.setFont(header_font)
+            
+        # Dynamic labels to save space when narrow
+        if total_width < scale(280):
+            labels = ["Move", "Pld", "W %", "B %", "D %"]
+        else:
+            labels = ["Move", "Played", "White %", "Black %", "Draw %"]
+            
+        current_labels = [self.table_common_moves.horizontalHeaderItem(i).text() for i in range(5) if self.table_common_moves.horizontalHeaderItem(i)]
+        if current_labels != labels:
+            self.table_common_moves.setHorizontalHeaderLabels(labels)
+            
+        # Proportions: Move: 15%, Played: 21%, White %: 22%, Black %: 21%, Draw %: 21%
+        col_ratios = [0.15, 0.21, 0.22, 0.21, 0.21]
+        header.blockSignals(True)
+        allocated = 0
+        for i in range(5):
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
+            if i == 4:
+                w = max(35, total_width - allocated)
+                header.resizeSection(i, w)
+            else:
+                w = max(35, int(total_width * col_ratios[i]))
+                header.resizeSection(i, w)
+                allocated += w
+        header.blockSignals(False)
 
     def on_board_move(self, move):
         if not self.backend.active_repo_name: return
@@ -3145,11 +3243,22 @@ class CreatorWindow(QMainWindow):
             item_san = QTableWidgetItem(localize_san(mv['san'], lang))
             item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
             self.table_common_moves.setItem(r, 0, item_san)
-            self.table_common_moves.setItem(r, 1, QTableWidgetItem(str(mv['total'])))
+            
+            # Format number of games (e.g. 841k or 1.2M) to save space
+            games_count = mv['total']
+            if games_count >= 1_000_000:
+                games_str = f"{games_count / 1_000_000:.1f}M"
+            elif games_count >= 1000:
+                games_str = f"{games_count / 1000:.1f}k" if games_count < 100_000 else f"{games_count / 1000:.0f}k"
+            else:
+                games_str = str(games_count)
+            self.table_common_moves.setItem(r, 1, QTableWidgetItem(games_str))
+            
             self.table_common_moves.setItem(r, 2, QTableWidgetItem(f"{mv['white_pct']:.1f}%"))
             self.table_common_moves.setItem(r, 3, QTableWidgetItem(f"{mv['black_pct']:.1f}%"))
             self.table_common_moves.setItem(r, 4, QTableWidgetItem(f"{mv['draw_pct']:.1f}%"))
 
+        self.resize_common_moves_columns()
         self.update_board_arrows()
         
         # --- TRANSPOSITION DETECTION (badge update) ---
@@ -3746,6 +3855,9 @@ class CreatorWindow(QMainWindow):
             self.board_widget.update()
 
     def eventFilter(self, obj, event):
+        if obj == getattr(self, 'table_common_moves', None) and event.type() == QEvent.Type.Resize:
+            self.resize_common_moves_columns()
+
         from PyQt6.QtWidgets import QLineEdit
         if hasattr(self, '_processing_event') and self._processing_event:
             return False
@@ -4150,7 +4262,8 @@ class CreatorWindow(QMainWindow):
             if ep and os.path.exists(ep):
                 t_ucis = [ot["move_uci"] for ot in outgoing]
                 if hasattr(self, "_instant_multipv_thread") and self._instant_multipv_thread and self._instant_multipv_thread.isRunning():
-                    self._instant_multipv_thread.terminate()
+                    self._instant_multipv_thread.requestInterruption()
+                    self._instant_multipv_thread.wait()
                 th = InstantMultiPVThread(
                     fen, t_ucis, ep,
                     threads_count=int(self.combo_threads.currentText())
@@ -4256,7 +4369,8 @@ class CreatorWindow(QMainWindow):
         )
         # Stop any previous build still running
         if hasattr(self, "_fen_index_thread") and self._fen_index_thread and self._fen_index_thread.isRunning():
-            self._fen_index_thread.terminate()
+            self._fen_index_thread.requestInterruption()
+            self._fen_index_thread.wait()
         t = FenIndexBuilderThread(db_path)
         t.ready.connect(self._on_fen_index_ready)
         t.start()
@@ -4862,10 +4976,8 @@ class CreatorWindow(QMainWindow):
                 self.backend.close()
             except: pass
             
-        if hasattr(self, 'training_manager') and self.training_manager:
-            try:
-                self.training_manager.close()
-            except: pass
+        # We do NOT close the training_manager here because it is owned by the MainWindow
+        # and closing it would break the user session in the active trainer.
 
         super().closeEvent(event)
 

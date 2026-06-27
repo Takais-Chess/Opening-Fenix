@@ -34,7 +34,7 @@ def test_start_engine_success(mock_engine_thread):
         mock_popen.assert_called_once()
         mock_engine.configure.assert_called_with({"Threads": 2})
         assert mock_engine_thread.running is True
-        mock_engine_thread.info_signal.emit.assert_any_call(["Engine geladen."])
+        mock_engine_thread.info_signal.emit.assert_any_call(["Engine bereit."])
 
 def test_start_engine_failure(mock_engine_thread):
     with patch('chess.engine.SimpleEngine.popen_uci', side_effect=Exception("Failed to load")):

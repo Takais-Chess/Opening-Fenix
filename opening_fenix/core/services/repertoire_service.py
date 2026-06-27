@@ -209,19 +209,32 @@ class RepertoireManager:
                 self.priority_cache = {}
 
     def check_if_alternative_good_move(self, move_obj, played_uci):
-        if not self.repo_session: return False
-        other_rep_move = self.repo_session.query(RepertoireMove).join(Move).filter(
+        return bool(self.get_alternative_move_type(move_obj, played_uci))
+
+    def get_alternative_move_type(self, move_obj, played_uci):
+        if not self.repo_session: return None
+        
+        # 1. Check if the move is active in the repertoire (only select the ID to keep it light)
+        exists = self.repo_session.query(RepertoireMove.id).join(Move).filter(
             Move.from_position_id == move_obj.from_position_id,
             Move.uci == played_uci,
             RepertoireMove.is_active == True
-        ).first()
-        if other_rep_move: return True
-        pos = move_obj.from_position
-        if pos.good_moves:
+        ).first() is not None
+        
+        if exists:
+            return 'repertoire'
+            
+        # 2. Check if it is a good move (only select the good_moves column to keep it light)
+        good_moves_json = self.repo_session.query(Position.good_moves).filter(
+            Position.id == move_obj.from_position_id
+        ).scalar()
+        
+        if good_moves_json:
             try:
-                import json
-                good_list = json.loads(pos.good_moves)
-                return played_uci in good_list
+                good_list = json.loads(good_moves_json)
+                if played_uci in good_list:
+                    return 'good'
             except Exception as e:
-                logger.debug(f"Error parsing good_moves in check_if_alternative: {e}")
-        return False
+                logger.debug(f"Error parsing good_moves in get_alternative_move_type: {e}")
+                
+        return None

@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self.training_manager = TrainingManager(profile_name=profile_name, repertoire_manager=self.repertoire_manager)
         
         self.current_move_obj = None
+        self._preloaded_challenge = None
         self.waiting_for_next = False
         self.show_comments = True
         self.mode = "TRAINER"
@@ -488,6 +489,7 @@ class MainWindow(QMainWindow):
     def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
         # Cancel any ongoing animations before switching
         self.animation_moves = []
+        self._preloaded_challenge = None
         if hasattr(self.board_widget, 'abort_piece_slide'):
             self.board_widget.abort_piece_slide()
 
@@ -616,6 +618,7 @@ class MainWindow(QMainWindow):
     def set_variation_filter(self, var_name):
         self.active_variation_filter = var_name
         self.active_variation_entry_fen = None # Reset cache
+        self._preloaded_challenge = None
         self.btn_filter.setText(f"{var_name[:12]}.. ▾" if var_name and len(var_name) > 12 else (var_name or "Filter") + " ▾")
         
         # If a filter is selected, jump the board to the start of that variation
@@ -705,9 +708,95 @@ class MainWindow(QMainWindow):
         elo = self.training_manager.get_current_elo()
         self.lbl_elo.setText(f"🎓 {elo}")
 
+    def preload_next_challenge(self):
+        """Preloads the next challenge/move sequence while the user is thinking."""
+        if not self.repertoire_manager.active_repertoire_name or not self.current_move_obj:
+            self._preloaded_challenge = None
+            return
+
+        try:
+            last_move = self.current_move_obj
+            # Calculate next move (continuation)
+            next_move, path = self.training_manager.get_next_move(
+                mode=self.training_mode,
+                last_move_obj=last_move,
+                last_was_success=True,
+                only_continuation=True,
+                variation_filter=self.active_variation_filter
+            )
+            
+            if next_move:
+                self._preloaded_challenge = {
+                    'type': 'continuation',
+                    'next_move': next_move,
+                    'path': path,
+                    'source_move_id': last_move.id
+                }
+            elif self.training_manager.get_setting("stop_at_variation_end"):
+                self._preloaded_challenge = {
+                    'type': 'stop_at_end',
+                    'last_move': last_move,
+                    'source_move_id': last_move.id
+                }
+            else:
+                # Auto-continue: jump to next variation/challenge in the queue
+                next_challenge_move, _ = self.training_manager.get_next_move(
+                    mode=self.training_mode,
+                    variation_filter=self.active_variation_filter,
+                    exclude_move_ids={last_move.id}
+                )
+                self._preloaded_challenge = {
+                    'type': 'auto_continue',
+                    'next_move': next_challenge_move,
+                    'path': [],
+                    'source_move_id': last_move.id
+                }
+        except Exception as e:
+            logger.error(f"Error in preload_next_challenge: {e}")
+            self._preloaded_challenge = None
+
     def load_next_challenge(self, last_success=False, last_move=None):
         self.waiting_for_next = False
         if not self.repertoire_manager.active_repertoire_name: return
+
+        # Try to use preloaded challenge
+        if last_success and last_move and self._preloaded_challenge:
+            pre = self._preloaded_challenge
+            self._preloaded_challenge = None  # Clear it
+            
+            # Verify the preloaded data matches the current move context
+            if pre.get('source_move_id') == last_move.id:
+                logger.debug(f"Preloaded challenge HIT! Type: {pre['type']}")
+                if pre['type'] == 'continuation':
+                    self.current_move_obj = pre['next_move']
+                    self._load_new_challenge_sequence(pre['path'])
+                    return
+                elif pre['type'] in ('stop_at_end', 'auto_continue'):
+                    if self.training_manager.get_setting("stop_at_variation_end"):
+                        self.current_move_obj = last_move
+                        self.update_notation_display(reveal_move=True)
+                        self.set_button_state('start')
+                        self.current_move_obj = None  # Reset so next start loads a new challenge
+                        return
+                    else:
+                        if pre['type'] == 'auto_continue':
+                            self.current_move_obj = pre['next_move']
+                        else:
+                            next_challenge_move, _ = self.training_manager.get_next_move(
+                                mode=self.training_mode,
+                                variation_filter=self.active_variation_filter
+                            )
+                            self.current_move_obj = next_challenge_move
+                        delay = self.training_manager.get_setting("auto_delay") or 0
+                        if delay > 0:
+                            QTimer.singleShot(delay, lambda: self._load_new_challenge_sequence(pre.get('path', [])))
+                        else:
+                            self._load_new_challenge_sequence(pre.get('path', []))
+                        return
+            else:
+                logger.debug(f"Preloaded challenge MISS: source_move_id mismatch. Expected {last_move.id}, got {pre.get('source_move_id')}")
+        else:
+            logger.debug(f"Preloaded challenge MISS: no preloaded challenge available (last_success={last_success}, last_move={last_move is not None}, has_preload={self._preloaded_challenge is not None})")
 
         path_to_animate = []
         if last_success and last_move:
@@ -819,28 +908,50 @@ class MainWindow(QMainWindow):
             self.play_sound("move")
             self.board_widget.board.push(move)
             self.board_widget.solution_arrow = None
-            self.board_widget.update()
+            
+            # Force immediate visual snap of the correct piece
+            self.board_widget.repaint()
 
-            if self.button_state == 'waiting_for_move':
-                self.training_manager.register_success(self.current_move_obj.id, True)
-                self.update_stats_display() # Update big donut chart after successful move
-
+            was_waiting = (self.button_state == 'waiting_for_move')
+            current_move = self.current_move_obj
             self.set_button_state('correct')
-            self.update_notation_display(reveal_move=True)
-            # Move-to-move delay is now always 0ms. auto_delay is now used for variation jumps.
-            QTimer.singleShot(0, lambda: self.load_next_challenge(True, self.current_move_obj))
+            
+            # Defer expensive database writes, notation updates, and next challenge calculation
+            def process_after_move():
+                if was_waiting:
+                    self.training_manager.register_success(current_move.id, True)
+                    self.update_stats_display()
+                self.update_notation_display(reveal_move=True)
+                self.load_next_challenge(True, current_move)
+                
+            QTimer.singleShot(0, process_after_move)
         else:
-            if self.repertoire_manager.check_if_alternative_good_move(self.current_move_obj, move.uci()):
+            alt_type = self.repertoire_manager.get_alternative_move_type(self.current_move_obj, move.uci())
+            if alt_type:
                 self.play_sound("move")
-                self.btn_smart.setText("GUTER ZUG (NICHT IM REPERTOIRE)")
+                if alt_type == 'repertoire':
+                    self.btn_smart.setText("GUTER ZUG (ANDERER REPERTOIRE-WEG)")
+                else:
+                    self.btn_smart.setText("GUTER ZUG (NICHT IM REPERTOIRE)")
+                # Force immediate visual snap-back of incorrect piece
+                self.board_widget.repaint()
                 QTimer.singleShot(1500, lambda: self.set_button_state(self.button_state))
                 return
 
             self.play_sound("error")
+            # Force immediate visual snap-back of incorrect piece
+            self.board_widget.repaint()
+            
             if self.button_state == 'waiting_for_move':
-                self.training_manager.register_success(self.current_move_obj.id, False)
+                current_move = self.current_move_obj
                 self.set_button_state('show_solution_prompt')
-                self.update_stats_display() # Update big donut chart after failed move
+                
+                # Defer the failure DB registration and stats update
+                def process_after_fail():
+                    self.training_manager.register_success(current_move.id, False)
+                    self.update_stats_display()
+                    
+                QTimer.singleShot(0, process_after_fail)
 
     def update_notation_display(self, temp_hist=None, reveal_move=False):
         hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter)
@@ -907,6 +1018,8 @@ class MainWindow(QMainWindow):
 
     def toggle_auto_continue_btn(self):
         self.training_manager.set_setting("stop_at_variation_end", not self.btn_auto_continue.isChecked())
+        # Invalidate preloaded challenge since the auto-continue preference changed
+        self._preloaded_challenge = None
 
     def switch_profile(self):
         self.switch_requested = True; self.close()
@@ -1041,6 +1154,10 @@ class MainWindow(QMainWindow):
             self.board_widget.solution_arrow = None
             
         self.board_widget.update()
+        
+        # Preload the next challenge in the background while user is thinking
+        self._preloaded_challenge = None
+        QTimer.singleShot(50, self.preload_next_challenge)
 
     def open_lichess_analysis(self):
         if not self.repertoire_manager.active_repertoire_name: return

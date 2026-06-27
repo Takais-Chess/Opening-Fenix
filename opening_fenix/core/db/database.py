@@ -1,4 +1,5 @@
 import os
+import threading
 from typing import Type
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -6,6 +7,8 @@ from sqlalchemy.orm.decl_api import DeclarativeMeta
 from sqlalchemy.pool import NullPool, StaticPool
 from sqlalchemy.exc import DatabaseError
 from opening_fenix.core.db.models import Base, UserBase
+
+_db_init_lock = threading.RLock()
 
 class DatabaseCorruptedException(Exception):
     """Raised when a SQLite database is physically corrupted or malformed."""
@@ -28,39 +31,40 @@ class DatabaseManager:
             db_filename: The file path to the SQLite database.
             base: The declarative base class containing the metadata to create tables.
         """
-        if db_filename == ":memory:":
-            self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
-        else:
-            os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
-            self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 15}, poolclass=NullPool)
-        
-        @event.listens_for(self.engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            _ = connection_record
-            cursor = dbapi_connection.cursor()
-            # Reverted to WAL for maximum performance
-            cursor.execute("PRAGMA journal_mode=WAL")
-            # FULL synchronous provides maximum safety against corruption during crashes
-            cursor.execute("PRAGMA synchronous=FULL")
-            cursor.execute("PRAGMA cache_size=-64000")
-            cursor.close()
-        
-        try:
-            base.metadata.create_all(self.engine)
-            self._check_integrity()
-            self._migrate_schema(base)
-        except DatabaseError as e:
-            from opening_fenix.core.logger import logger
-            logger.error(f"Database error during initialization: {e}")
-            raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
-        except Exception as e:
-            # Check if it's the raw sqlite3 DatabaseError which sometimes escapes SQLAlchemy
-            import sqlite3
-            if isinstance(e, sqlite3.DatabaseError):
+        with _db_init_lock:
+            if db_filename == ":memory:":
+                self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
+            else:
+                os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
+                self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 15}, poolclass=NullPool)
+            
+            # Set journal_mode to WAL once during initialization (persistent database setting)
+            if db_filename != ":memory:":
+                try:
+                    with self.engine.connect() as conn:
+                        current_mode = conn.execute(text("PRAGMA journal_mode")).scalar()
+                        if current_mode != "wal":
+                            conn.execute(text("PRAGMA journal_mode=WAL"))
+                except Exception as e:
+                    from opening_fenix.core.logger import logger
+                    logger.warning(f"Could not set journal_mode to WAL: {e}")
+
+            try:
+                base.metadata.create_all(self.engine)
+                self._check_integrity()
+                self._migrate_schema(base)
+            except DatabaseError as e:
                 from opening_fenix.core.logger import logger
-                logger.error(f"SQLite error during initialization: {e}")
+                logger.error(f"Database error during initialization: {e}")
                 raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
-            raise
+            except Exception as e:
+                # Check if it's the raw sqlite3 DatabaseError which sometimes escapes SQLAlchemy
+                import sqlite3
+                if isinstance(e, sqlite3.DatabaseError):
+                    from opening_fenix.core.logger import logger
+                    logger.error(f"SQLite error during initialization: {e}")
+                    raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
+                raise
 
     def _check_integrity(self) -> None:
         """Verifies the physical integrity of the database file."""

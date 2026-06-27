@@ -116,6 +116,21 @@ def test_check_if_alternative_good_move(complex_repertoire):
     assert complex_repertoire.check_if_alternative_good_move(m_e4, "d2d4") is True
     assert complex_repertoire.check_if_alternative_good_move(m_e4, "g1f3") is False
 
+def test_get_alternative_move_type(complex_repertoire):
+    session = complex_repertoire.repo_session
+    p_start = session.query(Position).filter(Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")).first()
+    m_e4 = session.query(Move).filter_by(from_position_id=p_start.id, uci="e2e4").first()
+    
+    # e2e4 is active in the repertoire
+    assert complex_repertoire.get_alternative_move_type(m_e4, "e2e4") == 'repertoire'
+    
+    # Add d2d4 as a "good move" json
+    p_start.good_moves = '["d2d4"]'
+    session.commit()
+    
+    assert complex_repertoire.get_alternative_move_type(m_e4, "d2d4") == 'good'
+    assert complex_repertoire.get_alternative_move_type(m_e4, "g1f3") is None
+
 def test_delete_repertoire(complex_repertoire):
     # This might be destructive so we do it last
     repo_name = complex_repertoire.active_repertoire_name

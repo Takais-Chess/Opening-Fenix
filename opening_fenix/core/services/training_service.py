@@ -292,22 +292,17 @@ class TrainingManager:
 
     def _ensure_reachable_moves_cache(self, variation_filter=None):
         """
-        Calculates and caches the list of reachable moves for the current repertoire and level.
-        Only runs BFS if the cache is empty or the level/filter changed.
+        Calculates and caches the list of reachable moves for the current repertoire, level, and variation filter.
+        Only runs BFS if the cache is empty or the configuration (level/filter/repertoire) changed.
         """
-        # If we have a variation filter, we don't cache globally (too many combinations)
-        if variation_filter:
-            return self._calculate_reachable_moves(variation_filter)
-            
-        # Check if we already have the cache for the active level
         active_level = self.get_active_level()
-        cache_key = (self.repertoire_manager.active_repertoire_name, active_level)
+        cache_key = (self.repertoire_manager.active_repertoire_name, active_level, variation_filter)
         
         if getattr(self, "_reachable_moves_cache_key", None) == cache_key and self._reachable_moves_cache is not None:
             return self._reachable_moves_cache
             
         # Re-calculate
-        self._reachable_moves_cache = self._calculate_reachable_moves(None)
+        self._reachable_moves_cache = self._calculate_reachable_moves(variation_filter)
         self._reachable_moves_cache_key = cache_key
         return self._reachable_moves_cache
 
@@ -425,7 +420,7 @@ class TrainingManager:
             logger.error(f"Error updating stats cache: {e}")
             self.user_session.rollback()
 
-    def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None):
+    def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None, exclude_move_ids=None):
         if not self.repertoire_manager.repo_session: return None, []
         self.repertoire_manager._ensure_priority_cache()
         self._ensure_forward_cache()
@@ -451,11 +446,17 @@ class TrainingManager:
             # IMPROVEMENT: Use the actual priority from the cache to sort due items.
             due_items.sort(key=lambda x: (x.box, -self.repertoire_manager.priority_cache.get((x.fen, x.move_uci), 0.0)))
             
+            reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
+            reachable_keys = set(reachable_repo_moves)
+
             for item in due_items:
+                if (item.fen, item.move_uci) not in reachable_keys: continue
+                
                 # O(1) move lookup via FEN+UCI index
                 found_move = self._move_by_fen_uci_cache.get((item.fen, item.move_uci))
                 
                 if not found_move or (valid_move_ids is not None and found_move.id not in valid_move_ids): continue
+                if exclude_move_ids and found_move.id in exclude_move_ids: continue
                 
                 rep_move = self._rep_move_cache.get(found_move.id)
                 if not rep_move or rep_move.level > max_lvl: continue
@@ -466,16 +467,11 @@ class TrainingManager:
                 # In free training, we only pick moves not yet successfully trained in this session
                 learned_keys = set(self._td_cache.keys())
                 candidates = []
-                for from_pos_id, m_list in self._forward_moves_cache.items():
-                    pos = self._pos_cache.get(from_pos_id)
-                    if not pos: continue
-                    pos_fen = pos.fen
-                    if f' {side} ' not in pos_fen: continue
-                    for m in m_list:
-                        rep_move = self._rep_move_cache.get(m.id)
-                        if not rep_move or rep_move.level > max_lvl: continue
-                        if (pos_fen, m.uci) not in learned_keys:
-                            if valid_move_ids is not None and m.id not in valid_move_ids: continue
+                for fen, uci in reachable_keys:
+                    if (fen, uci) not in learned_keys:
+                        m = self._move_by_fen_uci_cache.get((fen, uci))
+                        if m:
+                            if exclude_move_ids and m.id in exclude_move_ids: continue
                             candidates.append(m)
                 if candidates:
                     candidates.sort(key=lambda x: x.priority_score, reverse=True)
@@ -484,6 +480,9 @@ class TrainingManager:
 
         # 3. New Mode
         elif mode == 'new':
+            reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
+            reachable_keys = set(reachable_repo_moves)
+            
             if variation_filter:
                 self._ensure_forward_cache()
                 learned_keys = set(self._td_cache.keys())
@@ -494,13 +493,10 @@ class TrainingManager:
                 for pos_id in lead_up_pos_ids:
                     pos = self._pos_cache.get(pos_id)
                     if not pos: continue
-                    pos_fen = pos.fen
-                    if f' {side} ' not in pos_fen: continue
                     
                     for m in self._forward_moves_cache.get(pos_id, []):
-                        rep_move = self._rep_move_cache.get(m.id)
-                        if not rep_move or rep_move.level > max_lvl: continue
-                        if (pos_fen, m.uci) not in learned_keys:
+                        if (pos.fen, m.uci) in reachable_keys and (pos.fen, m.uci) not in learned_keys:
+                            if exclude_move_ids and m.id in exclude_move_ids: continue
                             lead_up_candidates.append(m)
                 
                 if lead_up_candidates:
@@ -511,18 +507,11 @@ class TrainingManager:
             learned_keys = set(self._td_cache.keys())
 
             candidates = []
-            for from_pos_id, m_list in self._forward_moves_cache.items():
-                pos = self._pos_cache.get(from_pos_id)
-                if not pos: continue
-                pos_fen = pos.fen
-                if f' {side} ' not in pos_fen: continue
-                
-                for m in m_list:
-                    rep_move = self._rep_move_cache.get(m.id)
-                    if not rep_move or rep_move.level > max_lvl: continue
-                    
-                    if (pos_fen, m.uci) not in learned_keys:
-                        if valid_move_ids is not None and m.id not in valid_move_ids: continue
+            for fen, uci in reachable_keys:
+                if (fen, uci) not in learned_keys:
+                    m = self._move_by_fen_uci_cache.get((fen, uci))
+                    if m:
+                        if exclude_move_ids and m.id in exclude_move_ids: continue
                         candidates.append(m)
             
             if candidates:
@@ -794,7 +783,13 @@ class TrainingManager:
     def get_box_distribution(self):
         dist = {i: 0 for i in range(8)}
         with self.user_session.no_autoflush:
-            for d in self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).all(): dist[d.box] = dist.get(d.box, 0) + 1
+            from sqlalchemy import func
+            results = self.user_session.query(TrainingData.box, func.count(TrainingData.id))\
+                .filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name)\
+                .group_by(TrainingData.box).all()
+            for box, count in results:
+                if box in dist:
+                    dist[box] = count
         return dist
 
     def get_future_reviews(self):

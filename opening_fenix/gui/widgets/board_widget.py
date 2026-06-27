@@ -53,7 +53,7 @@ class ChessBoardWidget(QWidget):
         self.move_anim = QVariantAnimation(self)
         self.move_anim.valueChanged.connect(self._on_animation_frame)
         self.move_anim.finished.connect(self._on_animation_finished)
-        self.move_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self.move_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         
         # Animation snapshot: cached pixmap of the static board (everything except the moving piece).
         # Built once per slide, reused on every animation frame for ~10x faster rendering.
@@ -162,25 +162,31 @@ class ChessBoardWidget(QWidget):
     def mouseReleaseEvent(self, event):
         if self.dragging_piece:
             end_square = self.get_square_from_pos(event.position())
-            if end_square is not None and self.drag_start_square is not None:
-                move = None
-                if self.dragging_piece.piece_type == chess.KING:
-                    target = self.board.piece_at(end_square)
-                    if target and target.color == self.dragging_piece.color and target.piece_type == chess.ROOK:
-                        for cand in self.board.legal_moves:
-                            if self.board.is_castling(cand):
-                                if chess.square_file(end_square) > chess.square_file(self.drag_start_square):
-                                    if self.board.is_kingside_castling(cand): move = cand; break
-                                elif chess.square_file(end_square) < chess.square_file(self.drag_start_square):
-                                    if self.board.is_queenside_castling(cand): move = cand; break
-                if move is None:
-                    is_promo = (self.dragging_piece.piece_type == chess.PAWN and (chess.square_rank(end_square) in [0, 7]))
-                    promotion = chess.QUEEN if is_promo else None
-                    move = chess.Move(self.drag_start_square, end_square, promotion=promotion)
-                if move in self.board.legal_moves: self.move_executed.emit(move)
+            drag_start = self.drag_start_square
+            dragging = self.dragging_piece
+            
+            # Clear dragging state immediately so any repaint inside the signal handler knows the drag is done
             self.dragging_piece = None
             self.drag_start_square = None
             self._board_snapshot = None  # Clear snapshot
+            
+            if end_square is not None and drag_start is not None:
+                move = None
+                if dragging.piece_type == chess.KING:
+                    target = self.board.piece_at(end_square)
+                    if target and target.color == dragging.color and target.piece_type == chess.ROOK:
+                        for cand in self.board.legal_moves:
+                            if self.board.is_castling(cand):
+                                if chess.square_file(end_square) > chess.square_file(drag_start):
+                                    if self.board.is_kingside_castling(cand): move = cand; break
+                                elif chess.square_file(end_square) < chess.square_file(drag_start):
+                                    if self.board.is_queenside_castling(cand): move = cand; break
+                if move is None:
+                    is_promo = (dragging.piece_type == chess.PAWN and (chess.square_rank(end_square) in [0, 7]))
+                    promotion = chess.QUEEN if is_promo else None
+                    move = chess.Move(drag_start, end_square, promotion=promotion)
+                if move in self.board.legal_moves: 
+                    self.move_executed.emit(move)
             self.update()
 
     def _draw_arrow(self, painter, start, end, color, square_size):

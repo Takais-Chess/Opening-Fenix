@@ -141,3 +141,22 @@ def test_auto_save_on_details_change(creator_window, qtbot, monkeypatch):
     # Wait for the timer (1s) to trigger on_details_changed timeout
     qtbot.wait(1200)
     assert mock_called
+
+
+def test_common_moves_proportional_resizing(creator_window, qapp):
+    """Test that table_common_moves columns resize proportionally when the table size changes."""
+    table = creator_window.table_common_moves
+    assert table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    
+    table.resize(400, 300)
+    qapp.processEvents()
+    
+    creator_window.resize_common_moves_columns()
+    
+    vp_width = table.viewport().width()
+    col_ratios = [0.15, 0.21, 0.22, 0.21, 0.21]
+    
+    header = table.horizontalHeader()
+    for i in range(4):
+        expected_w = int(vp_width * col_ratios[i])
+        assert abs(header.sectionSize(i) - expected_w) <= 2
