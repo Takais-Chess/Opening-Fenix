@@ -4,52 +4,107 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QApplication
 )
 from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QPixmap, QFont
 
 from opening_fenix.core.services.repertoire_core_service import RepertoireService
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 
+def get_repertoire_cover_path(name):
+    from opening_fenix.core.data_tools import get_user_dir
+    repo_base = os.path.join(get_user_dir(), "repertoires")
+    
+    # Try normal path
+    normal_dir = os.path.join(repo_base, name)
+    # Try test path
+    test_dir = os.path.join(repo_base, "test", name)
+    
+    for folder in (normal_dir, test_dir):
+        if os.path.isdir(folder):
+            try:
+                for f in os.listdir(folder):
+                    f_lower = f.lower()
+                    if f_lower.startswith("cover."):
+                        ext = f_lower.split(".")[-1]
+                        if ext in ("png", "jpg", "jpeg"):
+                            return os.path.join(folder, f)
+            except Exception:
+                pass
+    return None
+
 class RepoSelectionButton(QPushButton):
     def __init__(self, name, parent=None):
-        super().__init__(name, parent)
+        super().__init__("", parent)
         self.repo_name = name
-        self.setFixedHeight(scale(50))
+        self.setFixedSize(scale(160), scale(200))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: rgba(255, 255, 255, 0.4);
-                color: {COLORS['brown_text']};
                 border: 1px solid {COLORS['glass_border']};
-                border-radius: {scale(15)}px;
-                font-size: {scale(16)}px;
-                font-weight: bold;
-                padding: {scale(2)}px {scale(10)}px;
+                border-radius: {scale(12)}px;
             }}
 
             QPushButton:hover {{
                 background-color: rgba(255, 255, 255, 0.8);
                 border: 2px solid {COLORS['burnt_orange']};
-                color: {COLORS['burnt_orange']};
             }}
             
             QPushButton:pressed {{
-                background-color: {COLORS['burnt_orange']};
-                color: white;
+                background-color: rgba(211, 84, 0, 0.1);
+                border: 2px solid {COLORS['burnt_orange']};
             }}
         """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
+        layout.setSpacing(scale(6))
+        
+        self.lbl_image = QLabel()
+        self.lbl_image.setFixedSize(scale(140), scale(140))
+        self.lbl_image.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_image.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        
+        cover_path = get_repertoire_cover_path(name)
+        if cover_path:
+            pix = QPixmap(cover_path)
+            self.lbl_image.setPixmap(pix.scaled(
+                self.lbl_image.size(),
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            ))
+            self.lbl_image.setStyleSheet(f"border-radius: {scale(8)}px; border: none;")
+        else:
+            self.lbl_image.setStyleSheet(f"""
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                    stop:0 rgba(211, 84, 0, 0.3), 
+                    stop:1 rgba(211, 84, 0, 0.05));
+                border-radius: {scale(8)}px;
+                border: 1px dashed rgba(211, 84, 0, 0.3);
+            """)
+            self.lbl_image.setText("♟")
+            self.lbl_image.setFont(QFont("Segoe UI", 36))
+            
+        layout.addWidget(self.lbl_image)
+        
+        self.lbl_title = QLabel(name)
+        self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.lbl_title.setStyleSheet(f"font-size: {scale(12)}px; font-weight: bold; color: {COLORS['brown_text']}; border: none; background: transparent;")
+        layout.addWidget(self.lbl_title)
 
 class RepoSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle("Repertoire laden")
-        self.setMinimumSize(scale(600), scale(500))
+        self.setMinimumSize(scale(800), scale(680))
         self.selected_repo = None
         
         self.setStyleSheet(get_login_dialog_style())
         
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(scale(40), scale(40), scale(40), scale(40))
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
         layout.setSpacing(scale(10))
 
         lbl_title = QLabel("Repertoire laden")
@@ -62,7 +117,7 @@ class RepoSelectionDialog(QDialog):
         lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_sub)
         
-        layout.addSpacing(scale(25))
+        layout.addSpacing(scale(15))
 
         # Scroll Area Container
         self.grid_container = QWidget()
@@ -103,7 +158,7 @@ class RepoSelectionDialog(QDialog):
                 btn.clicked.connect(lambda checked, n=name: self.on_repo_selected(n))
                 self.grid_layout.addWidget(btn, row, col)
                 col += 1
-                if col > 1: # 2 columns
+                if col > 3: # 4 columns
                     col = 0
                     row += 1
                         
@@ -112,7 +167,7 @@ class RepoSelectionDialog(QDialog):
         container_layout.addWidget(self.scroll_area)
         layout.addWidget(self.grid_container, 1)
         
-        layout.addSpacing(scale(25))
+        layout.addSpacing(scale(15))
 
         h_btns = QHBoxLayout()
         h_btns.addStretch()

@@ -1,6 +1,6 @@
 import pytest
 import chess
-from PyQt6.QtWidgets import QApplication, QPushButton
+from PyQt6.QtWidgets import QApplication, QPushButton, QHeaderView
 from PyQt6.QtCore import Qt, QTimer
 from opening_fenix.creator.creator_window import CreatorWindow
 
@@ -144,7 +144,7 @@ def test_auto_save_on_details_change(creator_window, qtbot, monkeypatch):
 
 
 def test_common_moves_proportional_resizing(creator_window, qapp):
-    """Test that table_common_moves columns resize proportionally when the table size changes."""
+    """Test that table_common_moves columns resize using correct resize modes when the table size changes."""
     table = creator_window.table_common_moves
     assert table.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     
@@ -153,10 +153,9 @@ def test_common_moves_proportional_resizing(creator_window, qapp):
     
     creator_window.resize_common_moves_columns()
     
-    vp_width = table.viewport().width()
-    col_ratios = [0.15, 0.21, 0.22, 0.21, 0.21]
-    
     header = table.horizontalHeader()
-    for i in range(4):
-        expected_w = int(vp_width * col_ratios[i])
-        assert abs(header.sectionSize(i) - expected_w) <= 2
+    assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.ResizeToContents
+    assert header.sectionResizeMode(1) == QHeaderView.ResizeMode.ResizeToContents
+    assert header.sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
+    assert header.sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch
+    assert header.sectionResizeMode(4) == QHeaderView.ResizeMode.Stretch

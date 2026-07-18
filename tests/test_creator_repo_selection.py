@@ -24,14 +24,14 @@ def test_dialog_lists_repos(qtbot, repo_selection_dialog):
     # Verify that buttons were created
     buttons = repo_selection_dialog.findChildren(RepoSelectionButton)
     assert len(buttons) == 2
-    names = [b.text() for b in buttons]
+    names = [b.repo_name for b in buttons]
     assert "Repo1" in names
     assert "Repo2" in names
 
 def test_on_repo_selected(qtbot, repo_selection_dialog):
     # Click one of the buttons
     buttons = repo_selection_dialog.findChildren(RepoSelectionButton)
-    repo1_btn = next(b for b in buttons if b.text() == "Repo1")
+    repo1_btn = next(b for b in buttons if b.repo_name == "Repo1")
     
     with qtbot.waitSignal(repo_selection_dialog.accepted, timeout=1000):
         qtbot.mouseClick(repo1_btn, Qt.MouseButton.LeftButton)

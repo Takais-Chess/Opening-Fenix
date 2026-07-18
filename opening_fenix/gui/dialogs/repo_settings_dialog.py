@@ -83,12 +83,87 @@ from opening_fenix.gui.styles import (
 )
 from opening_fenix.gui.scaling import scale
 
+class AutoShrinkWrapLabel(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+        self.base_font = None
+
+    def setFont(self, font):
+        super().setFont(font)
+        if not hasattr(self, "_adjusting_font") or not self._adjusting_font:
+            self.base_font = QFont(font)
+            self.adjust_font_size()
+
+    def setText(self, text):
+        super().setText(text)
+        self.adjust_font_size()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.adjust_font_size()
+
+    def adjust_font_size(self):
+        text = self.text()
+        if not text:
+            return
+            
+        if not self.base_font:
+            self.base_font = QFont(self.font())
+            
+        margins = self.contentsMargins()
+        target_width = self.width() - margins.left() - margins.right()
+        if target_width <= 0:
+            return
+            
+        words = text.split()
+        if not words:
+            return
+            
+        from PyQt6.QtGui import QFontMetrics
+        
+        current_font = QFont(self.base_font)
+        font_size = current_font.pointSize()
+        if font_size <= 0:
+            font_size = current_font.pixelSize()
+            is_pixel = True
+        else:
+            is_pixel = False
+            
+        min_size = 7
+        
+        self._adjusting_font = True
+        try:
+            while font_size > min_size:
+                fm = QFontMetrics(current_font)
+                word_too_long = False
+                for word in words:
+                    clean_word = word.rstrip(":")
+                    if fm.horizontalAdvance(clean_word) > target_width:
+                        word_too_long = True
+                        break
+                
+                if not word_too_long:
+                    break
+                    
+                font_size -= 1
+                if is_pixel:
+                    current_font.setPixelSize(font_size)
+                else:
+                    current_font.setPointSize(font_size)
+                    
+            super().setFont(current_font)
+        finally:
+            self._adjusting_font = False
+
+
 class SingleRepoStatsWorker(QThread):
     stats_ready = pyqtSignal(dict)
     
     def __init__(self, backend):
         super().__init__()
         self.repo_name = backend.active_repo_name
+        self.is_test = getattr(backend, "is_test", False)
         
     def run(self):
         temp_backend = None
@@ -96,7 +171,7 @@ class SingleRepoStatsWorker(QThread):
             from opening_fenix.creator.creator_window import CreatorBackend
             if self.isInterruptionRequested():
                 return
-            temp_backend = CreatorBackend(is_test=True)
+            temp_backend = CreatorBackend(is_test=self.is_test)
             if self.isInterruptionRequested():
                 return
             if self.repo_name:
@@ -372,7 +447,7 @@ class RepoSettingsDialog(QDialog):
         
         # Name Row
         h_name_row = QHBoxLayout()
-        lbl_name_h = QLabel("Name:")
+        lbl_name_h = AutoShrinkWrapLabel("Name:")
         lbl_name_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_name_h.setFixedWidth(scale(120))
         
@@ -391,7 +466,7 @@ class RepoSettingsDialog(QDialog):
 
         # Description Row
         h_desc_row = QHBoxLayout()
-        lbl_desc_h = QLabel("Beschreibung:")
+        lbl_desc_h = AutoShrinkWrapLabel("Beschreibung:")
         lbl_desc_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_desc_h.setFixedWidth(scale(120))
         lbl_desc_h.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
@@ -409,7 +484,7 @@ class RepoSettingsDialog(QDialog):
         # Elo Row
         # Elo Row
         h_elo_row = QHBoxLayout()
-        lbl_elo_h = QLabel("Prio score ELO:")
+        lbl_elo_h = AutoShrinkWrapLabel("Prio score ELO:")
         lbl_elo_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_elo_h.setFixedWidth(scale(120))
         
@@ -425,7 +500,7 @@ class RepoSettingsDialog(QDialog):
         
         # Color Row
         h_color_row = QHBoxLayout()
-        lbl_color_h = QLabel("Deine Farbe:")
+        lbl_color_h = AutoShrinkWrapLabel("Deine Farbe:")
         lbl_color_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_color_h.setFixedWidth(scale(120))
         
@@ -442,7 +517,7 @@ class RepoSettingsDialog(QDialog):
         
         # Analysis Status Row
         h_ana_row = QHBoxLayout()
-        lbl_ana_h = QLabel("Analyse-Status:")
+        lbl_ana_h = AutoShrinkWrapLabel("Analyse-Status:")
         lbl_ana_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_ana_h.setFixedWidth(scale(120))
         self.lbl_ana_status = QLabel("-")
@@ -454,7 +529,7 @@ class RepoSettingsDialog(QDialog):
 
         # DB Coverage Row
         h_cov_row = QHBoxLayout()
-        lbl_cov_h = QLabel("Prio. Score Datenbank Elo:")
+        lbl_cov_h = AutoShrinkWrapLabel("Prio. Score Datenbank Elo:")
         lbl_cov_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
         lbl_cov_h.setFixedWidth(scale(120))
         self.lbl_db_cov = QLabel("-")
@@ -464,7 +539,32 @@ class RepoSettingsDialog(QDialog):
         h_cov_row.addStretch()
         v_info.addLayout(h_cov_row)
         
-        layout.addWidget(g_info)
+        # Cover Image Row
+        h_cover_row = QHBoxLayout()
+        lbl_cover_h = AutoShrinkWrapLabel("Cover-Bild:")
+        lbl_cover_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
+        lbl_cover_h.setFixedWidth(scale(120))
+        
+        self.lbl_cover_preview = QLabel("Kein Bild")
+        self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
+        self.lbl_cover_preview.setFixedSize(scale(80), scale(80))
+        self.lbl_cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_cover_preview.setScaledContents(True)
+        
+        btn_select_cover = QPushButton("Bild wählen...")
+        btn_select_cover.setFixedWidth(scale(130))
+        btn_select_cover.clicked.connect(self.select_cover_image)
+        
+        self.btn_remove_cover = QPushButton("Entfernen")
+        self.btn_remove_cover.setFixedWidth(scale(100))
+        self.btn_remove_cover.clicked.connect(self.remove_cover_image)
+        
+        h_cover_row.addWidget(lbl_cover_h)
+        h_cover_row.addWidget(self.lbl_cover_preview)
+        h_cover_row.addWidget(btn_select_cover)
+        h_cover_row.addWidget(self.btn_remove_cover)
+        h_cover_row.addStretch()
+        v_info.addLayout(h_cover_row)
         
         layout.addWidget(g_info)
 
@@ -984,6 +1084,137 @@ class RepoSettingsDialog(QDialog):
         for w in QApplication.instance().topLevelWidgets():
             if hasattr(w, "update_notation_display"): w.update_notation_display()
 
+    def update_cover_preview(self):
+        from PyQt6.QtGui import QPixmap
+        from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
+        import os
+        
+        name = self.l_n.text()
+        if not name or name == "Unbekannt":
+            self.lbl_cover_preview.clear()
+            self.lbl_cover_preview.setText("Kein Bild")
+            self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
+            self.btn_remove_cover.setEnabled(False)
+            return
+            
+        cover_path = get_repertoire_cover_path(name)
+        if cover_path and os.path.exists(cover_path):
+            pix = QPixmap(cover_path)
+            if not pix.isNull():
+                self.lbl_cover_preview.setPixmap(pix)
+                self.lbl_cover_preview.setStyleSheet("border: 1px solid #ddd; border-radius: 4px;")
+                self.btn_remove_cover.setEnabled(True)
+                return
+                
+        self.lbl_cover_preview.clear()
+        self.lbl_cover_preview.setText("Kein Bild")
+        self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
+        self.btn_remove_cover.setEnabled(False)
+
+    def select_cover_image(self):
+        import shutil
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+        from opening_fenix.core.data_tools import get_user_dir
+        
+        name = self.l_n.text()
+        if not name or name == "Unbekannt":
+            return
+            
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Cover-Bild auswählen",
+            "",
+            "Bilder (*.png *.jpg *.jpeg)"
+        )
+        if not file_path:
+            return
+            
+        # Get target directory
+        repo_base = os.path.join(get_user_dir(), "repertoires")
+        repo_dir = os.path.join(repo_base, name)
+        
+        # If normal directory doesn't exist, try test directory
+        if not os.path.exists(repo_dir):
+            repo_dir = os.path.join(repo_base, "test", name)
+            
+        if not os.path.exists(repo_dir):
+            QMessageBox.warning(self, "Fehler", f"Repertoire-Ordner für '{name}' wurde nicht gefunden.")
+            return
+            
+        # Get extension of selected file
+        ext = file_path.lower().split(".")[-1]
+        if ext not in ("png", "jpg", "jpeg"):
+            ext = "png"
+            
+        # Remove any existing cover images first to avoid conflicts (e.g. cover.jpg and cover.png)
+        for f in os.listdir(repo_dir):
+            if f.lower().startswith("cover."):
+                try:
+                    os.remove(os.path.join(repo_dir, f))
+                except Exception:
+                    pass
+                    
+        # Copy file to repo_dir as cover.{ext}
+        target_path = os.path.join(repo_dir, f"cover.{ext}")
+        try:
+            shutil.copy(file_path, target_path)
+            self.update_cover_preview()
+            
+            # Notify all top-level windows to refresh their repertoire lists/covers
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "refresh_repertoire_buttons"):
+                    w.refresh_repertoire_buttons()
+                if hasattr(w, "load_repertoire_list"):
+                    w.load_repertoire_list()
+                    
+            QMessageBox.information(self, "Erfolg", "Das Cover-Bild wurde erfolgreich hinzugefügt.")
+        except Exception as e:
+            QMessageBox.critical(self, "Fehler", f"Das Bild konnte nicht kopiert werden: {str(e)}")
+
+    def remove_cover_image(self):
+        import os
+        from PyQt6.QtWidgets import QMessageBox
+        from opening_fenix.core.data_tools import get_user_dir
+        
+        name = self.l_n.text()
+        if not name or name == "Unbekannt":
+            return
+            
+        reply = QMessageBox.question(
+            self,
+            "Cover-Bild entfernen",
+            "Möchtest du das aktuelle Cover-Bild wirklich löschen?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+            
+        repo_base = os.path.join(get_user_dir(), "repertoires")
+        repo_dirs = [os.path.join(repo_base, name), os.path.join(repo_base, "test", name)]
+        
+        deleted = False
+        for repo_dir in repo_dirs:
+            if os.path.exists(repo_dir):
+                for f in os.listdir(repo_dir):
+                    if f.lower().startswith("cover."):
+                        try:
+                            os.remove(os.path.join(repo_dir, f))
+                            deleted = True
+                        except Exception:
+                            pass
+                            
+        self.update_cover_preview()
+        if deleted:
+            # Notify all top-level windows to refresh their repertoire lists/covers
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "refresh_repertoire_buttons"):
+                    w.refresh_repertoire_buttons()
+                if hasattr(w, "load_repertoire_list"):
+                    w.load_repertoire_list()
+            QMessageBox.information(self, "Erfolg", "Das Cover-Bild wurde gelöscht.")
+
     def rename_repertoire(self):
         old_name = self.backend.active_repo_name
         new_name, ok = QInputDialog.getText(self, "Umbenennen", "Neuer Name für das Repertoire:", QLineEdit.EchoMode.Normal, old_name)
@@ -1138,6 +1369,8 @@ class RepoSettingsDialog(QDialog):
             self.tbl_levels.setCellWidget(idx, 2, spin)
             
         # self._refresh_maintenance_repo_list()  <-- Lazy loaded now!
+        if hasattr(self, "update_cover_preview"):
+            self.update_cover_preview()
 
 
 

@@ -349,21 +349,15 @@ class ChessBoardWidget(QWidget):
             painter.drawPixmap(0, 0, self._board_snapshot)
             painter.translate(x_offset, y_offset)
             
-            # 2. Draw animating piece with "Lift & Shadow" effect
+            # 2. Draw animating piece with lift scaling but no shadow
             if is_anim:
                 d = self.animating_piece_data
                 p = d['progress']
                 cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
                 cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
                 
-                lift = math.sin(p * math.pi) 
+                lift = math.sin(p * math.pi)
                 scale_factor = 1.0 + (0.15 * lift)
-                shadow_offset = scale(3) + (scale(5) * lift)
-                shadow_rect = QRectF(cur_col * square_size + shadow_offset, cur_row * square_size + shadow_offset, square_size, square_size)
-                painter.setBrush(QColor(0, 0, 0, int(60 * lift))) 
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(shadow_rect.translated(square_size*0.05, square_size*0.05).adjusted(square_size*0.1, square_size*0.1, -square_size*0.1, -square_size*0.1))
-                
                 self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
             
             # 3. Draw dragging piece on top

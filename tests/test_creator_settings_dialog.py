@@ -4,7 +4,7 @@ Prüft UI-Interaktionen, Einstellungspersistenz, Seitenstruktur und BW_GLASS-Sty
 """
 import pytest
 from unittest.mock import MagicMock, patch
-from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QComboBox
+from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox, QComboBox, QFileDialog
 from PyQt6.QtCore import Qt
 from opening_fenix.creator.creator_window import CreatorBackend
 from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
@@ -174,6 +174,60 @@ class TestRepoSettingsGeneralPage:
         with patch.object(creator_backend, 'rename_repertoire', return_value=(True, "Success")) as mock_rename:
             settings_dialog.rename_repertoire()
             assert mock_rename.called
+
+    def test_cover_image_ui_elements_exist(self, settings_dialog):
+        """Cover-Bild UI-Elemente sind vorhanden."""
+        assert hasattr(settings_dialog, "lbl_cover_preview")
+        assert hasattr(settings_dialog, "btn_remove_cover")
+        assert settings_dialog.lbl_cover_preview.text() == "Kein Bild"
+
+    def test_select_cover_image_flow(self, settings_dialog, tmp_path, monkeypatch):
+        """Cover-Bild auswählen kopiert die Datei und aktualisiert die Vorschau."""
+        # Create a mock source image file
+        src_img = tmp_path / "my_cover.png"
+        src_img.write_text("fake_png_data")
+
+        # Mock QFileDialog
+        monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args, **kwargs: (str(src_img), "PNG"))
+        # Mock QMessageBox
+        monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+        
+        # We need a fake user folder structure
+        user_dir_path = tmp_path / "user_dir"
+        repo_dir = user_dir_path / "repertoires" / settings_dialog.l_n.text()
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Patch get_user_dir to return our temp folder
+        monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.get_user_dir", lambda: str(user_dir_path))
+        monkeypatch.setattr("opening_fenix.core.data_tools.get_user_dir", lambda: str(user_dir_path))
+
+        settings_dialog.select_cover_image()
+
+        # Check that the cover image was copied
+        copied_cover = repo_dir / "cover.png"
+        assert copied_cover.exists()
+        assert copied_cover.read_text() == "fake_png_data"
+
+    def test_remove_cover_image_flow(self, settings_dialog, tmp_path, monkeypatch):
+        """Cover-Bild entfernen löscht die Datei und aktualisiert die Vorschau."""
+        # Mock QMessageBox to accept removal
+        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+        monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
+
+        user_dir_path = tmp_path / "user_dir"
+        repo_dir = user_dir_path / "repertoires" / settings_dialog.l_n.text()
+        repo_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Write a mock cover
+        cover_file = repo_dir / "cover.png"
+        cover_file.write_text("some_data")
+        assert cover_file.exists()
+
+        monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.get_user_dir", lambda: str(user_dir_path))
+        monkeypatch.setattr("opening_fenix.core.data_tools.get_user_dir", lambda: str(user_dir_path))
+
+        settings_dialog.remove_cover_image()
+        assert not cover_file.exists()
 
 
 # ─── Seite 2: Design & Audio ───────────────────────────────────────────────────

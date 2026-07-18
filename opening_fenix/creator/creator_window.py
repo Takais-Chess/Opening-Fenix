@@ -2430,7 +2430,16 @@ class CreatorWindow(QMainWindow):
         self.btn_back = QPushButton("←")
         self.btn_back.setProperty("class", "GlassPill")
         self.repolish(self.btn_back)
-        self.btn_back.setStyleSheet("font-size: 40px; font-weight: bold;")
+        self.btn_back.setStyleSheet(f"""
+            font-size: {scale(24)}px;
+            font-weight: bold;
+            padding-top: 0px;
+            padding-bottom: {scale(6)}px;
+            padding-left: {scale(15)}px;
+            padding-right: {scale(15)}px;
+            min-height: {scale(32)}px;
+            max-height: {scale(32)}px;
+        """)
         self.btn_back.setToolTip("Einen Zug zurück")
         self.btn_back.clicked.connect(self.on_back_button_clicked)
 
@@ -2443,6 +2452,8 @@ class CreatorWindow(QMainWindow):
         self.tree_widget = QTreeWidget()
         self.tree_widget.setHeaderLabels(["Zug", "Prio", "Kommentar", "Level", "Aktiv"])
         header = self.tree_widget.header()
+        header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # Kommentar
@@ -2547,7 +2558,7 @@ class CreatorWindow(QMainWindow):
         engine_container.setObjectName("EngineAnalysisPill")
         self.repolish(engine_container)
         evl = QVBoxLayout(engine_container)
-        evl.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
+        evl.setContentsMargins(scale(4), scale(12), scale(4), scale(12))
         evl.setSpacing(scale(8))
         
         # Engine Settings (Dropdowns)
@@ -2633,9 +2644,13 @@ class CreatorWindow(QMainWindow):
         self.table_engine.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_engine.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header_e = self.table_engine.horizontalHeader()
+        header_e.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         header_e.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_engine.setShowGrid(False)
+        self.table_engine.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table_engine.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         evl.addWidget(self.table_engine)
         self.analysis_splitter.addWidget(engine_container)
         
@@ -2645,7 +2660,7 @@ class CreatorWindow(QMainWindow):
         common_container.setMinimumWidth(scale(280)) # Allow narrower panel to keep board square, prevents jittering
         self.repolish(common_container)
         cvl = QVBoxLayout(common_container)
-        cvl.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
+        cvl.setContentsMargins(scale(4), scale(12), scale(4), scale(12))
         cvl.setSpacing(scale(8))
         
         # Database Label centered at top
@@ -2670,32 +2685,47 @@ class CreatorWindow(QMainWindow):
         self.table_common_moves.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table_common_moves.cellDoubleClicked.connect(self.on_common_move_double_click)
         header_cm = self.table_common_moves.horizontalHeader()
+        header_cm.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table_common_moves.setShowGrid(False)
+        self.table_common_moves.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         
-        self.table_common_moves.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.table_common_moves.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.table_common_moves.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_common_moves.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         
-        # Apply compact styling to table and headers to maximize space
+        # Apply premium glassmorphic styling to match the card and eliminate solid white background
         self.table_common_moves.setStyleSheet(f"""
             QTableWidget {{
-                background-color: white;
-                border: 1px solid rgba(0, 0, 0, 0.1);
-                border-radius: {scale(8)}px;
+                background-color: transparent;
+                alternate-background-color: rgba(62, 39, 35, 0.03);
+                border: none;
             }}
             QHeaderView::section {{
-                background-color: #fafafa;
+                background-color: transparent;
+                color: {COLORS['brown_text']};
                 padding-left: {scale(2)}px;
                 padding-right: {scale(2)}px;
                 padding-top: {scale(4)}px;
                 padding-bottom: {scale(4)}px;
                 font-weight: bold;
                 border: none;
-                border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+                border-bottom: {scale(2)}px solid {COLORS['glass_border']};
             }}
             QTableWidget::item {{
                 padding-left: {scale(2)}px;
                 padding-right: {scale(2)}px;
                 padding-top: {scale(4)}px;
                 padding-bottom: {scale(4)}px;
+                border-bottom: 1px solid rgba(62, 39, 35, 0.08);
+            }}
+            QTableWidget::item:hover {{
+                background-color: rgba(211, 84, 0, 0.15);
+                border-radius: {scale(4)}px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border-radius: {scale(4)}px;
             }}
         """)
         
@@ -2986,19 +3016,14 @@ class CreatorWindow(QMainWindow):
         if current_labels != labels:
             self.table_common_moves.setHorizontalHeaderLabels(labels)
             
-        # Proportions: Move: 15%, Played: 21%, White %: 22%, Black %: 21%, Draw %: 21%
-        col_ratios = [0.15, 0.21, 0.22, 0.21, 0.21]
+        # Proportions: Move and Played columns fit content exactly.
+        # White %, Black %, Draw % columns share remaining space equally, avoiding text dots.
         header.blockSignals(True)
-        allocated = 0
-        for i in range(5):
-            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
-            if i == 4:
-                w = max(35, total_width - allocated)
-                header.resizeSection(i, w)
-            else:
-                w = max(35, int(total_width * col_ratios[i]))
-                header.resizeSection(i, w)
-                allocated += w
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         header.blockSignals(False)
 
     def on_board_move(self, move):
@@ -3207,6 +3232,9 @@ class CreatorWindow(QMainWindow):
                 l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
                 "" 
             ])
+            it.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+            it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+            it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
             it.setData(0, Qt.ItemDataRole.UserRole, c['uci'])
             it.setData(1, Qt.ItemDataRole.UserRole, c['priority'])
             it.setData(0, Qt.ItemDataRole.UserRole + 1, c['id'])
@@ -3242,6 +3270,7 @@ class CreatorWindow(QMainWindow):
             lang = self.get_notation_lang()
             item_san = QTableWidgetItem(localize_san(mv['san'], lang))
             item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
+            item_san.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_common_moves.setItem(r, 0, item_san)
             
             # Format number of games (e.g. 841k or 1.2M) to save space
@@ -3252,11 +3281,21 @@ class CreatorWindow(QMainWindow):
                 games_str = f"{games_count / 1000:.1f}k" if games_count < 100_000 else f"{games_count / 1000:.0f}k"
             else:
                 games_str = str(games_count)
-            self.table_common_moves.setItem(r, 1, QTableWidgetItem(games_str))
+            item_games = QTableWidgetItem(games_str)
+            item_games.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_common_moves.setItem(r, 1, item_games)
             
-            self.table_common_moves.setItem(r, 2, QTableWidgetItem(f"{mv['white_pct']:.1f}%"))
-            self.table_common_moves.setItem(r, 3, QTableWidgetItem(f"{mv['black_pct']:.1f}%"))
-            self.table_common_moves.setItem(r, 4, QTableWidgetItem(f"{mv['draw_pct']:.1f}%"))
+            item_white = QTableWidgetItem(f"{mv['white_pct']:.1f}%")
+            item_white.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_common_moves.setItem(r, 2, item_white)
+            
+            item_black = QTableWidgetItem(f"{mv['black_pct']:.1f}%")
+            item_black.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_common_moves.setItem(r, 3, item_black)
+            
+            item_draw = QTableWidgetItem(f"{mv['draw_pct']:.1f}%")
+            item_draw.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_common_moves.setItem(r, 4, item_draw)
 
         self.resize_common_moves_columns()
         self.update_board_arrows()
@@ -3584,9 +3623,17 @@ class CreatorWindow(QMainWindow):
         if not d or isinstance(d[0], str): return
         self.table_engine.setRowCount(len(d))
         for r, l in enumerate(d):
-            self.table_engine.setItem(r, 0, QTableWidgetItem(l['score']))
-            self.table_engine.setItem(r, 1, QTableWidgetItem(str(l['depth'])))
-            self.table_engine.setItem(r, 2, QTableWidgetItem(l['pv']))
+            it_score = QTableWidgetItem(l['score'])
+            it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_engine.setItem(r, 0, it_score)
+            
+            it_depth = QTableWidgetItem(str(l['depth']))
+            it_depth.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_engine.setItem(r, 1, it_depth)
+            
+            it_pv = QTableWidgetItem(l['pv'])
+            it_pv.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_engine.setItem(r, 2, it_pv)
 
     def on_db_update(self, f, d, e):
         self.backend.update_position_analysis(f, d, e)
@@ -4037,10 +4084,15 @@ class CreatorWindow(QMainWindow):
         self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
         self.table_holes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_holes.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table_holes.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self.table_holes.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table_holes.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr = self.table_holes.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_holes.verticalHeader().setVisible(False)
+        self.table_holes.setShowGrid(False)
+        self.table_holes.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table_holes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table_holes.itemDoubleClicked.connect(self.on_hole_double_click)
         main_layout.addWidget(self.table_holes)
         
@@ -4212,9 +4264,13 @@ class CreatorWindow(QMainWindow):
         self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
         
         hdr = self.table_transpositions.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_transpositions.setShowGrid(False)
+        self.table_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         inner.addWidget(self.table_transpositions)
 
         # Bottom layout for deep search button
@@ -4301,6 +4357,7 @@ class CreatorWindow(QMainWindow):
                 "move_uci": it['move_uci'],
                 "move_san": it['move_san']
             })
+            move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_transpositions.setItem(i, 0, move_item)
             
             # Col 1: Tiefe (Always 1 for direct)
@@ -4339,6 +4396,7 @@ class CreatorWindow(QMainWindow):
                 "path_sans": p["path_sans"],
                 "target_fen": p["target_fen"],
             })
+            seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_transpositions.setItem(row, 0, seq_item)
 
             # Col 1: Tiefe
@@ -4849,9 +4907,13 @@ class CreatorWindow(QMainWindow):
                 item_type.setText("LÜCKE")
                 item_pop.setText("Unfertig")
 
+            item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_move = QTableWidgetItem(h.get('move_san', '—'))
+            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_holes.setItem(i, 0, item_pop)
             self.table_holes.setItem(i, 1, item_type)
-            self.table_holes.setItem(i, 2, QTableWidgetItem(h.get('move_san', '—')))
+            self.table_holes.setItem(i, 2, it_move)
 
 
     def on_hole_double_click(self, item):

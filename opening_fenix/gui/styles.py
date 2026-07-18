@@ -294,6 +294,13 @@ def get_creator_window_style():
     QMainWindow {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['beige']}, stop:1 #d1bfae); }}
     QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
+    /* Scrollbars styling for Creator Window */
+    {get_scrollbar_style()}
+    
+    QScrollArea QScrollBar:vertical, QTextBrowser QScrollBar:vertical, QTableWidget QScrollBar:vertical, QTreeWidget QScrollBar:vertical {{
+        width: {scale(10)}px;
+    }}
+    
     #CustomTitleBar {{ 
         background-color: transparent; 
         border: none;
@@ -322,7 +329,14 @@ def get_creator_window_style():
         padding: {scale(4)}px {scale(20)}px;
         min-height: {scale(32)}px;
     }}
-    #EngineAnalysisPill, #CommonMovesPill, #TranspositionPill, #OverhaulMainCard {{
+    #EngineAnalysisPill, #CommonMovesPill, #TranspositionPill {{
+        background-color: {COLORS['glass_bg']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(15)}px;
+        padding: {scale(4)}px {scale(5)}px;
+        min-height: {scale(32)}px;
+    }}
+    #OverhaulMainCard {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
         border-radius: {scale(15)}px;
