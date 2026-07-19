@@ -5,7 +5,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout, QLabel, QListWidget, QScrollArea, QFrame, 
     QGroupBox, QSpinBox, QPushButton, QCheckBox, QProgressBar, QSlider, 
     QLineEdit, QFileDialog, QMessageBox, QStackedWidget, QListWidgetItem,
-    QTextEdit, QGridLayout, QApplication
+    QTextEdit, QGridLayout, QApplication, QAbstractButton, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QIcon, QFont
@@ -17,6 +17,7 @@ from opening_fenix.gui.widgets.board_widget import THEMES
 # Import centralized styles
 from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 
 class NoWheelComboBox(QComboBox):
@@ -96,7 +97,7 @@ class LoadRepertoireDialog(QDialog):
         layout.addWidget(self.scroll_area)
 
         h_btn = QHBoxLayout()
-        b_cancel = QPushButton("Abbrechen")
+        b_cancel = QPushButton(tr_ui("login.cancel", "Abbrechen"))
         b_cancel.clicked.connect(self.reject)
         h_btn.addStretch()
         h_btn.addWidget(b_cancel)
@@ -155,7 +156,7 @@ class SettingsDialog(QDialog):
         super().__init__(main_window)
         set_consistent_icon(self)
         self.main_window = main_window
-        self.setWindowTitle("Trainer Einstellungen")
+        self.setWindowTitle(tr_ui("settings.window_title", "Trainer Einstellungen"))
         self.setMinimumSize(scale(900), scale(680))
         self.setStyleSheet(get_bw_glass_style())
         
@@ -177,9 +178,9 @@ class SettingsDialog(QDialog):
         self.sidebar.currentRowChanged.connect(self.display_page)
 
         sidebar_items = [
-            "🎨 Darstellung & Audio",
-            "📚 Repertoire-Konfiguration",
-            "❓ Hilfe & FAQ",
+            tr_ui("settings.tab_display", "🎨 Darstellung & Audio"),
+            tr_ui("settings.tab_repo", "📚 Repertoire-Konfiguration"),
+            tr_ui("settings.tab_faq", "❓ Hilfe & FAQ"),
         ]
         for text in sidebar_items:
             item = QListWidgetItem(text)
@@ -210,6 +211,7 @@ class SettingsDialog(QDialog):
     def display_page(self, index):
         self.pages.setCurrentIndex(index)
 
+
     # ─── Seite 1: Darstellung & Audio ──────────────────────────────────────────
 
     def init_page_display(self, page):
@@ -218,7 +220,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # Optik
-        g_design = QGroupBox("🎨 Optik")
+        g_design = QGroupBox(tr_ui("settings.optics_title", "🎨 Optik"))
         f_design = QFormLayout(g_design)
         f_design.setSpacing(scale(15))
 
@@ -228,7 +230,7 @@ class SettingsDialog(QDialog):
             self.main_window.training_manager.get_setting("theme") or "Blau (Turnier)"
         )
         self.combo_theme.currentTextChanged.connect(self.on_theme_changed)
-        f_design.addRow("Schachbrett-Design:", self.combo_theme)
+        f_design.addRow(tr_ui("settings.board_design", "Schachbrett-Design:"), self.combo_theme)
 
         self.spin_anim = QSpinBox()
         self.spin_anim.setRange(50, 1000)
@@ -237,22 +239,22 @@ class SettingsDialog(QDialog):
         self.spin_anim.valueChanged.connect(
             lambda v: self.main_window.training_manager.set_setting("anim_speed", v)
         )
-        self.spin_anim.setToolTip("Wie schnell Figuren über das Brett gleiten (Millisekunden).")
-        f_design.addRow("Animations-Tempo:", self.spin_anim)
+        self.spin_anim.setToolTip(tr_ui("settings.anim_speed_tooltip", "Wie schnell Figuren über das Brett gleiten (Millisekunden)."))
+        f_design.addRow(tr_ui("settings.anim_speed", "Animations-Tempo:"), self.spin_anim)
 
         self.combo_notation = QComboBox()
-        self.combo_notation.addItem("Standard (English) – K, Q, R, B, N", "en")
-        self.combo_notation.addItem("Deutsch – K, D, T, L, S", "de")
+        self.combo_notation.addItem(tr_ui("settings.notation_standard", "Standard (English) – K, Q, R, B, N"), "en")
+        self.combo_notation.addItem(tr_ui("settings.notation_german", "Deutsch – K, D, T, L, S"), "de")
         curr_lang = self.main_window.training_manager.get_setting("notation_language") or "en"
         idx = self.combo_notation.findData(curr_lang)
         if idx != -1: self.combo_notation.setCurrentIndex(idx)
         self.combo_notation.currentIndexChanged.connect(self.on_notation_language_changed)
-        f_design.addRow("Notation-Sprache:", self.combo_notation)
+        f_design.addRow(tr_ui("settings.notation_lang_label", "Notation-Sprache:"), self.combo_notation)
 
         layout.addWidget(g_design)
 
         # Audio
-        g_audio = QGroupBox("🔊 Klang && Lautstärke")
+        g_audio = QGroupBox(tr_ui("settings.audio_title", "🔊 Klang & Lautstärke").replace("&", "&&"))
         f_audio = QFormLayout(g_audio)
         f_audio.setSpacing(scale(15))
 
@@ -268,12 +270,12 @@ class SettingsDialog(QDialog):
         h_vol = QHBoxLayout()
         h_vol.addWidget(self.volume_slider)
         h_vol.addWidget(self.lbl_volume)
-        f_audio.addRow("Gesamtlautstärke:", h_vol)
+        f_audio.addRow(tr_ui("settings.volume", "Gesamtlautstärke:"), h_vol)
 
         layout.addWidget(g_audio)
 
         # Trainingsablauf
-        g_behavior = QGroupBox("🏋️ Trainings-Verhalten")
+        g_behavior = QGroupBox(tr_ui("settings.behavior_title", "🏋️ Trainings-Verhalten"))
         f_behavior = QFormLayout(g_behavior)
         f_behavior.setSpacing(scale(15))
 
@@ -287,10 +289,9 @@ class SettingsDialog(QDialog):
             lambda v: self.main_window.training_manager.set_setting("auto_delay", v)
         )
         self.spin_delay.setToolTip(
-            "Wartezeit (Millisekunden) nach einem korrekten Zug, "
-            "bis die nächste Aufgabe automatisch geladen wird."
+            tr_ui("settings.auto_delay_tooltip", "Wartezeit (Millisekunden) nach einem korrekten Zug, bis die nächste Aufgabe automatisch geladen wird.")
         )
-        f_behavior.addRow("Verzögerung bei Variantenwechsel (Auto-Weiter):", self.spin_delay)
+        f_behavior.addRow(tr_ui("settings.auto_delay", "Verzögerung bei Variantenwechsel (Auto-Weiter):"), self.spin_delay)
         layout.addWidget(g_behavior)
 
         layout.addStretch()
@@ -329,11 +330,11 @@ class SettingsDialog(QDialog):
         layout.setSpacing(scale(20))
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
-        lbl_title = QLabel("Häufig gestellte Fragen (FAQ)")
+        lbl_title = QLabel(tr_ui("settings_faq.title", "Häufig gestellte Fragen (FAQ)"))
         lbl_title.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(24)}px; font-weight: 800;")
         layout.addWidget(lbl_title)
 
-        lbl_intro = QLabel("Hier findest du Antworten auf die am häufigsten gestellten Fragen zum Training mit Opening Fenix.")
+        lbl_intro = QLabel(tr_ui("settings_faq.subtitle", "Hier findest du Antworten auf die am häufigsten gestellten Fragen zum Training mit Opening Fenix."))
         lbl_intro.setWordWrap(True)
         lbl_intro.setStyleSheet("color: #666; font-size: 14px;")
         layout.addWidget(lbl_intro)
@@ -341,16 +342,16 @@ class SettingsDialog(QDialog):
         from opening_fenix.gui.dialogs.faq_dialog import FAQItem
         faqs = [
             (
-                "Wie soll ich mein Training gestalten?",
-                "Ich empfehle immer, zuerst die fälligen Züge zu üben und falls danach noch Zeit ist, ein paar Varianten auf einen Schlag zu lernen (ca. 20–50 Züge) und diese direkt zu üben.\n\nDiesem Muster ein paar Mal pro Woche folgen, bis das Repertoire sitzt, und danach alle paar Wochen die fälligen Züge erledigen."
+                tr_ui("settings_faq.q1", "Wie soll ich mein Training gestalten?"),
+                tr_ui("settings_faq.a1", "Ich empfehle immer, zuerst die fälligen Züge zu üben und falls danach noch Zeit ist, ein paar Varianten auf einen Schlag zu lernen (ca. 20–50 Züge) und diese direkt zu üben.\n\nDiesem Muster ein paar Mal pro Woche folgen, bis das Repertoire sits, und danach alle paar Wochen die fälligen Züge erledigen.")
             ),
             (
-                "Wie soll ich reagieren, wenn ich einen Zug falsch habe?",
-                "Denke kurz darüber nach, warum der Zug falsch ist, und schaue dann mithilfe des Lichess-Buttons nach, warum dein gewählter Zug schlecht ist."
+                tr_ui("settings_faq.q2", "Wie soll ich reagieren, wenn ich einen Zug falsch habe?"),
+                tr_ui("settings_faq.a2", "Denke kurz darüber nach, warum der Zug falsch ist, und schaue dann mithilfe des Lichess-Buttons nach, warum dein gewählter Zug schlecht ist.")
             ),
             (
-                "Wie ändere ich das Trainingslevel und wann soll ich das machen?",
-                "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat."
+                tr_ui("settings_faq.q3", "Wie ändere ich das Trainingslevel und wann soll ich das machen?"),
+                tr_ui("settings_faq.a3", "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.")
             )
         ]
 
@@ -378,7 +379,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # Repertoire-Cards Bereich
-        g_sel = QGroupBox("📂 Repertoire Auswahl && Status")
+        g_sel = QGroupBox(tr_ui("settings.repo_selection_title", "📂 Repertoire Auswahl && Status"))
         v_sel = QVBoxLayout(g_sel)
         
         self.scroll_cards = QScrollArea()
@@ -388,7 +389,7 @@ class SettingsDialog(QDialog):
         
         self.card_container = QWidget()
         self.card_container.setStyleSheet("background: transparent;") # Explicitly transparent
-        self.card_layout = QVBoxLayout(self.card_container)
+        self.card_layout = QGridLayout(self.card_container)
         self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.card_layout.setSpacing(scale(10))
         
@@ -399,40 +400,76 @@ class SettingsDialog(QDialog):
         self.refresh_repertoire_cards()
 
         # Informationen (read-only)
-        self.grp_info = QGroupBox("ℹ️ Repertoire Informationen")
-        self.info_form = QFormLayout(self.grp_info)
-        self.info_form.setSpacing(scale(12))
+        self.grp_info = QGroupBox(tr_ui("settings.repo_info_title", "ℹ️ Repertoire Informationen"))
+        info_main_layout = QHBoxLayout(self.grp_info)
+        info_main_layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        info_main_layout.setSpacing(scale(25))
+
+        # Left Column Widget to enforce fixed width based on cover image size
+        left_col_widget = QWidget()
+        left_col_widget.setFixedWidth(scale(180))
+        left_col = QVBoxLayout(left_col_widget)
+        left_col.setContentsMargins(0, 0, 0, 0)
+        left_col.setSpacing(scale(10))
+        left_col.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+
+        self.lbl_info_cover = QLabel()
+        self.lbl_info_cover.setFixedSize(scale(180), scale(180))
+        self.lbl_info_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_col.addWidget(self.lbl_info_cover)
+
         self.lbl_name = QLabel("-")
-        self.lbl_name.setStyleSheet("font-weight: bold;")
+        self.lbl_name.setWordWrap(True)
+        self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_name.setStyleSheet("font-weight: bold; font-size: 15px;")
+        left_col.addWidget(self.lbl_name)
+
         self.lbl_color = QLabel("-")
+        self.lbl_color.setWordWrap(True)
+        self.lbl_color.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        left_col.addWidget(self.lbl_color)
+
+        self.lbl_db_info = QLabel("-")
+        self.lbl_db_info.setWordWrap(True)
+        self.lbl_db_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_db_info.setStyleSheet("color: #555555; font-size: 12px;")
+        left_col.addWidget(self.lbl_db_info)
+
         self.lbl_levels = QLabel("-")
+        self.levels_container = QWidget()
+        self.levels_layout = QVBoxLayout(self.levels_container)
+        self.levels_layout.setContentsMargins(0, 0, 0, 0)
+        self.levels_layout.setSpacing(scale(6))
+        left_col.addWidget(self.levels_container)
+
+        # Unused/hidden labels to keep the rest of the code logic happy
         self.lbl_depth = QLabel("-")
-        self.lbl_elo = QLabel("-")
         self.lbl_moves = QLabel("-")
+        self.lbl_depth.hide()
+        self.lbl_moves.hide()
+
+        info_main_layout.addWidget(left_col_widget, 0)
+
+        # Right Column (Description - borderless, nobox)
         self.txt_description = QTextEdit()
         self.txt_description.setReadOnly(True)
-        self.txt_description.setMaximumHeight(scale(160)) # Doubled size
         self.txt_description.setStyleSheet(
-            "background: rgba(0,0,0,0.03); border-radius: 6px; border: 1px solid rgba(0,0,0,0.1); padding: 6px;"
+            "background: transparent; border: none; padding: 0px; font-size: 14px; color: #2c3e50; line-height: 1.4;"
         )
-        self.info_form.addRow("Name:", self.lbl_name)
-        self.info_form.addRow("Farbe:", self.lbl_color)
-        self.info_form.addRow("Levels:", self.lbl_levels)
-        self.info_form.addRow("Analyse-Status:", self.lbl_depth)
-        self.info_form.addRow("Prio. Score Datenbank Elo:", self.lbl_elo)
-        self.info_form.addRow("Züge gesamt:", self.lbl_moves)
-        self.info_form.addRow("Beschreibung:", self.txt_description)
+        self.txt_description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        info_main_layout.addWidget(self.txt_description, 1)
+
         layout.addWidget(self.grp_info)
 
         # Gefahrenzone
-        g_danger = QGroupBox("⚠️ Gefahrenzone")
+        g_danger = QGroupBox(tr_ui("settings.danger_title", "⚠️ Gefahrenzone"))
         v_danger = QVBoxLayout(g_danger)
-        lbl_danger = QLabel("Das Zurücksetzen löscht deinen gesamten Trainingsfortschritt für dieses Repertoire.")
+        lbl_danger = QLabel(tr_ui("settings.danger_desc", "Das Zurücksetzen löscht deinen gesamten Trainingsfortschritt für dieses Repertoire."))
         lbl_danger.setWordWrap(True)
         lbl_danger.setStyleSheet("color: #888; font-size: 12px; margin-bottom: 8px;")
         v_danger.addWidget(lbl_danger)
 
-        self.btn_reset = QPushButton("🗑️ Trainingsfortschritt zurücksetzen")
+        self.btn_reset = QPushButton(tr_ui("settings.danger_btn", "🗑️ Trainingsfortschritt zurücksetzen"))
         self.btn_reset.setProperty("class", "Danger")
         self.btn_reset.clicked.connect(self.reset_repo_progress)
         v_danger.addWidget(self.btn_reset)
@@ -468,17 +505,18 @@ class SettingsDialog(QDialog):
         dots = "." * self.loading_dots
         text = f"Laden{dots}"
         
-        labels = [self.lbl_depth, self.lbl_elo, self.lbl_moves, self.lbl_levels]
+        labels = [self.lbl_depth, self.lbl_db_info, self.lbl_moves, self.lbl_levels]
         for lbl in labels:
             if not sip.isdeleted(lbl) and "Laden" in lbl.text():
                 lbl.setText(text)
+
 
     def on_repo_selected(self, repo_name):
         if not repo_name: return
         self.selected_repo = repo_name
 
         # Stop existing loader if any
-        if self.stats_loader and self.stats_loader.isRunning():
+        if hasattr(self, "stats_loader") and self.stats_loader and self.stats_loader.isRunning():
             self.stats_loader.requestInterruption()
             self.stats_loader.wait()
 
@@ -503,14 +541,42 @@ class SettingsDialog(QDialog):
             db_manager.close()
 
         self.lbl_name.setText(info.get("name", "-"))
-        self.lbl_color.setText("Weiß ♟️" if color == 'w' else "Schwarz ♟️")
-        self.txt_description.setPlainText(info.get("description", ""))
+        
+        # Color Badge Styling (Both Weiß and Schwarz have white backgrounds now)
+        if color == 'w':
+            self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♟️"))
+        else:
+            self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
+        self.lbl_color.setStyleSheet(
+            f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #111111; font-size: {scale(11)}px; font-weight: bold; border: 1px solid rgba(0,0,0,0.15);"
+        )
+            
+        self.txt_description.setPlainText(info.get("description", "-") or "-")
+        self.lbl_db_info.setText(tr_ui("settings.db_loading", "📚 Datenbank: Laden..."))
 
-        # Set placeholders
-        self.lbl_depth.setText("Laden.")
-        self.lbl_elo.setText("Laden.")
-        self.lbl_moves.setText("Laden.")
-        self.lbl_levels.setText("Laden.")
+        # Load cover image for details panel
+        from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
+        from PyQt6.QtGui import QPixmap
+        
+        cover_path = get_repertoire_cover_path(repo_name)
+        if cover_path and os.path.exists(cover_path):
+            pix = QPixmap(cover_path).scaled(scale(180), scale(180), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            self.lbl_info_cover.setPixmap(pix)
+        else:
+            logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
+            if os.path.exists(logo_path):
+                pix = QPixmap(logo_path).scaled(scale(180), scale(180), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                self.lbl_info_cover.setPixmap(pix)
+        self.lbl_info_cover.setStyleSheet("border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 8px; background: white;")
+
+        # Clear levels and set loading
+        self.level_pills = []
+        while self.levels_layout.count():
+            item = self.levels_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+        self.lbl_levels = QLabel(tr_ui("settings.loading_text", "Laden..."))
+        self.lbl_levels.setStyleSheet("color: #888; font-size: 12px;")
+        self.levels_layout.addWidget(self.lbl_levels)
 
         # Start animation and worker
         self.start_loading_animation()
@@ -524,20 +590,47 @@ class SettingsDialog(QDialog):
         
         if self.loading_timer: self.loading_timer.stop()
         
-        self.lbl_depth.setText(info.get("depth", "-"))
-
+        # Update Database Elo rating info
         elo_cat = info.get("elo", "-")
-        coverage = info.get("coverage_pct", 0)
         rating_info = get_elo_display(elo_cat)
-        self.lbl_elo.setText(f"{rating_info} [{coverage:.1f}% Abdeckung]")
+        self.lbl_db_info.setText(tr_ui("settings.db_info_format", "📚 Datenbank: {rating_info}", rating_info=rating_info))
         
-        self.lbl_moves.setText(str(info.get("moves", "0")))
-        
+        # Clear and build levels list as grid pills with white background
+        self.level_pills = []
+        while self.levels_layout.count():
+            item = self.levels_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+            
         lvl_details = info.get("level_details", [])
-        lvl_text = ""
-        for ld in lvl_details:
-            lvl_text += f"{ld['order']}: {ld['name']} ({ld['target_elo']} Elo)\n"
-        self.lbl_levels.setText(lvl_text.strip() or "-")
+        if not lvl_details:
+            lbl = QLabel("-")
+            lbl.setStyleSheet("color: #777; font-size: 13px;")
+            self.levels_layout.addWidget(lbl)
+        else:
+            for ld in lvl_details:
+                pill = QFrame()
+                # White background and border
+                pill.setStyleSheet("background: white; border: 1px solid rgba(0,0,0,0.12); border-radius: 12px;")
+                p_lay = QHBoxLayout(pill)
+                p_lay.setContentsMargins(scale(10), scale(4), scale(10), scale(4))
+                
+                # Format moves count safely (e.g. 14.115 instead of 14115, default to 0 if None)
+                moves_val = ld.get('moves')
+                if moves_val is None:
+                    moves_val = 0
+                from opening_fenix.core.translation import translator
+                if translator.current_lang == "en":
+                    moves_formatted = f"{moves_val:,}"
+                else:
+                    moves_formatted = f"{moves_val:,}".replace(",", ".")
+                p_lbl = QLabel(tr_ui("settings.level_pill_format", "Lvl {order}: {name} ({target_elo} Elo) - {moves} Züge", order=ld['order'], name=ld['name'], target_elo=ld['target_elo'], moves=moves_formatted))
+                p_lbl.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+                p_lbl.setWordWrap(True)
+                p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                p_lay.addWidget(p_lbl)
+                self.level_pills.append(pill)
+                
+            self.rearrange_levels_grid()
 
     def refresh_repertoire_cards(self):
         # Clear layout
@@ -546,17 +639,76 @@ class SettingsDialog(QDialog):
             if item.widget(): item.widget().deleteLater()
             
         repos = self.main_window.repertoire_manager.get_all_repertoires()
-        for r_name in sorted(repos):
+        active_repos = []
+        inactive_repos = []
+        for r_name in repos:
+            is_active = self.main_window.training_manager.is_repo_visible(r_name)
+            if is_active:
+                active_repos.append(r_name)
+            else:
+                inactive_repos.append(r_name)
+                
+        sorted_repos = sorted(active_repos) + sorted(inactive_repos)
+        
+        for r_name in sorted_repos:
             is_active = self.main_window.training_manager.is_repo_visible(r_name)
             card = RepertoireConfigCard(r_name, is_active, self)
             card.clicked.connect(lambda n=r_name: self.on_repo_selected(n))
             self.card_layout.addWidget(card)
+            
+        self.rearrange_cards_grid()
+
+    def rearrange_cards_grid(self):
+        # Calculate dynamic columns
+        width = self.scroll_cards.viewport().width()
+        card_min_width = scale(260) # Card fixed/minimum width
+        spacing = scale(10)
+        
+        cols = max(1, width // (card_min_width + spacing))
+        
+        cards = []
+        for i in range(self.card_layout.count()):
+            item = self.card_layout.itemAt(i)
+            if item and item.widget():
+                cards.append(item.widget())
+                
+        for card in cards:
+            self.card_layout.removeWidget(card)
+            
+        for idx, card in enumerate(cards):
+            r = idx // cols
+            c = idx % cols
+            self.card_layout.addWidget(card, r, c)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent
+        if obj == self.scroll_cards and event.type() == QEvent.Type.Resize:
+            self.rearrange_cards_grid()
+        elif hasattr(self, "levels_container") and obj == self.levels_container and event.type() == QEvent.Type.Resize:
+            self.rearrange_levels_grid()
+        return super().eventFilter(obj, event)
+
+    def rearrange_levels_grid(self):
+        if not hasattr(self, "level_pills") or not self.level_pills:
+            return
+            
+        for pill in self.level_pills:
+            self.levels_layout.removeWidget(pill)
+            
+        for pill in self.level_pills:
+            self.levels_layout.addWidget(pill)
+
+    def update_card_selection_highlights(self):
+        for i in range(self.card_layout.count()):
+            item = self.card_layout.itemAt(i)
+            if item and item.widget():
+                item.widget().update_style()
 
     def reset_repo_progress(self):
         if not hasattr(self, "selected_repo") or not self.selected_repo: return
         if QMessageBox.warning(
-            self, "Fortschritt zurücksetzen",
-            f"Trainingsfortschritt für '{self.selected_repo}' wirklich löschen?\n\nDies kann nicht rückgängig gemacht werden.",
+            self, tr_ui("settings.reset_title", "Fortschritt zurücksetzen"),
+            tr_ui("settings.reset_confirm", "Trainingsfortschritt für '{repo_name}' wirklich löschen?\n\nDies kann nicht rückgängig gemacht werden.", repo_name=self.selected_repo),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         ) == QMessageBox.StandardButton.Yes:
             original_repo = self.main_window.repertoire_manager.active_repertoire_name
@@ -564,8 +716,46 @@ class SettingsDialog(QDialog):
             self.main_window.training_manager.reset_repertoire_progress()
             if original_repo and original_repo != self.selected_repo:
                 self.main_window.repertoire_manager.set_active_repertoire(original_repo)
-            QMessageBox.information(self, "Erfolg", "Trainingsfortschritt erfolgreich zurückgesetzt.")
+            QMessageBox.information(self, tr_ui("settings.reset_success_title", "Erfolg"), tr_ui("settings.reset_success_desc", "Trainingsfortschritt erfolgreich zurückgesetzt."))
             self.main_window.refresh_repertoire_buttons()
+
+
+class ToggleSwitch(QAbstractButton):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setCheckable(True)
+        self.setFixedSize(scale(44), scale(22))
+        
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QBrush
+        from PyQt6.QtCore import QRectF, Qt
+        
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        # Draw background pill shape
+        brush_color = QColor("#111111") if self.isChecked() else QColor("#d1d1d6")
+        painter.setBrush(QBrush(brush_color))
+        painter.setPen(Qt.PenStyle.NoPen)
+        
+        rect = QRectF(0, 0, self.width(), self.height())
+        radius = self.height() / 2.0
+        painter.drawRoundedRect(rect, radius, radius)
+        
+        # Draw circle slider knob
+        knob_color = QColor("white")
+        painter.setBrush(QBrush(knob_color))
+        
+        margin = scale(2)
+        knob_size = self.height() - (margin * 2)
+        
+        if self.isChecked():
+            x = self.width() - knob_size - margin
+        else:
+            x = margin
+            
+        knob_rect = QRectF(x, margin, knob_size, knob_size)
+        painter.drawEllipse(knob_rect)
 
 
 class RepertoireConfigCard(QFrame):
@@ -581,44 +771,115 @@ class RepertoireConfigCard(QFrame):
         self.update_style()
         
     def init_ui(self):
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(scale(15), scale(12), scale(15), scale(12))
+        import os
+        from PyQt6.QtGui import QPixmap
+        from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
         
-        # Header Row
-        h_header = QHBoxLayout()
+        self.layout = QHBoxLayout(self)
+        self.layout.setContentsMargins(scale(12), scale(8), scale(12), scale(8))
+        self.layout.setSpacing(scale(15))
+        
+        # 1. Cover Image
+        self.lbl_cover = QLabel()
+        self.lbl_cover.setFixedSize(scale(48), scale(48))
+        cover_path = get_repertoire_cover_path(self.repo_name)
+        if cover_path and os.path.exists(cover_path):
+            pix = QPixmap(cover_path).scaled(scale(48), scale(48), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            self.lbl_cover.setPixmap(pix)
+        else:
+            logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
+            if os.path.exists(logo_path):
+                pix = QPixmap(logo_path).scaled(scale(48), scale(48), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+                self.lbl_cover.setPixmap(pix)
+        self.lbl_cover.setStyleSheet(f"border: 1px solid rgba(0, 0, 0, 0.1); border-radius: {scale(6)}px; background: white;")
+        self.layout.addWidget(self.lbl_cover)
+        
+        # 2. Info Container
+        self.info_widget = QWidget()
+        self.info_layout = QVBoxLayout(self.info_widget)
+        self.info_layout.setContentsMargins(0, 0, 0, 0)
+        self.info_layout.setSpacing(scale(4))
+        
         self.lbl_name = QLabel(self.repo_name)
-        self.lbl_name.setStyleSheet("font-weight: 700; font-size: 16px;")
+        self.lbl_name.setObjectName("RepoName")
+        self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(16)}px;")
+        self.info_layout.addWidget(self.lbl_name)
         
-        self.btn_status = QPushButton("Aktiv" if self.is_active else "Inaktiv")
-        self.btn_status.setCheckable(True)
-        self.btn_status.setChecked(self.is_active)
-        self.btn_status.setFixedWidth(scale(80))
-        self.btn_status.clicked.connect(self.toggle_active)
+        # Elo Row (Horizontal container for Elo Rating label + Toggle Switch Button next to it)
+        self.elo_row = QWidget()
+        self.elo_layout = QHBoxLayout(self.elo_row)
+        self.elo_layout.setContentsMargins(0, 0, 0, 0)
+        self.elo_layout.setSpacing(scale(8))
         
-        h_header.addWidget(self.lbl_name)
-        h_header.addStretch()
-        h_header.addWidget(self.btn_status)
-        self.layout.addLayout(h_header)
+        # User Elo Rating
+        self.lbl_elo = QLabel(f"🎓 {self.fetch_user_elo()} Elo")
+        self.lbl_elo.setObjectName("RepoElo")
+        self.lbl_elo.setStyleSheet(f"font-size: {scale(13)}px;")
+        self.elo_layout.addWidget(self.lbl_elo)
         
-        # Level Row (Only if active)
-        self.level_widget = QWidget()
-        l_layout = QHBoxLayout(self.level_widget)
-        l_layout.setContentsMargins(0, scale(10), 0, 0)
-        l_layout.addWidget(QLabel("Lernlevel:"))
+        # Toggle Switch Button (now next to Elo)
+        self.btn_toggle = ToggleSwitch()
+        self.btn_toggle.setChecked(self.is_active)
+        self.btn_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_toggle.clicked.connect(self.toggle_active)
+        self.elo_layout.addWidget(self.btn_toggle)
         
+        self.elo_layout.addStretch()
+        self.info_layout.addWidget(self.elo_row)
+        
+        # Level combobox (no prefix text, shown in its own row below)
         self.combo_level = NoWheelComboBox()
-        self.combo_level.setMinimumWidth(scale(250))
+        self.combo_level.setMinimumWidth(scale(150))
         self.combo_level.setFixedHeight(scale(35))
         self.populate_levels()
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
-        l_layout.addWidget(self.combo_level)
-        l_layout.addStretch()
+        self.info_layout.addWidget(self.combo_level)
         
-        self.layout.addWidget(self.level_widget)
-        self.level_widget.setVisible(self.is_active)
+        self.layout.addWidget(self.info_widget, 1)
         
-        if self.is_active: self.setMinimumHeight(scale(130))
-        else: self.setMinimumHeight(scale(55))
+        # Set visibility of widgets based on active status
+        self.lbl_elo.setVisible(self.is_active)
+        self.combo_level.setVisible(self.is_active)
+        
+        if self.is_active:
+            self.setFixedHeight(scale(130))
+        else:
+            self.setFixedHeight(scale(64))
+
+    def fetch_user_elo(self):
+        try:
+            from opening_fenix.core.db.profile import UserRepertoireSettings, TrainingData
+            from opening_fenix.core.db.database import DatabaseManager
+            from opening_fenix.core.utils import get_repertoire_db_path
+            from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
+            
+            session = self.main_window.training_manager.user_session
+            settings = session.query(UserRepertoireSettings).filter_by(repertoire_name=self.repo_name).first()
+            rating = settings.rating if settings else 800.0
+            
+            # Calculate seen factor (progress factor)
+            db_path = get_repertoire_db_path(self.repo_name)
+            db_manager = DatabaseManager(db_path)
+            rep_session = db_manager.get_session()
+            try:
+                from opening_fenix.core.db.repertoire import Move
+                levels = fetch_repertoire_levels(rep_session)
+                active_lvl = self.main_window.training_manager.get_active_level(self.repo_name)
+                
+                # Get total moves in active levels
+                total_moves_in_level = rep_session.query(Move).filter(Move.level <= active_lvl).count()
+                if total_moves_in_level == 0:
+                    return int(rating)
+                    
+                seen_moves = session.query(TrainingData).filter_by(repertoire_name=self.repo_name).count()
+                progress_factor = min(1.0, seen_moves / total_moves_in_level)
+                return int(800 + (rating - 800) * progress_factor)
+            finally:
+                rep_session.close()
+                db_manager.close()
+        except Exception:
+            pass
+        return 800
 
     def populate_levels(self):
         from opening_fenix.core.db.database import DatabaseManager
@@ -645,46 +906,71 @@ class RepertoireConfigCard(QFrame):
             db_manager.close()
 
     def toggle_active(self):
+        # Toggle internal active state
         self.is_active = not self.is_active
-        self.btn_status.setText("Aktiv" if self.is_active else "Inaktiv")
-        self.level_widget.setVisible(self.is_active)
         
-        if self.is_active: self.setMinimumHeight(scale(130))
-        else: self.setMinimumHeight(scale(55))
+        # Sync toggle switch button checked state
+        self.btn_toggle.blockSignals(True)
+        self.btn_toggle.setChecked(self.is_active)
+        self.btn_toggle.blockSignals(False)
+        
+        self.lbl_elo.setVisible(self.is_active)
+        self.combo_level.setVisible(self.is_active)
+        
+        if self.is_active:
+            self.setFixedHeight(scale(130))
+        else:
+            self.setFixedHeight(scale(64))
         
         self.main_window.training_manager.set_repo_visibility(self.repo_name, self.is_active)
         self.main_window.refresh_repertoire_buttons()
         self.update_style()
         self.clicked.emit()
+        # Refresh cards list to re-sort active ones to the top
+        self.parent_dlg.refresh_repertoire_cards()
 
     def on_level_changed(self):
         level = self.combo_level.currentData()
         if level is not None:
             self.main_window.training_manager.set_active_level(level, self.repo_name)
+            # Update Elo label with the user's current Elo
+            self.lbl_elo.setText(f"🎓 {self.fetch_user_elo()} Elo")
 
     def update_style(self):
-        # Using a more premium glassmorphic/flat hybrid look
+        is_selected = (hasattr(self.parent_dlg, "selected_repo") and self.parent_dlg.selected_repo == self.repo_name)
+        
         if self.is_active:
             bg = "white"
-            border = "2px solid #111111"
-            opacity = "1"
+            border = "2px solid #3e2723" if is_selected else "1px solid rgba(0, 0, 0, 0.12)"
         else:
-            bg = "rgba(0,0,0,0.03)" # Reverting to gray background for buttons
-            border = "1px solid rgba(0,0,0,0.1)"
-            opacity = "0.7"
+            bg = "rgba(0,0,0,0.03)"
+            border = "2px dashed #3e2723" if is_selected else "1px solid rgba(0, 0, 0, 0.08)"
             
         self.setStyleSheet(f"""
             RepertoireConfigCard {{
                 background-color: {bg};
                 border: {border};
-                border-radius: 12px;
+                border-radius: {scale(12)}px;
             }}
-            QLabel {{ 
+            QLabel#RepoName {{ 
                 color: #111111;
-                opacity: {opacity};
+                font-weight: 700;
+            }}
+            QLabel#RepoElo {{ 
+                color: #555555;
             }}
         """)
 
     def mousePressEvent(self, event):
+        # We need to make sure that clicking on the combobox or toggle button doesn't trigger card selection
+        child = self.childAt(event.position().toPoint())
+        if child and (child == self.combo_level or self.combo_level.isAncestorOf(child) or child == self.btn_toggle):
+            super().mousePressEvent(event)
+            return
+        
+        self.parent_dlg.selected_repo = self.repo_name
+        self.parent_dlg.on_repo_selected(self.repo_name)
+        self.parent_dlg.update_card_selection_highlights()
         self.clicked.emit()
         super().mousePressEvent(event)
+

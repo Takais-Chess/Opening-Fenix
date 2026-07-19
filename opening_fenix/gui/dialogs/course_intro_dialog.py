@@ -9,6 +9,7 @@ import os
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon
 from opening_fenix.core.data_tools import get_base_path
+from opening_fenix.core.translation import tr_ui
 
 class CourseIntroDialog(QDialog):
     """
@@ -22,6 +23,7 @@ class CourseIntroDialog(QDialog):
         # Premium Frameless Window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         
         self.setMinimumSize(scale(700), scale(600))
         
@@ -79,8 +81,8 @@ class CourseIntroDialog(QDialog):
         layout.addLayout(close_layout)
         
         # --- HEADER ---
-        repo_name = self.repertoire_info.get("name", "Dein neues Repertoire")
-        lbl_welcome = QLabel("Willkommen bei")
+        repo_name = self.repertoire_info.get("name", tr_ui("course_intro.default_repo_name", "Dein neues Repertoire"))
+        lbl_welcome = QLabel(tr_ui("course_intro.welcome_title", "Willkommen bei"))
         lbl_welcome.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(18)}px; font-weight: bold;")
         lbl_welcome.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
@@ -134,11 +136,11 @@ class CourseIntroDialog(QDialog):
             lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_name.setWordWrap(True)
             
-            lbl_moves = QLabel(f"♟️ {lvl['moves']} Züge")
+            lbl_moves = QLabel(tr_ui("course_intro.moves_count", "♟️ {moves} Züge").format(moves=lvl['moves']))
             lbl_moves.setStyleSheet(f"background: transparent; border: none; padding: 2px; color: {COLORS['brown_text']}; font-size: {scale(13)}px; font-weight: bold;")
             lbl_moves.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            lbl_elo = QLabel(f"🎓 Ziel-Elo: {lvl['target_elo']}")
+            lbl_elo = QLabel(tr_ui("course_intro.target_elo", "🎓 Ziel-Elo: {target_elo}").format(target_elo=lvl['target_elo']))
             lbl_elo.setStyleSheet(f"background: transparent; border: none; padding: 2px; color: {COLORS['light_text']}; font-size: {scale(12)}px;")
             lbl_elo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
@@ -160,7 +162,7 @@ class CourseIntroDialog(QDialog):
         # --- DESCRIPTION ---
         description = self.repertoire_info.get("description", "")
         if not description:
-            description = "Dieses Repertoire wurde noch nicht mit einer Beschreibung versehen.<br><br><i>Tipp: Du kannst im Creator unter 'Repertoire-Einstellungen' eine Beschreibung hinzufügen!</i>"
+            description = tr_ui("course_intro.no_description", "Dieses Repertoire wurde noch nicht mit einer Beschreibung versehen.<br><br><i>Tipp: Du kannst im Creator unter 'Repertoire-Einstellungen' eine Beschreibung hinzufügen!</i>")
         
         txt_desc = QTextBrowser()
         txt_desc.setHtml(f"<div style='font-size: {scale(10)}px; line-height: 1.6; color: {COLORS['brown_text']};'>{description}</div>")
@@ -175,7 +177,7 @@ class CourseIntroDialog(QDialog):
         layout.addWidget(txt_desc, 1)
         
         # --- BUTTON ---
-        btn_start = QPushButton("JETZT LERNEN")
+        btn_start = QPushButton(tr_ui("course_intro.btn_start", "JETZT LERNEN"))
         btn_start.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_start.setStyleSheet(f"""
             QPushButton {{

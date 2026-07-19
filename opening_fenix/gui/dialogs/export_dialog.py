@@ -5,14 +5,16 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from opening_fenix.gui.styles import get_export_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 
 
 class ExportDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
-        self.setWindowTitle("Exportieren")
+        self.setWindowTitle(tr_ui("export.window_title", "Exportieren"))
         self.setMinimumWidth(scale(350))
         self.result_data = None
 
@@ -24,20 +26,20 @@ class ExportDialog(QDialog):
         layout = QVBoxLayout(self)
         
         
-        lbl_title = QLabel("Repertoire Exportieren")
+        lbl_title = QLabel(tr_ui("export.title", "Repertoire Exportieren"))
         lbl_title.setStyleSheet(f"font-size: {scale(20)}px; font-weight: bold; color: {COLORS['brown_text']}; margin-bottom: {scale(10)}px;")
         lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         layout.addWidget(lbl_title)
 
         # Format Selection
-        g_fmt = QGroupBox("1. Format")
+        g_fmt = QGroupBox(tr_ui("export.format_group", "1. Format"))
         l_fmt = QVBoxLayout(g_fmt)
         l_fmt.setSpacing(scale(10))
         self.bg_fmt = QButtonGroup(self)
 
-        self.r_pgn = QRadioButton("PGN (Textdatei für andere Programme)")
-        self.r_db = QRadioButton("Datenbank (.db Datei für Backup)")
+        self.r_pgn = QRadioButton(tr_ui("export.format_pgn", "PGN (Textdatei für andere Programme)"))
+        self.r_db = QRadioButton(tr_ui("export.format_db", "Datenbank (.db Datei für Backup)"))
         self.r_pgn.setChecked(True)
         self.bg_fmt.addButton(self.r_pgn, 1)
         self.bg_fmt.addButton(self.r_db, 2)
@@ -50,13 +52,13 @@ class ExportDialog(QDialog):
         layout.addWidget(g_fmt)
 
         # Scope Selection
-        g_scope = QGroupBox("2. Umfang")
+        g_scope = QGroupBox(tr_ui("export.scope_group", "2. Umfang"))
         l_scope = QVBoxLayout(g_scope)
         l_scope.setSpacing(scale(10))
         self.bg_scope = QButtonGroup(self)
 
-        self.r_all = QRadioButton("Ganzes Repertoire")
-        self.r_curr = QRadioButton("Nur ab aktueller Position auf dem Brett")
+        self.r_all = QRadioButton(tr_ui("export.scope_all", "Ganzes Repertoire"))
+        self.r_curr = QRadioButton(tr_ui("export.scope_current", "Nur ab aktueller Position auf dem Brett"))
         self.r_all.setChecked(True)
         self.bg_scope.addButton(self.r_all, 1)
         self.bg_scope.addButton(self.r_curr, 2)
@@ -65,27 +67,25 @@ class ExportDialog(QDialog):
         layout.addWidget(g_scope)
 
         # Options
-        self.g_opt = QGroupBox("3. Zusätzliche PGN Optionen")
+        self.g_opt = QGroupBox(tr_ui("export.options_group", "3. Zusätzliche PGN Optionen"))
         l_opt = QFormLayout(self.g_opt)
         l_opt.setVerticalSpacing(scale(15))
 
         
         # Transpositions handling
         self.combo_transpos = QComboBox()
-        self.combo_transpos.addItems([
-            "Alle Züge anzeigen (Nicht abschneiden)",
-            "Abschneiden (Ohne Kommentar)",
-            "Abschneiden (Mit Zugfolge-Kommentar)"
-        ])
-        self.combo_transpos.setToolTip("Wie sollen Stellungen behandelt werden, die über verschiedene Zugfolgen erreicht werden?")
+        self.combo_transpos.addItem(tr_ui("export.transpos_all", "Alle Züge anzeigen (Nicht abschneiden)"))
+        self.combo_transpos.addItem(tr_ui("export.transpos_cut", "Abschneiden (Ohne Kommentar)"))
+        self.combo_transpos.addItem(tr_ui("export.transpos_cut_comment", "Abschneiden (Mit Zugfolge-Kommentar)"))
+        self.combo_transpos.setToolTip(tr_ui("export.transpos_tooltip", "Wie sollen Stellungen behandelt werden, die über verschiedene Zugfolgen erreicht werden?"))
         # Set "Abschneiden (Mit Zugfolge-Kommentar)" as default
         self.combo_transpos.setCurrentIndex(2)
-        l_opt.addRow("Transpositionen:", self.combo_transpos)
+        l_opt.addRow(tr_ui("export.transpos_label", "Transpositionen:"), self.combo_transpos)
         
         # Language Selection
         self.combo_lang = QComboBox()
-        self.combo_lang.addItem("Standard (English)", "en")
-        self.combo_lang.addItem("Deutsch", "de")
+        self.combo_lang.addItem(tr_ui("export.lang_en", "Standard (English)"), "en")
+        self.combo_lang.addItem(tr_ui("export.lang_de", "Deutsch"), "de")
         
         # Default to current profile setting if available
         if parent and hasattr(parent, 'get_notation_lang'):
@@ -93,10 +93,10 @@ class ExportDialog(QDialog):
             idx = self.combo_lang.findData(lang)
             if idx >= 0: self.combo_lang.setCurrentIndex(idx)
             
-        l_opt.addRow("Sprache:", self.combo_lang)
+        l_opt.addRow(tr_ui("export.lang_label", "Sprache:"), self.combo_lang)
         
         # Level Selection
-        self.chk_limit = QCheckBox("Nur bis Level exportieren:")
+        self.chk_limit = QCheckBox(tr_ui("export.limit_checkbox", "Nur bis Level exportieren:"))
         self.combo_level = QComboBox()
         
         # Fetch actual levels from backend
@@ -105,7 +105,7 @@ class ExportDialog(QDialog):
             self.level_data = self.backend.get_repertoire_levels()
         
         for lvl in self.level_data:
-            self.combo_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
+            self.combo_level.addItem(tr_ui("export.limit_level", "Level {num} ({name})", num=lvl['order'], name=lvl['name']), userData=lvl['order'])
             
         self.combo_level.setEnabled(False)
         self.chk_limit.toggled.connect(self.combo_level.setEnabled)
@@ -122,10 +122,10 @@ class ExportDialog(QDialog):
         # Buttons
         h_btn = QHBoxLayout()
         
-        b_cancel = QPushButton("Abbrechen")
+        b_cancel = QPushButton(tr_ui("export.btn_cancel", "Abbrechen"))
         b_cancel.clicked.connect(self.reject)
         
-        b_ok = QPushButton("💾 Exportieren")
+        b_ok = QPushButton(tr_ui("export.btn_export", "💾 Exportieren"))
         b_ok.setObjectName("PrimaryButton")
         b_ok.clicked.connect(self.on_accept)
         

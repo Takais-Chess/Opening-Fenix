@@ -106,31 +106,37 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     successful_requests_in_a_row += 1
                     
                     moves_data = data.get('moves', [])
-                    if moves_data:
-                        moves_dict = {
-                            move['uci']: {
-                                'white': move.get('white', 0),
-                                'draws': move.get('draws', 0),
-                                'black': move.get('black', 0),
-                                'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
-                            } for move in moves_data if 'uci' in move
-                        }
-                        
-                        new_data = LichessData(
-                            fen=pos.fen,
-                            elo_range=elo_category,
-                            moves_json=json.dumps(moves_dict)
-                        )
+                    # Double check to prevent race condition during long network request
+                    existing = session.query(LichessData).filter_by(fen=pos.fen, elo_range=elo_category).first()
+                    if not existing:
+                        if moves_data:
+                            moves_dict = {
+                                move['uci']: {
+                                    'white': move.get('white', 0),
+                                    'draws': move.get('draws', 0),
+                                    'black': move.get('black', 0),
+                                    'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
+                                } for move in moves_data if 'uci' in move
+                            }
+                            new_data = LichessData(
+                                fen=pos.fen,
+                                elo_range=elo_category,
+                                moves_json=json.dumps(moves_dict)
+                            )
+                        else:
+                            new_data = LichessData(
+                                fen=pos.fen,
+                                elo_range=elo_category,
+                                moves_json=json.dumps({})
+                            )
                         session.add(new_data)
-                        new_data_points_added += 1
-                    else:
-                        new_data = LichessData(
-                            fen=pos.fen,
-                            elo_range=elo_category,
-                            moves_json=json.dumps({})
-                        )
-                        session.add(new_data)
-                        new_data_points_added += 1
+                        try:
+                            with session.begin_nested():
+                                session.flush()
+                            new_data_points_added += 1
+                        except Exception:
+                            # Ignored collision (already inserted by another thread)
+                            pass
             
             except urllib.error.HTTPError as e:
                 successful_requests_in_a_row = 0

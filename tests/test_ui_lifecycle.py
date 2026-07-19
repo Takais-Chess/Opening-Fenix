@@ -107,3 +107,24 @@ def test_login_to_creator_launch(qapp, mock_user_dir):
     
     target_btn.click()
     assert login.open_creator_requested is True
+
+def test_launch_creator_without_active_repertoire(main_window, qapp):
+    """Test that CreatorWindow can be launched even if no active repertoire is selected."""
+    # 1. Switch active repertoire to None to simulate empty state
+    main_window.change_repertoire(None)
+    assert main_window.repertoire_manager.active_repertoire_name is None
+    
+    # 2. Click the creator button
+    main_window.btn_creator.click()
+    qapp.processEvents()
+    
+    # 3. Verify creator window was created, is visible, and has None active repertoire
+    assert main_window.creator_window is not None
+    assert isinstance(main_window.creator_window, CreatorWindow)
+    assert main_window.creator_window.isVisible()
+    assert main_window.creator_window.backend.active_repo_name is None
+    
+    # Cleanup
+    main_window.creator_window.close()
+    qapp.processEvents()
+

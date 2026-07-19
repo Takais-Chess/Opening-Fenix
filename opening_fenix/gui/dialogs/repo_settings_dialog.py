@@ -82,6 +82,7 @@ from opening_fenix.gui.styles import (
     get_bw_glass_style, COLORS, set_consistent_icon
 )
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 class AutoShrinkWrapLabel(QLabel):
     def __init__(self, text="", parent=None):
@@ -312,22 +313,22 @@ class MaintenanceRepoWidget(QWidget):
         layout.addWidget(self.chk, 0, 0)
         
         self.lbl_name = QLabel(name)
-        self.lbl_name.setStyleSheet("font-weight: 600; font-size: 14px; color: #34495e;")
+        self.lbl_name.setStyleSheet(f"font-weight: 600; font-size: {scale(14)}px; color: {COLORS['dark_accent']};")
         layout.addWidget(self.lbl_name, 0, 1)
         
         lbl_elo_h = QLabel("Prio Elo:")
-        lbl_elo_h.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        lbl_elo_h.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(11)}px;")
         lbl_elo_h.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(lbl_elo_h, 0, 2)
 
         self.lbl_elo_val = QLabel(current_elo)
         self.lbl_elo_val.setFixedWidth(scale(70))
-        self.lbl_elo_val.setStyleSheet("font-weight: bold; color: #2980b9; font-size: 13px; background: rgba(41, 128, 185, 0.05); border-radius: 4px; padding: 2px;")
+        self.lbl_elo_val.setStyleSheet(f"font-weight: bold; color: {COLORS['info_blue']}; font-size: {scale(13)}px; background: rgba(41, 128, 185, 0.05); border-radius: {scale(4)}px; padding: {scale(2)}px;")
         self.lbl_elo_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_elo_val, 0, 3)
         
         self.lbl_status = QLabel("Bereit")
-        self.lbl_status.setStyleSheet("color: #95a5a6; font-size: 11px; font-style: italic;")
+        self.lbl_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(11)}px; font-style: italic;")
         self.lbl_status.setFixedWidth(scale(140))
         self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.lbl_status, 0, 4)
@@ -391,11 +392,11 @@ class RepoSettingsDialog(QDialog):
         self.sidebar.currentRowChanged.connect(self.display_page)
         
         sidebar_items = [
-            ("📊 Repertoire-Daten", "Stammdaten und Level"),
-            ("🎨 Design & Audio", "Optik und Sound"),
-            ("📥 Import & Export", "Datentransfer"),
-            ("🛠️ Repertoire-Werkzeuge", "Wartung & Analyse"),
-            ("🚜 Wartung Center", "Stapelverarbeitung")
+            (tr_ui("repo_settings.sidebar_gen", "📊 Repertoire-Daten"), tr_ui("repo_settings.sidebar_gen_sub", "Stammdaten und Level")),
+            (tr_ui("repo_settings.sidebar_design", "🎨 Design & Audio"), tr_ui("repo_settings.sidebar_design_sub", "Optik und Sound")),
+            (tr_ui("repo_settings.sidebar_imex", "📥 Import & Export"), tr_ui("repo_settings.sidebar_imex_sub", "Datentransfer")),
+            (tr_ui("repo_settings.sidebar_tools", "🛠️ Repertoire-Werkzeuge"), tr_ui("repo_settings.sidebar_tools_sub", "Wartung & Analyse")),
+            (tr_ui("repo_settings.sidebar_maintenance", "🚜 Wartung Center"), tr_ui("repo_settings.sidebar_maintenance_sub", "Stapelverarbeitung"))
         ]
         
         for title, sub in sidebar_items:
@@ -440,141 +441,129 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 📋 Repertoire Identität
-        g_info = QGroupBox("📋 Repertoire Identität")
-        v_info = QVBoxLayout(g_info)
-        v_info.setSpacing(scale(15))
-        v_info.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        g_info = QGroupBox(tr_ui("repo_settings.identity_title", "📋 Repertoire Identität"))
+        f_info = QFormLayout(g_info)
+        f_info.setSpacing(scale(15))
+        f_info.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        f_info.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         
         # Name Row
-        h_name_row = QHBoxLayout()
-        lbl_name_h = AutoShrinkWrapLabel("Name:")
+        lbl_name_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_name", "Name:"))
         lbl_name_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_name_h.setFixedWidth(scale(120))
         
         self.l_n = QLabel()
         self.l_n.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50;")
         
-        btn_rename = QPushButton("✎ Umbenennen")
+        btn_rename = QPushButton(tr_ui("repo_settings.btn_rename", "✎ Umbenennen"))
         btn_rename.setFixedWidth(scale(140))
         btn_rename.clicked.connect(self.rename_repertoire)
         
-        h_name_row.addWidget(lbl_name_h)
-        h_name_row.addWidget(self.l_n)
-        h_name_row.addStretch()
-        h_name_row.addWidget(btn_rename)
-        v_info.addLayout(h_name_row)
+        h_name_field = QHBoxLayout()
+        h_name_field.addWidget(self.l_n)
+        h_name_field.addStretch()
+        h_name_field.addWidget(btn_rename)
+        f_info.addRow(lbl_name_h, h_name_field)
 
         # Description Row
-        h_desc_row = QHBoxLayout()
-        lbl_desc_h = AutoShrinkWrapLabel("Beschreibung:")
+        lbl_desc_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_description", "Beschreibung:"))
         lbl_desc_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_desc_h.setFixedWidth(scale(120))
-        lbl_desc_h.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         
         self.txt_description = QPlainTextEdit()
-        self.txt_description.setPlaceholderText("Beschreibe dein Repertoire hier...")
+        self.txt_description.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
         self.txt_description.setMinimumHeight(scale(140))
         self.txt_description.setMaximumHeight(scale(200))
         self.txt_description.textChanged.connect(self.save_description)
-        
-        h_desc_row.addWidget(lbl_desc_h)
-        h_desc_row.addWidget(self.txt_description)
-        v_info.addLayout(h_desc_row)
+        f_info.addRow(lbl_desc_h, self.txt_description)
 
         # Elo Row
-        # Elo Row
-        h_elo_row = QHBoxLayout()
-        lbl_elo_h = AutoShrinkWrapLabel("Prio score ELO:")
+        lbl_elo_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_prio_elo", "Prio score ELO:"))
         lbl_elo_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_elo_h.setFixedWidth(scale(120))
         
         self.combo_repertoire_elo = NoWheelComboBox()
-        self.combo_repertoire_elo.addItems(list(ELO_DISPLAY_MAP.values()))
+        self.combo_repertoire_elo.addItems([get_elo_display(k) for k in ELO_DISPLAY_MAP.keys()])
         self.combo_repertoire_elo.setFixedWidth(scale(200))
         self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
         
-        h_elo_row.addWidget(lbl_elo_h)
-        h_elo_row.addWidget(self.combo_repertoire_elo)
-        h_elo_row.addStretch()
-        v_info.addLayout(h_elo_row)
+        h_elo_field = QHBoxLayout()
+        h_elo_field.addWidget(self.combo_repertoire_elo)
+        h_elo_field.addStretch()
+        f_info.addRow(lbl_elo_h, h_elo_field)
         
         # Color Row
-        h_color_row = QHBoxLayout()
-        lbl_color_h = AutoShrinkWrapLabel("Deine Farbe:")
+        lbl_color_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_color", "Deine Farbe:"))
         lbl_color_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_color_h.setFixedWidth(scale(120))
         
         self.combo_repertoire_color = NoWheelComboBox()
-        self.combo_repertoire_color.addItem("Weiß", "w")
-        self.combo_repertoire_color.addItem("Schwarz", "b")
+        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_white", "Weiß"), "w")
+        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_black", "Schwarz"), "b")
         self.combo_repertoire_color.setFixedWidth(scale(140))
         self.combo_repertoire_color.currentTextChanged.connect(self.save_repertoire_color)
         
-        h_color_row.addWidget(lbl_color_h)
-        h_color_row.addWidget(self.combo_repertoire_color)
-        h_color_row.addStretch()
-        v_info.addLayout(h_color_row)
+        h_color_field = QHBoxLayout()
+        h_color_field.addWidget(self.combo_repertoire_color)
+        h_color_field.addStretch()
+        f_info.addRow(lbl_color_h, h_color_field)
         
         # Analysis Status Row
-        h_ana_row = QHBoxLayout()
-        lbl_ana_h = AutoShrinkWrapLabel("Analyse-Status:")
+        lbl_ana_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_analysis_status", "Analyse-Status:"))
         lbl_ana_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_ana_h.setFixedWidth(scale(120))
         self.lbl_ana_status = QLabel("-")
         self.lbl_ana_status.setStyleSheet("font-weight: 600; color: #2c3e50;")
-        h_ana_row.addWidget(lbl_ana_h)
-        h_ana_row.addWidget(self.lbl_ana_status)
-        h_ana_row.addStretch()
-        v_info.addLayout(h_ana_row)
+        
+        h_ana_field = QHBoxLayout()
+        h_ana_field.addWidget(self.lbl_ana_status)
+        h_ana_field.addStretch()
+        f_info.addRow(lbl_ana_h, h_ana_field)
 
         # DB Coverage Row
-        h_cov_row = QHBoxLayout()
-        lbl_cov_h = AutoShrinkWrapLabel("Prio. Score Datenbank Elo:")
+        lbl_cov_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_db_coverage", "Prio. Score Datenbank Elo:"))
         lbl_cov_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_cov_h.setFixedWidth(scale(120))
         self.lbl_db_cov = QLabel("-")
         self.lbl_db_cov.setStyleSheet("font-weight: 600; color: #2c3e50;")
-        h_cov_row.addWidget(lbl_cov_h)
-        h_cov_row.addWidget(self.lbl_db_cov)
-        h_cov_row.addStretch()
-        v_info.addLayout(h_cov_row)
+        
+        h_cov_field = QHBoxLayout()
+        h_cov_field.addWidget(self.lbl_db_cov)
+        h_cov_field.addStretch()
+        f_info.addRow(lbl_cov_h, h_cov_field)
         
         # Cover Image Row
-        h_cover_row = QHBoxLayout()
-        lbl_cover_h = AutoShrinkWrapLabel("Cover-Bild:")
+        lbl_cover_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_cover_image", "Cover-Bild:"))
         lbl_cover_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        lbl_cover_h.setFixedWidth(scale(120))
         
-        self.lbl_cover_preview = QLabel("Kein Bild")
+        self.lbl_cover_preview = QLabel(tr_ui("repo_settings.no_image", "Kein Bild"))
         self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
         self.lbl_cover_preview.setFixedSize(scale(80), scale(80))
         self.lbl_cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_cover_preview.setScaledContents(True)
         
-        btn_select_cover = QPushButton("Bild wählen...")
+        btn_select_cover = QPushButton(tr_ui("repo_settings.btn_select_image", "Bild wählen..."))
         btn_select_cover.setFixedWidth(scale(130))
         btn_select_cover.clicked.connect(self.select_cover_image)
         
-        self.btn_remove_cover = QPushButton("Entfernen")
+        self.btn_remove_cover = QPushButton(tr_ui("repo_settings.btn_remove", "Entfernen"))
         self.btn_remove_cover.setFixedWidth(scale(100))
         self.btn_remove_cover.clicked.connect(self.remove_cover_image)
         
-        h_cover_row.addWidget(lbl_cover_h)
-        h_cover_row.addWidget(self.lbl_cover_preview)
-        h_cover_row.addWidget(btn_select_cover)
-        h_cover_row.addWidget(self.btn_remove_cover)
-        h_cover_row.addStretch()
-        v_info.addLayout(h_cover_row)
+        h_cover_field = QHBoxLayout()
+        h_cover_field.addWidget(self.lbl_cover_preview)
+        h_cover_field.addWidget(btn_select_cover)
+        h_cover_field.addWidget(self.btn_remove_cover)
+        h_cover_field.addStretch()
+        f_info.addRow(lbl_cover_h, h_cover_field)
         
         layout.addWidget(g_info)
 
         # 📈 Level-Struktur
-        g_levels = QGroupBox("📈 Level-Struktur")
+        g_levels = QGroupBox(tr_ui("repo_settings.levels_title", "📈 Level-Struktur"))
         v_levels = QVBoxLayout(g_levels)
         
         self.tbl_levels = QTableWidget()
         self.tbl_levels.setColumnCount(3)
-        self.tbl_levels.setHorizontalHeaderLabels(["Lvl", "Bezeichnung", "Ziel-Elo (Trainer)"])
+        self.tbl_levels.setHorizontalHeaderLabels([
+            tr_ui("repo_settings.header_lvl", "Lvl"), 
+            tr_ui("repo_settings.header_name", "Bezeichnung"), 
+            tr_ui("repo_settings.header_target_elo", "Ziel-Elo (Trainer)")
+        ])
         self.tbl_levels.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.tbl_levels.setMinimumHeight(scale(180))
         self.tbl_levels.verticalHeader().setVisible(False)
@@ -583,7 +572,7 @@ class RepoSettingsDialog(QDialog):
         v_levels.addWidget(self.tbl_levels)
         
         h_lvl_btns = QHBoxLayout()
-        btn_add_lvl = QPushButton("➕ Level hinzufügen")
+        btn_add_lvl = QPushButton(tr_ui("repo_settings.btn_add_level", "➕ Level hinzufügen"))
         btn_add_lvl.clicked.connect(self.add_level)
         h_lvl_btns.addWidget(btn_add_lvl)
         h_lvl_btns.addStretch()
@@ -592,9 +581,9 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_levels)
 
         # ⚠️ Gefahrenzone
-        g_danger = QGroupBox("⚠️ Gefahrenzone")
+        g_danger = QGroupBox(tr_ui("repo_settings.danger_zone_title", "⚠️ Gefahrenzone"))
         v_danger = QVBoxLayout(g_danger)
-        btn_delete = QPushButton("🗑️ Repertoire unwiderruflich löschen")
+        btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_repertoire", "🗑️ Repertoire unwiderruflich löschen"))
         btn_delete.setProperty("class", "Danger")
         btn_delete.clicked.connect(self.delete_repertoire_action)
         v_danger.addWidget(btn_delete)
@@ -608,7 +597,7 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 🎨 Oberfläche
-        g_ui = QGroupBox("🎨 Oberfläche")
+        g_ui = QGroupBox(tr_ui("repo_settings.ui_title", "🎨 Oberfläche"))
         f_ui = QFormLayout(g_ui)
         self.combo_theme = QComboBox()
         for t in THEMES.keys(): self.combo_theme.addItem(t)
@@ -616,11 +605,11 @@ class RepoSettingsDialog(QDialog):
         idx = self.combo_theme.findText(current_theme)
         if idx >= 0: self.combo_theme.setCurrentIndex(idx)
         self.combo_theme.currentTextChanged.connect(self.change_board_theme)
-        f_ui.addRow("Schachbrett Design:", self.combo_theme)
+        f_ui.addRow(tr_ui("repo_settings.board_design", "Schachbrett Design:"), self.combo_theme)
         layout.addWidget(g_ui)
 
         # 🔊 Sound & Sprache
-        g_sound = QGroupBox("🔊 Sound & Sprache")
+        g_sound = QGroupBox(tr_ui("repo_settings.sound_language_title", "🔊 Sound & Sprache"))
         f_sound = QFormLayout(g_sound)
         
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
@@ -631,33 +620,33 @@ class RepoSettingsDialog(QDialog):
             vol_val = 100
         self.slider_vol.setValue(vol_val)
         self.slider_vol.valueChanged.connect(self.change_volume)
-        f_sound.addRow("Lautstärke:", self.slider_vol)
+        f_sound.addRow(tr_ui("repo_settings.volume", "Lautstärke:"), self.slider_vol)
         
         self.combo_not = QComboBox()
-        self.combo_not.addItem("Standard (English)", "en")
-        self.combo_not.addItem("Deutsch (S,D,L,K,T)", "de")
+        self.combo_not.addItem(tr_ui("repo_settings.notation_standard", "Standard (English)"), "en")
+        self.combo_not.addItem(tr_ui("repo_settings.notation_german", "Deutsch (S,D,L,K,T)"), "de")
         curr_not = self.main_window.config.get("notation_language", "en")
         idx_not = self.combo_not.findData(curr_not)
         if idx_not >= 0: self.combo_not.setCurrentIndex(idx_not)
         self.combo_not.currentIndexChanged.connect(self.change_notation_language)
-        f_sound.addRow("Notation-Sprache:", self.combo_not)
+        f_sound.addRow(tr_ui("repo_settings.notation_language", "Notation-Sprache:"), self.combo_not)
         
         layout.addWidget(g_sound)
 
         # 🧱 Tab-Konfiguration
-        g_tabs = QGroupBox("🧱 Tab-Konfiguration (Sichtbarkeit)")
+        g_tabs = QGroupBox(tr_ui("repo_settings.tab_config_title", "🧱 Tab-Konfiguration (Sichtbarkeit)"))
         v_tabs = QVBoxLayout(g_tabs)
-        lbl_tab_info = QLabel("Wähle aus, welche Tabs in der Creator-Ansicht (unten rechts) angezeigt werden sollen:")
+        lbl_tab_info = QLabel(tr_ui("repo_settings.tab_info", "Wähle aus, welche Tabs in der Creator-Ansicht (unten rechts) angezeigt werden sollen:"))
         lbl_tab_info.setWordWrap(True)
         lbl_tab_info.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 10px;")
         v_tabs.addWidget(lbl_tab_info)
         
         active_tabs = self.main_window.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
-        self.chk_details = QCheckBox("📋 Details (Position-Infos)")
-        self.chk_analysis = QCheckBox("🧠 Analyse (Engine && Lichess)")
-        self.chk_transpositions = QCheckBox("🔄 Transpositionen (Varianten-Überschneidungen)")
-        self.chk_holes = QCheckBox("🕳️ Such Modus (Repertoire-Lücken)")
-        self.chk_kontrolle = QCheckBox("✅ Kontrolle (Variation Filtering)")
+        self.chk_details = QCheckBox(tr_ui("repo_settings.tab_details", "📋 Details (Position-Infos)"))
+        self.chk_analysis = QCheckBox(tr_ui("repo_settings.tab_analysis", "🧠 Analyse (Engine && Lichess)"))
+        self.chk_transpositions = QCheckBox(tr_ui("repo_settings.tab_transpositions", "🔄 Transpositionen (Varianten-Überschneidungen)"))
+        self.chk_holes = QCheckBox(tr_ui("repo_settings.tab_search_mode", "🕳️ Such Modus (Repertoire-Lücken)"))
+        self.chk_kontrolle = QCheckBox(tr_ui("repo_settings.tab_control", "✅ Kontrolle (Variation Filtering)"))
         
         for chk, key in [(self.chk_details, "DETAILS"), (self.chk_analysis, "ANALYSIS"), 
                          (self.chk_transpositions, "TRANSPOSITIONS"),
@@ -675,17 +664,17 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 📥 Import
-        g_import = QGroupBox("📥 Import-Möglichkeiten")
+        g_import = QGroupBox(tr_ui("repo_settings.import_title", "📥 Import-Möglichkeiten"))
         v_import = QVBoxLayout(g_import)
         h_pgn = QHBoxLayout()
         
-        pgn_tip = "Importiert Züge in das gewählte Level. Existierende Kommentare werden ergänzt (nicht überschrieben). Züge, die bereits vorhanden sind, behalten ihr Level bei (keine Duplikate)."
+        pgn_tip = tr_ui("repo_settings.pgn_tip", "Importiert Züge in das gewählte Level. Existierende Kommentare werden ergänzt (nicht überschrieben). Züge, die bereits vorhanden sind, behalten ihr Level bei (keine Duplikate).")
         
-        btn_paste = QPushButton("📋 PGN Text einfügen")
+        btn_paste = QPushButton(tr_ui("repo_settings.btn_paste_pgn", "📋 PGN Text einfügen"))
         btn_paste.setToolTip(pgn_tip)
         btn_paste.clicked.connect(self.paste_pgn_dialog)
         
-        btn_file = QPushButton("📄 PGN Datei auswählen")
+        btn_file = QPushButton(tr_ui("repo_settings.btn_select_pgn_file", "📄 PGN Datei auswählen"))
         btn_file.setToolTip(pgn_tip)
         btn_file.clicked.connect(self.import_pgn_file_dialog)
         
@@ -695,15 +684,15 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_import)
 
         # 📤 Export && Management
-        g_export = QGroupBox("📤 Export && Management")
+        g_export = QGroupBox(tr_ui("repo_settings.export_management_title", "📤 Export && Management"))
         v_export = QVBoxLayout(g_export)
         
         h_manage = QHBoxLayout()
-        btn_simple_export = QPushButton("📤 Export (PGN/DB)")
+        btn_simple_export = QPushButton(tr_ui("repo_settings.btn_export_simple", "📤 Export (PGN/DB)"))
         btn_simple_export.clicked.connect(self.export_repertoire)
         
-        btn_copy_repo = QPushButton("👯 Gesamten Kurs kopieren")
-        btn_copy_repo.setToolTip("Erstellt eine vollständige 1:1 Kopie dieses Repertoires unter einem neuen Namen.")
+        btn_copy_repo = QPushButton(tr_ui("repo_settings.btn_copy_course", "👯 Gesamten Kurs kopieren"))
+        btn_copy_repo.setToolTip(tr_ui("repo_settings.copy_course_tip", "Erstellt eine vollständige 1:1 Kopie dieses Repertoires unter einem neuen Namen."))
         btn_copy_repo.clicked.connect(self.copy_repertoire_action)
         
         h_manage.addWidget(btn_simple_export)
@@ -711,8 +700,8 @@ class RepoSettingsDialog(QDialog):
         v_export.addLayout(h_manage)
         
         v_export.addSpacing(scale(15))
-        btn_full_export = QPushButton("🚀 Gesamter Kurs für Teilen vorbereiten")
-        btn_full_export.setToolTip("Exportiert jedes Level als einzelne PGN-Datei, erstellt eine README-Übersicht und öffnet den Ordner zur Weitergabe.")
+        btn_full_export = QPushButton(tr_ui("repo_settings.btn_prepare_share", "🚀 Gesamter Kurs für Teilen vorbereiten"))
+        btn_full_export.setToolTip(tr_ui("repo_settings.prepare_share_tip", "Exportiert jedes Level als einzelne PGN-Datei, erstellt eine README-Übersicht und öffnet den Ordner zur Weitergabe."))
         btn_full_export.setProperty("class", "Primary")
         btn_full_export.setMinimumHeight(scale(50))
         btn_full_export.clicked.connect(self.prepare_full_course_export)
@@ -727,21 +716,21 @@ class RepoSettingsDialog(QDialog):
         layout.setSpacing(scale(20))
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
-        # 1. 🔍 Diagnose && Instandhaltung
-        g_diag = QGroupBox("🔍 Diagnose && Instandhaltung")
+        # 1. 🔍 Diagnose & Instandhaltung
+        g_diag = QGroupBox(tr_ui("repo_settings.tools_title", "🔍 Diagnose & Instandhaltung"))
         v_diag = QVBoxLayout(g_diag)
-        btn_diag = QPushButton("🔎 Datenbank-Diagnose && Reparatur")
+        btn_diag = QPushButton(tr_ui("repo_settings.btn_diag", "🔎 Datenbank-Diagnose & Reparatur"))
         btn_diag.clicked.connect(self.run_structure_repair)
-        btn_names = QPushButton("🏷️ Variantennamen neu berechnen")
+        btn_names = QPushButton(tr_ui("repo_settings.btn_names", "🏷️ Variantennamen neu berechnen"))
         btn_names.clicked.connect(self.run_variation_name_repair)
         
-        self.btn_wipe_lichess = QPushButton("🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [...]")
+        self.btn_wipe_lichess = QPushButton(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [...]"))
         self.btn_wipe_lichess.clicked.connect(self.wipe_other_lichess_data_action)
         self.btn_wipe_lichess.setStyleSheet("color: #e67e22; font-weight: 500;")
 
-        btn_cleanup_lichess = QPushButton("🧹 Verwaiste Lichess-Daten bereinigen")
+        btn_cleanup_lichess = QPushButton(tr_ui("repo_settings.btn_cleanup_lichess", "🧹 Verwaiste Lichess-Daten bereinigen"))
         btn_cleanup_lichess.clicked.connect(self.run_lichess_orphan_cleanup)
-        btn_cleanup_lichess.setToolTip("Entfernt Lichess-Explorer-Daten für Stellungen, die nicht mehr in deinem Repertoire existieren.")
+        btn_cleanup_lichess.setToolTip(tr_ui("repo_settings.cleanup_lichess_tooltip", "Entfernt Lichess-Explorer-Daten für Stellungen, die nicht mehr in deinem Repertoire existieren."))
 
         v_diag.addWidget(btn_diag)
         v_diag.addWidget(btn_names)
@@ -750,18 +739,18 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_diag)
 
         # 2. 🧹 Kommentare Bereinigen
-        g_clean = QGroupBox("🧹 Kommentare Bereinigen")
+        g_clean = QGroupBox(tr_ui("repo_settings.comments_cleanup_title", "🧹 Kommentare Bereinigen"))
         v_clean = QVBoxLayout(g_clean)
-        btn_dedupe = QPushButton("🔄 Doppelte Texte in Kommentaren entfernen")
+        btn_dedupe = QPushButton(tr_ui("repo_settings.btn_dedupe", "🔄 Doppelte Texte in Kommentaren entfernen"))
         btn_dedupe.clicked.connect(self.clean_comments)
-        btn_brackets = QPushButton("❌ Text in [eckigen Klammern] löschen")
+        btn_brackets = QPushButton(tr_ui("repo_settings.btn_brackets", "❌ Text in [eckigen Klammern] löschen"))
         btn_brackets.clicked.connect(self.clean_brackets)
         v_clean.addWidget(btn_dedupe)
         v_clean.addWidget(btn_brackets)
         layout.addWidget(g_clean)
 
         # 3. 🤖 Engine Analyse
-        g_engine = QGroupBox("🤖 Alternativ gute Züge berechnen mit Engine Analyse des gesamten Reperotires")
+        g_engine = QGroupBox(tr_ui("repo_settings.engine_scan_title", "🤖 Alternativ gute Züge berechnen mit Engine Analyse des gesamten Repertoires"))
         f_engine = QFormLayout(g_engine)
         self.txt_engine_path = QLineEdit()
         self.txt_engine_path.setText(self.main_window.config.get("engine_path", ""))
@@ -769,7 +758,7 @@ class RepoSettingsDialog(QDialog):
         btn_browse.setFixedWidth(scale(30))
         btn_browse.clicked.connect(self.browse_engine_path)
         h_path = QHBoxLayout(); h_path.addWidget(self.txt_engine_path); h_path.addWidget(btn_browse)
-        f_engine.addRow("Engine Pfad:", h_path)
+        f_engine.addRow(tr_ui("repo_settings.engine_path_label", "Engine Pfad:"), h_path)
         
         # Defaults: 18 depth and 25% CPU Threads
         self.s_d = NoWheelSpinBox(); self.s_d.setRange(10, 50); self.s_d.setValue(18)
@@ -778,20 +767,20 @@ class RepoSettingsDialog(QDialog):
         for i in range(1, cpu_count + 1): self.c_threads.addItem(str(i))
         default_threads = max(1, int(cpu_count * 0.25))
         self.c_threads.setCurrentText(str(default_threads))
-        f_engine.addRow("Suchtiefe:", self.s_d)
-        f_engine.addRow("Threads:", self.c_threads)
+        f_engine.addRow(tr_ui("repo_settings.search_depth_label", "Suchtiefe:"), self.s_d)
+        f_engine.addRow(tr_ui("repo_settings.threads_label", "Threads:"), self.c_threads)
         
-        btn_start_eng = QPushButton("🚀 Engine-Scan starten")
+        btn_start_eng = QPushButton(tr_ui("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
         btn_start_eng.clicked.connect(self.start_analysis)
         f_engine.addRow("", btn_start_eng)
-        self.pb_eng = QProgressBar(); self.l_eng_status = QLabel("Bereit")
+        self.pb_eng = QProgressBar(); self.l_eng_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
         v_eng_prog = QVBoxLayout()
         v_eng_prog.addWidget(self.l_eng_status); v_eng_prog.addWidget(self.pb_eng)
-        f_engine.addRow("Fortschritt:", v_eng_prog)
+        f_engine.addRow(tr_ui("repo_settings.progress_label", "Fortschritt:"), v_eng_prog)
         layout.addWidget(g_engine)
 
         # 4. 🌐 Lichess Datenbank Daten herunterladen und Prio scores berechnen lassen
-        g_lichess = QGroupBox("🌐 Lichess Datenbank Daten herunterladen und Prio scores berechnen lassen")
+        g_lichess = QGroupBox(tr_ui("repo_settings.lichess_scan_title", "🌐 Lichess Datenbank Daten herunterladen und Prio scores berechnen lassen"))
         v_lich = QVBoxLayout(g_lichess)
         f_token = QFormLayout()
         
@@ -808,47 +797,47 @@ class RepoSettingsDialog(QDialog):
         
         h_token_row.addWidget(self.txt_lichess_token)
         h_token_row.addWidget(btn_toggle_token)
-        f_token.addRow("API-Token:", h_token_row)
+        f_token.addRow(tr_ui("repo_settings.api_token_label", "API-Token:"), h_token_row)
         
         # Elo Selection (Read-only / display based on settings)
-        self.lbl_lichess_target_elo = QLabel("Ziel-Elo: -")
+        self.lbl_lichess_target_elo = QLabel(tr_ui("repo_settings.target_elo_label", "Ziel-Elo: {elo}", elo="-"))
         self.lbl_lichess_target_elo.setStyleSheet("font-weight: bold; color: #2980b9; background: rgba(41, 128, 185, 0.1); border-radius: 4px; padding: 5px;")
-        f_token.addRow("Import-Fokus:", self.lbl_lichess_target_elo)
+        f_token.addRow(tr_ui("repo_settings.import_focus_label", "Import-Fokus:"), self.lbl_lichess_target_elo)
         v_lich.addLayout(f_token)
         
         h_fetch = QHBoxLayout()
-        btn_fetch = QPushButton("📡 Daten laden && Scores berechnen")
+        btn_fetch = QPushButton(tr_ui("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
         btn_fetch.clicked.connect(self.start_fetch)
-        btn_delete_l = QPushButton("🗑️ Daten für diese Elo löschen")
+        btn_delete_l = QPushButton(tr_ui("repo_settings.btn_delete_lichess", "🗑️ Daten für diese Elo löschen"))
         btn_delete_l.clicked.connect(self.delete_lichess_action)
         h_fetch.addWidget(btn_fetch); h_fetch.addWidget(btn_delete_l)
         v_lich.addLayout(h_fetch)
-        self.pb_lich = QProgressBar(); self.l_lich_status = QLabel("Warte auf Start...")
+        self.pb_lich = QProgressBar(); self.l_lich_status = QLabel(tr_ui("repo_settings.status_waiting", "Warte auf Start..."))
         v_lich.addWidget(self.l_lich_status); v_lich.addWidget(self.pb_lich)
         layout.addWidget(g_lichess)
 
         # 5. ⚡ Prio basiertes Leveling
-        g_prio = QGroupBox("⚡ Alle Züge basierend auf dem Prio Score auf ein Level niedrigere Level setzten")
+        g_prio = QGroupBox(tr_ui("repo_settings.prio_leveling_title", "⚡ Alle Züge basierend auf dem Prio Score auf ein Level niedrigere Level setzen"))
         v_prio = QVBoxLayout(g_prio)
         f_prio = QFormLayout()
         self.spin_prio_threshold = QSpinBox(); self.spin_prio_threshold.setRange(1, 100); self.spin_prio_threshold.setSuffix(" %"); self.spin_prio_threshold.setValue(10)
         self.combo_prio_target = QComboBox()
-        f_prio.addRow("Schwellenwert (Prio > X):", self.spin_prio_threshold)
-        f_prio.addRow("Ziel-Level:", self.combo_prio_target)
+        f_prio.addRow(tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio > X):"), self.spin_prio_threshold)
+        f_prio.addRow(tr_ui("repo_settings.target_level_label", "Ziel-Level:"), self.combo_prio_target)
         v_prio.addLayout(f_prio)
         h_prio_btns = QHBoxLayout()
-        self.btn_prio_preview = QPushButton("🔍 Auswirkung prüfen"); self.btn_prio_preview.clicked.connect(self.preview_priority_level)
-        self.btn_prio_apply = QPushButton("🚀 Level anpassen"); self.btn_prio_apply.setProperty("class", "Primary"); self.btn_prio_apply.clicked.connect(self.apply_priority_level)
+        self.btn_prio_preview = QPushButton(tr_ui("repo_settings.btn_prio_preview", "🔍 Auswirkung prüfen")); self.btn_prio_preview.clicked.connect(self.preview_priority_level)
+        self.btn_prio_apply = QPushButton(tr_ui("repo_settings.btn_prio_apply", "🚀 Level anpassen")); self.btn_prio_apply.setProperty("class", "Primary"); self.btn_prio_apply.clicked.connect(self.apply_priority_level)
         h_prio_btns.addWidget(self.btn_prio_preview); h_prio_btns.addWidget(self.btn_prio_apply)
         v_prio.addLayout(h_prio_btns)
         layout.addWidget(g_prio)
 
         # 6. 🏗️ Globale Zuweisungen
-        g_global = QGroupBox("🏗️ Alle Züge auf ein gewisses Level setzen")
+        g_global = QGroupBox(tr_ui("repo_settings.global_leveling_title", "🏗️ Alle Züge auf ein gewisses Level setzen"))
         v_global = QVBoxLayout(g_global)
         h_global = QHBoxLayout()
         self.combo_global_level = QComboBox()
-        btn_global_apply = QPushButton("Alle Züge auf dieses Level setzen")
+        btn_global_apply = QPushButton(tr_ui("repo_settings.btn_global_apply", "Alle Züge auf dieses Level setzen"))
         btn_global_apply.clicked.connect(self.global_move_all_level)
         h_global.addWidget(self.combo_global_level); h_global.addWidget(btn_global_apply)
         v_global.addLayout(h_global)
@@ -862,20 +851,25 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 🚜 Wartungs-Center (Batch)
-        g_main = QGroupBox("🚜 Wartungs-Center (Batch)")
+        g_main = QGroupBox(tr_ui("repo_settings.maintenance_title", "🚜 Wartungs-Center (Batch)"))
         v_main = QVBoxLayout(g_main)
         v_main.setSpacing(scale(15))
         v_main.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
 
         # --- Section 1: Repertoires ---
-        lbl_batch = QLabel("1. Wähle Repertoires aus, die verarbeitet werden sollen:")
+        lbl_batch = QLabel(tr_ui("repo_settings.maintenance_step1", "1. Wähle Repertoires aus, die verarbeitet werden sollen:"))
         lbl_batch.setStyleSheet("font-weight: bold; color: #444;")
         v_main.addWidget(lbl_batch)
         
         self.main_table = QTableWidget()
         self.main_table.setColumnCount(6)
         self.main_table.setHorizontalHeaderLabels([
-            "", "Repertoire Name", "Prio Elo", "Analyse-Status", "Datenbank-Coverage", "Fortschritt"
+            tr_ui("repo_settings.col_select", ""),
+            tr_ui("repo_settings.col_name", "Repertoire Name"),
+            tr_ui("repo_settings.col_prio_elo", "Prio Elo"),
+            tr_ui("repo_settings.col_status", "Analyse-Status"),
+            tr_ui("repo_settings.col_coverage", "Datenbank-Coverage"),
+            tr_ui("repo_settings.col_progress", "Fortschritt")
         ])
         self.main_table.verticalHeader().setVisible(False)
         self.main_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
@@ -891,8 +885,8 @@ class RepoSettingsDialog(QDialog):
         v_main.addWidget(self.main_table)
         
         h_ctrl = QHBoxLayout()
-        btn_all = QPushButton("Alle")
-        btn_none = QPushButton("Keine")
+        btn_all = QPushButton(tr_ui("repo_settings.btn_all", "Alle"))
+        btn_none = QPushButton(tr_ui("repo_settings.btn_none", "Keine"))
         btn_all.clicked.connect(lambda: self._select_all_maintenance_repos(True))
         btn_none.clicked.connect(lambda: self._select_all_maintenance_repos(False))
         h_ctrl.addWidget(btn_all); h_ctrl.addWidget(btn_none); h_ctrl.addStretch()
@@ -904,18 +898,18 @@ class RepoSettingsDialog(QDialog):
         v_main.addWidget(line)
         v_main.addSpacing(scale(10))
 
-        lbl_tasks = QLabel("2. Aufgaben auswählen && konfigurieren:")
+        lbl_tasks = QLabel(tr_ui("repo_settings.maintenance_step2", "2. Aufgaben auswählen & konfigurieren:"))
         lbl_tasks.setStyleSheet("font-weight: bold; color: #444;")
         v_main.addWidget(lbl_tasks)
 
         f_conf = QFormLayout()
-        self.chk_m_engine = QCheckBox("Engine Analyse (Alternativen)")
+        self.chk_m_engine = QCheckBox(tr_ui("repo_settings.task_engine", "Engine Analyse (Alternativen)"))
         self.chk_m_engine.setChecked(True)
-        self.chk_m_lichess = QCheckBox("Lichess Import (Trend-Daten)")
+        self.chk_m_lichess = QCheckBox(tr_ui("repo_settings.task_lichess", "Lichess Import (Trend-Daten)"))
         self.chk_m_lichess.setChecked(True)
-        self.chk_m_cleanup_lichess = QCheckBox("Verwaiste Lichess-Daten bereinigen")
+        self.chk_m_cleanup_lichess = QCheckBox(tr_ui("repo_settings.task_cleanup_lichess", "Verwaiste Lichess-Daten bereinigen"))
         self.chk_m_cleanup_lichess.setChecked(True)
-        self.chk_m_stats = QCheckBox("Statistiken && Prioritäten berechnen")
+        self.chk_m_stats = QCheckBox(tr_ui("repo_settings.task_stats", "Statistiken & Prioritäten berechnen"))
         self.chk_m_stats.setChecked(True)
         
         v_tasks = QVBoxLayout()
@@ -923,7 +917,7 @@ class RepoSettingsDialog(QDialog):
         v_tasks.addWidget(self.chk_m_lichess)
         v_tasks.addWidget(self.chk_m_cleanup_lichess)
         v_tasks.addWidget(self.chk_m_stats)
-        f_conf.addRow("Aufgaben:", v_tasks)
+        f_conf.addRow(tr_ui("repo_settings.tasks_label", "Aufgaben:"), v_tasks)
         
         self.spin_m_depth = QSpinBox()
         self.spin_m_depth.setRange(10, 40)
@@ -932,23 +926,23 @@ class RepoSettingsDialog(QDialog):
         except (ValueError, TypeError):
             depth_val = 20
         self.spin_m_depth.setValue(depth_val)
-        f_conf.addRow("Engine Tiefe:", self.spin_m_depth)
+        f_conf.addRow(tr_ui("repo_settings.engine_depth_label", "Engine Tiefe:"), self.spin_m_depth)
         
         self.spin_m_threads = QSpinBox()
         self.spin_m_threads.setRange(1, multiprocessing.cpu_count())
         self.spin_m_threads.setValue(max(1, multiprocessing.cpu_count() - 1))
-        f_conf.addRow("Engine Threads:", self.spin_m_threads)
+        f_conf.addRow(tr_ui("repo_settings.engine_threads_label", "Engine Threads:"), self.spin_m_threads)
         v_main.addLayout(f_conf)
         
         # --- Section 3: Execution ---
         v_main.addSpacing(scale(15))
-        self.btn_m_start = QPushButton("🚀 Wartungs-Batch starten")
+        self.btn_m_start = QPushButton(tr_ui("repo_settings.btn_start_batch", "🚀 Wartungs-Batch starten"))
         self.btn_m_start.setProperty("class", "Primary")
         self.btn_m_start.setMinimumHeight(scale(50))
         self.btn_m_start.clicked.connect(self.start_centralized_maintenance)
         v_main.addWidget(self.btn_m_start)
         
-        self.pb_m_overall = QProgressBar(); self.lbl_m_overall = QLabel("Bereit")
+        self.pb_m_overall = QProgressBar(); self.lbl_m_overall = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
         self.pb_m_overall.setAlignment(Qt.AlignmentFlag.AlignCenter)
         v_main.addWidget(self.lbl_m_overall); v_main.addWidget(self.pb_m_overall)
         

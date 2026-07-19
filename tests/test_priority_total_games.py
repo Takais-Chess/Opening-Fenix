@@ -147,3 +147,68 @@ def test_priority_total_games_logic(mock_user_dir):
     
     session.close()
     db.close()
+
+def test_priority_islands_have_zero_priority(mock_user_dir):
+    repo_name = "test_priority_islands"
+    db_path = get_repertoire_db_path(repo_name)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    # 1. Setup metadata (color = white)
+    session.add(Metadata(key="color", value="w"))
+    
+    # 2. Setup positions
+    start_board = chess.Board()
+    start_fen = " ".join(start_board.fen().split(" ")[:4])
+    
+    e4_board = chess.Board()
+    e4_board.push_san("e4")
+    e4_fen = " ".join(e4_board.fen().split(" ")[:4])
+    
+    p_start = Position(fen=start_fen)
+    p_e4 = Position(fen=e4_fen)
+    
+    # Island position (completely disconnected from start position)
+    island_board = chess.Board("r1bqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    # Make a move to get a distinct FEN
+    island_board.push_san("d4")
+    island_fen = " ".join(island_board.fen().split(" ")[:4])
+    island_to_board = island_board.copy()
+    island_to_board.push_san("d5")
+    island_to_fen = " ".join(island_to_board.fen().split(" ")[:4])
+    
+    p_island_from = Position(fen=island_fen)
+    p_island_to = Position(fen=island_to_fen)
+    
+    session.add_all([p_start, p_e4, p_island_from, p_island_to])
+    session.flush()
+    
+    # Moves
+    m_e4 = Move(from_position_id=p_start.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_island_d5 = Move(from_position_id=p_island_from.id, to_position_id=p_island_to.id, uci="d7d5", san="d5")
+    session.add_all([m_e4, m_island_d5])
+    session.flush()
+    
+    # Repertoire moves
+    rm_e4 = RepertoireMove(move_id=m_e4.id, is_active=True)
+    rm_island_d5 = RepertoireMove(move_id=m_island_d5.id, is_active=True)
+    session.add_all([rm_e4, rm_island_d5])
+    session.commit()
+    
+    # 3. Calculate priority scores
+    success, msg = calculate_priority_scores(repo_name, "high")
+    assert success, msg
+    
+    session.expire_all()
+    
+    # Start -> e4 move should have priority score 1.0 (100%)
+    db_m_e4 = session.get(Move, m_e4.id)
+    assert db_m_e4.priority_score == 1.0
+    
+    # Island move should have priority score 0.0 (0%) because it's an unreachable island
+    db_m_island_d5 = session.get(Move, m_island_d5.id)
+    assert db_m_island_d5.priority_score == 0.0
+    
+    session.close()
+    db.close()
+

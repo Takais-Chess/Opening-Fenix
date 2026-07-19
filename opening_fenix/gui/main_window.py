@@ -15,7 +15,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QTabWidget, QFormLayout,
     QLineEdit, QFileDialog, QListWidget, QProgressBar, 
     QComboBox, QSpinBox, QGroupBox, QFrame, QButtonGroup,
-    QGridLayout, QListWidgetItem, QSlider, QScroller, QMenu, QSizePolicy, QSplitter,
+    QGridLayout, QListWidgetItem, QSlider, QScroller, QScrollerProperties, QMenu, QSizePolicy, QSplitter,
     QTabBar, QStackedWidget, QGraphicsDropShadowEffect
 )
 from PyQt6.QtGui import (
@@ -45,6 +45,7 @@ from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.logger import logger
 from opening_fenix.core.db.database import DatabaseCorruptedException
+from opening_fenix.core.translation import tr_ui
 
 
 class MainWindow(QMainWindow):
@@ -52,7 +53,7 @@ class MainWindow(QMainWindow):
     def __init__(self, profile_name):
         super().__init__()
         self.profile_name = profile_name
-        self.setWindowTitle(f"Opening Fenix - {profile_name}")
+        self.setWindowTitle(tr_ui("main_window.window_title", "Opening Fenix - {profile}", profile=profile_name))
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         
         set_consistent_icon(self)
@@ -63,6 +64,11 @@ class MainWindow(QMainWindow):
         
         self.repertoire_manager = RepertoireManager(profile_name=profile_name)
         self.training_manager = TrainingManager(profile_name=profile_name, repertoire_manager=self.repertoire_manager)
+        
+        # Load profile-specific language setting before initializing UI
+        profile_lang = self.training_manager.get_setting("ui_language") or "de"
+        from opening_fenix.core.translation import translator
+        translator.load_language(profile_lang)
         
         self.current_move_obj = None
         self._preloaded_challenge = None
@@ -86,7 +92,8 @@ class MainWindow(QMainWindow):
         self.stats_update_timer.timeout.connect(self._do_update_stats_display)
 
         self.init_ui()
-        self.init_sounds()
+        # Lazy load sounds to ensure audio system is initialized within the event loop
+        QTimer.singleShot(200, self.init_sounds)
         self.init_animation()
         self.previous_fen_for_animation = None
         
@@ -145,58 +152,56 @@ class MainWindow(QMainWindow):
         self.tour = GuidedTourOverlay(self)
         
         # Step 1: Welcome (Moved to first)
-        self.tour.add_step(None, "Willkommen bei Opening Fenix!", 
-            "Lass uns kurz die wichtigsten Funktionen durchgehen, damit du direkt mit deinem Training starten kannst.")
+        self.tour.add_step(None, tr_ui("tour.step1_title", "Willkommen bei Opening Fenix!"), 
+            tr_ui("tour.step1_text", "Lass uns kurz die wichtigsten Funktionen durchgehen, damit du direkt mit deinem Training starten kannst."))
 
         # Step 2: Trainer Overview (NEW / Moved to second)
-        self.tour.add_step(None, "Der Trainer", 
-            "Das Programm besteht aus 2 Modulen. Dem Trainer und dem Creator. \n"
-            "Mit dem Trainer übst du deine Züge aus den Reperotires und lernst neue. Zum Creator wird später noch etwas gesagt.")
+        self.tour.add_step(None, tr_ui("tour.step2_title", "Der Trainer"), 
+            tr_ui("tour.step2_text", "Das Programm besteht aus 2 Modulen. Dem Trainer und dem Creator. \nMit dem Trainer übst du deine Züge aus den Reperotires und lernst neue. Zum Creator wird später noch etwas gesagt."))
             
         # Step 3: Repertoires
-        self.tour.add_step(self.repo_scroll, "Deine Repertoires", 
-            "Hier oben findest du alle Eröffnungen, die du für dieses Profil gewählt hast. Du kannst jederzeit zwischen ihnen wechseln.")
+        self.tour.add_step(self.repo_scroll, tr_ui("tour.step3_title", "Deine Repertoires"), 
+            tr_ui("tour.step3_text", "Hier oben findest du alle Eröffnungen, die du für dieses Profil gewählt hast. Du kannst jederzeit zwischen ihnen wechseln."))
             
         # Step 4: Elo
-        self.tour.add_step(self.lbl_elo, "Dein Fortschritt (Elo)", 
-            "Diese Elo zeigt dir, wie gut du das Repertoire bereits beherrschst. Sie wird steigen, je mehr du das Repertoire lernst und übst.")
+        self.tour.add_step(self.lbl_elo, tr_ui("tour.step4_title", "Dein Fortschritt (Elo)"), 
+            tr_ui("tour.step4_text", "Diese Elo zeigt dir, wie gut du das Repertoire bereits beherrschst. Sie wird steigen, je mehr du das Repertoire lernst und übst."))
             
         # Step 5: Training Hub
-        self.tour.add_step(self.side_panel, "Das Training Center", 
-            "Hier schlägt das Herz der App. Die Grafik zeigt dir, wie viele Züge du bereits gelernt hast und wie viele zur Wiederholung fällig sind.")
+        self.tour.add_step(self.side_panel, tr_ui("tour.step5_title", "Das Training Center"), 
+            tr_ui("tour.step5_text", "Hier schlägt das Herz der App. Die Grafik zeigt dir, wie viele Züge du bereits gelernt hast und wie viele zur Wiederholung fällig sind."))
 
         # Step 6: Notation
-        self.tour.add_step(self.txt_notation, "Notation & Details", 
-            "Hier siehst du den Partieverlauf und deine Kommentare. Ein Klick auf einen Zug bringt dich an die entsprechende Stelle im Creator.")
+        self.tour.add_step(self.txt_notation, tr_ui("tour.step6_title", "Notation & Details"), 
+            tr_ui("tour.step6_text", "Hier siehst du den Partieverlauf und deine Kommentare. Ein Klick auf einen Zug bringt dich an die entsprechende Stelle im Creator."))
             
         # Step 7: Starten Button (Updated Text)
-        self.tour.add_step(self.btn_smart, "Training Starten", 
-            "Klicke hier, um mit dem Training zu starten und zur nächsten Variante zu gehen")
+        self.tour.add_step(self.btn_smart, tr_ui("tour.step7_title", "Training Starten"), 
+            tr_ui("tour.step7_text", "Klicke hier, um mit dem Training zu starten und zur nächsten Variante zu gehen"))
             
         # Step 8: Learn New
-        self.tour.add_step(self.btn_learn_new, "Neues lernen (🧠)", 
-            "Aktiviere das Gehirn-Icon, um gezielt neue Züge aus deinem Repertoire zu lernen, die du noch nicht kennst.")
+        self.tour.add_step(self.btn_learn_new, tr_ui("tour.step8_title", "Neues lernen (🧠)"), 
+            tr_ui("tour.step8_text", "Aktiviere das Gehirn-Icon, um gezielt neue Züge aus deinem Repertoire zu lernen, die du noch nicht kennst."))
 
         # Step 9: Auto-Weiter (Updated Text)
-        self.tour.add_step(self.btn_auto_continue, "Auto-Weiter (⚡)", 
-            "Ist dieser Button aktiv, springt die App am Ende einer Variante automatisch zur nächsten fälligen Aufgabe. "
-            "Ideal falls man Züge wiederholt und schon vertraut ist mit der Eröffnung")
+        self.tour.add_step(self.btn_auto_continue, tr_ui("tour.step9_title", "Auto-Weiter (⚡)"), 
+            tr_ui("tour.step9_text", "Ist dieser Button aktiv, springt die App am Ende einer Variante automatisch zur nächsten fälligen Aufgabe. Ideal falls man Züge wiederholt und schon vertraut ist mit der Eröffnung"))
 
         # Step 10: Lichess (Updated Text)
-        self.tour.add_step(self.btn_lichess, "Lichess Analyse", 
-            "Du verstehst nicht warum dein Zug falsch ist? Mit dem Lichess-Button kannst du die aktuelle Position direkt in der Lichess-Analyse mit der Engine prüfen.")
+        self.tour.add_step(self.btn_lichess, tr_ui("tour.step10_title", "Lichess Analyse"), 
+            tr_ui("tour.step10_text", "Du verstehst nicht warum dein Zug falsch ist? Mit dem Lichess-Button kannst du die aktuelle Position direkt in der Lichess-Analyse mit der Engine prüfen."))
             
         # Step 11: Creator
-        self.tour.add_step(self.btn_creator, "Repertoire Creator (✏️)", 
-            "Möchtest du das gesamte Repertoire durchstöbern oder das Repertoire bearbeiten? Mit dem Creator-Button (✏️) springst du direkt in den Editor.")
+        self.tour.add_step(self.btn_creator, tr_ui("tour.step11_title", "Repertoire Creator (✏️)"), 
+            tr_ui("tour.step11_text", "Möchtest du das gesamte Repertoire durchstöbern oder das Repertoire bearbeiten? Mit dem Creator-Button (✏️) springst du direkt in den Editor."))
             
         # Step 12: Filter (Updated Text)
-        self.tour.add_step(self.btn_filter, "Fokussiertes Training", 
-            "Nutze den Variantenfilter oben, um nur bestimmte Varianten zu trainieren oder lernen - ideal, wenn man eine neue Variante lernt und man möchte alle züge zu dieser Variante lernen bevor man etwas anderes lernt oder um sich auf eine spezielle Eröffnung vorzubereiten")
+        self.tour.add_step(self.btn_filter, tr_ui("tour.step12_title", "Fokussiertes Training"), 
+            tr_ui("tour.step12_text", "Nutze den Variantenfilter oben, um nur bestimmte Varianten zu trainieren oder lernen - ideal, wenn man eine neue Variante lernt und man möchte alle züge zu dieser Variante lernen bevor man etwas anderes lernt oder um sich auf eine spezielle Eröffnung vorzubereiten"))
 
         # Step 13: Ressourcen (NEW)
-        self.tour.add_step(self.btn_resources, "Ressourcen", 
-            "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm")
+        self.tour.add_step(self.btn_resources, tr_ui("tour.step13_title", "Ressourcen"), 
+            tr_ui("tour.step13_text", "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm"))
 
         self.tour.finished.connect(self.on_tour_finished)
         self.tour.start_tour()
@@ -268,6 +273,14 @@ class MainWindow(QMainWindow):
         
         self.repo_scroll.setWidget(self.repo_tabs_widget)
         QScroller.grabGesture(self.repo_scroll.viewport(), QScroller.ScrollerGestureType.LeftMouseButtonGesture)
+        
+        # Disable vertical drag bounciness/overshoot
+        scroller = QScroller.scroller(self.repo_scroll.viewport())
+        props = scroller.scrollerProperties()
+        props.setScrollMetric(QScrollerProperties.ScrollMetric.VerticalOvershootPolicy, 
+                              QScrollerProperties.OvershootPolicy.OvershootAlwaysOff)
+        scroller.setScrollerProperties(props)
+        
         self.repo_scroll.horizontalScrollBar().valueChanged.connect(self.update_tab_scroll_arrows)
 
         top_layout.addWidget(self.btn_scroll_left)
@@ -279,7 +292,7 @@ class MainWindow(QMainWindow):
         top_right_layout.setSpacing(15)
         top_right_layout.setContentsMargins(15, 0, 15, 0)
 
-        self.btn_filter = QPushButton("Filter ▾")
+        self.btn_filter = QPushButton(tr_ui("main_window.filter_label", "Filter ▾"))
         self.btn_filter.setFlat(True)
         # Added subtle hover styling for the top bar flat buttons
         self.btn_filter.setStyleSheet(f"""
@@ -322,14 +335,14 @@ class MainWindow(QMainWindow):
         res_pill_layout.setContentsMargins(scale(15), 0, scale(15), 0)
         res_pill_layout.setSpacing(0)
 
-        self.btn_resources = QPushButton("📁 Ressourcen")
+        self.btn_resources = QPushButton(tr_ui("main_window.resources_btn", "📁 Ressourcen"))
         self.btn_resources.setFlat(True)
         self.btn_resources.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
             QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
         """)
         self.btn_resources.setFixedHeight(scale(40)) # Use 40px to drive the pill height, matching btn_settings
-        self.btn_resources.setToolTip("Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)")
+        self.btn_resources.setToolTip(tr_ui("main_window.resources_tooltip", "Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)"))
         self.btn_resources.clicked.connect(self.open_repertoire_folder)
         res_pill_layout.addWidget(self.btn_resources)
         
@@ -378,7 +391,7 @@ class MainWindow(QMainWindow):
         side_layout.setContentsMargins(20, 20, 20, 20)
         side_layout.setSpacing(15)
 
-        side_layout.addWidget(QLabel("NOTATION"), 0, Qt.AlignmentFlag.AlignLeft)
+        side_layout.addWidget(QLabel(tr_ui("main_window.notation_label", "NOTATION")), 0, Qt.AlignmentFlag.AlignLeft)
         self.txt_notation = ZoomableTextBrowser()
         self.txt_notation.setObjectName("NotationView")
         self.txt_notation.setOpenLinks(False)
@@ -405,13 +418,13 @@ class MainWindow(QMainWindow):
         self.btn_learn_new.setObjectName("ActionButton")
         self.btn_learn_new.setCheckable(True)
         self.btn_learn_new.clicked.connect(self.toggle_learning_mode)
-        self.btn_learn_new.setToolTip("<b>Lern-Modus</b><br>Trainiere neue Züge, die du noch nicht kennst.")
+        self.btn_learn_new.setToolTip(tr_ui("main_window.learn_mode_tooltip", "<b>Lern-Modus</b><br>Trainiere neue Züge, die du noch nicht kennst."))
         
         self.btn_auto_continue = QPushButton("⚡")
         self.btn_auto_continue.setObjectName("ActionButton")
         self.btn_auto_continue.setCheckable(True)
         self.btn_auto_continue.clicked.connect(self.toggle_auto_continue_btn)
-        self.btn_auto_continue.setToolTip("<b>Auto-Weiter</b><br>Springe nach einem korrekten Zug automatisch zum nächsten.")
+        self.btn_auto_continue.setToolTip(tr_ui("main_window.auto_continue_tooltip", "<b>Auto-Weiter</b><br>Springe nach einem korrekten Zug automatisch zum nächsten."))
         
         # Use custom Lichess Icon
         self.btn_lichess = QPushButton()
@@ -424,12 +437,12 @@ class MainWindow(QMainWindow):
 
             self.btn_lichess.setText("🔬")
         self.btn_lichess.clicked.connect(self.open_lichess_analysis)
-        self.btn_lichess.setToolTip("<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse.")
+        self.btn_lichess.setToolTip(tr_ui("main_window.lichess_tooltip", "<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse."))
         
         self.btn_creator = QPushButton("✏️")
         self.btn_creator.setObjectName("ActionButton")
         self.btn_creator.clicked.connect(lambda: self.open_creator_at_current_position(chess.STARTING_FEN))
-        self.btn_creator.setToolTip("<b>Repertoire Creator</b><br>Öffne den Creator an der Startposition, um dein Repertoire zu bearbeiten.")
+        self.btn_creator.setToolTip(tr_ui("main_window.creator_tooltip", "<b>Repertoire Creator</b><br>Öffne den Creator an der Startposition, um dein Repertoire zu bearbeiten."))
         
         actions_grid.addWidget(self.btn_learn_new, 0, 0)
         actions_grid.addWidget(self.btn_auto_continue, 0, 1)
@@ -439,7 +452,7 @@ class MainWindow(QMainWindow):
         stats_actions_row.addLayout(actions_grid, 1)
         hub_layout.addLayout(stats_actions_row)
 
-        self.btn_smart = QPushButton("TRAINING STARTEN")
+        self.btn_smart = QPushButton(tr_ui("main_window.btn_start", "TRAINING STARTEN"))
         self.btn_smart.setObjectName("StartButton"); self.btn_smart.clicked.connect(self.on_smart_click)
         hub_layout.addWidget(self.btn_smart)
 
@@ -528,7 +541,7 @@ class MainWindow(QMainWindow):
         
         if reset_filter:
             self.active_variation_filter = None
-            self.btn_filter.setText("Filter ▾")
+            self.btn_filter.setText(tr_ui("main_window.filter_label", "Filter ▾"))
         
         if repo_name:
             is_player_white = self.repertoire_manager.get_repertoire_color() == 'w'
@@ -619,7 +632,10 @@ class MainWindow(QMainWindow):
         self.active_variation_filter = var_name
         self.active_variation_entry_fen = None # Reset cache
         self._preloaded_challenge = None
-        self.btn_filter.setText(f"{var_name[:12]}.. ▾" if var_name and len(var_name) > 12 else (var_name or "Filter") + " ▾")
+        if var_name and len(var_name) > 12:
+            self.btn_filter.setText(tr_ui("main_window.filter_label_short", "{var}.. ▾", var=var_name[:12]))
+        else:
+            self.btn_filter.setText(tr_ui("main_window.filter_label_named", "{var} ▾", var=var_name or "Filter"))
         
         # If a filter is selected, jump the board to the start of that variation
         if var_name:
@@ -830,7 +846,7 @@ class MainWindow(QMainWindow):
             reveal = (self.training_mode == 'new')
             self.update_notation_display(reveal_move=reveal)
         else:
-            self.btn_smart.setText("🎉 FERTIG!")
+            self.btn_smart.setText(tr_ui("main_window.btn_done", "🎉 FERTIG!"))
             self.btn_smart.setEnabled(False)
 
     def on_notation_click(self, url):
@@ -842,8 +858,10 @@ class MainWindow(QMainWindow):
         self.open_creator_at_current_position(decoded_fen)
         
     def open_creator_at_current_position(self, fen=None):
-        if not self.repertoire_manager.active_repertoire_name: return
-        target_fen = fen or self.board_widget.board.fen()
+        active_repo = self.repertoire_manager.active_repertoire_name
+        is_test = self.repertoire_manager.is_active_test
+        
+        target_fen = fen or (self.board_widget.board.fen() if active_repo else chess.STARTING_FEN)
         
         # Check if window exists and is not deleted
         if self.creator_window and not sip.isdeleted(self.creator_window):
@@ -852,13 +870,10 @@ class MainWindow(QMainWindow):
                 self.creator_window.showNormal()
             
             # 2. Update Repertoire if it changed in the main window
-            active_repo = self.repertoire_manager.active_repertoire_name
-            is_test = self.repertoire_manager.is_active_test
-            
             # Switch if name OR folder context (test vs. regular) changed OR session was closed
             if (self.creator_window.backend.active_repo_name != active_repo or 
                 self.creator_window.is_test != is_test or
-                self.creator_window.backend.session is None):
+                (active_repo is not None and self.creator_window.backend.session is None)):
                 self.creator_window.load_repertoire(active_repo, self.training_manager, is_test)
             
             # 3. Update FEN
@@ -869,30 +884,43 @@ class MainWindow(QMainWindow):
             self.creator_window.raise_()
             self.creator_window.activateWindow()
         else:
-            is_t = self.repertoire_manager.is_active_test
             self.creator_window = CreatorWindow(
-                repertoire_name=self.repertoire_manager.active_repertoire_name, 
+                repertoire_name=active_repo, 
                 initial_fen=target_fen, 
                 training_manager=self.training_manager,
-                is_test=is_t
+                is_test=is_test
             )
+            self.creator_window.closed.connect(self.on_creator_closed)
             self.creator_window.show()
             self.creator_window.showMaximized()
+
+    def on_creator_closed(self):
+        # Reset cached sorted repo names and update the UI buttons
+        self.sorted_repo_names = None
+        self.refresh_repertoire_buttons()
+        # If the active repertoire changed in the creator, switch to it
+        if self.creator_window and not sip.isdeleted(self.creator_window):
+            creator_repo = self.creator_window.backend.active_repo_name
+            if creator_repo and creator_repo != self.repertoire_manager.active_repertoire_name:
+                self.change_repertoire(creator_repo)
+            else:
+                self.change_repertoire(self.repertoire_manager.active_repertoire_name)
+
 
 
     def set_button_state(self, state):
         self.button_state = state
         if state == 'start':
-            self.btn_smart.setText("TRAINING STARTEN"); self.btn_smart.setEnabled(True)
+            self.btn_smart.setText(tr_ui("main_window.btn_start", "TRAINING STARTEN")); self.btn_smart.setEnabled(True)
         elif state == 'waiting_for_move':
             if self.training_mode == 'new':
-                self.btn_smart.setText("SPIELE DEN ZUG"); self.btn_smart.setEnabled(False)
+                self.btn_smart.setText(tr_ui("main_window.btn_play_move", "SPIELE DEN ZUG")); self.btn_smart.setEnabled(False)
             else:
-                self.btn_smart.setText("DU BIST AM ZUG"); self.btn_smart.setEnabled(False)
+                self.btn_smart.setText(tr_ui("main_window.btn_your_turn", "DU BIST AM ZUG")); self.btn_smart.setEnabled(False)
         elif state == 'correct':
-            self.btn_smart.setText("KORREKT!"); self.btn_smart.setEnabled(False)
+            self.btn_smart.setText(tr_ui("main_window.btn_correct", "KORREKT!")); self.btn_smart.setEnabled(False)
         elif state == 'show_solution_prompt':
-            self.btn_smart.setText("FALSCH! LÖSUNG ANZEIGEN"); self.btn_smart.setEnabled(True)
+            self.btn_smart.setText(tr_ui("main_window.btn_wrong", "FALSCH! LÖSUNG ANZEIGEN")); self.btn_smart.setEnabled(True)
 
     def on_smart_click(self):
         if self.button_state == 'start':
@@ -930,9 +958,9 @@ class MainWindow(QMainWindow):
             if alt_type:
                 self.play_sound("move")
                 if alt_type == 'repertoire':
-                    self.btn_smart.setText("GUTER ZUG (ANDERER REPERTOIRE-WEG)")
+                    self.btn_smart.setText(tr_ui("main_window.btn_alt_repertoire", "GUTER ZUG (ANDERER REPERTOIRE-WEG)"))
                 else:
-                    self.btn_smart.setText("GUTER ZUG (NICHT IM REPERTOIRE)")
+                    self.btn_smart.setText(tr_ui("main_window.btn_alt_not_repertoire", "GUTER ZUG (NICHT IM REPERTOIRE)"))
                 # Force immediate visual snap-back of incorrect piece
                 self.board_widget.repaint()
                 QTimer.singleShot(1500, lambda: self.set_button_state(self.button_state))

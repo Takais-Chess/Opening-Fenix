@@ -32,7 +32,8 @@ class TrainingManager:
             "auto_delay": 200, 
             "anim_speed": 300, 
             "stop_at_variation_end": True,
-            "notation_language": "en"
+            "notation_language": "en",
+            "ui_language": "de"
         }
         
         # Optimization Caches

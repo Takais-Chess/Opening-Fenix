@@ -152,3 +152,56 @@ def test_verify_lichess_token_network_error(mock_urlopen):
     assert success is False
     assert "Netzwerkfehler" in msg
 
+
+def test_run_lichess_import_duplicate_collision(mock_user_dir, sample_repertoire, mock_urlopen):
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.utils import get_repertoire_db_path
+    from opening_fenix.core.db.models import Position, LichessData
+    
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    # Get a FEN that will be queried
+    pos = session.query(Position).first()
+    assert pos is not None
+    
+    # Define a side effect that inserts the LichessData into the database
+    # simulating a concurrent background enrichment
+    def side_effect(*args, **kwargs):
+        # We need a separate session to commit the concurrent insert
+        side_db = DatabaseManager(db_path)
+        side_session = side_db.get_session()
+        try:
+            # Only insert if not already present
+            if not side_session.query(LichessData).filter_by(fen=pos.fen, elo_range="high").first():
+                side_session.add(LichessData(
+                    fen=pos.fen,
+                    elo_range="high",
+                    moves_json='{"e2e4": {"white": 10, "draws": 5, "black": 5, "total": 20}}'
+                ))
+                side_session.commit()
+        finally:
+            side_session.close()
+            side_db.close()
+            
+        mock_response = MagicMock()
+        mock_response.read.return_value = json.dumps({
+            "moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}]
+        }).encode("utf-8")
+        return mock_response.__enter__.return_value
+
+    mock_urlopen.side_effect = side_effect
+    
+    with patch("time.sleep"), patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"):
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        
+    assert success is True
+    # The import should have skipped or handled the collision without throwing an IntegrityError
+    # Check that we have exactly 1 record in LichessData for this FEN and elo_range
+    count = session.query(LichessData).filter_by(fen=pos.fen, elo_range="high").count()
+    assert count == 1
+    session.close()
+    db.close()
+
+

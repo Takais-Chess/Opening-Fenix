@@ -7,6 +7,7 @@ from PyQt6.QtGui import QColor
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon
+from opening_fenix.core.translation import tr_ui
 
 class FAQItem(QFrame):
     def __init__(self, question, answer, parent=None):
@@ -42,7 +43,8 @@ class FAQDialog(QDialog):
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Häufig gestellte Fragen (FAQ)")
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle(tr_ui("faq.window_title", "Häufig gestellte Fragen (FAQ)"))
         self.setMinimumSize(scale(650), scale(550))
         set_consistent_icon(self)
         
@@ -54,7 +56,7 @@ class FAQDialog(QDialog):
         layout.setSpacing(scale(20))
         
         # Header
-        lbl_title = QLabel("Häufig gestellte Fragen")
+        lbl_title = QLabel(tr_ui("faq.title", "Häufig gestellte Fragen"))
         lbl_title.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(28)}px; font-weight: 900;")
         lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_title)
@@ -72,16 +74,16 @@ class FAQDialog(QDialog):
         # --- DATA ---
         faqs = [
             (
-                "Wie soll ich mein Training gestalten?",
-                "Ich empfehle immer, zuerst die fälligen Züge zu üben und falls danach noch Zeit ist, ein paar Varianten auf einen Schlag zu lernen (ca. 20–50 Züge) und diese direkt zu üben.\n\nDiesem Muster ein paar Mal pro Woche folgen, bis das Repertoire sitzt, und danach alle paar Wochen die fälligen Züge erledigen."
+                tr_ui("faq.q1", "Wie soll ich mein Training gestalten?"),
+                tr_ui("faq.a1", "Ich empfehle immer, zuerst die fälligen Züge zu üben und falls danach noch Zeit ist, ein paar Varianten auf einen Schlag zu lernen (ca. 20–50 Züge) und diese direkt zu üben.\n\nDiesem Muster ein paar Mal pro Woche folgen, bis das Repertoire sitzt, und danach alle paar Wochen die fälligen Züge erledigen.")
             ),
             (
-                "Wie soll ich reagieren, wenn ich einen Zug falsch habe?",
-                "Denke kurz darüber nach, warum der Zug falsch ist, und schaue dann mithilfe des Lichess-Buttons nach, warum dein gewählter Zug schlecht ist."
+                tr_ui("faq.q2", "Wie soll ich reagieren, wenn ich einen Zug falsch habe?"),
+                tr_ui("faq.a2", "Denke kurz darüber nach, warum der Zug falsch ist, und schaue dann mithilfe des Lichess-Buttons nach, warum dein gewählter Zug schlecht ist.")
             ),
             (
-                "Wie ändere ich das Trainingslevel und wann soll ich das machen?",
-                "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat."
+                tr_ui("faq.q3", "Wie ändere ich das Trainingslevel und wann soll ich das machen?"),
+                tr_ui("faq.a3", "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.")
             )
         ]
         
@@ -93,7 +95,7 @@ class FAQDialog(QDialog):
         layout.addWidget(scroll)
         
         # Close Button
-        btn_close = QPushButton("VERSTANDEN")
+        btn_close = QPushButton(tr_ui("faq.btn_close", "VERSTANDEN"))
         btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_close.setStyleSheet(f"""
             QPushButton {{

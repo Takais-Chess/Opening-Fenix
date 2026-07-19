@@ -1,6 +1,6 @@
 import os
 from PyQt6.QtGui import QIcon
-from opening_fenix.core.data_tools import get_base_path
+from opening_fenix.core.utils import get_base_path
 from opening_fenix.gui.scaling import scale
 
 
@@ -94,6 +94,10 @@ COLORS = {
     "button_hover": "#e0e0e0",
     "error_red": "#e74c3c",
     "success_green": "#2ecc71",
+    "warning_orange": "#e67e22",
+    "info_blue": "#2980b9",
+    "dark_accent": "#2c3e50",
+    "text_muted": "#7f8c8d",
     "arrow_blue": "rgba(20, 60, 150, 0.5)", # Deep rich blue with 50% opacity
     "glass_bg": "rgba(255, 255, 255, 0.4)",
     "glass_border": "rgba(255, 255, 255, 0.9)",
@@ -690,7 +694,7 @@ def get_bw_glass_style():
         background-color: rgba(0, 0, 0, 0.05);
     }}
     QListWidget#Sidebar::item:selected {{ 
-        background-color: {COLORS['bw_accent']}; 
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {COLORS['light_text']}, stop:1 {COLORS['brown_text']});
         color: white; 
     }}
     
@@ -846,6 +850,39 @@ def get_login_dialog_style():
     
     QPushButton#PrimaryAction:hover {{
         background-color: #e67e22;
+    }}
+    
+    #LangBtn_DE, #LangBtn_EN {{
+        background-color: rgba(255, 255, 255, 0.3);
+        color: {COLORS['brown_text']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(10)}px;
+        font-size: {scale(12)}px;
+        font-weight: bold;
+        padding: {scale(5)}px {scale(10)}px;
+        min-width: {scale(45)}px;
+        max-width: {scale(45)}px;
+    }}
+    
+    #LangBtn_DE:checked, #LangBtn_EN:checked {{
+        background-color: {COLORS['burnt_orange']};
+        color: white;
+        border: 1px solid {COLORS['burnt_orange']};
+    }}
+    
+    #LangBtn_DE:hover:!checked, #LangBtn_EN:hover:!checked {{
+        background-color: rgba(255, 255, 255, 0.6);
+    }}
+
+    QCheckBox#AutoLoginCheckbox {{
+        color: {COLORS['brown_text']};
+        font-family: 'Inter', 'Segoe UI';
+        font-size: {scale(14)}px;
+        font-weight: bold;
+    }}
+
+    QCheckBox#AutoLoginCheckbox:hover {{
+        color: {COLORS['burnt_orange']};
     }}
     
     QScrollArea {{

@@ -10,10 +10,11 @@ from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
-from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
+from opening_fenix.core.utils import get_base_path, get_user_dir
 # Import centralized styles
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 
 class RepertoireButton(QPushButton):
@@ -62,7 +63,7 @@ class RepertoireSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
-        self.setWindowTitle("Repertoires wählen")
+        self.setWindowTitle(tr_ui("login.repertoire_selection_title", "Repertoires wählen"))
         self.setMinimumSize(scale(560), scale(600))
         self.selected_repos = []
         self.selected_language = None
@@ -77,13 +78,13 @@ class RepertoireSelectionDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         
-        lbl_title = QLabel("Repertoires auswählen")
+        lbl_title = QLabel(tr_ui("login.repertoire_selection_title", "Repertoires wählen"))
         lbl_title.setObjectName("LoginTitle")
         lbl_title.setStyleSheet(f"font-size: {scale(24)}px;")
         layout.addWidget(lbl_title)
 
         
-        lbl_sub = QLabel("Wähle die Repertoires für dein neues Profil:")
+        lbl_sub = QLabel(tr_ui("login.repertoire_selection_subtitle", "Wähle die Repertoires für dein neues Profil:"))
         lbl_sub.setObjectName("LoginSubtitle")
         layout.addWidget(lbl_sub)
         
@@ -123,7 +124,7 @@ class RepertoireSelectionDialog(QDialog):
 
         # Notation Language Selection
         lang_layout = QHBoxLayout()
-        lbl_lang = QLabel("Notation Sprache:")
+        lbl_lang = QLabel(tr_ui("login.notation_language", "Notation Sprache:"))
         lbl_lang.setStyleSheet(f"font-size: {scale(16)}px; color: black; font-weight: bold;")
         
         self.lang_group = QButtonGroup(self)
@@ -171,7 +172,7 @@ class RepertoireSelectionDialog(QDialog):
         
         layout.addSpacing(scale(20))
 
-        self.btn_ok = QPushButton("✔ Profil erstellen")
+        self.btn_ok = QPushButton("✔  " + tr_ui("login.create", "Profil erstellen"))
         self.btn_ok.setObjectName("PrimaryAction")
         self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_ok.setEnabled(True) # Always enabled, validate on click
@@ -258,6 +259,38 @@ class LoginDialog(QDialog):
         layout.setSpacing(0)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
+        # Top bar for language switcher
+        top_bar = QHBoxLayout()
+        top_bar.setContentsMargins(0, 0, 0, 0)
+        top_bar.addStretch()
+        
+        from opening_fenix.core.translation import translator
+        current_lang = translator.current_lang
+        
+        self.btn_lang_de = QPushButton("DE")
+        self.btn_lang_de.setObjectName("LangBtn_DE")
+        self.btn_lang_de.setCheckable(True)
+        self.btn_lang_de.setChecked(current_lang == "de")
+        self.btn_lang_de.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.btn_lang_en = QPushButton("EN")
+        self.btn_lang_en.setObjectName("LangBtn_EN")
+        self.btn_lang_en.setCheckable(True)
+        self.btn_lang_en.setChecked(current_lang == "en")
+        self.btn_lang_en.setCursor(Qt.CursorShape.PointingHandCursor)
+        
+        self.lang_group = QButtonGroup(self)
+        self.lang_group.addButton(self.btn_lang_de)
+        self.lang_group.addButton(self.btn_lang_en)
+        
+        self.btn_lang_de.clicked.connect(lambda: self.change_language("de"))
+        self.btn_lang_en.clicked.connect(lambda: self.change_language("en"))
+        
+        top_bar.addWidget(self.btn_lang_de)
+        top_bar.addWidget(self.btn_lang_en)
+        layout.addLayout(top_bar)
+        layout.addSpacing(scale(5))
+
         # Header Section (Tightened)
         header_layout = QVBoxLayout()
         header_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -273,15 +306,15 @@ class LoginDialog(QDialog):
 
         header_layout.addWidget(logo_label)
 
-        title_label = QLabel("OPENING FENIX")
-        title_label.setObjectName("LoginTitle")
-        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(title_label)
+        self.title_label = QLabel(tr_ui("login.title", "OPENING FENIX"))
+        self.title_label.setObjectName("LoginTitle")
+        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self.title_label)
 
-        subtitle_label = QLabel("Wer trainiert heute?")
-        subtitle_label.setObjectName("LoginSubtitle")
-        subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(subtitle_label)
+        self.subtitle_label = QLabel(tr_ui("login.subtitle", "Wer trainiert heute?"))
+        self.subtitle_label.setObjectName("LoginSubtitle")
+        self.subtitle_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self.subtitle_label)
 
         layout.addLayout(header_layout)
         layout.addSpacing(scale(25))
@@ -311,7 +344,15 @@ class LoginDialog(QDialog):
         
         layout.addWidget(self.grid_container, 1)
 
-        layout.addSpacing(scale(25))
+        layout.addSpacing(scale(10))
+
+        # Checkbox for automatic login
+        self.chk_auto_login = QCheckBox(tr_ui("login.auto_login_checkbox", "Beim nächsten Start dieses Profil wieder verwenden"))
+        self.chk_auto_login.setObjectName("AutoLoginCheckbox")
+        self.chk_auto_login.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.chk_auto_login)
+
+        layout.addSpacing(scale(15))
 
         # Buttons in a horizontal layout at the bottom
         bottom_button_layout = QHBoxLayout()
@@ -319,7 +360,7 @@ class LoginDialog(QDialog):
 
         
         # Primary Action: Repertoire Creator
-        self.btn_creator = QPushButton("🛠  REPERTOIRE CREATOR")
+        self.btn_creator = QPushButton(tr_ui("login.creator_mode", "🛠  REPERTOIRE CREATOR"))
         self.btn_creator.setObjectName("PrimaryAction")
         self.btn_creator.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_creator.setFixedHeight(scale(60))
@@ -328,7 +369,7 @@ class LoginDialog(QDialog):
         bottom_button_layout.addWidget(self.btn_creator, 1)
 
         # Secondary Action: New Profile
-        self.btn_new = QPushButton("+  NEUES PROFIL ERSTELLEN")
+        self.btn_new = QPushButton(tr_ui("login.create_profile", "+  NEUES PROFIL ERSTELLEN"))
         self.btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_new.setFixedHeight(scale(60))
         self.btn_new.clicked.connect(self.create_new_profile)
@@ -352,7 +393,7 @@ class LoginDialog(QDialog):
         overlay_layout = QVBoxLayout(self.loading_overlay)
         overlay_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        self.lbl_loading = QLabel("Wird geladen...")
+        self.lbl_loading = QLabel(tr_ui("login.loading", "Wird geladen..."))
         self.lbl_loading.setStyleSheet(f"font-size: {scale(22)}px; font-weight: bold; color: {COLORS['brown_text']};")
         overlay_layout.addWidget(self.lbl_loading)
         
@@ -366,7 +407,7 @@ class LoginDialog(QDialog):
     def show_loading_state(self, profile_name):
         """Displays a loading message and disables interaction."""
         self.login_in_progress = True
-        self.lbl_loading.setText(f"Trainer wird geladen...\n({profile_name})")
+        self.lbl_loading.setText(tr_ui("login.loading_trainer", "Trainer wird geladen...\n({profile_name})", profile_name=profile_name))
         self.loading_overlay.show()
         self.loading_overlay.raise_()
         self.setEnabled(True) # Ensure dialog is enabled to show overlay, but we'll block buttons
@@ -389,13 +430,13 @@ class LoginDialog(QDialog):
             diff = now - dt
             
             if diff.days > 0:
-                if diff.days == 1: return "Gestern"
-                return f"Vor {diff.days} Tagen"
+                if diff.days == 1: return tr_ui("login.relative_time_yesterday", "Gestern")
+                return tr_ui("login.relative_time_days", "Vor {days} Tagen", days=diff.days)
             
             seconds = diff.seconds
-            if seconds < 60: return "Gerade eben"
-            if seconds < 3600: return f"Vor {seconds // 60} Min."
-            return f"Vor {seconds // 3600} Std."
+            if seconds < 60: return tr_ui("login.relative_time_now", "Gerade eben")
+            if seconds < 3600: return tr_ui("login.relative_time_minutes", "Vor {minutes} Min.", minutes=seconds // 60)
+            return tr_ui("login.relative_time_hours", "Vor {hours} Std.", hours=seconds // 3600)
         except: return None
 
     def load_profiles(self):
@@ -433,7 +474,7 @@ class LoginDialog(QDialog):
         profile_data.sort(key=lambda x: x[1], reverse=True)
 
         # 1. Add special "Freies Training" button first
-        free_btn = ProfileGridButton("Freies Training")
+        free_btn = ProfileGridButton(tr_ui("login.free_training", "Freies Training"))
         # Special styling for the free training button
         free_btn.setStyleSheet(f"""
             QPushButton {{
@@ -470,9 +511,97 @@ class LoginDialog(QDialog):
 
     def select_profile(self, name):
         if self.login_in_progress: return
+        
+        # Save auto-login setting and current profile choice to config.json
+        try:
+            import datetime
+            from opening_fenix.core.translation import translator
+            
+            config_path = os.path.join(get_user_dir(), "config.json")
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+            
+            # Save the language selection globally
+            config["ui_language"] = translator.current_lang
+            config["last_profile"] = name
+            
+            # Save or clear auto-login preference
+            if self.chk_auto_login.isChecked():
+                config["auto_login_profile"] = name
+            else:
+                config["auto_login_profile"] = None
+                
+            # Update last used timestamp
+            last_used_map = config.setdefault("profile_last_used", {})
+            last_used_map[name] = datetime.datetime.now().isoformat()
+            
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=4)
+                
+            # Write profile-specific UI language setting (so MainWindow loads correctly)
+            if name != "Freies Training":
+                settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
+                profile_settings = {}
+                if os.path.exists(settings_path):
+                    try:
+                        with open(settings_path, "r") as f:
+                            profile_settings = json.load(f)
+                    except:
+                        pass
+                
+                profile_settings["ui_language"] = translator.current_lang
+                try:
+                    with open(settings_path, "w") as f:
+                        json.dump(profile_settings, f, indent=4)
+                except:
+                    pass
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Failed to save profile selections on login: {e}")
+            
         self.selected_profile = name
         self.profile_selected.emit(name)
-        # We don't call self.accept() here anymore, WindowManager will decide when to close us
+
+    def change_language(self, lang_code):
+        from opening_fenix.core.translation import translator
+        # Update translator
+        translator.load_language(lang_code)
+        
+        # Save globally immediately in config.json
+        try:
+            config_path = os.path.join(get_user_dir(), "config.json")
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, "r") as f:
+                    config = json.load(f)
+            config["ui_language"] = lang_code
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=4)
+        except Exception as e:
+            from opening_fenix.core.logger import logger
+            logger.error(f"Failed to save language setting: {e}")
+            
+        # Re-translate dialog UI elements
+        self.retranslate_ui()
+
+    def retranslate_ui(self):
+        # Update switcher button checks just in case
+        from opening_fenix.core.translation import translator
+        self.btn_lang_de.setChecked(translator.current_lang == "de")
+        self.btn_lang_en.setChecked(translator.current_lang == "en")
+        
+        # Retranslate texts
+        self.title_label.setText(tr_ui("login.title", "OPENING FENIX"))
+        self.subtitle_label.setText(tr_ui("login.subtitle", "Wer trainiert heute?"))
+        self.chk_auto_login.setText(tr_ui("login.auto_login_checkbox", "Beim nächsten Start dieses Profil wieder verwenden"))
+        self.btn_creator.setText(tr_ui("login.creator_mode", "🛠  REPERTOIRE CREATOR"))
+        self.btn_new.setText(tr_ui("login.create_profile", "+  NEUES PROFIL ERSTELLEN"))
+        self.lbl_loading.setText(tr_ui("login.loading", "Wird geladen..."))
+        
+        # Rebuild grid so the "Freies Training" button and layout update
+        self.load_profiles()
 
     def show_context_menu(self, pos, name):
         # We need to find the button that sent the event to map coordinates
@@ -481,7 +610,7 @@ class LoginDialog(QDialog):
         menu = QMenu(self)
         menu.setStyleSheet("QMenu { background-color: #2c3e50; color: white; border: 1px solid rgba(255,255,255,0.2); } QMenu::item:selected { background-color: rgba(255,255,255,0.1); }")
         
-        delete_action = QAction(f"'{name}' löschen", self)
+        delete_action = QAction(tr_ui("login.delete_profile_action", "'{name}' löschen", name=name), self)
         delete_action.triggered.connect(lambda: self.delete_profile(name))
         menu.addAction(delete_action)
         
@@ -489,8 +618,9 @@ class LoginDialog(QDialog):
 
     def delete_profile(self, name):
         reply = QMessageBox.question(
-            self, "Profil löschen",
-            f"Bist du sicher, dass du das Profil '{name}' löschen möchtest?\nAlle Trainingsdaten gehen verloren.",
+            self, 
+            tr_ui("login.delete_profile_title", "Profil löschen"),
+            tr_ui("login.delete_profile_confirm", "Bist du sicher, dass du das Profil '{name}' löschen möchtest?\nAlle Trainingsdaten gehen verloren.", name=name),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -506,12 +636,20 @@ class LoginDialog(QDialog):
             self.load_profiles()
 
     def create_new_profile(self):
-        name, ok = QInputDialog.getText(self, "Neues Profil", "Bitte gib einen Namen für das Profil ein:")
+        name, ok = QInputDialog.getText(
+            self, 
+            tr_ui("login.profile_name_prompt_title", "Neues Profil"), 
+            tr_ui("login.profile_name_prompt_label", "Name des neuen Profils:")
+        )
         if ok and name.strip():
             name = name.strip()
             # Basic validation
             if any(c in name for c in '/\\:*?"<>|'):
-                QMessageBox.warning(self, "Fehler", "Profilname enthält ungültige Zeichen.")
+                QMessageBox.warning(
+                    self, 
+                    tr_ui("login.invalid_name_error", "Ungültiger Name"), 
+                    tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
+                )
                 return
             
             sel_dialog = RepertoireSelectionDialog(self)

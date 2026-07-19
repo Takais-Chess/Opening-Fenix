@@ -14,10 +14,24 @@ ELO_INTERNAL_MAP = {v: k for k, v in ELO_DISPLAY_MAP.items()}
 def get_elo_display(internal_key):
     if not internal_key:
         return "N/A"
-    return ELO_DISPLAY_MAP.get(internal_key.lower(), internal_key.capitalize())
+    from opening_fenix.core.translation import tr_ui
+    key_lower = internal_key.lower()
+    default_val = ELO_DISPLAY_MAP.get(key_lower, internal_key.capitalize())
+    return tr_ui(f"elo.{key_lower}", default_val)
 
 def get_elo_internal(display_name):
-    return ELO_INTERNAL_MAP.get(display_name, "high")
+    # First try the static German map (fast path)
+    if display_name in ELO_INTERNAL_MAP:
+        return ELO_INTERNAL_MAP[display_name]
+    # Fall back: compare against current translated display names for each key
+    try:
+        from opening_fenix.core.translation import tr_ui
+        for key in ELO_DISPLAY_MAP:
+            if tr_ui(f"elo.{key}", ELO_DISPLAY_MAP[key]) == display_name:
+                return key
+    except Exception:
+        pass
+    return "high"
 
 def get_base_path():
     """Gibt den Basispfad der Anwendung zurück, um Probleme mit dem Arbeitsverzeichnis zu vermeiden."""

@@ -70,12 +70,24 @@ class PieChartWidget(QWidget):
 
         if self.show_text:
             due_count = self.data.get("due", 0)
+            due_str = str(due_count)
+            char_count = len(due_str)
+            
+            if char_count <= 2:
+                font_factor = 0.25
+            elif char_count == 3:
+                font_factor = 0.21
+            elif char_count == 4:
+                font_factor = 0.17
+            else:
+                font_factor = 0.13
+                
             font = painter.font()
-            font.setPointSize(int(side * 0.35) if side < 100 else int(side * 0.25))
+            font.setPointSize(int(side * 0.35) if side < 100 else int(side * font_factor))
             font.setBold(True)
             painter.setFont(font)
             painter.setPen(QColor("#f59e0b")) 
-            painter.drawText(outer_rect, Qt.AlignmentFlag.AlignCenter, str(due_count))
+            painter.drawText(outer_rect, Qt.AlignmentFlag.AlignCenter, due_str)
 
             if side >= 100:
                 font.setPointSize(int(side * 0.08))

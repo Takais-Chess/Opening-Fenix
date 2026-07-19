@@ -48,6 +48,7 @@ from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, D
 from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 
 # --- EXPORTERS ---
@@ -207,11 +208,20 @@ class CreatorBackend:
         if not pos: return None, []
         path = []
         curr_id = pos.id
+        # Track visited positions to detect transposition cycles.
+        # Without this, a cycle (A->B->A via different moves) could cause 200 wasted
+        # iterations and land on a mid-game island as the apparent "root".
+        visited_ids = {curr_id}
         for _ in range(200):
             incoming = self.session.query(Move).filter_by(to_position_id=curr_id).order_by(Move.priority_score.desc()).first()
             if not incoming: break
+            next_id = incoming.from_position_id
+            if next_id in visited_ids:
+                # Cycle detected – stop here to avoid infinite loop
+                break
+            visited_ids.add(next_id)
             path.insert(0, incoming.uci)
-            curr_id = incoming.from_position_id
+            curr_id = next_id
         root_pos = self.session.get(Position, curr_id)
         return (root_pos.fen if root_pos else None), path
 
@@ -1352,15 +1362,15 @@ class CreatorBackend:
         
         total, analyzed_count, min_depth, max_depth = stats
         if total == 0:
-            analysis_status = "Keine Spielerzüge"
+            analysis_status = tr_ui("analysis.no_player_moves", "Keine Spielerzüge")
         elif analyzed_count == 0:
-            analysis_status = "Nicht analysiert"
+            analysis_status = tr_ui("analysis.not_analyzed", "Nicht analysiert")
         elif analyzed_count < total:
-            analysis_status = "Teilweise analysiert"
+            analysis_status = tr_ui("analysis.partially_analyzed", "Teilweise analysiert")
         elif min_depth == max_depth:
-            analysis_status = f"Tiefe: {min_depth}"
+            analysis_status = tr_ui("analysis.depth", "Tiefe: {depth}", depth=min_depth)
         else:
-            analysis_status = f"Tiefe: Zwischen {min_depth} und {max_depth}"
+            analysis_status = tr_ui("analysis.depth_range", "Tiefe: Zwischen {min} und {max}", min=min_depth, max=max_depth)
 
         # Calculate coverage % - Join with positions to ensure we only count what belongs to this repo
         total_p = self.session.query(Position.id).count()
@@ -1542,7 +1552,7 @@ class CreatorBackend:
 
                 if has_variation or incoming_repo or outgoing_repo:
                     v_name = (pos.variation_1 or pos.cached_v1 or
-                              pos.variation_2 or pos.cached_v2 or "Variante")
+                              pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
                     results.append({
                         "move_uci": uci,
                         "move_san": san,
@@ -1589,7 +1599,7 @@ class CreatorBackend:
 
                 # The target variation name
                 target_vname = (pos.variation_1 or pos.cached_v1 or
-                                pos.variation_2 or pos.cached_v2 or "Variante")
+                                pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
 
                 # Count how many moves in the repertoire lead to this position's parent
                 # as a rough proxy for path depth
@@ -1659,7 +1669,7 @@ class CreatorBackend:
                         )
                         if is_in_repo:
                             v_name = (pos.variation_1 or pos.cached_v1 or
-                                      pos.variation_2 or pos.cached_v2 or "Variante")
+                                      pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
                             results.append({
                                 "sequence": " ".join(current_path_sans),
                                 "move_ucis": list(current_path_ucis),
@@ -2123,7 +2133,7 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
 class NewRepertoireDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Neues Repertoire")
+        self.setWindowTitle(tr_ui("creator.new_repo_title", "Neues Repertoire"))
         self.setFixedWidth(scale(400))
         set_consistent_icon(self)
         self.init_ui()
@@ -2135,21 +2145,21 @@ class NewRepertoireDialog(QDialog):
 
         form = QFormLayout()
         self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText("z.B. Caro-Kann für Fortgeschrittene")
+        self.name_input.setPlaceholderText(tr_ui("creator.new_repo_name_placeholder", "z.B. Caro-Kann für Fortgeschrittene"))
         
         self.color_combo = QComboBox()
-        self.color_combo.addItem("Weiß", "w")
-        self.color_combo.addItem("Schwarz", "b")
+        self.color_combo.addItem(tr_ui("creator.new_repo_color_white", "Weiß"), "w")
+        self.color_combo.addItem(tr_ui("creator.new_repo_color_black", "Schwarz"), "b")
         
-        form.addRow("Name:", self.name_input)
-        form.addRow("Deine Farbe:", self.color_combo)
+        form.addRow(tr_ui("creator.new_repo_name_label", "Name:"), self.name_input)
+        form.addRow(tr_ui("creator.new_repo_color_label", "Deine Farbe:"), self.color_combo)
         layout.addLayout(form)
 
         btns = QHBoxLayout()
-        btn_ok = QPushButton("Erstellen")
+        btn_ok = QPushButton(tr_ui("creator.new_repo_btn_create", "Erstellen"))
         btn_ok.setDefault(True)
         btn_ok.clicked.connect(self.accept)
-        btn_cancel = QPushButton("Abbrechen")
+        btn_cancel = QPushButton(tr_ui("creator.new_repo_btn_cancel", "Abbrechen"))
         btn_cancel.clicked.connect(self.reject)
         
         btns.addStretch()
@@ -2161,6 +2171,8 @@ class NewRepertoireDialog(QDialog):
         return self.name_input.text().strip(), self.color_combo.currentData()
 
 class CreatorWindow(QMainWindow):
+    closed = pyqtSignal()
+
     def _is_ui_valid(self):
         """Robust check if the UI widgets are initialized and not deleted."""
         try:
@@ -2175,7 +2187,7 @@ class CreatorWindow(QMainWindow):
 
     def __init__(self, repertoire_name=None, initial_fen=None, training_manager=None, is_test=False):
         super().__init__()
-        self.setWindowTitle("Opening Fenix - Repertoire Creator")
+        self.setWindowTitle(tr_ui("creator.window_title", "Opening Fenix - Repertoire Creator"))
         set_consistent_icon(self)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         self.resize(scale(1400), scale(900))
@@ -2258,12 +2270,12 @@ class CreatorWindow(QMainWindow):
                 self.overhaul_active = True
                 self.overhaul_paused = True
 
-            self.setWindowTitle(f"Creator - {rtl}")
+            self.setWindowTitle(tr_ui("creator.window_title_with_repo", "Creator - {repo}", repo=rtl))
             self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
             self.board_widget.update()
         else:
             # If no repertoire is found, default to creating a new one or opening empty state
-            self.setWindowTitle("Creator - Kein Repertoire")
+            self.setWindowTitle(tr_ui("creator.window_title_no_repo", "Creator - Kein Repertoire"))
             # We can automatically prompt for a new repertoire if none is found
             QTimer.singleShot(100, self.new_repertoire_dialog)
 
@@ -2288,11 +2300,6 @@ class CreatorWindow(QMainWindow):
             with open(config_path, "w") as f:
                 json.dump(self.config, f, indent=4)
         except: pass
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        # Re-apply icon after native handle is created (needed for FramelessWindowHint on Windows)
-        QTimer.singleShot(0, lambda: set_consistent_icon(self))
 
     def init_ui(self):
         self.setStyleSheet(get_creator_window_style())
@@ -2321,30 +2328,30 @@ class CreatorWindow(QMainWindow):
         self.toolbar.setStyleSheet(get_creator_toolbar_style())
 
         # Toolbar Buttons using QPushButtons for reliable CSS rounding
-        btn_load = QPushButton("📂 Laden")
+        btn_load = QPushButton(tr_ui("creator.toolbar_load", "📂 Laden"))
         btn_load.setProperty("class", "GlassPill")
         self.repolish(btn_load)
-        btn_load.setToolTip("Ein anderes Repertoire laden")
+        btn_load.setToolTip(tr_ui("creator.toolbar_load_tooltip", "Ein anderes Repertoire laden"))
         btn_load.clicked.connect(self.load_repertoire_dialog)
         self.toolbar.addWidget(btn_load)
 
-        btn_new = QPushButton("➕ Neu")
+        btn_new = QPushButton(tr_ui("creator.toolbar_new", "➕ Neu"))
         btn_new.setProperty("class", "GlassPill")
         self.repolish(btn_new)
-        btn_new.setToolTip("Ein neues, leeres Repertoire erstellen")
+        btn_new.setToolTip(tr_ui("creator.toolbar_new_tooltip", "Ein neues, leeres Repertoire erstellen"))
         btn_new.clicked.connect(self.new_repertoire_dialog)
         self.toolbar.addWidget(btn_new)
 
-        btn_repo = QPushButton("⚙ Settings")
+        btn_repo = QPushButton(tr_ui("creator.toolbar_settings", "⚙ Einstellungen"))
         btn_repo.setProperty("class", "GlassPill")
         self.repolish(btn_repo)
-        btn_repo.setToolTip("Repertoire-Einstellungen öffnen")
+        btn_repo.setToolTip(tr_ui("creator.toolbar_settings_tooltip", "Repertoire-Einstellungen öffnen"))
         btn_repo.clicked.connect(self.open_repo_settings)
         self.toolbar.addWidget(btn_repo)
 
         self.combo_structure = QComboBox()
         self.combo_structure.setMinimumWidth(scale(220))
-        self.combo_structure.addItem("🧩 Struktur Explorer")
+        self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "🧩 Struktur Explorer"))
         self.combo_structure.setProperty("class", "GlassPill")
         self.repolish(self.combo_structure)
         self.combo_structure.currentIndexChanged.connect(self.on_structure_combo_changed)
@@ -2359,16 +2366,16 @@ class CreatorWindow(QMainWindow):
             self.btn_lichess.setIconSize(QSize(scale(22), scale(22)))
         else:
             self.btn_lichess.setText("🔬")
-        self.btn_lichess.setToolTip("<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse.")
+        self.btn_lichess.setToolTip(tr_ui("creator.toolbar_lichess_tooltip", "<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse."))
         self.btn_lichess.clicked.connect(self.open_lichess_analysis)
         self.repolish(self.btn_lichess)
         self.toolbar.addWidget(self.btn_lichess)
 
         # Repertoire Resources Button
-        self.btn_resources = QPushButton("📁 Ressourcen")
+        self.btn_resources = QPushButton(tr_ui("creator.toolbar_resources", "📁 Ressourcen"))
         self.btn_resources.setProperty("class", "GlassPill")
         self.repolish(self.btn_resources)
-        self.btn_resources.setToolTip("Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)")
+        self.btn_resources.setToolTip(tr_ui("creator.toolbar_resources_tooltip", "Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)"))
         self.btn_resources.clicked.connect(self.open_repertoire_folder)
         self.toolbar.addWidget(self.btn_resources)
 
@@ -2418,10 +2425,10 @@ class CreatorWindow(QMainWindow):
 
         h_header = QHBoxLayout()
         h_header.setContentsMargins(0, 0, 0, 0) # Margins handled by parent layout
-        lbl_title = QLabel("KANDIDATENZÜGE")
+        lbl_title = QLabel(tr_ui("creator.candidate_moves_title", "KANDIDATENZÜGE"))
         lbl_title.setStyleSheet("font-weight: bold; border: none;")
         
-        self.chk_a = QPushButton("Zug-Pfeile anzeigen")
+        self.chk_a = QPushButton(tr_ui("creator.btn_show_arrows", "Zug-Pfeile anzeigen"))
         self.chk_a.setCheckable(True)
         self.chk_a.setProperty("class", "GlassPill")
         self.repolish(self.chk_a)
@@ -2440,7 +2447,7 @@ class CreatorWindow(QMainWindow):
             min-height: {scale(32)}px;
             max-height: {scale(32)}px;
         """)
-        self.btn_back.setToolTip("Einen Zug zurück")
+        self.btn_back.setToolTip(tr_ui("creator.btn_back_tooltip", "Einen Zug zurück"))
         self.btn_back.clicked.connect(self.on_back_button_clicked)
 
         h_header.addWidget(lbl_title)
@@ -2450,7 +2457,13 @@ class CreatorWindow(QMainWindow):
         t_layout.addLayout(h_header)
 
         self.tree_widget = QTreeWidget()
-        self.tree_widget.setHeaderLabels(["Zug", "Prio", "Kommentar", "Level", "Aktiv"])
+        self.tree_widget.setHeaderLabels([
+            tr_ui("creator.tree_col_move", "Zug"),
+            tr_ui("creator.tree_col_prio", "Prio"),
+            tr_ui("creator.tree_col_comment", "Kommentar"),
+            tr_ui("creator.tree_col_level", "Level"),
+            tr_ui("creator.tree_col_active", "Aktiv")
+        ])
         header = self.tree_widget.header()
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         header.setStretchLastSection(False)
@@ -2489,7 +2502,7 @@ class CreatorWindow(QMainWindow):
 
         # Kommentar Section
         self.txt_c = QPlainTextEdit()
-        self.txt_c.setPlaceholderText("Stellungs-Kommentar hier eingeben...")
+        self.txt_c.setPlaceholderText(tr_ui("creator.comment_placeholder", "Stellungs-Kommentar hier eingeben..."))
         self.txt_c.setMinimumHeight(scale(150))
         self.txt_c.textChanged.connect(self.on_details_changed)
 
@@ -2497,15 +2510,15 @@ class CreatorWindow(QMainWindow):
 
         sym_layout = QHBoxLayout()
         sym_layout.setSpacing(scale(8))
-        syms = [("+−", "Weiß steht deutlich besser"),
-                ("±", "Weiß steht besser"),
-                ("⩲", "Weiß steht etwas besser"),
-                ("=", "Stellung ist ausgeglichen"),
-                ("∞", "Stellung ist unklar"),
-                ("⇆", "Stellung mit Gegenspiel"),
-                ("⩱", "Schwarz steht etwas besser"),
-                ("∓", "Schwarz steht besser"),
-                ("−+", "Schwarz steht deutlich besser")]
+        syms = [("+−", tr_ui("creator.sym_white_much_better", "Weiß steht deutlich besser")),
+                ("±", tr_ui("creator.sym_white_better", "Weiß steht besser")),
+                ("⩲", tr_ui("creator.sym_white_slightly_better", "Weiß steht etwas besser")),
+                ("=", tr_ui("creator.sym_equal", "Stellung ist ausgeglichen")),
+                ("∞", tr_ui("creator.sym_unclear", "Stellung ist unklar")),
+                ("⇆", tr_ui("creator.sym_counterplay", "Stellung mit Gegenspiel")),
+                ("⩱", tr_ui("creator.sym_black_slightly_better", "Schwarz steht etwas besser")),
+                ("∓", tr_ui("creator.sym_black_better", "Schwarz steht besser")),
+                ("−+", tr_ui("creator.sym_black_much_better", "Schwarz steht deutlich besser"))]
         for s, tooltip in syms:
             btn = QPushButton(s)
             btn.setFixedSize(scale(30), scale(30))
@@ -2525,9 +2538,9 @@ class CreatorWindow(QMainWindow):
         self.i_v1 = QLineEdit()
         self.i_v2 = QLineEdit()
         self.i_v3 = QLineEdit()
-        self.i_v1.setPlaceholderText("Variante 1")
-        self.i_v2.setPlaceholderText("Variante 2")
-        self.i_v3.setPlaceholderText("Variante 3")
+        self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
+        self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
+        self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
 
         self.i_v1.textChanged.connect(self.on_details_changed)
         self.i_v1.textChanged.connect(self._update_variant_visibility)
@@ -2616,9 +2629,9 @@ class CreatorWindow(QMainWindow):
         self.repolish(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
         
-        lbl_depth = QLabel("Tiefe:")
-        lbl_threads = QLabel("Kerne:")
-        lbl_lines = QLabel("Züge:")
+        lbl_depth = QLabel(tr_ui("creator.engine_depth_label", "Tiefe:"))
+        lbl_threads = QLabel(tr_ui("creator.engine_cores_label", "Kerne:"))
+        lbl_lines = QLabel(tr_ui("creator.engine_lines_label", "Züge:"))
         
         h_eng_settings.addWidget(lbl_depth)
         h_eng_settings.addWidget(self.combo_depth)
@@ -2629,7 +2642,7 @@ class CreatorWindow(QMainWindow):
         h_eng_settings.addStretch() # Center alignment
         evl.addLayout(h_eng_settings)
         
-        self.btn_engine_toggle = QPushButton("▶ Analyse Starten")
+        self.btn_engine_toggle = QPushButton(tr_ui("creator.btn_engine_start", "▶ Analyse Starten"))
         self.btn_engine_toggle.setCheckable(True)
         self.btn_engine_toggle.setMinimumHeight(scale(35))
         self.btn_engine_toggle.setProperty("class", "GlassPill")
@@ -2638,7 +2651,11 @@ class CreatorWindow(QMainWindow):
         evl.addWidget(self.btn_engine_toggle)
         
         self.table_engine = QTableWidget(0, 3)
-        self.table_engine.setHorizontalHeaderLabels(["Eval", "Depth", "Move"])
+        self.table_engine.setHorizontalHeaderLabels([
+            tr_ui("creator.engine_col_score", "Bewertung"),
+            tr_ui("creator.engine_col_depth", "Tiefe"),
+            tr_ui("creator.engine_col_move", "Zug")
+        ])
         self.table_engine.verticalHeader().setVisible(False)
         self.table_engine.setAlternatingRowColors(True)
         self.table_engine.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -2664,7 +2681,7 @@ class CreatorWindow(QMainWindow):
         cvl.setSpacing(scale(8))
         
         # Database Label centered at top
-        self.lbl_lichess_cat_display = QLabel(f"Datenbank: {get_elo_display('high')}")
+        self.lbl_lichess_cat_display = QLabel(tr_ui("creator.db_label", "Datenbank: {elo}", elo=get_elo_display('high')))
         self.lbl_lichess_cat_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_lichess_cat_display.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['light_text']};")
         cvl.addWidget(self.lbl_lichess_cat_display)
@@ -2674,11 +2691,17 @@ class CreatorWindow(QMainWindow):
         self.combo_lichess_cat.addItems(["low", "mid", "high", "masters"])
         self.combo_lichess_cat.setCurrentText("high")
         self.combo_lichess_cat.currentTextChanged.connect(self.update_ui_from_fen)
-        self.combo_lichess_cat.currentTextChanged.connect(lambda t: self.lbl_lichess_cat_display.setText(f"Datenbank: {get_elo_display(t)}"))
+        self.combo_lichess_cat.currentTextChanged.connect(lambda t: self.lbl_lichess_cat_display.setText(tr_ui("creator.db_label", "Datenbank: {elo}", elo=get_elo_display(t))))
         self.combo_lichess_cat.hide()
         
         self.table_common_moves = QTableWidget(0, 5)
-        self.table_common_moves.setHorizontalHeaderLabels(["Move", "Played", "White %", "Black %", "Draw %"])
+        self.table_common_moves.setHorizontalHeaderLabels([
+            tr_ui("creator.common_col_move", "Zug"),
+            tr_ui("creator.common_col_games", "Partien"),
+            tr_ui("creator.common_col_white", "Weiß %"),
+            tr_ui("creator.common_col_black", "Schwarz %"),
+            tr_ui("creator.common_col_draw", "Remis %")
+        ])
         self.table_common_moves.verticalHeader().setVisible(False)
         self.table_common_moves.setAlternatingRowColors(True)
         self.table_common_moves.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -2752,11 +2775,11 @@ class CreatorWindow(QMainWindow):
         
         # Store all possible tabs in a mapping
         self._all_tabs = {
-            "DETAILS": (self.tab_details, "DETAILS"),
-            "ANALYSIS": (self.tab_analysis, "ANALYSIS"),
-            "HOLES": (self.tab_holes, "Such Modus"),
-            "KONTROLLE": (self.tab_kontrolle, "Rep. Kontrolle"),
-            "TRANSPOSITIONS": (self.tab_transpositions, "Transpositionen")
+            "DETAILS": (self.tab_details, tr_ui("creator.tab_details", "DETAILS")),
+            "ANALYSIS": (self.tab_analysis, tr_ui("creator.tab_analysis", "ANALYSIS")),
+            "HOLES": (self.tab_holes, tr_ui("creator.tab_holes", "Such Modus")),
+            "KONTROLLE": (self.tab_kontrolle, tr_ui("creator.tab_kontrolle", "Rep. Kontrolle")),
+            "TRANSPOSITIONS": (self.tab_transpositions, tr_ui("creator.tab_transpositions", "Transpositionen"))
         }
         
         self.apply_tab_visibility()
@@ -2908,10 +2931,10 @@ class CreatorWindow(QMainWindow):
             has_inherited = bool(placeholder and placeholder.strip() and placeholder != default_placeholder)
             return has_text or has_inherited
 
-        v1_filled = is_filled(self.i_v1, "Variante 1")
+        v1_filled = is_filled(self.i_v1, tr_ui("creator.variant_placeholder_1", "Variante 1"))
         self.i_v2.setVisible(v1_filled)
         
-        v2_filled = is_filled(self.i_v2, "Variante 2")
+        v2_filled = is_filled(self.i_v2, tr_ui("creator.variant_placeholder_2", "Variante 2"))
         self.i_v3.setVisible(v1_filled and v2_filled)
 
     def _load_saved_elo_or_autoselect(self):
@@ -3008,9 +3031,21 @@ class CreatorWindow(QMainWindow):
             
         # Dynamic labels to save space when narrow
         if total_width < scale(280):
-            labels = ["Move", "Pld", "W %", "B %", "D %"]
+            labels = [
+                tr_ui("creator.common_col_move_short", "Zug"),
+                tr_ui("creator.common_col_games_short", "Part."),
+                tr_ui("creator.common_col_white_short", "W %"),
+                tr_ui("creator.common_col_black_short", "S %"),
+                tr_ui("creator.common_col_draw_short", "R %")
+            ]
         else:
-            labels = ["Move", "Played", "White %", "Black %", "Draw %"]
+            labels = [
+                tr_ui("creator.common_col_move", "Zug"),
+                tr_ui("creator.common_col_games", "Partien"),
+                tr_ui("creator.common_col_white", "Weiß %"),
+                tr_ui("creator.common_col_black", "Schwarz %"),
+                tr_ui("creator.common_col_draw", "Remis %")
+            ]
             
         current_labels = [self.table_common_moves.horizontalHeaderItem(i).text() for i in range(5) if self.table_common_moves.horizontalHeaderItem(i)]
         if current_labels != labels:
@@ -3130,22 +3165,54 @@ class CreatorWindow(QMainWindow):
         else:
             rf, ms = None, []
         
+        from opening_fenix.core.logger import logger
         if not rf:
-            from opening_fenix.core.logger import logger
             logger.info(f"Creator: Could not find path to FEN {fen}. Attempting direct set.")
             try:
                 self.board_widget.board.set_fen(fen)
             except Exception as e:
                 logger.error(f"Creator: Direct FEN set failed: {e}")
         else:
-            self.board_widget.board = chess.Board(rf)
+            # Always replay from the standard starting position so that
+            # board.fullmove_number is correct for the candidate-moves header.
+            # get_path_to_fen traces back through the highest-priority incoming
+            # moves; if it reached the real chess starting position, rf will match
+            # and the replay gives the right move number.  If it stopped at an
+            # island (priority fix ensures this is now rare), we detect the
+            # mismatch below and fall back to a direct FEN set.
+            start_fen_4 = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+            root_fen_4 = " ".join(rf.split(" ")[:4])
+            if root_fen_4 == start_fen_4:
+                self.board_widget.board = chess.Board()  # guarantees fullmove_number=1
+            else:
+                self.board_widget.board = chess.Board(rf)
+            
+            push_ok = True
             for u in ms:
                 try:
                     self.board_widget.board.push(chess.Move.from_uci(u))
                 except Exception as e:
-                    from opening_fenix.core.logger import logger
                     logger.error(f"Creator: Failed to push move {u} during navigation: {e}")
+                    push_ok = False
                     break
+            
+            # Safety check: verify we landed on the intended position.
+            # A mismatch means get_path_to_fen took a wrong transposition route
+            # (e.g. through an island with a now-zero priority score).  Fall back
+            # to a direct FEN set so at least the correct position is shown
+            # (move number will show as 1, but the position itself is right).
+            if push_ok:
+                reached_fen_4 = " ".join(self.board_widget.board.fen().split(" ")[:4])
+                target_fen_4 = " ".join(fen.strip().split(" ")[:4])
+                if reached_fen_4 != target_fen_4:
+                    logger.warning(
+                        f"Creator: Path navigation reached wrong position "
+                        f"({reached_fen_4} != {target_fen_4}). Falling back to direct FEN."
+                    )
+                    try:
+                        self.board_widget.board.set_fen(fen)
+                    except Exception as e:
+                        logger.error(f"Creator: Direct FEN fallback failed: {e}")
         
         self.board_widget.update()
         self.update_ui_from_fen()
@@ -3172,16 +3239,16 @@ class CreatorWindow(QMainWindow):
             self.block_signals_details(True)
             if d and isinstance(d, dict):
                 self.i_v1.setText(str(d.get('variation_1','')) if not d.get('v1_inherited') else "")
-                self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else "Variante 1")
+                self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else tr_ui("creator.variant_placeholder_1", "Variante 1"))
                 self.i_v2.setText(str(d.get('variation_2','')) if not d.get('v2_inherited') else "")
-                self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else "Variante 2")
+                self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else tr_ui("creator.variant_placeholder_2", "Variante 2"))
                 self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
-                self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else "Variante 3")
+                self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
                 self.txt_c.setPlainText(str(d.get('comment','')))
             else:
-                self.i_v1.setText(""); self.i_v1.setPlaceholderText("Variante 1")
-                self.i_v2.setText(""); self.i_v2.setPlaceholderText("Variante 2")
-                self.i_v3.setText(""); self.i_v3.setPlaceholderText("Variante 3")
+                self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
+                self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
+                self.i_v3.setText(""); self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
                 self.txt_c.setPlainText("")
             
             # Ensure visibility is updated after text changes
@@ -3805,6 +3872,16 @@ class CreatorWindow(QMainWindow):
             self.training_manager = training_manager
         
         self.is_test = is_test
+        
+        if not repo_name:
+            self.backend.close()
+            self.backend.active_repo_name = None
+            self.setWindowTitle(tr_ui("creator.window_title_no_repo_loaded", "Creator - Kein Repertoire geladen"))
+            self.update_structure_tree()
+            self.init_management_slots()
+            self.board_widget.update()
+            return
+            
         self.backend.load_repertoire(repo_name, is_test)
         self._load_saved_elo_or_autoselect()
         self.update_structure_tree()
@@ -3829,6 +3906,8 @@ class CreatorWindow(QMainWindow):
                 self.board_widget.flipped = (color == 'b')
                 self.board_widget.update()
                 self.set_board_to_fen(chess.STARTING_FEN)
+                if self.training_manager:
+                    self.training_manager.set_repo_visibility(n, True)
 
     def update_board_arrows(self):
         self.board_widget.explorer_arrows = []
@@ -3879,6 +3958,7 @@ class CreatorWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
         QTimer.singleShot(100, self.trigger_board_adjust)
 
@@ -3968,6 +4048,7 @@ class CreatorWindow(QMainWindow):
         """Clean up resources before closing."""
         if self.backend:
             self.backend.close()
+        self.closed.emit()
         super().closeEvent(event)
 
     def init_hole_finder_tab(self):
@@ -3995,7 +4076,7 @@ class CreatorWindow(QMainWindow):
         mode_layout.setSpacing(scale(5))
         
         # Scan Button (Defined early to be placed in combo_layout)
-        self.btn_hole_scan = QPushButton("🔎 Suchen")
+        self.btn_hole_scan = QPushButton(tr_ui("creator.hole_btn_scan", "🔎 Suchen"))
         self.btn_hole_scan.setMinimumHeight(scale(40))
         self.btn_hole_scan.setProperty("class", "GlassPill")
         self.repolish(self.btn_hole_scan)
@@ -4006,18 +4087,18 @@ class CreatorWindow(QMainWindow):
         self.lbl_hole_scan_res.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-weight: bold;")
         
         combo_layout = QHBoxLayout()
-        combo_layout.addWidget(QLabel("<b>Such-Modus:</b>"))
+        combo_layout.addWidget(QLabel(tr_ui("creator.hole_search_mode_label", "<b>Such-Modus:</b>")))
         
         self.combo_hole_mode = QComboBox()
-        self.combo_hole_mode.addItem("unanalysierte populäre Züge finden", "holes")
-        self.combo_hole_mode.addItem("Level Aufstieg prüfen", "priority")
-        self.combo_hole_mode.addItem("Level Abstieg prüfen", "level_down")
-        self.combo_hole_mode.addItem("Level Gesundheits Check", "level_check")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_unanalyzed", "unanalysierte populäre Züge finden"), "holes")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_priority", "Level Aufstieg prüfen"), "priority")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_down", "Level Abstieg prüfen"), "level_down")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_check", "Level Gesundheits Check"), "level_check")
         
-        self.combo_hole_mode.setItemData(0, "Sucht nach Zügen, die noch nicht im Repertoire sind.", Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(1, "Prüft, ob Züge im Repertoire das richtige Level haben.", Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(2, "Findet Züge, die abstellen sollten, weil sie selten vorkommen.", Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(3, "Findet Repertoire-Lücken zwischen Leveln.", Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(0, tr_ui("creator.hole_mode_unanalyzed_tooltip", "Sucht nach Zügen, die noch nicht im Repertoire sind."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(1, tr_ui("creator.hole_mode_priority_tooltip", "Prüft, ob Züge im Repertoire das richtige Level haben."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(2, tr_ui("creator.hole_mode_level_down_tooltip", "Findet Züge, die abstellen sollten, weil sie selten vorkommen."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(3, tr_ui("creator.hole_mode_level_check_tooltip", "Findet Repertoire-Lücken zwischen Leveln."), Qt.ItemDataRole.ToolTipRole)
         
         combo_layout.addWidget(self.combo_hole_mode)
         combo_layout.addStretch()
@@ -4025,7 +4106,7 @@ class CreatorWindow(QMainWindow):
         combo_layout.addWidget(self.btn_hole_scan)
         mode_layout.addLayout(combo_layout)
         
-        self.lbl_mode_desc = QLabel("Findet Züge, die in Master/Lichess Partien oft gespielt werden, aber im Repertoire fehlen.")
+        self.lbl_mode_desc = QLabel(tr_ui("creator.hole_mode_desc", "Findet Züge, die in Master/Lichess Partien oft gespielt werden, aber im Repertoire fehlen."))
         self.lbl_mode_desc.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; margin-left: 10px;")
         mode_layout.addWidget(self.lbl_mode_desc)
         main_layout.addLayout(mode_layout)
@@ -4037,7 +4118,7 @@ class CreatorWindow(QMainWindow):
         
         # Threshold
         h_threshold = QHBoxLayout()
-        self.lbl_hole_threshold = QLabel("Min. Popularität:")
+        self.lbl_hole_threshold = QLabel(tr_ui("creator.hole_label_popularity", "Min. Popularität:"))
         self.combo_hole_threshold = QComboBox()
         self.combo_hole_threshold.addItem("0.1%", 0.1)
         self.combo_hole_threshold.addItem("0.5%", 0.5)
@@ -4052,7 +4133,7 @@ class CreatorWindow(QMainWindow):
         
         # Level
         h_level = QHBoxLayout()
-        self.lbl_hole_level = QLabel("Ziel-Level:")
+        self.lbl_hole_level = QLabel(tr_ui("creator.hole_label_level", "Ziel-Level:"))
         self.combo_hole_level = QComboBox()
         h_level.addWidget(self.lbl_hole_level)
         h_level.addWidget(self.combo_hole_level)
@@ -4065,7 +4146,7 @@ class CreatorWindow(QMainWindow):
         param_row2 = QHBoxLayout()
         param_row2.setSpacing(scale(20))
         
-        self.chk_prio_rare = QCheckBox("Seltene Züge prüfen")
+        self.chk_prio_rare = QCheckBox(tr_ui("creator.hole_chk_rare", "Seltene Züge prüfen"))
         self.chk_prio_rare.setVisible(False)
         param_row2.addWidget(self.chk_prio_rare)
         
@@ -4081,7 +4162,11 @@ class CreatorWindow(QMainWindow):
         
         # --- TABLE ---
         self.table_holes = QTableWidget(0, 3)
-        self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
+        self.table_holes.setHorizontalHeaderLabels([
+            tr_ui("creator.hole_header_pop", "Pop %"),
+            tr_ui("creator.hole_header_type", "Typ"),
+            tr_ui("creator.hole_header_move", "Zug")
+        ])
         self.table_holes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_holes.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         hdr = self.table_holes.horizontalHeader()
@@ -4098,37 +4183,37 @@ class CreatorWindow(QMainWindow):
         
         # --- BOTTOM ROW ---
         h_btm = QHBoxLayout()
-        self.btn_hole_exempt = QPushButton("🚫 Auswahl ignorieren")
+        self.btn_hole_exempt = QPushButton(tr_ui("creator.hole_btn_ignore", "🚫 Auswahl ignorieren"))
         self.btn_hole_exempt.clicked.connect(self.exempt_selected_hole)
         h_btm.addWidget(self.btn_hole_exempt)
         h_btm.addStretch()
         main_layout.addLayout(h_btm)
         
         layout.addWidget(self.card_hole_main)
-
+ 
     def on_hole_mode_change(self):
         mode = self.combo_hole_mode.currentData()
         
         if mode == "holes":
-            self.lbl_mode_desc.setText("Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben.")
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_holes_desc", "Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben."))
             self.combo_hole_level.setVisible(False)
             self.lbl_hole_level.setVisible(False)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
         elif mode == "priority":
-            self.lbl_mode_desc.setText("Findet Züge in einem Level, die häufiger als die angegebene Popularität gespielt werden.")
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_priority_desc", "Findet Züge in einem Level, die häufiger als die angegebene Popularität gespielt werden."))
             self.combo_hole_level.setVisible(True)
             self.lbl_hole_level.setVisible(True)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
         elif mode == "level_down":
-            self.lbl_mode_desc.setText("Findet Züge in einem Level, die seltener als die angegebene Popularität gespielt werden.")
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_down_desc", "Findet Züge in einem Level, die seltener als die angegebene Popularität gespielt werden."))
             self.combo_hole_level.setVisible(True)
             self.lbl_hole_level.setVisible(True)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
         elif mode == "level_check":
-            self.lbl_mode_desc.setText("Findet Probleme mit der Level einstufung")
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_check_desc", "Findet Probleme mit der Level einstufung"))
             self.combo_hole_level.setVisible(False)
             self.lbl_hole_level.setVisible(False)
             self.lbl_hole_threshold.setVisible(False)
@@ -4150,11 +4235,11 @@ class CreatorWindow(QMainWindow):
         
         # HEADER
         header_layout = QHBoxLayout()
-        lbl_title = QLabel("Repertoire Kontrolle")
+        lbl_title = QLabel(tr_ui("creator.overhaul_title", "Repertoire Kontrolle"))
         lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['brown_text']};")
         header_layout.addWidget(lbl_title)
         
-        self.lbl_overhaul_status = QLabel("Keine aktive Session")
+        self.lbl_overhaul_status = QLabel(tr_ui("creator.overhaul_status_no_session", "Keine aktive Session"))
         self.lbl_overhaul_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic;")
         header_layout.addWidget(self.lbl_overhaul_status)
         header_layout.addStretch()
@@ -4163,7 +4248,7 @@ class CreatorWindow(QMainWindow):
         # PROGRESS BAR
         self.pb_overhaul = QProgressBar()
         self.pb_overhaul.setValue(0)
-        self.pb_overhaul.setFormat("%v / %m Stellungen (%p%)")
+        self.pb_overhaul.setFormat(tr_ui("creator.overhaul_pb_format", "%v / %m Stellungen (%p%)"))
         self.pb_overhaul.setMinimumHeight(scale(30))
         # Use custom styling for progress bar to match burnt-orange palette
         self.pb_overhaul.setStyleSheet(f"""
@@ -4186,14 +4271,14 @@ class CreatorWindow(QMainWindow):
         settings_layout = QHBoxLayout()
         settings_layout.setSpacing(scale(15))
         
-        settings_layout.addWidget(QLabel("Prüf-Level:"))
+        settings_layout.addWidget(QLabel(tr_ui("creator.overhaul_label_level", "Prüf-Level:")))
         self.combo_overhaul_level = QComboBox()
         self.combo_overhaul_level.setMinimumWidth(scale(150))
         settings_layout.addWidget(self.combo_overhaul_level)
         
-        settings_layout.addWidget(QLabel("Variante:"))
+        settings_layout.addWidget(QLabel(tr_ui("creator.overhaul_label_variation", "Variante:")))
         self.combo_overhaul_variation = QComboBox()
-        self.combo_overhaul_variation.addItem("Alle Varianten", userData=None)
+        self.combo_overhaul_variation.addItem(tr_ui("creator.overhaul_variation_all", "Alle Varianten"), userData=None)
         self.combo_overhaul_variation.setMinimumWidth(scale(200))
         settings_layout.addWidget(self.combo_overhaul_variation)
         
@@ -4206,20 +4291,20 @@ class CreatorWindow(QMainWindow):
         h_btns = QHBoxLayout()
         h_btns.setSpacing(scale(15))
         
-        self.btn_overhaul_start = QPushButton("▶ Session Starten")
+        self.btn_overhaul_start = QPushButton(tr_ui("creator.overhaul_btn_start", "▶ Session Starten"))
         self.btn_overhaul_start.setMinimumHeight(scale(50))
         self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_start.clicked.connect(self.toggle_overhaul_session)
         h_btns.addWidget(self.btn_overhaul_start, 2)
         
-        self.btn_overhaul_pause = QPushButton("⏸ Pause")
+        self.btn_overhaul_pause = QPushButton(tr_ui("creator.overhaul_btn_pause", "⏸ Pause"))
         self.btn_overhaul_pause.setMinimumHeight(scale(50))
         self.btn_overhaul_pause.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_pause.clicked.connect(self.toggle_overhaul_pause)
         self.btn_overhaul_pause.setVisible(False)
         h_btns.addWidget(self.btn_overhaul_pause, 1)
         
-        self.btn_overhaul_reset = QPushButton("🔄 Reset")
+        self.btn_overhaul_reset = QPushButton(tr_ui("creator.overhaul_btn_reset", "🔄 Reset"))
         self.btn_overhaul_reset.setMinimumHeight(scale(50))
         self.btn_overhaul_reset.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
         self.btn_overhaul_reset.clicked.connect(self.reset_overhaul_session)
@@ -4230,7 +4315,7 @@ class CreatorWindow(QMainWindow):
         main_layout.addSpacing(scale(15))
         
         # NEXT BUTTON
-        self.btn_overhaul_next = QPushButton("⏭ Nächste unkontrollierte Stellung")
+        self.btn_overhaul_next = QPushButton(tr_ui("creator.overhaul_btn_next", "⏭ Nächste unkontrollierte Stellung"))
         self.btn_overhaul_next.clicked.connect(self.jump_to_next_unchecked)
         self.btn_overhaul_next.setEnabled(False)
         self.btn_overhaul_next.setMinimumHeight(scale(55))
@@ -4256,7 +4341,11 @@ class CreatorWindow(QMainWindow):
 
         # Combined table for Direct and Deep search
         self.table_transpositions = QTableWidget(0, 3)
-        self.table_transpositions.setHorizontalHeaderLabels(["Zug / Zugfolge", "Tiefe", "Ranking / Qualität"])
+        self.table_transpositions.setHorizontalHeaderLabels([
+            tr_ui("creator.transpositions_header_move", "Zug / Zugfolge"),
+            tr_ui("creator.transpositions_header_depth", "Tiefe"),
+            tr_ui("creator.transpositions_header_quality", "Ranking / Qualität")
+        ])
         self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_transpositions.verticalHeader().setVisible(False)
@@ -4281,7 +4370,7 @@ class CreatorWindow(QMainWindow):
         h_deep_bottom.addWidget(self.lbl_transpos_status)
         h_deep_bottom.addStretch()
         
-        self.btn_deep_transpos = QPushButton("🔍 Tiefe Suche starten")
+        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
         self.btn_deep_transpos.setMinimumHeight(scale(40))
         self.btn_deep_transpos.setProperty("class", "GlassPill")
         self.repolish(self.btn_deep_transpos)
@@ -4339,7 +4428,7 @@ class CreatorWindow(QMainWindow):
         
         if not items:
             self.table_transpositions.setRowCount(1)
-            item = QTableWidgetItem("Kein unbekannter Zug führt direkt in eine bekannte Stellung")
+            item = QTableWidgetItem(tr_ui("creator.transpositions_no_moves", "Kein unbekannter Zug führt direkt in eine bekannte Stellung"))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item.setForeground(QColor(COLORS['light_text']))
             self.table_transpositions.setItem(0, 0, item)
@@ -4405,7 +4494,15 @@ class CreatorWindow(QMainWindow):
             self.table_transpositions.setItem(row, 1, depth_item)
 
             # Col 2: Ranking / Qualität
-            quality_label = p.get("quality_label", "🟡 Möglich")
+            q = p.get("quality")
+            if q == "möglich":
+                quality_label = tr_ui("creator.transpositions_quality_possible", "🟡 Möglich")
+            elif q == "fehler":
+                quality_label = tr_ui("creator.transpositions_quality_errors", "🔴 mit Fehlern")
+            elif q == "loading":
+                quality_label = tr_ui("creator.transpositions_quality_loading", "⏳ Laden...")
+            else:
+                quality_label = p.get("quality_label", tr_ui("creator.transpositions_quality_possible", "🟡 Möglich"))
             qual_item = QTableWidgetItem(quality_label)
             qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             if p.get("quality") == "fehler":
@@ -4446,26 +4543,26 @@ class CreatorWindow(QMainWindow):
         index_ready = getattr(self.backend, "_fen_index", None) is not None
         if not index_ready:
             self.btn_deep_transpos.setEnabled(False)
-            self.btn_deep_transpos.setText("⏳ Index wird aufgebaut…")
-            self.lbl_transpos_status.setText("FEN-Index wird aufgebaut…")
+            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_indexing", "⏳ Index wird aufgebaut…"))
+            self.lbl_transpos_status.setText(tr_ui("creator.transpositions_indexing_status", "FEN-Index wird aufgebaut…"))
             return
 
-        if self.lbl_transpos_status.text() == "FEN-Index wird aufgebaut…":
+        if self.lbl_transpos_status.text() == tr_ui("creator.transpositions_indexing_status", "FEN-Index wird aufgebaut…"):
             self.lbl_transpos_status.setText("")
 
         if self._bfs_running:
             depth = self._bfs_next_depth  # depth currently being searched
             self.btn_deep_transpos.setEnabled(True)
-            self.btn_deep_transpos.setText(f"⏹ Tiefe {depth} — Stoppen")
+            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_btn_stop", "⏹ Tiefe {depth} — Stoppen", depth=depth))
         elif self._bfs_start_fen is None:
             # Not yet started for this position
             self.btn_deep_transpos.setEnabled(True)
-            self.btn_deep_transpos.setText("🔍 Tiefe Suche starten")
+            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
         else:
             # Completed at least one depth level
             next_d = self._bfs_next_depth
             self.btn_deep_transpos.setEnabled(True)
-            self.btn_deep_transpos.setText(f"⬇ Tiefe {next_d} suchen")
+            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_btn_searching", "⬇ Tiefe {next_d} suchen", next_d=next_d))
 
     def on_deep_transpos_button_clicked(self):
         """Handle deep search button: start, stop, or go one depth deeper."""
@@ -4477,7 +4574,7 @@ class CreatorWindow(QMainWindow):
                 self._path_quality_thread.stop()
             self._bfs_running = False
             self._update_deep_button_state()
-            self.lbl_transpos_status.setText("Suche gestoppt.")
+            self.lbl_transpos_status.setText(tr_ui("creator.transpositions_status_stopped", "Suche gestoppt."))
             return
 
         fen = self.board_widget.board.fen()
@@ -4488,7 +4585,7 @@ class CreatorWindow(QMainWindow):
 
         ep = self.config.get("engine_path", "")
         if not ep or not os.path.exists(ep):
-            QMessageBox.warning(self, "Engine Fehler", "Kein Engine-Pfad in den Einstellungen hinterlegt.")
+            QMessageBox.warning(self, tr_ui("creator.engine_error_title", "Engine Fehler"), tr_ui("creator.engine_error_desc", "Kein Engine-Pfad in den Einstellungen hinterlegt."))
             return
 
         # First click: reset start FEN and accumulated results
@@ -4508,7 +4605,7 @@ class CreatorWindow(QMainWindow):
         target_depth = self._bfs_next_depth
         self._bfs_running = True
         self._update_deep_button_state()
-        self.lbl_transpos_status.setText(f"Suche bis Tiefe {target_depth}…")
+        self.lbl_transpos_status.setText(tr_ui("creator.transpositions_status_searching_to", "Suche bis Tiefe {target_depth}…", target_depth=target_depth))
 
         t = BfsTranspositionThread(
             self._bfs_start_fen,
@@ -4525,7 +4622,7 @@ class CreatorWindow(QMainWindow):
 
     def _on_bfs_progress(self, depth):
         """Show progress as the BFS thread moves from one depth to another."""
-        self.lbl_transpos_status.setText(f"Suche Tiefe {depth}…")
+        self.lbl_transpos_status.setText(tr_ui("creator.transpositions_status_searching", "Suche Tiefe {depth}…", depth=depth))
 
     def _on_bfs_depth_complete(self, depth, raw_paths):
         """Called by BfsTranspositionThread ONLY when target_depth is finished."""
@@ -4534,7 +4631,7 @@ class CreatorWindow(QMainWindow):
         n = len(raw_paths)
         if n == 0:
             # We finished the FULL search up to target_depth and found nothing
-            self.lbl_transpos_status.setText(f"Keine Transpositionen bis Tiefe {depth} gefunden.")
+            self.lbl_transpos_status.setText(tr_ui("creator.transpositions_no_transpos_found", "Keine Transpositionen bis Tiefe {depth} gefunden.", depth=depth))
             # ONLY move to the next depth if everything was empty
             self._bfs_next_depth = depth + 1
             self._update_deep_button_state()
@@ -4546,7 +4643,7 @@ class CreatorWindow(QMainWindow):
         self._update_deep_button_state()
 
         self.lbl_transpos_status.setText(
-            f"Tiefe {depth} fertig — {n} Pfad/Pfade gefunden. Qualität wird bewertet…"
+            tr_ui("creator.transpositions_depth_complete", "Tiefe {depth} fertig — {count} Pfad/Pfade gefunden. Qualität wird bewertet…", depth=depth, count=n)
         )
         self._update_deep_button_state()
 
@@ -4565,7 +4662,7 @@ class CreatorWindow(QMainWindow):
         # Pre-populate table with unclassified paths to provide instant user feedback
         loading_paths = [{**p, "quality": "loading", "quality_label": "⏳ Laden..."} for p in raw_paths]
         self._populate_deep_table(loading_paths)
-        self.lbl_transpos_status.setText(f"Tiefe {depth} fertig — {n} Pfad/Pfade gefunden. Engine lädt (0 / ?)…")
+        self.lbl_transpos_status.setText(tr_ui("creator.transpositions_engine_loading", "Tiefe {depth} fertig — {count} Pfad/Pfade gefunden. Engine lädt (0 / {total})…", depth=depth, count=n, total=n))
 
         pq = PathQualityEvalThread(
             raw_paths,
@@ -4581,7 +4678,7 @@ class CreatorWindow(QMainWindow):
     def _on_path_quality_progress(self, current_pos, total_pos):
         """Update the progress label with current eval status."""
         self.lbl_transpos_status.setText(
-            f"Bewerte Pfade... {current_pos} / {total_pos} Zwischenstellungen analysiert."
+            tr_ui("creator.transpositions_evaluating_paths", "Bewerte Pfade... {current} / {total} Zwischenstellungen analysiert.", current=current_pos, total=total_pos)
         )
 
     def _on_path_quality_ready(self, classified_paths):
@@ -4589,7 +4686,7 @@ class CreatorWindow(QMainWindow):
         n_ok = sum(1 for p in classified_paths if p["quality"] == "möglich")
         n_err = len(classified_paths) - n_ok
         self.lbl_transpos_status.setText(
-            f"✦ {len(classified_paths)} Transposition(en): {n_ok} 🟡 Möglich, {n_err} 🔴 mit Fehlern"
+            tr_ui("creator.transpositions_summary_format", "✦ {count} Transposition(en): {possible} 🟡 Möglich, {errors} 🔴 mit Fehlern", count=len(classified_paths), possible=n_ok, errors=n_err)
         )
         self._populate_deep_table(classified_paths)
 
@@ -4691,27 +4788,27 @@ class CreatorWindow(QMainWindow):
 
     def _update_overhaul_ui_state(self):
         if not self.overhaul_active:
-            self.btn_overhaul_start.setText("▶ Session Starten")
+            self.btn_overhaul_start.setText(tr_ui("creator.overhaul_btn_start", "▶ Session Starten"))
             self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
             self.btn_overhaul_pause.setVisible(False)
             self.btn_overhaul_next.setEnabled(False)
-            self.lbl_overhaul_status.setText("Keine aktive Session")
+            self.lbl_overhaul_status.setText(tr_ui("creator.overhaul_status_no_session", "Keine aktive Session"))
             self.combo_overhaul_level.setEnabled(True)
             self.combo_overhaul_variation.setEnabled(True)
         else:
             if self.overhaul_paused:
-                self.btn_overhaul_start.setText("▶ Session Fortsetzen")
+                self.btn_overhaul_start.setText(tr_ui("creator.overhaul_btn_resume", "▶ Session Fortsetzen"))
                 self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold;")
                 self.btn_overhaul_pause.setVisible(False)
                 self.btn_overhaul_next.setEnabled(False)
-                self.lbl_overhaul_status.setText(f"Session Pausiert (Start: {self.overhaul_start.strftime('%H:%M:%S')})")
+                self.lbl_overhaul_status.setText(tr_ui("creator.overhaul_status_paused", "Session Pausiert (Start: {time})", time=self.overhaul_start.strftime('%H:%M:%S')))
             else:
-                self.btn_overhaul_start.setText("⏹ Session Stoppen")
+                self.btn_overhaul_start.setText(tr_ui("creator.overhaul_btn_stop", "⏹ Session Stoppen"))
                 self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
                 self.btn_overhaul_pause.setVisible(True)
-                self.btn_overhaul_pause.setText("⏸ Pause")
+                self.btn_overhaul_pause.setText(tr_ui("creator.overhaul_btn_pause", "⏸ Pause"))
                 self.btn_overhaul_next.setEnabled(True)
-                self.lbl_overhaul_status.setText(f"Session Aktiv (Seit: {self.overhaul_start.strftime('%H:%M:%S')})")
+                self.lbl_overhaul_status.setText(tr_ui("creator.overhaul_status_active", "Session Aktiv (Seit: {time})", time=self.overhaul_start.strftime('%H:%M:%S')))
             
             # FILTERS REMAIN LOCKED AS LONG AS SESSION IS ACTIVE (including paused)
             self.combo_overhaul_level.setEnabled(False)

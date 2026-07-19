@@ -37,18 +37,21 @@ class ScaleManager:
         print(f"DEBUG: Device Pixel Ratio: {screen.devicePixelRatio()}")
         print(f"DEBUG: Base logical height: {self._base_logical_height}")
         print(f"DEBUG: Calculated Scale Factor: {self._scale_factor:.2f}")
-        return self._scale_factor
-
-            
         # Safety clamp to prevent everything from becoming too small
         if self._scale_factor < 0.5:
             self._scale_factor = 0.5
+
+        return self._scale_factor
 
 
     @property
     def factor(self):
         if self._scale_factor is None:
-            return self._init_scaling()
+            self._init_scaling()
+            
+        if self._scale_factor < 0.5:
+            self._scale_factor = 0.5
+            
         return self._scale_factor
 
 

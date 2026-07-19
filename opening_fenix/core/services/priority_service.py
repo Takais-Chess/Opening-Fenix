@@ -42,18 +42,17 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
         start_board = chess.Board()
         start_fen_normalized = " ".join(start_board.fen().split(" ")[:4])
         
-        roots = []
         start_pos_id = None
         for pid, fen in id_to_fen.items():
             clean_f = " ".join(fen.split(" ")[:4])
             if clean_f == start_fen_normalized:
                 start_pos_id = pid
-            
-            if pid not in incoming_pos_ids:
-                roots.append(pid)
+                break
         
-        if start_pos_id and start_pos_id not in roots:
-            roots.append(start_pos_id)
+        if start_pos_id is not None:
+            roots = [start_pos_id]
+        else:
+            roots = [pid for pid in id_to_fen.keys() if pid not in incoming_pos_ids]
             
         if not roots:
             if id_to_fen:

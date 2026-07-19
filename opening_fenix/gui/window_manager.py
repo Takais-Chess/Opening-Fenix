@@ -2,10 +2,22 @@ import sys
 from PyQt6.QtWidgets import QApplication, QDialog
 from PyQt6.QtCore import Qt
 from PyQt6 import sip
-from opening_fenix.gui.dialogs.login_dialog import LoginDialog
-from opening_fenix.gui.main_window import MainWindow
-from opening_fenix.creator.creator_window import CreatorWindow
 from opening_fenix.core.logger import logger
+
+class LoginDialog:
+    def __new__(cls, *args, **kwargs):
+        from opening_fenix.gui.dialogs.login_dialog import LoginDialog as RealLoginDialog
+        return RealLoginDialog(*args, **kwargs)
+
+class MainWindow:
+    def __new__(cls, *args, **kwargs):
+        from opening_fenix.gui.main_window import MainWindow as RealMainWindow
+        return RealMainWindow(*args, **kwargs)
+
+class CreatorWindow:
+    def __new__(cls, *args, **kwargs):
+        from opening_fenix.creator.creator_window import CreatorWindow as RealCreatorWindow
+        return RealCreatorWindow(*args, **kwargs)
 
 class WindowManager:
     def __init__(self):
@@ -13,39 +25,11 @@ class WindowManager:
         self.login_dialog = None
         self.main_window = None
         self.creator_window = None
-        self.preloaded_window = None
-        self.preloaded_profile = None
 
     def start_application(self, initial_profile=None):
         """Initial entry point to start the app lifecycle."""
         self.current_profile = initial_profile
-        
-        # If we don't have an initial profile, try to preload the last one from config
-        if not self.current_profile:
-            self.attempt_preload_last_profile()
-            
         self.run_loop()
-
-    def attempt_preload_last_profile(self):
-        """Attempts to preload the last used profile in the background."""
-        try:
-            import os
-            import json
-            from opening_fenix.core.data_tools import get_user_dir
-            config_path = os.path.join(get_user_dir(), "config.json")
-            if os.path.exists(config_path):
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-                    last_profile = config.get("last_profile")
-                    if last_profile:
-                        profile_path = os.path.join(get_user_dir(), "profiles", f"{last_profile}.db")
-                        if os.path.exists(profile_path):
-                            logger.info(f"Preloading last profile: {last_profile}")
-                            self.preloaded_profile = last_profile
-                            # We create the window but don't show it yet
-                            self.preloaded_window = MainWindow(last_profile)
-        except Exception as e:
-            logger.warning(f"Failed to preload last profile: {e}")
 
     def run_loop(self):
         """Main application state machine loop."""
@@ -58,17 +42,36 @@ class WindowManager:
             if self.current_profile:
                 # If we have an initial profile (auto-login) but no window is preloaded,
                 # show a loading screen so the user doesn't see a "black hole".
-                if not self.main_window and not self.preloaded_window:
+                if not self.main_window:
+                    from PyQt6.QtCore import QEventLoop, QTimer
                     self.login_dialog = LoginDialog()
                     self.login_dialog.show()
                     self.login_dialog.show_loading_state(self.current_profile)
-                    QApplication.processEvents()
+                    
+                    # Spin a short event loop to let the dialog map, layout and paint itself
+                    loop = QEventLoop()
+                    QTimer.singleShot(150, loop.quit)
+                    loop.exec()
 
                 self.show_main_window()
                 
                 # Check why main window closed
                 if self.main_window and getattr(self.main_window, 'switch_requested', False):
                     self.current_profile = None
+                    # Clear auto-login on profile switch
+                    try:
+                        import os
+                        import json
+                        from opening_fenix.core.utils import get_user_dir
+                        config_path = os.path.join(get_user_dir(), "config.json")
+                        if os.path.exists(config_path):
+                            with open(config_path, "r") as f:
+                                config = json.load(f)
+                            config["auto_login_profile"] = None
+                            with open(config_path, "w") as f:
+                                json.dump(config, f, indent=4)
+                    except Exception as e:
+                        logger.warning(f"Could not clear auto_login_profile on switch: {e}")
                     # Clean up old window
                     is_mock = hasattr(self.main_window, "__unittest_mock__") or "Mock" in str(type(self.main_window))
                     if is_mock or not sip.isdeleted(self.main_window):
@@ -114,21 +117,8 @@ class WindowManager:
         logger.info(f"Profile selected in dialog: {profile_name}")
         self.login_dialog.show_loading_state(profile_name)
         
-        # If this profile is already preloaded, we are ready!
-        if self.preloaded_profile == profile_name and self.preloaded_window:
-            logger.info("Using preloaded window")
-            self.main_window = self.preloaded_window
-            self.preloaded_window = None
-            self.preloaded_profile = None
-        else:
-            # Not preloaded or different profile, clean up preloaded if any
-            if self.preloaded_window:
-                self.preloaded_window.deleteLater()
-                self.preloaded_window = None
-                self.preloaded_profile = None
-            
-            # Create the main window (this will block the UI for a bit, but overlay is shown)
-            self.main_window = MainWindow(profile_name)
+        # Create the main window (this will block the UI for a bit, but overlay is shown)
+        self.main_window = MainWindow(profile_name)
             
         # Transition complete, accept the dialog
         self.login_dialog.accept()

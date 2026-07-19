@@ -4,6 +4,7 @@ from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QRegion, QFont, QPainter
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS
+from opening_fenix.core.translation import tr_ui
 
 class GuidedTourOverlay(QWidget):
     """
@@ -68,7 +69,7 @@ class GuidedTourOverlay(QWidget):
         self.lbl_step = QLabel("1 / 5")
         self.lbl_step.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(12)}px;")
         
-        self.btn_next = QPushButton("WEITER →")
+        self.btn_next = QPushButton(tr_ui("tour.btn_next", "WEITER →"))
         self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next.setStyleSheet(f"""
             QPushButton {{
@@ -111,9 +112,9 @@ class GuidedTourOverlay(QWidget):
         self.lbl_step.setText(f"{self.current_step + 1} / {len(self.steps)}")
         
         if self.current_step == len(self.steps) - 1:
-            self.btn_next.setText("FERTIG ✓")
+            self.btn_next.setText(tr_ui("tour.btn_finish", "FERTIG ✓"))
         else:
-            self.btn_next.setText("WEITER →")
+            self.btn_next.setText(tr_ui("tour.btn_next", "WEITER →"))
             
         # Force layout update and resize to fit content before positioning
         self.lbl_title.setFixedWidth(self.desc_card.width() - scale(40)) # Account for margins

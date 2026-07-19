@@ -9,6 +9,7 @@ from PyQt6.QtGui import QPixmap, QFont
 from opening_fenix.core.services.repertoire_core_service import RepertoireService
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.translation import tr_ui
 
 def get_repertoire_cover_path(name):
     from opening_fenix.core.data_tools import get_user_dir
@@ -97,7 +98,7 @@ class RepoSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
-        self.setWindowTitle("Repertoire laden")
+        self.setWindowTitle(tr_ui("repo_selection.window_title", "Repertoire laden"))
         self.setMinimumSize(scale(800), scale(680))
         self.selected_repo = None
         
@@ -107,12 +108,39 @@ class RepoSelectionDialog(QDialog):
         layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
         layout.setSpacing(scale(10))
 
-        lbl_title = QLabel("Repertoire laden")
+        # Title bar with centered text and a close button
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header_layout.addSpacing(scale(40)) # Spacer to compensate for close button width and center the title
+        
+        lbl_title = QLabel(tr_ui("repo_selection.title", "Repertoire laden"))
         lbl_title.setObjectName("LoginTitle")
         lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(lbl_title)
+        header_layout.addWidget(lbl_title, 1)
+        
+        self.btn_close = QPushButton("✕")
+        self.btn_close.setFixedSize(scale(40), scale(30))
+        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close.setStyleSheet(f"""
+            QPushButton {{
+                border: none;
+                background: transparent;
+                color: {COLORS['brown_text']};
+                font-size: {scale(16)}px;
+                font-weight: bold;
+                border-radius: {scale(4)}px;
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+            }}
+        """)
+        self.btn_close.clicked.connect(self.close_dialog_or_app)
+        header_layout.addWidget(self.btn_close, alignment=Qt.AlignmentFlag.AlignTop)
+        
+        layout.addLayout(header_layout)
 
-        lbl_sub = QLabel("Wähle ein Repertoire zum Bearbeiten aus:")
+        lbl_sub = QLabel(tr_ui("repo_selection.subtitle", "Wähle ein Repertoire zum Bearbeiten aus:"))
         lbl_sub.setObjectName("LoginSubtitle")
         lbl_sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(lbl_sub)
@@ -147,7 +175,7 @@ class RepoSelectionDialog(QDialog):
         repo_names = RepertoireService().get_all_repertoires()
         row = 0
         if not repo_names:
-            lbl_empty = QLabel("Keine Repertoires gefunden.")
+            lbl_empty = QLabel(tr_ui("repo_selection.empty", "Keine Repertoires gefunden."))
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_empty.setStyleSheet("font-style: italic; color: #666;")
             self.grid_layout.addWidget(lbl_empty, 0, 0)
@@ -171,7 +199,7 @@ class RepoSelectionDialog(QDialog):
 
         h_btns = QHBoxLayout()
         h_btns.addStretch()
-        self.btn_cancel = QPushButton("Abbrechen")
+        self.btn_cancel = QPushButton(tr_ui("repo_selection.btn_cancel", "Abbrechen"))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.setFixedWidth(scale(150))
         self.btn_cancel.setFixedHeight(scale(45))
@@ -183,3 +211,11 @@ class RepoSelectionDialog(QDialog):
     def on_repo_selected(self, name):
         self.selected_repo = name
         self.accept()
+
+    def close_dialog_or_app(self):
+        # If no active repertoire is loaded in the parent CreatorWindow, exit the entire app
+        parent = self.parent()
+        if parent and hasattr(parent, "backend") and not parent.backend.active_repo_name:
+            QApplication.quit()
+        else:
+            self.reject()

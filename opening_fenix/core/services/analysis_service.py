@@ -14,6 +14,7 @@ from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
 from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
+from opening_fenix.core.translation import tr_ui
 import urllib.request
 import urllib.parse
 
@@ -129,12 +130,54 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         session.close()
         db.close()
 
+def _resolve_status(status_key: str) -> str:
+    if not status_key:
+        return ""
+    if status_key == "repo_not_found":
+        return tr_ui("analysis.repo_not_found", "Repertoire nicht gefunden")
+    if status_key == "no_player_moves":
+        return tr_ui("analysis.no_player_moves", "Keine Spielerzüge")
+    if status_key == "not_analyzed":
+        return tr_ui("analysis.not_analyzed", "Nicht analysiert")
+    if status_key == "partially_analyzed":
+        return tr_ui("analysis.partially_analyzed", "Teilweise analysiert")
+    if status_key == "error_checking_status":
+        return tr_ui("analysis.error_checking_status", "Fehler bei Statusprüfung")
+    if status_key.startswith("depth:"):
+        parts = status_key.split(":")
+        depth_val = parts[1] if len(parts) > 1 else "-"
+        return tr_ui("analysis.depth", "Tiefe: {depth}", depth=depth_val)
+    if status_key.startswith("depth_range:"):
+        parts = status_key.split(":")
+        min_val = parts[1] if len(parts) > 1 else "-"
+        max_val = parts[2] if len(parts) > 2 else "-"
+        return tr_ui("analysis.depth_range", "Tiefe: Zwischen {min} und {max}", min=min_val, max=max_val)
+    
+    # Fallback to legacy string if it contains German words
+    if status_key == "Keine Spielerzüge":
+        return tr_ui("analysis.no_player_moves", "Keine Spielerzüge")
+    if status_key == "Nicht analysiert":
+        return tr_ui("analysis.not_analyzed", "Nicht analysiert")
+    if status_key == "Teilweise analysiert":
+        return tr_ui("analysis.partially_analyzed", "Teilweise analysiert")
+    
+    import re
+    if "Tiefe: Zwischen" in status_key:
+        m = re.search(r"Zwischen\s+(\d+)\s+und\s+(\d+)", status_key)
+        if m:
+            return tr_ui("analysis.depth_range", "Tiefe: Zwischen {min} und {max}", min=m.group(1), max=m.group(2))
+    if "Tiefe:" in status_key:
+        m = re.search(r"Tiefe:\s+(\d+)", status_key)
+        if m:
+            return tr_ui("analysis.depth", "Tiefe: {depth}", depth=m.group(1))
+    return status_key
+
 def get_repertoire_analysis_status(repo_name: str, session: Optional[Session] = None) -> str:
     db = None
     if session is None:
         db_path = get_repertoire_db_path(repo_name)
         if not os.path.exists(db_path):
-            return "Repertoire nicht gefunden"
+            return _resolve_status("repo_not_found")
         db = DatabaseManager(db_path)
         session = db.get_session()
     
@@ -148,10 +191,9 @@ def get_repertoire_analysis_status(repo_name: str, session: Optional[Session] = 
         cached_status = get_meta(session, "ana_cache_status", "")
         
         if str(total_p) == str(cached_count) and cached_status:
-            return cached_status
+            return _resolve_status(cached_status)
 
         # If no valid cache, calculate with FAST SQL
-        # We need: total positions for player, count of analyzed, min depth, max depth
         stats = session.query(
             func.count(Position.id),
             func.count(Position.analysis_depth),
@@ -161,27 +203,27 @@ def get_repertoire_analysis_status(repo_name: str, session: Optional[Session] = 
         
         total_player_pos, analyzed_count, min_depth, max_depth = stats
         
-        status = ""
+        status_key = ""
         if not total_player_pos or total_player_pos == 0:
-            status = "Keine Spielerzüge"
+            status_key = "no_player_moves"
         elif not analyzed_count or analyzed_count == 0:
-            status = "Nicht analysiert"
+            status_key = "not_analyzed"
         elif analyzed_count < total_player_pos:
-            status = "Teilweise analysiert"
+            status_key = "partially_analyzed"
         elif min_depth == max_depth:
-            status = f"Tiefe: {min_depth}"
+            status_key = f"depth:{min_depth}"
         else:
-            status = f"Tiefe: Zwischen {min_depth} und {max_depth}"
+            status_key = f"depth_range:{min_depth}:{max_depth}"
 
         # Save to cache
         set_meta(session, "ana_cache_count", total_p)
-        set_meta(session, "ana_cache_status", status)
+        set_meta(session, "ana_cache_status", status_key)
         session.commit()
-        return status
+        return _resolve_status(status_key)
 
     except Exception as e:
         print(f"Error getting analysis status for {repo_name}: {e}")
-        return "Fehler bei Statusprüfung"
+        return _resolve_status("error_checking_status")
     finally:
         if db:
             session.close()

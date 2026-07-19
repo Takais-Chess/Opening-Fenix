@@ -12,6 +12,7 @@ from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path
 from opening_fenix.core.services.analysis_service import get_repertoire_analysis_status
 from opening_fenix.core.services.profile_service import update_repertoire_name_globally
 from opening_fenix.core.logger import logger
+from opening_fenix.core.translation import tr_ui
 import json
 
 def fetch_repertoire_levels(session: Session) -> List[Dict[str, Any]]:
@@ -33,10 +34,10 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
             "name": get_meta(session, "name", repo_name),
             "levels": [lvl['name'] for lvl in levels],
             "level_details": [], # Defer counts
-            "depth": "Laden...", 
+            "depth": tr_ui("analysis.loading", "Laden..."), 
             "elo": get_meta(session, "lichess_elo", "N/A"),
             "coverage_pct": 0,
-            "moves": "Laden...",
+            "moves": tr_ui("analysis.loading", "Laden..."),
             "description": get_meta(session, "description", "")
         }
 
@@ -120,9 +121,12 @@ class RepertoireService:
                 if os.path.isdir(os.path.join(test_base, f)):
                     files.append(f)
                     
-        # Filter only those that actually have a database
+        # Filter only those that actually have a database and deduplicate
         valid_repos = []
+        seen = set()
         for repo_name in files:
+            if repo_name in seen:
+                continue
             db_path = get_repertoire_db_path(repo_name)
             if os.path.exists(db_path):
                 # Verify SQLite header just in case
@@ -131,6 +135,7 @@ class RepertoireService:
                     conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'")
                     conn.close()
                     valid_repos.append(repo_name)
+                    seen.add(repo_name)
                 except sqlite3.DatabaseError as e:
                     logger.debug(f"Skipping {repo_name} due to database error: {e}")
                     

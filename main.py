@@ -8,10 +8,7 @@ from PyQt6.QtCore import Qt
 
 from PyQt6.QtGui import QIcon
 
-from opening_fenix.core.data_tools import get_base_path, get_user_dir
-from opening_fenix.core.migration import migrate_legacy_profiles
-from opening_fenix.gui.dialogs.login_dialog import LoginDialog
-from opening_fenix.gui.main_window import MainWindow
+from opening_fenix.core.utils import get_base_path, get_user_dir
 from opening_fenix.gui.styles import set_consistent_icon
 from opening_fenix.gui.window_manager import WindowManager
 from opening_fenix.core.logger import logger
@@ -115,24 +112,39 @@ if __name__ == "__main__":
 
         from opening_fenix.core.utils import migrate_repertoire_storage
         migrate_repertoire_storage()
-        migrate_legacy_profiles()
+        
+        # Check if legacy profiles exist before importing migration (to save import time)
+        profiles_dir = os.path.join(get_user_dir(), "profiles")
+        if os.path.exists(profiles_dir) and any(f.endswith(".json") and not f.endswith("_settings.json") for f in os.listdir(profiles_dir)):
+            from opening_fenix.core.migration import migrate_legacy_profiles
+            migrate_legacy_profiles()
+            
         ensure_default_engine_path()
 
         config_path = os.path.join(get_user_dir(), "config.json")
-        last_profile = None
+        auto_login_profile = None
+        ui_lang = "de"
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r") as f:
                     config = json.load(f)
-                    last_profile = config.get("last_profile")
+                    auto_login_profile = config.get("auto_login_profile")
+                    ui_lang = config.get("ui_language", "de")
             except Exception as e:
-                logger.warning(f"Error reading last_profile from config: {e}")
+                logger.warning(f"Error reading config: {e}")
+
+        # Initialize TranslationManager with global language
+        from opening_fenix.core.translation import translator
+        translator.load_language(ui_lang)
 
         initial_profile = None
-        if last_profile:
-            profile_path = os.path.join(get_user_dir(), "profiles", f"{last_profile}.db")
-            if os.path.exists(profile_path):
-                 initial_profile = last_profile
+        if auto_login_profile:
+            if auto_login_profile == "Freies Training":
+                initial_profile = auto_login_profile
+            else:
+                profile_path = os.path.join(get_user_dir(), "profiles", f"{auto_login_profile}.db")
+                if os.path.exists(profile_path):
+                     initial_profile = auto_login_profile
 
         # Start the WindowManager to handle app lifecycle
         manager = WindowManager()
