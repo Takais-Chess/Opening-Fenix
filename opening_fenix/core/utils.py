@@ -44,10 +44,78 @@ def get_base_path():
 def get_user_dir():
     """Returns the directory where user data (profiles, config, repertoires) is stored."""
     if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
+        exe_dir = os.path.dirname(sys.executable)
+        try:
+            test_file = os.path.join(exe_dir, ".perm_test")
+            with open(test_file, "w") as f:
+                f.write("1")
+            os.remove(test_file)
+            return exe_dir
+        except Exception:
+            appdata = os.getenv("APPDATA") or os.path.expanduser("~")
+            user_dir = os.path.join(appdata, "Opening Fenix")
+            os.makedirs(user_dir, exist_ok=True)
+            return user_dir
+
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     return os.path.dirname(parent_dir)
+
+def ensure_user_data_seeded():
+    r"""
+    Ensures that default profiles, repertoires, and config.json bundled with the
+    application are copied to the writable user_dir (%APPDATA%\Opening Fenix)
+    on first run when installed in a read-only directory like Program Files.
+    """
+    user_dir = get_user_dir()
+    
+    # Locate candidate source directories for bundled assets
+    sources = []
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        sources.append(exe_dir)
+        if hasattr(sys, '_MEIPASS'):
+            sources.append(sys._MEIPASS)
+            
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    root_dir = os.path.dirname(parent_dir)
+    sources.append(root_dir)
+
+    import shutil
+
+    # 1. Seed config.json if not present
+    user_config = os.path.join(user_dir, "config.json")
+    if not os.path.exists(user_config):
+        for src in sources:
+            src_config = os.path.join(src, "config.json")
+            if os.path.exists(src_config):
+                try:
+                    shutil.copy(src_config, user_config)
+                    break
+                except Exception as e:
+                    print(f"Warning: Could not copy config.json from {src_config}: {e}")
+
+    # 2. Seed profiles and repertoires
+    for folder in ["profiles", "repertoires"]:
+        dest_folder = os.path.join(user_dir, folder)
+        if not os.path.exists(dest_folder):
+            os.makedirs(dest_folder, exist_ok=True)
+            
+        for src in sources:
+            src_folder = os.path.join(src, folder)
+            if os.path.exists(src_folder) and os.path.isdir(src_folder):
+                for item in os.listdir(src_folder):
+                    s_path = os.path.join(src_folder, item)
+                    d_path = os.path.join(dest_folder, item)
+                    if not os.path.exists(d_path):
+                        try:
+                            if os.path.isdir(s_path):
+                                shutil.copytree(s_path, d_path)
+                            else:
+                                shutil.copy(s_path, d_path)
+                        except Exception as e:
+                            print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
 
 def _update_lichess_delay_config(delay_value):
     """Safely reads, updates, and writes the lichess_delay to the config file."""
@@ -94,6 +162,24 @@ def get_repertoire_dir(repo_name, is_test=None):
         return regular_path
     elif os.path.exists(test_path) and os.path.isdir(test_path):
         return test_path
+
+    # Fallback for frozen executable if app was installed to Program Files
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        exe_regular = os.path.join(exe_dir, "repertoires", repo_name)
+        exe_test = os.path.join(exe_dir, "repertoires", "test", repo_name)
+        if os.path.exists(exe_regular) and os.path.isdir(exe_regular):
+            return exe_regular
+        if os.path.exists(exe_test) and os.path.isdir(exe_test):
+            return exe_test
+            
+        if hasattr(sys, '_MEIPASS'):
+            mei_regular = os.path.join(sys._MEIPASS, "repertoires", repo_name)
+            mei_test = os.path.join(sys._MEIPASS, "repertoires", "test", repo_name)
+            if os.path.exists(mei_regular) and os.path.isdir(mei_regular):
+                return mei_regular
+            if os.path.exists(mei_test) and os.path.isdir(mei_test):
+                return mei_test
         
     # Default fallback if neither exists (using the "test" prefix heuristic for new creations)
     is_test_by_name = repo_name.lower().startswith("test")

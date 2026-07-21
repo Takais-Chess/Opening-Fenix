@@ -1,10 +1,17 @@
-# Tarrasch
+# ♟️ Tarrasch Defense Repertoire
 
-## Details
-- Farbe: Schwarz
-- Datum: 07.04.2026
+### 📌 Course Overview
+| Property | Detail |
+| :--- | :--- |
+| **Side / Color** | 🔴 Black |
+| **Created Date** | 07.04.2026 |
+| **Format** | Opening Fenix V2 Repertoire |
 
-## Levels
-- L1: Grundlagen
-- L2: Tiefe Theorie
-- L3: Nachschlagewerk und Erklärungen
+---
+
+### 🎓 Repertoire Levels
+| Level | Name & Description |
+| :---: | :--- |
+| **L1** | **Grundlagen** (Core Tarrasch Lines vs 1.d4) |
+| **L2** | **Tiefe Theorie** (Deep Analytical Lines) |
+| **L3** | **Nachschlagewerk** (Reference Lines) |

@@ -74,7 +74,7 @@ class RepertoireTabsWidget(QWidget):
         self.right_layout.setSpacing(15)
         self.right_layout.setContentsMargins(15, 0, 15, 0)
 
-        self.btn_filter = QPushButton("Filter ▾")
+        self.btn_filter = QPushButton(tr_ui("main.btn_filter", "Filter ▾"))
         self.btn_filter.setFlat(True)
         self.btn_filter.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
@@ -84,7 +84,7 @@ class RepertoireTabsWidget(QWidget):
         self.lbl_elo = QLabel("🎓 800")
         self.lbl_elo.setStyleSheet(f"font-size: {scale(20)}px; color: {COLORS['burnt_orange']}; font-weight: bold;")
 
-        self.btn_profile = QPushButton("Profil")
+        self.btn_profile = QPushButton(tr_ui("main.btn_profile", "Profil"))
         self.btn_profile.setFlat(True)
         self.btn_profile.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
@@ -112,7 +112,7 @@ class RepertoireTabsWidget(QWidget):
         res_layout = QHBoxLayout(self.res_pill)
         res_layout.setContentsMargins(scale(15), 0, scale(15), 0)
         
-        self.btn_resources = QPushButton("📁 Ressourcen")
+        self.btn_resources = QPushButton(tr_ui("main.btn_resources", "📁 Ressourcen"))
         self.btn_resources.setFlat(True)
         self.btn_resources.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}

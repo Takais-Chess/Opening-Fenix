@@ -35,4 +35,4 @@ class AppController:
         pass
 
     def handle_repertoire_error(self, message):
-        QMessageBox.critical(self.main_window, "Fehler", message)
+        QMessageBox.critical(self.main_window, tr_ui("main.dlg_error_title", "Fehler"), message)

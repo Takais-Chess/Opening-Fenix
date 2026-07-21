@@ -34,7 +34,7 @@ class TrainingCenterWidget(QFrame):
         layout.setContentsMargins(20, 20, 20, 20)
         layout.setSpacing(15)
 
-        layout.addWidget(QLabel("NOTATION"), 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(QLabel(tr_ui("training.lbl_notation", "NOTATION")), 0, Qt.AlignmentFlag.AlignLeft)
         self.txt_notation = ZoomableTextBrowser()
         self.txt_notation.setObjectName("NotationView")
         self.txt_notation.setOpenLinks(False)
@@ -60,13 +60,13 @@ class TrainingCenterWidget(QFrame):
         self.btn_learn_new.setObjectName("ActionButton")
         self.btn_learn_new.setCheckable(True)
         self.btn_learn_new.clicked.connect(lambda: self.learn_new_toggled.emit(self.btn_learn_new.isChecked()))
-        self.btn_learn_new.setToolTip("<b>Lern-Modus</b><br>Trainiere neue Züge, die du noch nicht kennst.")
+        self.btn_learn_new.setToolTip(tr_ui("training.tooltip_learn_mode", "<b>Lern-Modus</b><br>Trainiere neue Züge, die du noch nicht kennst."))
         
         self.btn_auto_continue = QPushButton("⚡")
         self.btn_auto_continue.setObjectName("ActionButton")
         self.btn_auto_continue.setCheckable(True)
         self.btn_auto_continue.clicked.connect(lambda: self.auto_continue_toggled.emit(self.btn_auto_continue.isChecked()))
-        self.btn_auto_continue.setToolTip("<b>Auto-Weiter</b><br>Springe nach einem korrekten Zug automatisch zum nächsten.")
+        self.btn_auto_continue.setToolTip(tr_ui("training.tooltip_auto_next", "<b>Auto-Weiter</b><br>Springe nach einem korrekten Zug automatisch zum nächsten."))
         
         self.btn_lichess = QPushButton()
         self.btn_lichess.setObjectName("ActionButton")
@@ -77,12 +77,12 @@ class TrainingCenterWidget(QFrame):
         else:
             self.btn_lichess.setText("🔬")
         self.btn_lichess.clicked.connect(self.lichess_requested.emit)
-        self.btn_lichess.setToolTip("<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse.")
+        self.btn_lichess.setToolTip(tr_ui("training.tooltip_lichess", "<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse."))
         
         self.btn_creator = QPushButton("✏️")
         self.btn_creator.setObjectName("ActionButton")
         self.btn_creator.clicked.connect(self.creator_requested.emit)
-        self.btn_creator.setToolTip("<b>Repertoire Creator</b><br>Öffne den Creator an der aktuellen Position.")
+        self.btn_creator.setToolTip(tr_ui("training.tooltip_creator", "<b>Repertoire Creator</b><br>Öffne den Creator an der aktuellen Position."))
         
         actions_grid.addWidget(self.btn_learn_new, 0, 0)
         actions_grid.addWidget(self.btn_auto_continue, 0, 1)
@@ -92,7 +92,7 @@ class TrainingCenterWidget(QFrame):
         stats_actions_row.addLayout(actions_grid, 1)
         hub_layout.addLayout(stats_actions_row)
 
-        self.btn_smart = QPushButton("TRAINING STARTEN")
+        self.btn_smart = QPushButton(tr_ui("training.btn_start_training", "TRAINING STARTEN"))
         self.btn_smart.setObjectName("StartButton")
         self.btn_smart.clicked.connect(self.smart_clicked.emit)
         hub_layout.addWidget(self.btn_smart)
@@ -111,20 +111,20 @@ class TrainingCenterWidget(QFrame):
 
     def set_button_state(self, state, training_mode):
         if state == 'start':
-            self.btn_smart.setText("TRAINING STARTEN")
+            self.btn_smart.setText(tr_ui("training.btn_start_training", "TRAINING STARTEN"))
             self.btn_smart.setEnabled(True)
         elif state == 'waiting_for_move':
             if training_mode == 'new':
-                self.btn_smart.setText("SPIELE DEN ZUG")
+                self.btn_smart.setText(tr_ui("training.status_play_move", "SPIELE DEN ZUG"))
                 self.btn_smart.setEnabled(False)
             else:
-                self.btn_smart.setText("DU BIST AM ZUG")
+                self.btn_smart.setText(tr_ui("training.status_your_turn", "DU BIST AM ZUG"))
                 self.btn_smart.setEnabled(False)
         elif state == 'correct':
-            self.btn_smart.setText("KORREKT!")
+            self.btn_smart.setText(tr_ui("training.status_correct", "KORREKT!"))
             self.btn_smart.setEnabled(False)
         elif state == 'show_solution_prompt':
-            self.btn_smart.setText("FALSCH! LÖSUNG ANZEIGEN")
+            self.btn_smart.setText(tr_ui("training.status_wrong_show_solution", "FALSCH! LÖSUNG ANZEIGEN"))
             self.btn_smart.setEnabled(True)
 
     def update_notation(self, html):

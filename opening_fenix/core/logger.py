@@ -11,21 +11,23 @@ def setup_logger(name="OpeningFenix"):
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
         
-        # File handler
-        fh = logging.FileHandler(log_file, encoding='utf-8')
-        fh.setLevel(logging.DEBUG)
-        
         # Console handler
         ch = logging.StreamHandler()
         ch.setLevel(logging.DEBUG)
         
         # Formatter
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        fh.setFormatter(formatter)
         ch.setFormatter(formatter)
-        
-        logger.addHandler(fh)
         logger.addHandler(ch)
+
+        # File handler
+        try:
+            fh = logging.FileHandler(log_file, encoding='utf-8')
+            fh.setLevel(logging.DEBUG)
+            fh.setFormatter(formatter)
+            logger.addHandler(fh)
+        except Exception as e:
+            print(f"Warning: Could not create log file '{log_file}': {e}")
         
     return logger
 

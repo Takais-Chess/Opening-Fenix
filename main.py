@@ -42,8 +42,8 @@ def cleanup_temp_db_files():
 
 def ensure_default_engine_path():
     """
-    Checks if an engine path is set in config.json. If not, and if a Stockfish
-    executable is found in the bundled 'engines' folder, sets it as default.
+    Checks if an engine path is set in config.json. If not valid, and if a Stockfish
+    executable is found in any bundled 'engines' folder, sets it as default.
     """
     config_path = os.path.join(get_user_dir(), "config.json")
     config = {}
@@ -54,20 +54,35 @@ def ensure_default_engine_path():
         except Exception as e:
             logger.warning(f"Error loading config.json: {e}")
     
-    if not config.get("engine_path") or not os.path.exists(config["engine_path"]):
-        # Look in bundled engines folder
-        engines_dir = os.path.join(get_base_path(), "engines")
-        if os.path.exists(engines_dir):
-            for f in os.listdir(engines_dir):
-                if f.lower().endswith(".exe"):
-                    config["engine_path"] = os.path.abspath(os.path.join(engines_dir, f))
-                    try:
-                        with open(config_path, "w") as f_out:
-                            json.dump(config, f_out, indent=4)
-                        logger.info(f"Set default engine path to {config['engine_path']}")
-                    except Exception as e:
-                        logger.error(f"Could not save config with default engine path: {e}")
-                    break
+    current_engine = config.get("engine_path")
+    if not current_engine or not os.path.exists(current_engine):
+        candidates = [
+            os.path.join(get_base_path(), "engines"),
+            os.path.join(get_user_dir(), "engines")
+        ]
+        if getattr(sys, 'frozen', False):
+            candidates.append(os.path.join(os.path.dirname(sys.executable), "engines"))
+            if hasattr(sys, '_MEIPASS'):
+                candidates.append(os.path.join(sys._MEIPASS, "engines"))
+
+        found_engine = None
+        for engines_dir in candidates:
+            if os.path.exists(engines_dir) and os.path.isdir(engines_dir):
+                for f in os.listdir(engines_dir):
+                    if f.lower().endswith(".exe"):
+                        found_engine = os.path.abspath(os.path.join(engines_dir, f))
+                        break
+            if found_engine:
+                break
+
+        if found_engine:
+            config["engine_path"] = found_engine
+            try:
+                with open(config_path, "w") as f_out:
+                    json.dump(config, f_out, indent=4)
+                logger.info(f"Set default engine path to {found_engine}")
+            except Exception as e:
+                logger.error(f"Could not save config with default engine path: {e}")
 
 if __name__ == "__main__":
     if sys.platform == 'win32':
@@ -110,7 +125,8 @@ if __name__ == "__main__":
 
         logger.info("Application initialized, setting up services...")
 
-        from opening_fenix.core.utils import migrate_repertoire_storage
+        from opening_fenix.core.utils import migrate_repertoire_storage, ensure_user_data_seeded
+        ensure_user_data_seeded()
         migrate_repertoire_storage()
         
         # Check if legacy profiles exist before importing migration (to save import time)

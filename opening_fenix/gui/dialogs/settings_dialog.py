@@ -51,7 +51,7 @@ class LoadRepertoireDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
-        self.setWindowTitle("Repertoire Laden")
+        self.setWindowTitle(tr_ui("settings.load_repertoire_title", "Repertoire Laden"))
         self.setMinimumSize(scale(520), scale(420))
         self.selected_repo = None
         self.setStyleSheet(get_bw_glass_style())
@@ -62,11 +62,11 @@ class LoadRepertoireDialog(QDialog):
         layout.setSpacing(scale(20))
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
-        lbl_title = QLabel("Repertoire auswählen")
+        lbl_title = QLabel(tr_ui("settings.select_repertoire_label", "Repertoire auswählen"))
         lbl_title.setStyleSheet("font-size: 22px; font-weight: 800; color: #111111; margin-bottom: 5px;")
         layout.addWidget(lbl_title)
 
-        lbl_sub = QLabel("Klicke auf ein Repertoire, um es zu laden.")
+        lbl_sub = QLabel(tr_ui("settings.select_repertoire_sub", "Klicke auf ein Repertoire, um es zu laden."))
         lbl_sub.setStyleSheet("color: #666; font-size: 13px; margin-bottom: 10px;")
         layout.addWidget(lbl_sub)
 
@@ -254,7 +254,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(g_design)
 
         # Audio
-        g_audio = QGroupBox(tr_ui("settings.audio_title", "🔊 Klang & Lautstärke").replace("&", "&&"))
+        g_audio = QGroupBox(tr_ui("settings.audio_title", "🔊 Klang && Lautstärke"))
         f_audio = QFormLayout(g_audio)
         f_audio.setSpacing(scale(15))
 
@@ -375,12 +375,14 @@ class SettingsDialog(QDialog):
 
     def init_page_repo(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
+        layout.setSpacing(scale(12))
+        layout.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
 
         # Repertoire-Cards Bereich
         g_sel = QGroupBox(tr_ui("settings.repo_selection_title", "📂 Repertoire Auswahl && Status"))
         v_sel = QVBoxLayout(g_sel)
+        v_sel.setContentsMargins(scale(6), scale(6), scale(6), scale(6))
+        v_sel.setSpacing(0)
         
         self.scroll_cards = QScrollArea()
         self.scroll_cards.setWidgetResizable(True)
@@ -391,7 +393,8 @@ class SettingsDialog(QDialog):
         self.card_container.setStyleSheet("background: transparent;") # Explicitly transparent
         self.card_layout = QGridLayout(self.card_container)
         self.card_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.card_layout.setSpacing(scale(10))
+        self.card_layout.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
+        self.card_layout.setSpacing(scale(8))
         
         self.scroll_cards.setWidget(self.card_container)
         v_sel.addWidget(self.scroll_cards)
@@ -461,6 +464,17 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self.grp_info)
 
+        # Ordner-Zugriff
+        g_folder = QGroupBox(tr_ui("settings.folder_access_title", "📁 Ordner-Zugriff"))
+        h_folder = QHBoxLayout(g_folder)
+        btn_open_repos = QPushButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
+        btn_open_repos.clicked.connect(self.open_repertoires_folder)
+        btn_open_profs = QPushButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs.clicked.connect(self.open_profiles_folder)
+        h_folder.addWidget(btn_open_repos)
+        h_folder.addWidget(btn_open_profs)
+        layout.addWidget(g_folder)
+
         # Gefahrenzone
         g_danger = QGroupBox(tr_ui("settings.danger_title", "⚠️ Gefahrenzone"))
         v_danger = QVBoxLayout(g_danger)
@@ -476,6 +490,22 @@ class SettingsDialog(QDialog):
         layout.addWidget(g_danger)
 
         layout.addStretch()
+
+    def open_repertoires_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        path = os.path.join(get_user_dir(), "repertoires")
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_profiles_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        path = os.path.join(get_user_dir(), "profiles")
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
         self.stats_loader = None
         self.loading_timer = None

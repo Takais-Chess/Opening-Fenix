@@ -1,126 +1,161 @@
-# Technical Deep Dive - Opening Fenix V2
+# ♟️ Technical & Algorithmic Deep Dive - Opening Fenix V2
 
-This document explains the core technical logic and algorithms behind Opening Fenix V2.
-
-## 1. Database Integrity & Recovery
-Opening Fenix includes a robust system for handling SQLite database corruption (e.g., "malformed database" errors).
-
-### Detection & Recovery
-- **Validation**: On connection, the application performs an integrity check. If a database is found to be malformed, it triggers the recovery sequence.
-- **Recovery Process**: 
-    1. The corruption is logged, and the user is notified.
-    2. A temporary recovery script is generated using the SQLite `.recover` command logic.
-    3. Data is extracted into a new SQL dump and re-imported into a clean database file.
-    4. The original malformed file is backed up before being replaced by the healthy recovered version.
-
-
-## 2. Priority Scores (The BFS Probability Algorithm)
-Opening Fenix uses a **Breadth-First Search (BFS)** traversal to calculate a **Priority Score** (Probability) for every move in the database.
-
-### Initial State
-The starting position (Root) is assigned a probability of **1.0**.
-
-### Propagation Rules
-1.  **User's Turn**: If multiple repertoire moves exist for the user, the probability is **split equally** among them.
-2.  **Opponent's Turn**: The probability is distributed based on **Lichess Popularity Data**.
-    - `Total Games = Sum(Lichess move counts) + Count(Rare moves not in Lichess)`
-    - `Rare Move Weight`: Each move not found in Lichess data is treated as having **1 game** by default to ensure it still receives a small probability.
-    - `Move Probability = Parent Probability * (Move Games / Total Games)`
-
-### Purpose
-This score represents how likely you are to encounter a specific position in a real game. It is used to:
-- Sort candidate moves.
-- Prioritize which moves you should learn first.
-
-## 3. Level Reachability (Smart Repertoire Logic)
-Repertoires are organized into **Levels** (1 to N).
-- During training, you can set an **Active Level** (e.g., "Level 2").
-- **Reachability Analysis**: A move is only presented if it is reachable from the root through a continuous path of moves that are **all within the active level limit**.
-- **Transposition Awareness**: The system tracks the **Minimum Reached Level** for every unique position (FEN). If a position is reached via multiple paths, the "easiest" path (lowest level) determines its availability.
-- This prevents the system from asking you about deep variations (Level 3) before you've learned the main lines (Level 1) that lead to them via transpositions.
-
-## 4. ELO Categories
-When fetching Lichess data, the application maps your chosen category to specific rating ranges:
-- **Low**: 1600
-- **Mid**: 1800, 2000
-- **High**: 2200
-- **Masters**: Uses the dedicated Lichess Masters Explorer (Elite-level games only).
-
-## 5. Move Processing (PGN Import)
-The PGN import service uses an optimized bulk-insert strategy:
-- **Deduplication**: It uses an in-memory cache of FENs and UCIs to ensure that transpositions are correctly identified as the same position, preventing duplicate entries.
-- **Automated Integrity Repair**: After bulk insertion, the system automatically runs a repair workflow that re-links orphaned moves and validates parent-child relationships across the entire repertoire.
-- **Comment Merging**: Comments from PGN files are appended to positions. If a position appears in multiple lines with different comments, they are merged using a `|` separator.
-
-## 6. Variation Inheritance
-The variation structure (e.g., *Sicilian -> Najdorf*) is built dynamically.
-- **Tag Inheritance**: If a position is tagged with a sub-variation (e.g., `variation_2 = "Najdorf"`) but is missing a top-level tag, it **recursively crawls up the tree** to find the nearest ancestor with a `variation_1` tag (e.g., "Sicilian").
-- This ensures that filters in the Trainer remain consistent even if you only tag the "leaf" nodes of a variation.
-
-## 7. Onboarding & Guided Tours
-To enhance the First-Time User Experience (FTUE), the application implements a multi-stage onboarding system:
-- **Guided Tour**: Uses a spotlight overlay mechanism to highlight key UI elements (Sidebar, Repertoire List, Training Controls) in sequence.
-- **Contextual FAQs**: A series of pedagogical cards that explain the SRS methodology and how to use the "Loch Finder" effectively.
-- **Conditional Triggering**: Onboarding states are persisted in the user profile to ensure they only trigger once, or can be reset manually from settings.
-
-## 8. Lichess Elo Buckets Logic
-The application fetches population-level move frequencies from Lichess. To ensure the most relevant data is used, it maps user settings to specific rating buckets:
-- **Low (1600)**: Focuses on avoiding common blunders and learning solid fundamentals.
-- **Mid (1800-2000)**: Incorporates more theoretical lines and common sidelines encountered in intermediate play.
-- **High (2200)**: Prioritizes theoretically sound responses and engine-approved variations.
-- **Masters**: Uses only the Lichess Masters database for elite-level theory.
+This document provides a detailed explanation of the **chess engine logic**, **graph traversal algorithms**, **priority calculation formulas**, and **training selection mechanics** behind Opening Fenix V2.
 
 ---
 
-## 9. Thread Management & UI Stability
-To maintain a responsive "Glassmorphism" interface, Opening Fenix utilizes a strict background execution model for all CPU or I/O bound tasks.
+## 1. 📊 Priority Score Algorithm (BFS Probability Propagation)
 
-### Worker Threads (`threads.py`)
-- **AnalysisThread**: Wraps the Stockfish UCI bridge. It uses cooperative cancellation (`_is_canceled`) to ensure engine processes are killed before the GUI deletes the thread object.
-- **HoleFinderThread**: Runs heavy BFS traversals. It is fully decoupled from the `CreatorWindow` to prevent UI freezing during large repertoire scans.
-- **LichessLoaderThread**: Handles the asynchronous data fetching for the statistics dialogs.
+The **Priority Score** represents the statistical probability of encountering a specific position or move in real-world play. It is calculated across the repertoire's directed acyclic move graph using a **Breadth-First Search (BFS)** traversal (`priority_service.py`).
 
-### Lifecycle Protection
-- **WindowManager Loop**: A centralized state machine (`opening_fenix/gui/window_manager.py`) manages the hand-off between the Login, Trainer, and Creator windows. 
-- **Graceful Teardown**: `MainWindow` overrides `closeEvent` to ensure all SQLAlchemy sessions and background engines are flushed and terminated before the process exits, preventing persistent file locks on Windows.
+### 1.1 Initial State & Root Setup
+- The starting position (Root FEN: `rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -`) is assigned an initial probability of:
+  $$P(\text{Root}) = 1.0$$
+- If the root position is absent, positions without incoming moves are identified as roots.
 
-## 10. Lichess API Backoff Controller
-The Lichess integration features an intelligent "tempo" controller to comply with API rate limits:
-- **Exponential Backoff**: If a `429 Too Many Requests` status is returned, the system immediately suspends operations for 60 seconds and increases the base delay logic (`delay * 1.5`).
-- **Adaptive Recovery**: For every 50 successful requests, the system cautiously reduces the delay by 5%, allowing it to settle on the most optimal network throughput (minimum `0.05s`).
+### 1.2 Probability Propagation Rules
+When traversing from a position $S$ to child moves $m_1, m_2, \dots, m_k$:
+
+1. **User's Turn**:
+   If it is the user's turn, probability is divided equally among all active candidate repertoire moves:
+   $$P(m_i) = \frac{P(S)}{N_{\text{active candidates}}}$$
+   $$P(S_{\text{child}, i}) = P(S_{\text{child}, i}) + P(m_i)$$
+
+2. **Opponent's Turn (Lichess Statistics)**:
+   When it is the opponent's turn, probability is distributed according to Lichess population move frequencies for the chosen ELO rating tier (**Low 1600**, **Mid 1800-2000**, **High 2200**, or **Masters**):
+   $$P(m_i) = P(S) \times \frac{\text{Games}(m_i)}{\sum_{j=1}^{k} \text{Games}(m_j)}$$
+
+### 1.3 Rare Moves & Back-Propagation Weighting
+To prevent unrecorded or rare opponent moves from receiving zero probability:
+- **Rare Move Weight ($W_{rare}$)**: If a move is absent from the Lichess explorer, it receives a baseline weight ($W_{rare} \ge 1$).
+- **Child Back-Propagation**: If an opponent move has no direct Lichess record, the service checks whether its target child position exists in Lichess data, inheriting the total game frequency of that child position as its weight.
+- **Normalization**: Rare move weights are capped at $\min(\text{Lichess game counts of known moves})$ to maintain realistic proportions relative to popular lines.
 
 ---
 
-## 11. Development & Persistence
+## 2. 🎯 Next Move Selection Algorithm (`get_next_move`)
 
-### Database Architecture
-- **ORM**: Managed via **SQLAlchemy** in `opening_fenix/core/models.py`.
-- **Persistence Layers**: 
-  - **Repertoire DB**: Stores positions, moves, levels, and Lichess metadata.
-  - **User Profile DB**: Stores SRS training data (`box`, `next_due`, `streak`) and user-specific repertoire settings.
-- **Performance**: SQLite `WAL` (Write-Ahead Logging) mode is enabled for improved concurrency and performance.
+During training, the application selects the optimal move to present to the user via `TrainingManager.get_next_move()` (`training_service.py`). The selection follows a strict 4-stage hierarchy:
 
-### GUI Framework
-- Built with **PyQt6**.
-- Main application logic: `opening_fenix/gui/main_window.py`.
-- Repertoire management: `opening_fenix/creator/creator_window.py`.
-
-## 12. Testing Suite
-
-### Running Tests
-Tests use `pytest`. On Windows, ensure the project root is in `PYTHONPATH`:
-
-```powershell
-# Run all tests
-$env:PYTHONPATH="."; .\.venv\Scripts\python.exe -m pytest
+```
+[ User Action / System Request ]
+               │
+               ▼
+   1. Continuation Flow (Did user just succeed on move X?)
+               │ (No downstream move due)
+               ▼
+   2. Due Mode (Review scheduled SRS moves)
+               │ (No moves due)
+               ▼
+   3. New Mode (Learn unlearned repertoire lines)
+               │ (All reachable lines learned)
+               ▼
+        [ Training Complete ]
 ```
 
-### Key Test Fixtures
-Located in `tests/conftest.py`, these fixtures isolate tests from production data:
-- `mock_user_dir`: Redirects all user data paths to a temporary directory.
-- `sample_repertoire`: Sets up a minimal repertoire for testing.
-- `repertoire_manager`: Provides a pre-configured `RepertoireManager`.
+### 2.1 Continuation Flow
+If the user correctly answered move $M_{last}$:
+1. The trainer queries downstream positions originating from $M_{last}.\text{to\_position\_id}$.
+2. If a downstream move is due for review, it is returned immediately.
+3. This creates a natural, unbroken flow through opening variations.
 
-### Internal Utilities
-- **Variation Inheritance**: Implemented in `RepertoireManager._find_inherited_v1`. It recursively crawls up the move tree to find the nearest ancestor with a `variation_1` tag.
-- **Resolution Scaling**: Managed in `opening_fenix/gui/scaling.py` for High-DPI support.
+### 2.2 Due Mode (SRS Reviews)
+1. **Time Window**: Finds all moves in `TrainingData` scheduled for review where:
+   $$\text{next\_due} \le \text{Now} + 5 \text{ minutes}$$
+2. **Prioritized Sorting**: Candidate due items are sorted by:
+   $$\text{Sort Key} = \Big(\text{SRS Box (ASC)}, -\text{Priority Score (DESC)}\Big)$$
+   *(Lower Leitner boxes are reviewed first; within the same box, higher-priority/more common lines take precedence).*
+3. **Reachability & Level Validation**: Verifies that the move is reachable within the active level limit ($\text{Level}_{\text{move}} \le \text{Active Level}$).
+4. **Ancestor Entry Point Resolution**: Resolves the sequence leading to the move using `_get_ancestor()` so the user is prompted from the appropriate variation boundary.
+
+### 2.3 New Mode (Learning New Lines)
+1. **Reachable Candidates**: Computes all moves reachable in the active level that have **never** been trained (`TrainingData` record absent).
+2. **Highest Priority First**: Sorts unlearned candidates by `priority_score DESC`.
+3. **Random Tie-Breaking**: If multiple candidate moves share the exact same top priority score, one is selected at random using `random.choice(best)`.
+
+### 2.4 Freies Training (Free Practice)
+- Runs inside an in-memory SQLite database (`:memory:`).
+- Selects unlearned moves for the current session ordered by priority score, preserving actual profile progress from modification.
+
+---
+
+## 3. 🌐 Level Reachability & Transposition-Aware Graph Traversal
+
+Opening Fenix uses **Level Reachability Analysis** to prevent structural inconsistencies (e.g., presenting a Level 3 variation before the user has learned the Level 1 main line leading to it).
+
+### 3.1 Minimum Reached Level
+Because positions can be reached via multiple transposition paths:
+$$\text{MinReachedLevel}(P) = \min_{p \in \text{Paths}(\text{Root} \to P)} \left( \max_{m \in p} \text{Level}(m) \right)$$
+
+### 3.2 Reachability Rule
+A move $m: A \to B$ is marked as **reachable** under active level $L_{\text{active}}$ if and only if:
+$$\text{MinReachedLevel}(A) \le L_{\text{active}} \quad \text{and} \quad \text{Level}(m) \le L_{\text{active}}$$
+
+---
+
+## 4. 🔎 Hole Finder 2.0 Algorithm (`hole_finder_service.py`)
+
+The **Hole Finder** scans the repertoire to discover missing variations that opponents play frequently.
+
+### 4.1 Traversal & Coverage Verification
+1. Performs a BFS starting from the root FEN.
+2. For each reachable position where it is the opponent's turn:
+   - Queries Lichess popularity stats.
+   - Calculates total opponent volume: $V_{total} = \sum \text{Games}(m_{opp})$.
+   - Checks which opponent moves are covered in the repertoire.
+3. **Gap Detection**: If an opponent move $m_{opp}$ has a frequency $\ge \text{Min Frequency Threshold}$ (e.g., $1.0\%$) and is **not** in the repertoire, it is flagged as an Opening Hole.
+
+### 4.2 Transposition & Level Consistency
+- Gaps are annotated with their minimum reached level.
+- Double-clicking a hole in the GUI automatically navigates the board to that position and sets up candidate move additions.
+
+---
+
+## 5. 📈 Leitner SRS Engine & Dynamic Opening Elo
+
+### 5.1 Leitner 7-Box Scheduling
+The Spaced Repetition System uses 7 review intervals:
+
+| Box | Review Interval | Description |
+| :---: | :---: | :--- |
+| **1** | 5 Minutes | Immediate review after first learning or blunder |
+| **2** | 1 Day | Short-term memory consolidation |
+| **3** | 3 Days | Medium-term memory test |
+| **4** | 9 Days | Intermediate retention check |
+| **5** | 21 Days | Long-term memory verification |
+| **6** | 63 Days | Advanced mastery |
+| **7** | 180 Days | Deep permanent knowledge |
+
+When a move is answered correctly, it advances ($\text{Box} \to \text{Box} + 1$). When answered incorrectly, it drops back to **Box 1**.
+
+### 5.2 Dynamic Opening Elo Rating
+The user's overall mastery for a repertoire is calculated as an estimated **Opening Elo**:
+$$\text{Opening Elo} = 1200 + \sum_{i=1}^{7} \left( \text{Count}(\text{Box}_i) \times \Delta\text{Elo}_i \right)$$
+This provides immediate visual feedback on repertoire strength growth.
+
+---
+
+## 6. 🏗️ Architecture & Thread Management
+
+Opening Fenix uses PySide/PyQt6 with a decoupled multi-threaded architecture (`opening_fenix/core/threads.py`):
+
+```
+                   ┌─────────────────────────┐
+                   │    Qt Main GUI Loop     │
+                   │ (MainWindow / Creator)  │
+                   └────────────┬────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        ▼                       ▼                       ▼
+┌───────────────┐       ┌───────────────┐       ┌───────────────┐
+│ AnalysisThread│       │HoleFinderThread│      │LichessLoader  │
+│ (Stockfish)   │       │(BFS Traversal)│       │ (API Throttling│
+└───────────────┘       └───────────────┘       └───────────────┘
+```
+
+- **AnalysisThread**: Manages Stockfish UCI engine interaction with cooperative cancellation.
+- **HoleFinderThread**: Runs heavy BFS scans asynchronously to keep the UI responsive.
+- **LichessLoaderThread**: Handles HTTP fetching with an **Exponential Backoff Controller** (suspends for 60s on HTTP 429, gradually recovers by 5% every 50 requests).
+
+---
+*Documentation maintained for Opening Fenix V2.*

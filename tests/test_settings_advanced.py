@@ -17,7 +17,7 @@ def test_diagnostic_dialog_init(qtbot, complex_backend, monkeypatch):
     dialog = DiagnosticDialog(complex_backend)
     qtbot.addWidget(dialog)
     # The scan runs in a timer, wait for it
-    qtbot.waitUntil(lambda: "identified" in dialog.lbl_info.text(), timeout=2000)
+    qtbot.waitUntil(lambda: "identifiziert" in dialog.lbl_info.text().lower() or "identified" in dialog.lbl_info.text().lower(), timeout=2000)
     assert dialog.btn_repair.isEnabled()
 
 def test_maintenance_widget(qtbot):

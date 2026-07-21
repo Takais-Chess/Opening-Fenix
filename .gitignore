@@ -138,6 +138,8 @@ build/
 backups/
 tmp/
 *.db
+*.corrupted*
+*.empty
 test_cleanup_repo.db
 Compressed (zipped) folder/
 *.zip

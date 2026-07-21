@@ -5,8 +5,13 @@ is_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
 app_name = 'Opening Fenix Public' if is_share else 'Opening Fenix'
 
 datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
+if os.path.exists('profiles'):
+    datas_list.append(('profiles', 'profiles'))
+if os.path.exists('repertoires'):
+    datas_list.append(('repertoires', 'repertoires'))
 if not is_share:
-    datas_list.append(('engines', 'engines'))
+    if os.path.exists('engines'):
+        datas_list.append(('engines', 'engines'))
 
 a = Analysis(
     ['main.py'],

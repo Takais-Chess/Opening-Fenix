@@ -198,7 +198,7 @@ class DiagnosticDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
-        self.setWindowTitle("Datenbank Diagnose")
+        self.setWindowTitle(tr_ui("repo_settings.diag_title", "Datenbank-Diagnose"))
         self.setMinimumWidth(scale(500))
         self.backend = backend
         self.setStyleSheet(get_bw_glass_style())
@@ -210,7 +210,7 @@ class DiagnosticDialog(QDialog):
         layout.setSpacing(scale(15))
         layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
 
-        self.lbl_info = QLabel("Überprüfe Repertoire-Struktur...")
+        self.lbl_info = QLabel(tr_ui("repo_settings.diag_checking", "Überprüfe Repertoire-Struktur..."))
         self.lbl_info.setStyleSheet("font-weight: bold; font-size: 16px;")
         layout.addWidget(self.lbl_info)
         
@@ -220,13 +220,13 @@ class DiagnosticDialog(QDialog):
         layout.addWidget(self.txt_results)
         
         h_btn = QHBoxLayout()
-        self.btn_repair = QPushButton("🔧 Probleme beheben")
+        self.btn_repair = QPushButton(tr_ui("repo_settings.btn_repair_issues", "🔧 Probleme beheben"))
         self.btn_repair.setProperty("class", "Primary")
         self.btn_repair.clicked.connect(self.repair)
         self.btn_repair.setEnabled(False)
         self.btn_repair.setVisible(False)
         
-        btn_close = QPushButton("Schließen")
+        btn_close = QPushButton(tr_ui("repo_settings.btn_close", "Schließen"))
         btn_close.clicked.connect(self.accept)
         
         h_btn.addStretch()
@@ -236,64 +236,64 @@ class DiagnosticDialog(QDialog):
 
     def run_diagnostic(self):
         self.issues = self.backend.run_diagnostic()
-        msg = "<h3 style='margin-bottom: 10px;'>Diagnose-Ergebnis:</h3>"
+        msg = tr_ui("repo_settings.diag_result_title", "<h3 style='margin-bottom: 10px;'>Diagnose-Ergebnis:</h3>")
         
         has_issues = False
         
         # Schema
         if self.issues['schema']:
-            msg += f"<p style='color: #e74c3c;'><b>⚠️ Veraltetes Datenbankschema</b><br>Fehlende Spalten: {', '.join(self.issues['schema'])}</p>"
+            msg += tr_ui("repo_settings.diag_schema_outdated", "<p style='color: #e74c3c;'><b>⚠️ Veraltetes Datenbankschema</b><br>Fehlende Spalten: {cols}</p>", cols=', '.join(self.issues['schema']))
             has_issues = True
         else:
-            msg += "<p style='color: #27ae60;'><b>✅ Datenbankschema</b><br>Das Schema ist aktuell.</p>"
+            msg += tr_ui("repo_settings.diag_schema_ok", "<p style='color: #27ae60;'><b>✅ Datenbankschema</b><br>Das Schema ist aktuell.</p>")
             
         # Gaps
         if self.issues['gaps'] > 0:
-            msg += f"<p style='color: #e74c3c;'><b>⚠️ Zug-Lücken</b><br>{self.issues['gaps']} fehlende Repertoire-Links gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_gaps_warn", "<p style='color: #e74c3c;'><b>⚠️ Zug-Lücken</b><br>{count} fehlende Repertoire-Links gefunden.</p>", count=self.issues['gaps'])
             has_issues = True
         else:
-            msg += "<p style='color: #27ae60;'><b>✅ Zug-Kette</b><br>Keine Lücken gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_gaps_ok", "<p style='color: #27ae60;'><b>✅ Zug-Kette</b><br>Keine Lücken gefunden.</p>")
             
         # Duplicates
         if self.issues['duplicates'] > 0:
-            msg += f"<p style='color: #e74c3c;'><b>⚠️ FEN-Duplikate</b><br>{self.issues['duplicates']} doppelte Stellungen gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_dups_warn", "<p style='color: #e74c3c;'><b>⚠️ FEN-Duplikate</b><br>{count} doppelte Stellungen gefunden.</p>", count=self.issues['duplicates'])
             has_issues = True
         else:
-            msg += "<p style='color: #27ae60;'><b>✅ Eindeutigkeit</b><br>Keine FEN-Duplikate gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_dups_ok", "<p style='color: #27ae60;'><b>✅ Eindeutigkeit</b><br>Keine FEN-Duplikate gefunden.</p>")
             
         # Orphans
         if self.issues.get('orphans', 0) > 0:
-            msg += f"<p style='color: #f39c12;'><b>ℹ️ Isolierte Stellungen</b><br>{self.issues['orphans']} Stellungen sind nicht erreichbar.</p>"
+            msg += tr_ui("repo_settings.diag_orphans_info", "<p style='color: #f39c12;'><b>ℹ️ Isolierte Stellungen</b><br>{count} Stellungen sind nicht erreichbar.</p>", count=self.issues['orphans'])
         else:
-            msg += "<p style='color: #27ae60;'><b>✅ Erreichbarkeit</b><br>Alle Stellungen sind verknüpft.</p>"
+            msg += tr_ui("repo_settings.diag_orphans_ok", "<p style='color: #27ae60;'><b>✅ Erreichbarkeit</b><br>Alle Stellungen sind verknüpft.</p>")
 
         # Lichess Orphans
         if self.issues.get('orphaned_lichess', 0) > 0:
-            msg += f"<p style='color: #e67e22;'><b>⚠️ Verwaiste Lichess-Daten</b><br>{self.issues['orphaned_lichess']} Cache-Einträge ohne zugehörige Stellung gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_orphaned_lichess_warn", "<p style='color: #e67e22;'><b>⚠️ Verwaiste Lichess-Daten</b><br>{count} Cache-Einträge ohne zugehörige Stellung gefunden.</p>", count=self.issues['orphaned_lichess'])
             has_issues = True
         else:
-            msg += "<p style='color: #27ae60;'><b>✅ Lichess-Cache</b><br>Keine verwaisten Daten gefunden.</p>"
+            msg += tr_ui("repo_settings.diag_orphaned_lichess_ok", "<p style='color: #27ae60;'><b>✅ Lichess-Cache</b><br>Keine verwaisten Daten gefunden.</p>")
             
         self.txt_results.setHtml(msg)
         
         if has_issues:
-            self.lbl_info.setText("Probleme identified! 🛠️")
+            self.lbl_info.setText(tr_ui("repo_settings.diag_issues_found", "Probleme identifiziert! 🛠️"))
             self.btn_repair.setEnabled(True)
             self.btn_repair.setVisible(True)
         else:
-            self.lbl_info.setText("Alles gesund! ✨")
+            self.lbl_info.setText(tr_ui("repo_settings.diag_all_healthy", "Alles gesund! ✨"))
             self.btn_repair.setVisible(False)
 
     def repair(self):
         self.btn_repair.setEnabled(False)
-        self.lbl_info.setText("Repariere Datenbank... ⌛")
+        self.lbl_info.setText(tr_ui("repo_settings.diag_repairing", "Repariere Datenbank... ⌛"))
         QApplication.processEvents()
         
         self.backend.repair_diagnostic_issues()
         
-        self.txt_results.append("<br><hr><br><p style='color: #27ae60; font-weight: bold;'>Reparatur erfolgreich abgeschlossen!</p>")
-        self.txt_results.append("<p>Alle identifizierten Löcher wurden gestopft und Duplikate bereinigt.</p>")
-        self.lbl_info.setText("Reparatur fertig! ✅")
+        self.txt_results.append(tr_ui("repo_settings.diag_repair_done_title", "<br><hr><br><p style='color: #27ae60; font-weight: bold;'>Reparatur erfolgreich abgeschlossen!</p>"))
+        self.txt_results.append(tr_ui("repo_settings.diag_repair_done_msg", "<p>Alle identifizierten Löcher wurden gestopft und Duplikate bereinigt.</p>"))
+        self.lbl_info.setText(tr_ui("repo_settings.diag_repair_finished", "Reparatur fertig! ✅"))
         if hasattr(self.parent(), 'refresh_info'):
             self.parent().refresh_info()
 
@@ -316,7 +316,7 @@ class MaintenanceRepoWidget(QWidget):
         self.lbl_name.setStyleSheet(f"font-weight: 600; font-size: {scale(14)}px; color: {COLORS['dark_accent']};")
         layout.addWidget(self.lbl_name, 0, 1)
         
-        lbl_elo_h = QLabel("Prio Elo:")
+        lbl_elo_h = QLabel(tr_ui("repo_settings.col_prio_elo", "Prio Elo:"))
         lbl_elo_h.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(11)}px;")
         lbl_elo_h.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(lbl_elo_h, 0, 2)
@@ -327,7 +327,7 @@ class MaintenanceRepoWidget(QWidget):
         self.lbl_elo_val.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.lbl_elo_val, 0, 3)
         
-        self.lbl_status = QLabel("Bereit")
+        self.lbl_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
         self.lbl_status.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(11)}px; font-style: italic;")
         self.lbl_status.setFixedWidth(scale(140))
         self.lbl_status.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -363,7 +363,7 @@ class RepoSettingsDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
         self.main_window = parent
-        self.setWindowTitle("Repertoire Einstellungen")
+        self.setWindowTitle(tr_ui("repo_settings.dialog_title", "Repertoire Einstellungen"))
         self.setMinimumSize(scale(1080), scale(700))
         self.backend = backend
         self.setStyleSheet(get_bw_glass_style())
@@ -609,7 +609,7 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_ui)
 
         # 🔊 Sound & Sprache
-        g_sound = QGroupBox(tr_ui("repo_settings.sound_language_title", "🔊 Sound & Sprache"))
+        g_sound = QGroupBox(tr_ui("repo_settings.sound_language_title", "🔊 Sound && Sprache"))
         f_sound = QFormLayout(g_sound)
         
         self.slider_vol = QSlider(Qt.Orientation.Horizontal)
@@ -717,14 +717,14 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 1. 🔍 Diagnose & Instandhaltung
-        g_diag = QGroupBox(tr_ui("repo_settings.tools_title", "🔍 Diagnose & Instandhaltung"))
+        g_diag = QGroupBox(tr_ui("repo_settings.tools_title", "🔍 Diagnose && Instandhaltung"))
         v_diag = QVBoxLayout(g_diag)
-        btn_diag = QPushButton(tr_ui("repo_settings.btn_diag", "🔎 Datenbank-Diagnose & Reparatur"))
+        btn_diag = QPushButton(tr_ui("repo_settings.btn_diag", "🔎 Datenbank-Diagnose && Reparatur"))
         btn_diag.clicked.connect(self.run_structure_repair)
         btn_names = QPushButton(tr_ui("repo_settings.btn_names", "🏷️ Variantennamen neu berechnen"))
         btn_names.clicked.connect(self.run_variation_name_repair)
         
-        self.btn_wipe_lichess = QPushButton(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [...]"))
+        self.btn_wipe_lichess = QPushButton(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess Datenbank-Daten löschen für alle Elos außer [{elo}]", elo="..."))
         self.btn_wipe_lichess.clicked.connect(self.wipe_other_lichess_data_action)
         self.btn_wipe_lichess.setStyleSheet("color: #e67e22; font-weight: 500;")
 
@@ -755,7 +755,8 @@ class RepoSettingsDialog(QDialog):
         self.txt_engine_path = QLineEdit()
         self.txt_engine_path.setText(self.main_window.config.get("engine_path", ""))
         btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(scale(30))
+        btn_browse.setFixedWidth(scale(42))
+        btn_browse.setStyleSheet("padding: 0px; font-weight: bold;")
         btn_browse.clicked.connect(self.browse_engine_path)
         h_path = QHBoxLayout(); h_path.addWidget(self.txt_engine_path); h_path.addWidget(btn_browse)
         f_engine.addRow(tr_ui("repo_settings.engine_path_label", "Engine Pfad:"), h_path)
@@ -770,9 +771,9 @@ class RepoSettingsDialog(QDialog):
         f_engine.addRow(tr_ui("repo_settings.search_depth_label", "Suchtiefe:"), self.s_d)
         f_engine.addRow(tr_ui("repo_settings.threads_label", "Threads:"), self.c_threads)
         
-        btn_start_eng = QPushButton(tr_ui("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
-        btn_start_eng.clicked.connect(self.start_analysis)
-        f_engine.addRow("", btn_start_eng)
+        self.btn_start_eng = QPushButton(tr_ui("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
+        self.btn_start_eng.clicked.connect(self.start_analysis)
+        f_engine.addRow("", self.btn_start_eng)
         self.pb_eng = QProgressBar(); self.l_eng_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
         v_eng_prog = QVBoxLayout()
         v_eng_prog.addWidget(self.l_eng_status); v_eng_prog.addWidget(self.pb_eng)
@@ -791,7 +792,8 @@ class RepoSettingsDialog(QDialog):
         self.txt_lichess_token.textChanged.connect(self.on_token_changed)
         
         btn_toggle_token = QPushButton("👁️")
-        btn_toggle_token.setFixedWidth(scale(35))
+        btn_toggle_token.setFixedWidth(scale(42))
+        btn_toggle_token.setStyleSheet("padding: 0px; font-size: 14px;")
         btn_toggle_token.setCheckable(True)
         btn_toggle_token.toggled.connect(lambda checked: self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Normal if checked else QLineEdit.EchoMode.Password))
         
@@ -806,11 +808,11 @@ class RepoSettingsDialog(QDialog):
         v_lich.addLayout(f_token)
         
         h_fetch = QHBoxLayout()
-        btn_fetch = QPushButton(tr_ui("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
-        btn_fetch.clicked.connect(self.start_fetch)
+        self.btn_fetch = QPushButton(tr_ui("repo_settings.btn_fetch", "📡 Daten laden && Scores berechnen"))
+        self.btn_fetch.clicked.connect(self.start_fetch)
         btn_delete_l = QPushButton(tr_ui("repo_settings.btn_delete_lichess", "🗑️ Daten für diese Elo löschen"))
         btn_delete_l.clicked.connect(self.delete_lichess_action)
-        h_fetch.addWidget(btn_fetch); h_fetch.addWidget(btn_delete_l)
+        h_fetch.addWidget(self.btn_fetch); h_fetch.addWidget(btn_delete_l)
         v_lich.addLayout(h_fetch)
         self.pb_lich = QProgressBar(); self.l_lich_status = QLabel(tr_ui("repo_settings.status_waiting", "Warte auf Start..."))
         v_lich.addWidget(self.l_lich_status); v_lich.addWidget(self.pb_lich)
@@ -843,7 +845,46 @@ class RepoSettingsDialog(QDialog):
         v_global.addLayout(h_global)
         layout.addWidget(g_global)
 
+        # 7. 📁 System-Ordner im Explorer öffnen
+        g_folders = QGroupBox(tr_ui("repo_settings.folder_access_title", "📁 System-Ordner im Explorer öffnen"))
+        h_folders = QHBoxLayout(g_folders)
+        btn_open_active = QPushButton(tr_ui("repo_settings.btn_open_active_repo", "📁 Aktuellen Repertoire-Ordner im Explorer öffnen"))
+        btn_open_active.clicked.connect(self.open_active_repertoire_folder)
+        btn_open_all_r = QPushButton(tr_ui("repo_settings.btn_open_all_repos", "📁 Alle Repertoires-Ordner im Explorer öffnen"))
+        btn_open_all_r.clicked.connect(self.open_all_repertoires_folder)
+        btn_open_profs = QPushButton(tr_ui("repo_settings.btn_open_profiles", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs.clicked.connect(self.open_profiles_folder)
+        h_folders.addWidget(btn_open_active)
+        h_folders.addWidget(btn_open_all_r)
+        h_folders.addWidget(btn_open_profs)
+        layout.addWidget(g_folders)
+
         layout.addStretch()
+
+    def open_active_repertoire_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        if self.active_repo_name:
+            path = get_repertoire_dir(self.active_repo_name)
+            if not os.path.exists(path):
+                os.makedirs(path, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_all_repertoires_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        path = os.path.join(get_user_dir(), "repertoires")
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def open_profiles_folder(self):
+        from PyQt6.QtGui import QDesktopServices
+        from PyQt6.QtCore import QUrl
+        path = os.path.join(get_user_dir(), "profiles")
+        if not os.path.exists(path):
+            os.makedirs(path, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def init_page_maintenance(self, page):
         layout = QVBoxLayout(page)
@@ -909,7 +950,7 @@ class RepoSettingsDialog(QDialog):
         self.chk_m_lichess.setChecked(True)
         self.chk_m_cleanup_lichess = QCheckBox(tr_ui("repo_settings.task_cleanup_lichess", "Verwaiste Lichess-Daten bereinigen"))
         self.chk_m_cleanup_lichess.setChecked(True)
-        self.chk_m_stats = QCheckBox(tr_ui("repo_settings.task_stats", "Statistiken & Prioritäten berechnen"))
+        self.chk_m_stats = QCheckBox(tr_ui("repo_settings.task_stats", "Statistiken && Prioritäten berechnen"))
         self.chk_m_stats.setChecked(True)
         
         v_tasks = QVBoxLayout()
@@ -987,26 +1028,24 @@ class RepoSettingsDialog(QDialog):
             self.backend.set_repertoire_start_move(val)
 
     def set_all_levels_elo(self):
-        val, ok = QInputDialog.getInt(self, "Globales Elo", "Ziel-Elo für ALLE Level setzen:", 1500, 800, 4000)
+        val, ok = QInputDialog.getInt(self, tr_ui("repo_settings.dlg_global_elo_title", "Globales Elo"), tr_ui("repo_settings.dlg_global_elo_prompt", "Ziel-Elo für ALLE Level setzen:"), 1500, 800, 4000)
         if ok and self.backend:
             levels = self.backend.get_repertoire_levels()
             for lvl in levels:
                 self.backend.update_level_elo(lvl['order'], val)
             self.refresh_info()
-            QMessageBox.information(self, "Erfolg", f"Alle Level wurden auf {val} Elo gesetzt.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_all_levels_elo_done", "Alle Level wurden auf {val} Elo gesetzt.", val=val))
 
     def delete_level(self):
         levels = self.backend.get_repertoire_levels()
         if not levels: return
         last = levels[-1]
         
-        reply = QMessageBox.question(self, "Level löschen", 
-            f"Möchtest du das Level '{last['name']}' wirklich löschen?\n\nACHTUNG: Züge in diesem Level werden NICHT gelöscht, behalten aber ihre Level-Nummer (was zu Inkonsistenzen führen kann).",
+        reply = QMessageBox.question(self, tr_ui("repo_settings.dlg_delete_level_title", "Level löschen"), 
+            tr_ui("repo_settings.dlg_delete_level_msg", "Möchtest du das Level '{name}' wirklich löschen?\n\nACHTUNG: Züge in diesem Level werden NICHT gelöscht, behalten aber ihre Level-Nummer (was zu Inkonsistenzen führen kann).", name=last['name']),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             
         if reply == QMessageBox.StandardButton.Yes:
-            # Backend usually needs a specific method. Let's assume we can delete by order or name.
-            # If backend doesn't have it, we manually delete from session.
             try:
                 lvl_obj = self.backend.session.query(RepertoireLevel).filter_by(order=last['order']).first()
                 if lvl_obj:
@@ -1014,7 +1053,7 @@ class RepoSettingsDialog(QDialog):
                     self.backend.session.commit()
                     self.refresh_info()
             except Exception as e:
-                QMessageBox.critical(self, "Fehler", str(e))
+                QMessageBox.critical(self, tr_ui("repo_settings.dlg_error", "Fehler"), str(e))
 
     def preview_priority_level(self):
         threshold = self.spin_prio_threshold.value()
@@ -1022,7 +1061,7 @@ class RepoSettingsDialog(QDialog):
         if not target_lvl: return
         
         impact = self.backend.get_priority_level_impact(threshold, target_lvl)
-        QMessageBox.information(self, "Vorschau", f"Bei einer Priorität > {threshold}% würden {impact} Züge in das Level {target_lvl} verschoben werden.")
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_preview_title", "Vorschau"), tr_ui("repo_settings.dlg_preview_msg", "Bei einer Priorität > {threshold}% würden {count} Züge in das Level {level} verschoben werden.", threshold=threshold, count=impact, level=target_lvl))
 
     def apply_priority_level(self):
         threshold = self.spin_prio_threshold.value()
@@ -1031,36 +1070,36 @@ class RepoSettingsDialog(QDialog):
         
         impact = self.backend.get_priority_level_impact(threshold, target_lvl)
         if impact == 0:
-            QMessageBox.information(self, "Info", "Keine Züge gefunden, die dem Kriterium entsprechen.")
+            QMessageBox.information(self, "Info", tr_ui("repo_settings.dlg_preview_msg", "Bei einer Priorität > {threshold}% würden {count} Züge in das Level {level} verschoben werden.", threshold=threshold, count=0, level=target_lvl))
             return
             
-        reply = QMessageBox.question(self, "Anwenden", f"{impact} Züge werden auf Level {target_lvl} gesetzt. Fortfahren?",
+        reply = QMessageBox.question(self, tr_ui("repo_settings.dlg_apply_title", "Anwenden"), tr_ui("repo_settings.dlg_apply_msg", "{count} Züge werden auf Level {level} gesetzt. Fortfahren?", count=impact, level=target_lvl),
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             modified = self.backend.apply_priority_level_update(threshold, target_lvl)
             self.refresh_info()
-            QMessageBox.information(self, "Fertig", f"{modified} Züge wurden aktualisiert.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), tr_ui("repo_settings.dlg_moves_updated", "{count} Züge wurden aktualisiert.", count=modified))
 
     def clean_comments(self):
         n = self.backend.deduplicate_comments_in_repo()
-        QMessageBox.information(self, "Bereinigung", f"Fertig! In {n} Stellungen wurden doppelte Kommentar-Texte entfernt.")
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), tr_ui("repo_settings.dlg_dedup_done", "Fertig! In {count} Stellungen wurden doppelte Kommentar-Texte entfernt.", count=n))
 
     def clean_brackets(self):
         n = self.backend.clean_brackets_in_repo()
-        QMessageBox.information(self, "Bereinigung", f"Fertig! In {n} Stellungen wurde Text in [eckigen Klammern] gelöscht.")
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), tr_ui("repo_settings.dlg_brackets_done", "Fertig! In {count} Stellungen wurde Text in [eckigen Klammern] gelöscht.", count=n))
 
     def global_move_all_level(self):
         target_lvl = self.combo_global_level.currentData()
         if not target_lvl: return
         
-        reply = QMessageBox.question(self, "Globale Zuweisung", 
-            f"Möchtest du wirklich ALLE Züge des Repertoires auf Level {target_lvl} setzen?",
+        reply = QMessageBox.question(self, tr_ui("repo_settings.dlg_global_assign_title", "Globale Zuweisung"), 
+            tr_ui("repo_settings.dlg_global_assign_msg", "Möchtest du wirklich ALLE Züge des Repertoires auf Level {level} setzen?", level=target_lvl),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             
         if reply == QMessageBox.StandardButton.Yes:
             n = self.backend.move_all_to_level(target_lvl)
             self.refresh_info()
-            QMessageBox.information(self, "Erfolg", f"{n} Züge wurden auf Level {target_lvl} gesetzt.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_moves_set_to_level", "{count} Züge wurden auf Level {level} gesetzt.", count=n, level=target_lvl))
 
     def change_board_theme(self, theme):
         self.main_window.board_widget.set_theme(theme)
@@ -1086,7 +1125,7 @@ class RepoSettingsDialog(QDialog):
         name = self.l_n.text()
         if not name or name == "Unbekannt":
             self.lbl_cover_preview.clear()
-            self.lbl_cover_preview.setText("Kein Bild")
+            self.lbl_cover_preview.setText(tr_ui("repo_settings.no_cover_image", "Kein Bild"))
             self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
             self.btn_remove_cover.setEnabled(False)
             return
@@ -1101,7 +1140,7 @@ class RepoSettingsDialog(QDialog):
                 return
                 
         self.lbl_cover_preview.clear()
-        self.lbl_cover_preview.setText("Kein Bild")
+        self.lbl_cover_preview.setText(tr_ui("repo_settings.no_cover_image", "Kein Bild"))
         self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
         self.btn_remove_cover.setEnabled(False)
 
@@ -1133,7 +1172,7 @@ class RepoSettingsDialog(QDialog):
             repo_dir = os.path.join(repo_base, "test", name)
             
         if not os.path.exists(repo_dir):
-            QMessageBox.warning(self, "Fehler", f"Repertoire-Ordner für '{name}' wurde nicht gefunden.")
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.dlg_cover_folder_error", "Repertoire-Ordner für '{name}' wurde nicht gefunden.", name=name))
             return
             
         # Get extension of selected file
@@ -1162,9 +1201,9 @@ class RepoSettingsDialog(QDialog):
                 if hasattr(w, "load_repertoire_list"):
                     w.load_repertoire_list()
                     
-            QMessageBox.information(self, "Erfolg", "Das Cover-Bild wurde erfolgreich hinzugefügt.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_cover_added", "Das Cover-Bild wurde erfolgreich hinzugefügt."))
         except Exception as e:
-            QMessageBox.critical(self, "Fehler", f"Das Bild konnte nicht kopiert werden: {str(e)}")
+            QMessageBox.critical(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.dlg_cover_copy_error", "Das Bild konnte nicht kopiert werden: {error}", error=str(e)))
 
     def remove_cover_image(self):
         import os
@@ -1177,8 +1216,8 @@ class RepoSettingsDialog(QDialog):
             
         reply = QMessageBox.question(
             self,
-            "Cover-Bild entfernen",
-            "Möchtest du das aktuelle Cover-Bild wirklich löschen?",
+            tr_ui("repo_settings.dlg_cover_remove_title", "Cover-Bild entfernen"),
+            tr_ui("repo_settings.dlg_cover_remove_msg", "Möchtest du das aktuelle Cover-Bild wirklich löschen?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -1207,17 +1246,17 @@ class RepoSettingsDialog(QDialog):
                     w.refresh_repertoire_buttons()
                 if hasattr(w, "load_repertoire_list"):
                     w.load_repertoire_list()
-            QMessageBox.information(self, "Erfolg", "Das Cover-Bild wurde gelöscht.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_cover_deleted", "Das Cover-Bild wurde gelöscht."))
 
     def rename_repertoire(self):
         old_name = self.backend.active_repo_name
-        new_name, ok = QInputDialog.getText(self, "Umbenennen", "Neuer Name für das Repertoire:", QLineEdit.EchoMode.Normal, old_name)
+        new_name, ok = QInputDialog.getText(self, tr_ui("repo_settings.dlg_rename_title", "Umbenennen"), tr_ui("repo_settings.dlg_rename_prompt", "Neuer Name für das Repertoire:"), QLineEdit.EchoMode.Normal, old_name)
         if ok and new_name and new_name != old_name:
             # Use the new robust renaming logic (filesystem + profiles)
             if hasattr(self.backend, "rename_repertoire"):
                 success, msg = self.backend.rename_repertoire(old_name, new_name)
                 if success:
-                    QMessageBox.information(self, "Erfolg", msg)
+                    QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), msg)
                     self.refresh_info()
                     
                     # Notify all top-level windows to refresh their repertoire lists
@@ -1229,7 +1268,7 @@ class RepoSettingsDialog(QDialog):
                         if hasattr(w, "load_repertoire_list"):
                             w.load_repertoire_list()
                 else:
-                    QMessageBox.warning(self, "Fehler", msg)
+                    QMessageBox.warning(self, tr_ui("repo_settings.dlg_error", "Fehler"), msg)
             else:
                 # Legacy fallback (only updates display name metadata)
                 self.backend.set_meta("repertoire_display_name", new_name)
@@ -1243,7 +1282,7 @@ class RepoSettingsDialog(QDialog):
         if item.column() == 1:
             lvl_order = int(self.tbl_levels.item(item.row(), 0).text())
             old_name = item.text()
-            new_name, ok = QInputDialog.getText(self, "Level Umbenennen", "Neuer Name für dieses Level:", QLineEdit.EchoMode.Normal, old_name)
+            new_name, ok = QInputDialog.getText(self, tr_ui("repo_settings.dlg_rename_level_title", "Level Umbenennen"), tr_ui("repo_settings.dlg_rename_level_prompt", "Neuer Name für dieses Level:"), QLineEdit.EchoMode.Normal, old_name)
             if ok and new_name and new_name != old_name:
                 self.backend.update_level_name(lvl_order, new_name)
                 self.refresh_info()
@@ -1315,8 +1354,8 @@ class RepoSettingsDialog(QDialog):
         
         # Update extra info rows
         if fast_only:
-            self.lbl_ana_status.setText("Laden.")
-            self.lbl_db_cov.setText("Laden.")
+            self.lbl_ana_status.setText(tr_ui("repo_settings.status_loading", "Laden..."))
+            self.lbl_db_cov.setText(tr_ui("repo_settings.status_loading", "Laden..."))
         else:
             self.lbl_ana_status.setText(info.get('depth', '-'))
             cov = info.get("coverage_pct", 0)
@@ -1326,9 +1365,9 @@ class RepoSettingsDialog(QDialog):
         # Sync Lichess UI
         elo_display = get_elo_display(elo)
         if hasattr(self, 'lbl_lichess_target_elo'):
-            self.lbl_lichess_target_elo.setText(f"Ziel-Elo: {elo_display}")
+            self.lbl_lichess_target_elo.setText(tr_ui("repo_settings.target_elo_label", "Ziel-Elo: {elo}", elo=elo_display))
         if hasattr(self, 'btn_wipe_lichess'):
-            self.btn_wipe_lichess.setText(f"🗑️ Lichess Datenbank Daten Löschen für alle Elos außer [{elo_display}]")
+            self.btn_wipe_lichess.setText(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess Datenbank-Daten löschen für alle Elos außer [{elo}]", elo=elo_display))
 
         # Refresh Table
         self.tbl_levels.setRowCount(0)
@@ -1369,7 +1408,7 @@ class RepoSettingsDialog(QDialog):
 
 
     def delete_repertoire_action(self):
-        if QMessageBox.warning(self, "Löschen", "Repertoire wirklich unwiderruflich löschen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+        if QMessageBox.warning(self, tr_ui("repo_settings.dlg_delete_repo_title", "Löschen"), tr_ui("repo_settings.dlg_delete_repo_msg", "Repertoire wirklich unwiderruflich löschen?"), QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.main_window.delete_repertoire_action()
             self.accept()
 
@@ -1382,30 +1421,30 @@ class RepoSettingsDialog(QDialog):
             fmt, scope, transpos_mode, max_l, lang = d.result_data
             start = self.main_window.board_widget.board.fen() if scope == "current" else None
             if fmt == "pgn":
-                p = QProgressDialog("Exportiere...", "Abbrechen", 0, 0, self)
+                p = QProgressDialog(tr_ui("repo_settings.dlg_export_progress", "Exportiere..."), tr_ui("repo_settings.dlg_export_cancel", "Abbrechen"), 0, 0, self)
                 pgn = self.backend.export_pgn(start, transpos_mode, lambda c: p.setValue(c) or p.wasCanceled(), max_l, language=lang)
                 if pgn:
-                    path, _ = QFileDialog.getSaveFileName(self, "Export Speichern", f"{self.backend.active_repo_name}.pgn", "PGN Dateien (*.pgn)")
+                    path, _ = QFileDialog.getSaveFileName(self, tr_ui("repo_settings.dlg_export_save_title", "Export Speichern"), f"{self.backend.active_repo_name}.pgn", "PGN Dateien (*.pgn)")
                     if path:
                         with open(path, "w", encoding="utf-8") as f: f.write(pgn)
-                        QMessageBox.information(self, "Erfolg", "Export abgeschlossen.")
+                        QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_export_done", "Export abgeschlossen."))
             else:
-                path, _ = QFileDialog.getSaveFileName(self, "Export Speichern", f"{self.backend.active_repo_name}.db", "SQLite Datenbank (*.db)")
+                path, _ = QFileDialog.getSaveFileName(self, tr_ui("repo_settings.dlg_export_save_title", "Export Speichern"), f"{self.backend.active_repo_name}.db", "SQLite Datenbank (*.db)")
                 if path:
                     s, m = self.backend.export_db(path, start)
-                    (QMessageBox.information if s else QMessageBox.warning)(self, "Ergebnis", m)
+                    (QMessageBox.information if s else QMessageBox.warning)(self, tr_ui("repo_settings.dlg_export_result_title", "Ergebnis"), m)
 
     def copy_repertoire_action(self):
         """Duplicates the current repertoire folder and its database."""
         old_name = self.backend.active_repo_name
         if not old_name: return
         
-        new_name, ok = QInputDialog.getText(self, "Kurs kopieren", "Name für die Kopie:", QLineEdit.EchoMode.Normal, f"{old_name} - Kopie")
+        new_name, ok = QInputDialog.getText(self, tr_ui("repo_settings.dlg_copy_title", "Kurs kopieren"), tr_ui("repo_settings.dlg_copy_prompt", "Name für die Kopie:"), QLineEdit.EchoMode.Normal, tr_ui("repo_settings.dlg_copy_suffix", "{name} - Kopie", name=old_name))
         if not (ok and new_name and new_name != old_name): return
         
         # Validate name
         if any(c in new_name for c in '\\/:*?"<>|'):
-            QMessageBox.warning(self, "Ungültiger Name", "Der Name enthält ungültige Zeichen.")
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_invalid_name_title", "Ungültiger Name"), tr_ui("repo_settings.dlg_invalid_name_msg", "Der Name enthält ungültige Zeichen."))
             return
 
         import shutil
@@ -1415,7 +1454,7 @@ class RepoSettingsDialog(QDialog):
         new_dir = os.path.join(os.path.dirname(old_dir), new_name)
         
         if os.path.exists(new_dir):
-            QMessageBox.warning(self, "Fehler", "Ein Repertoire mit diesem Namen existiert bereits.")
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.dlg_repo_exists_msg", "Ein Repertoire mit diesem Namen existiert bereits."))
             return
             
         try:
@@ -1435,9 +1474,9 @@ class RepoSettingsDialog(QDialog):
                 if os.path.exists(old_aux):
                     os.rename(old_aux, new_aux)
 
-            QMessageBox.information(self, "Erfolg", f"Repertoire wurde als '{new_name}' kopiert.\nDu kannst es jetzt über das Hauptmenü laden.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_copy_done", "Repertoire wurde als '{name}' kopiert.\nDu kannst es jetzt über das Hauptmenü laden.", name=new_name))
         except Exception as e:
-            QMessageBox.critical(self, "Fehler beim Kopieren", str(e))
+            QMessageBox.critical(self, tr_ui("repo_settings.dlg_copy_error_title", "Fehler beim Kopieren"), str(e))
 
     def prepare_full_course_export(self):
         # Implementation moved to method below for readability-ish
@@ -1450,10 +1489,10 @@ class RepoSettingsDialog(QDialog):
         if not os.path.exists(repo_dir): os.makedirs(repo_dir, exist_ok=True)
         levels = self.backend.get_repertoire_levels()
         if not levels: return
-        lang_sel, ok = QInputDialog.getItem(self, "Sprache", "Notation für Export:", ["Standard (English)", "Deutsch"], 0, False)
+        lang_sel, ok = QInputDialog.getItem(self, tr_ui("repo_settings.dlg_export_full_lang_title", "Sprache"), tr_ui("repo_settings.dlg_export_full_lang_prompt", "Notation für Export:"), [tr_ui("repo_settings.notation_standard", "Standard (English)"), tr_ui("repo_settings.notation_german", "Deutsch (S,D,L,K,T)")], 0, False)
         if not ok: return
-        lang = "de" if lang_sel == "Deutsch" else "en"
-        progress = QProgressDialog("Exportiere...", "Abbrechen", 0, len(levels), self)
+        lang = "de" if lang_sel == tr_ui("repo_settings.notation_german", "Deutsch (S,D,L,K,T)") else "en"
+        progress = QProgressDialog(tr_ui("repo_settings.dlg_export_progress", "Exportiere..."), tr_ui("repo_settings.dlg_export_cancel", "Abbrechen"), 0, len(levels), self)
         safe_repo_name = re.sub(r'[\\/*?:"<>|]', '_', repo_name)
         exported = []
         for i, lvl in enumerate(levels):
@@ -1468,7 +1507,7 @@ class RepoSettingsDialog(QDialog):
             progress.setValue(i + 1)
         if not progress.wasCanceled():
             self._create_export_readme(repo_dir, repo_name, levels, exported)
-            QMessageBox.information(self, "Fertig", "Repertoire exportiert.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), tr_ui("repo_settings.dlg_export_full_done", "Repertoire exportiert."))
             try: os.startfile(os.path.abspath(repo_dir))
             except: pass
 
@@ -1481,15 +1520,25 @@ class RepoSettingsDialog(QDialog):
         with open(os.path.join(repo_dir, "README.md"), "w", encoding="utf-8") as f: f.write(content)
 
     def run_structure_repair(self): DiagnosticDialog(self.backend, self).exec(); self.refresh_info()
-    def run_variation_name_repair(self): self.backend.reset_and_repair_variation_names()
+    def run_variation_name_repair(self):
+        self.backend.reset_and_repair_variation_names()
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), tr_ui("repo_settings.dlg_variation_names_recalculated", "Variantennamen wurden erfolgreich neu berechnet."))
     def browse_engine_path(self):
         p, _ = QFileDialog.getOpenFileName(self, "Engine", "", "*.exe")
         if p: self.txt_engine_path.setText(p); self.main_window.config["engine_path"] = p; self.main_window.save_config()
 
     def start_analysis(self):
+        if hasattr(self, 'w_eng') and self.w_eng is not None and self.w_eng.isRunning():
+            self.l_eng_status.setText(tr_ui("repo_settings.dlg_engine_stopping", "Engine-Analyse wird gestoppt..."))
+            if hasattr(self, 'btn_start_eng') and self.btn_start_eng is not None:
+                self.btn_start_eng.setEnabled(False)
+                self.btn_start_eng.setText(tr_ui("repo_settings.btn_stopping_scan", "⏳ Stoppe..."))
+            self.w_eng.cancel()
+            return
+
         ep = self.txt_engine_path.text()
         if not ep or not os.path.exists(ep):
-            QMessageBox.warning(self, "Engine fehlt", "Bitte konfiguriere zuerst einen gültigen Engine-Pfad.")
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_engine_missing_title", "Engine fehlt"), tr_ui("repo_settings.dlg_engine_missing_msg", "Bitte konfiguriere zuerst einen gültigen Engine-Pfad."))
             return
 
         self.w_eng = AnalysisThread(self.backend.active_repo_name, self.s_d.value(), int(self.c_threads.currentText()), ep)
@@ -1500,20 +1549,41 @@ class RepoSettingsDialog(QDialog):
         def on_finished(success, message):
             try:
                 if not sip.isdeleted(self):
+                    if hasattr(self, 'btn_start_eng') and self.btn_start_eng is not None:
+                        self.btn_start_eng.setEnabled(True)
+                        self.btn_start_eng.setText(tr_ui("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
+                        self.btn_start_eng.setStyleSheet("")
                     self.l_eng_status.setText(message)
                     if success:
-                        QMessageBox.information(self, "Engine-Analyse fertig", message)
+                        QMessageBox.information(self, tr_ui("repo_settings.dlg_engine_done_title", "Engine-Analyse fertig"), message)
                     else:
-                        QMessageBox.warning(self, "Engine-Analyse Fehler", message)
+                        if "abgebrochen" in message.lower() or "canceled" in message.lower() or "cancelled" in message.lower() or "stopp" in message.lower():
+                            QMessageBox.information(self, tr_ui("repo_settings.dlg_engine_stopped_title", "Engine-Analyse gestoppt"), message)
+                        else:
+                            QMessageBox.warning(self, tr_ui("repo_settings.dlg_engine_error_title", "Engine-Analyse Fehler"), message)
             except: pass
             
         self.w_eng.finished_signal.connect(on_finished)
         self.w_eng.start()
-        self.l_eng_status.setText("Engine Analyse läuft...")
+
+        if hasattr(self, 'btn_start_eng') and self.btn_start_eng is not None:
+            self.btn_start_eng.setEnabled(True)
+            self.btn_start_eng.setText(tr_ui("repo_settings.btn_stop_scan", "🛑 Engine-Scan stoppen"))
+            self.btn_start_eng.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
+
+        self.l_eng_status.setText(tr_ui("repo_settings.dlg_engine_running", "Engine Analyse läuft..."))
 
     def on_token_changed(self, text): self.main_window.config["lichess_token"] = text; self.main_window.save_config()
 
     def start_fetch(self):
+        if hasattr(self, 'w_lich') and self.w_lich is not None and self.w_lich.isRunning():
+            self.l_lich_status.setText(tr_ui("repo_settings.dlg_lichess_stopping", "Lichess Import wird gestoppt..."))
+            if hasattr(self, 'btn_fetch') and self.btn_fetch is not None:
+                self.btn_fetch.setEnabled(False)
+                self.btn_fetch.setText(tr_ui("repo_settings.btn_stopping_fetch", "⏳ Stoppe..."))
+            self.w_lich.cancel()
+            return
+
         # Use repertoire-specific Elo category instead of global config
         target_elo_display = self.combo_repertoire_elo.currentText()
         target_elo = get_elo_internal(target_elo_display)
@@ -1523,22 +1593,38 @@ class RepoSettingsDialog(QDialog):
         self.w_lich.progress_signal.connect(self.pb_lich.setValue)
         
         def on_finished(success, message):
-            self.l_lich_status.setText(message)
-            if success:
-                QMessageBox.information(self, "Lichess Import fertig", message)
-            else:
-                QMessageBox.warning(self, "Lichess Import Fehler", message)
+            try:
+                if not sip.isdeleted(self):
+                    if hasattr(self, 'btn_fetch') and self.btn_fetch is not None:
+                        self.btn_fetch.setEnabled(True)
+                        self.btn_fetch.setText(tr_ui("repo_settings.btn_fetch", "📡 Daten laden && Scores berechnen"))
+                        self.btn_fetch.setStyleSheet("")
+                    self.l_lich_status.setText(message)
+                    if success:
+                        QMessageBox.information(self, tr_ui("repo_settings.dlg_lichess_done_title", "Lichess Import fertig"), message)
+                    else:
+                        if "abgebrochen" in message.lower() or "canceled" in message.lower() or "cancelled" in message.lower() or "stopp" in message.lower():
+                            QMessageBox.information(self, tr_ui("repo_settings.dlg_lichess_stopped_title", "Lichess Import gestoppt"), message)
+                        else:
+                            QMessageBox.warning(self, tr_ui("repo_settings.dlg_lichess_error_title", "Lichess Import Fehler"), message)
+            except: pass
                 
         self.w_lich.finished_signal.connect(on_finished)
         self.w_lich.start()
-        self.l_lich_status.setText("Lichess Daten werden geladen...")
+
+        if hasattr(self, 'btn_fetch') and self.btn_fetch is not None:
+            self.btn_fetch.setEnabled(True)
+            self.btn_fetch.setText(tr_ui("repo_settings.btn_stop_fetch", "🛑 Import stoppen"))
+            self.btn_fetch.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
+
+        self.l_lich_status.setText(tr_ui("repo_settings.dlg_lichess_running", "Lichess Daten werden geladen..."))
 
 
     def delete_lichess_action(self):
         from PyQt6.QtWidgets import QMessageBox
         target_elo_display = self.combo_repertoire_elo.currentText()
         target_elo = get_elo_internal(target_elo_display)
-        ans = QMessageBox.question(self, "Löschen", f"Sollen alle Lichess-Daten für '{target_elo_display}' wirklich gelöscht werden?")
+        ans = QMessageBox.question(self, tr_ui("repo_settings.dlg_lichess_delete_title", "Löschen"), tr_ui("repo_settings.dlg_lichess_delete_msg", "Sollen alle Lichess-Daten für '{elo}' wirklich gelöscht werden?", elo=target_elo_display))
         if ans == QMessageBox.StandardButton.Yes:
             from opening_fenix.core.db.database import DatabaseManager
             from opening_fenix.core.db.models import LichessData
@@ -1548,23 +1634,22 @@ class RepoSettingsDialog(QDialog):
             db = DatabaseManager(db_path)
             try:
                 session = db.get_session()
-                # Delete only for current Elo focus
                 count = session.query(LichessData).filter(LichessData.elo_range == target_elo).delete(synchronize_session=False)
                 session.commit()
                 session.close()
                 db.close()
-                QMessageBox.information(self, "Erfolg", f"{count} Einträge für '{target_elo_display}' gelöscht.")
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_lichess_deleted", "{count} Einträge für '{elo}' gelöscht.", count=count, elo=target_elo_display))
                 self.refresh_info()
             except Exception as e:
-                QMessageBox.critical(self, "Fehler", f"Löschen fehlgeschlagen: {e}")
+                QMessageBox.critical(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.dlg_lichess_delete_error", "Löschen fehlgeschlagen: {error}", error=e))
 
     
     def wipe_other_lichess_data_action(self):
         """Deletes Lichess data from the database for all Elo categories except the current one."""
         target_elo_display = self.combo_repertoire_elo.currentText()
         target_elo = get_elo_internal(target_elo_display)
-        confirm = QMessageBox.question(self, "Bereinigen", 
-            f"Möchtest du wirklich alle Lichess-Daten löschen, die NICHT für '{target_elo_display}' sind?\nDies spart Speicherplatz.",
+        confirm = QMessageBox.question(self, tr_ui("repo_settings.dlg_wipe_lichess_title", "Bereinigen"), 
+            tr_ui("repo_settings.dlg_wipe_lichess_msg", "Möchtest du wirklich alle Lichess-Daten löschen, die NICHT für '{elo}' sind?\nDies spart Speicherplatz.", elo=target_elo_display),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         
         if confirm == QMessageBox.StandardButton.Yes:
@@ -1578,9 +1663,9 @@ class RepoSettingsDialog(QDialog):
                 session.commit()
                 session.close()
                 db.close()
-                QMessageBox.information(self, "Erfolg", f"Bereinigung abgeschlossen. {count} Einträge wurden gelöscht.")
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_wipe_lichess_done", "Bereinigung abgeschlossen. {count} Einträge wurden gelöscht.", count=count))
             except Exception as e:
-                QMessageBox.critical(self, "Fehler", f"Bereinigung fehlgeschlagen: {e}")
+                QMessageBox.critical(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.dlg_wipe_lichess_error", "Bereinigung fehlgeschlagen: {error}", error=e))
 
     def on_stats_ready(self, row, status, coverage, elo):
         # Update Analysis Status
@@ -1599,6 +1684,14 @@ class RepoSettingsDialog(QDialog):
         self.main_table.setItem(row, 2, it_elo)
 
     def start_centralized_maintenance(self):
+        if hasattr(self, 'm_thread') and self.m_thread is not None and self.m_thread.isRunning():
+            self.lbl_m_overall.setText(tr_ui("repo_settings.dlg_maintenance_stopping", "Wartung wird gestoppt..."))
+            if hasattr(self, 'btn_m_start') and self.btn_m_start is not None:
+                self.btn_m_start.setEnabled(False)
+                self.btn_m_start.setText(tr_ui("repo_settings.btn_stopping_batch", "⏳ Stoppe..."))
+            self.m_thread.cancel()
+            return
+
         # Implementation of centralized maintenance batch
         import multiprocessing
         configs = []
@@ -1611,7 +1704,7 @@ class RepoSettingsDialog(QDialog):
                 configs.append({'name': repo_name, 'elo': prio_elo})
         
         if not configs:
-            QMessageBox.warning(self, "Wartung", "Bitte wähle mindestens ein Repertoire aus.")
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_maintenance_title", "Wartung"), tr_ui("repo_settings.dlg_select_at_least_one_repo", "Bitte wähle mindestens ein Repertoire aus."))
             return
 
         tasks = {
@@ -1636,6 +1729,11 @@ class RepoSettingsDialog(QDialog):
         self.m_thread.repo_status_signal.connect(self.on_m_repo_status)
         self.m_thread.finished_signal.connect(self.on_m_finished)
         self.m_thread.start()
+
+        if hasattr(self, 'btn_m_start') and self.btn_m_start is not None:
+            self.btn_m_start.setEnabled(True)
+            self.btn_m_start.setText(tr_ui("repo_settings.btn_stop_batch", "🛑 Wartungs-Batch stoppen"))
+            self.btn_m_start.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; font-weight: bold;")
 
     def on_m_overall_progress(self, current, total, name):
         if sip.isdeleted(self) or not hasattr(self, "pb_m_overall"): return
@@ -1663,11 +1761,18 @@ class RepoSettingsDialog(QDialog):
 
     def on_m_finished(self, success, message):
         if sip.isdeleted(self): return
+        if hasattr(self, 'btn_m_start') and self.btn_m_start is not None:
+            self.btn_m_start.setEnabled(True)
+            self.btn_m_start.setText(tr_ui("repo_settings.btn_start_batch", "🚀 Wartungs-Batch starten"))
+            self.btn_m_start.setStyleSheet("")
         self.lbl_m_overall.setText(f"Wartung beendet: {message}")
         if success:
-            QMessageBox.information(self, "Wartung Center", "Die Stapelverarbeitung wurde erfolgreich abgeschlossen.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_maintenance_center_title", "Wartung Center"), tr_ui("repo_settings.dlg_batch_completed_success", "Die Stapelverarbeitung wurde erfolgreich abgeschlossen."))
         else:
-            QMessageBox.warning(self, "Wartung Center", f"Wartung beendet mit Fehlern:\n{message}")
+            if "abgebrochen" in message.lower() or "canceled" in message.lower() or "cancelled" in message.lower() or "stopp" in message.lower():
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_maintenance_center_title", "Wartung Center"), tr_ui("repo_settings.dlg_maintenance_stopped", "Wartung gestoppt: {message}", message=message))
+            else:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_maintenance_center_title", "Wartung Center"), tr_ui("repo_settings.dlg_maintenance_ended_with_errors", "Wartung beendet mit Fehlern:\n{message}", message=message))
         self.refresh_info()
 
     def _select_all_maintenance_repos(self, checked):
@@ -1698,11 +1803,11 @@ class RepoSettingsDialog(QDialog):
             self.main_table.setItem(row, 2, it_elo)
             
             # Placeholders
-            it_ana = QTableWidgetItem("Laden...")
+            it_ana = QTableWidgetItem(tr_ui("repo_settings.status_loading", "Laden..."))
             it_ana.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.main_table.setItem(row, 3, it_ana)
             
-            it_cov = QTableWidgetItem("Laden...")
+            it_cov = QTableWidgetItem(tr_ui("repo_settings.status_loading", "Laden..."))
             it_cov.setFlags(Qt.ItemFlag.ItemIsEnabled)
             self.main_table.setItem(row, 4, it_cov)
 
@@ -1737,9 +1842,9 @@ class RepoSettingsDialog(QDialog):
     def run_lichess_orphan_cleanup(self):
         count = self.backend.cleanup_orphaned_lichess_data()
         if count > 0:
-            QMessageBox.information(self, "Bereinigung fertig", f"Erfolgreich {count} verwaiste Lichess-Einträge gelöscht.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_orphan_cleanup_title", "Bereinigung fertig"), tr_ui("repo_settings.dlg_orphan_cleanup_done", "Erfolgreich {count} verwaiste Lichess-Einträge gelöscht.", count=count))
         else:
-            QMessageBox.information(self, "Bereinigung fertig", "Keine verwaisten Lichess-Daten gefunden.")
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_orphan_cleanup_title", "Bereinigung fertig"), tr_ui("repo_settings.dlg_orphan_cleanup_empty", "Keine verwaisten Lichess-Daten gefunden."))
         self.refresh_info()
 
     def closeEvent(self, event):

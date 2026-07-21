@@ -192,43 +192,65 @@ class ChessBoardWidget(QWidget):
     def _draw_arrow(self, painter, start, end, color, square_size):
         f1, r1 = chess.square_file(start), chess.square_rank(start)
         f2, r2 = chess.square_file(end), chess.square_rank(end)
-        if self.flipped: r1=r1; c1=7-f1; r2=r2; c2=7-f2
-        else: r1=7-r1; c1=f1; r2=7-r2; c2=f2
+        if self.flipped:
+            r1, c1 = r1, 7 - f1
+            r2, c2 = r2, 7 - f2
+        else:
+            r1, c1 = 7 - r1, f1
+            r2, c2 = 7 - r2, f2
+
         x1, y1 = (c1 + 0.5) * square_size, (r1 + 0.5) * square_size
         x2, y2 = (c2 + 0.5) * square_size, (r2 + 0.5) * square_size
+
         dx, dy = x2 - x1, y2 - y1
-        length = math.sqrt(dx*dx + dy*dy)
-        if length > 0:
-            angle = math.atan2(dy, dx)
-            # Modern Design: Tapered shaft and sharp, small arrowhead
-            head_len = square_size * 0.4
-            head_width = square_size * 0.35
-            shaft_start_width = square_size * 0.08 # Thin tail
-            shaft_end_width = square_size * 0.15   # Tapered to head
-            
-            # 1. Calculate the base of the arrowhead (where shaft ends)
-            x_head_base, y_head_base = x2 - (head_len * 0.8) * math.cos(angle), y2 - (head_len * 0.8) * math.sin(angle)
-            
-            # 2. Draw Tapered Shaft using a Polygon for premium look
-            perp_angle = angle + math.pi / 2
-            
-            # Define 4 points for the shaft polygon
-            p1 = QPointF(x1 + (shaft_start_width/2) * math.cos(perp_angle), y1 + (shaft_start_width/2) * math.sin(perp_angle))
-            p2 = QPointF(x1 - (shaft_start_width/2) * math.cos(perp_angle), y1 - (shaft_start_width/2) * math.sin(perp_angle))
-            p3 = QPointF(x_head_base - (shaft_end_width/2) * math.cos(perp_angle), y_head_base - (shaft_end_width/2) * math.sin(perp_angle))
-            p4 = QPointF(x_head_base + (shaft_end_width/2) * math.cos(perp_angle), y_head_base + (shaft_end_width/2) * math.sin(perp_angle))
-            
-            painter.setBrush(color)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.drawPolygon(QPolygonF([p1, p2, p3, p4]))
-            
-            # 3. Draw Sharper Arrowhead
-            arrow_p1 = QPointF(x2 - head_len * math.cos(angle - math.pi/7), y2 - head_len * math.sin(angle - math.pi/7))
-            arrow_p2 = QPointF(x2 - head_len * math.cos(angle + math.pi/7), y2 - head_len * math.sin(angle + math.pi/7))
-            
-            # Offset the head slightly back for better alignment
-            # (Calculated by drawing from x2,y2)
-            painter.drawPolygon(QPolygonF([QPointF(x2, y2), arrow_p1, arrow_p2]))
+        length = math.sqrt(dx * dx + dy * dy)
+        if length <= 0:
+            return
+
+        angle = math.atan2(dy, dx)
+        ux, uy = math.cos(angle), math.sin(angle)
+        px, py = -math.sin(angle), math.cos(angle)
+
+        # Offsets & proportions for a sleek, unified arrow geometry
+        start_offset = min(square_size * 0.18, length * 0.2)
+        tip_offset = min(square_size * 0.1, length * 0.1)
+
+        sx = x1 + ux * start_offset
+        sy = y1 + uy * start_offset
+
+        tx = x2 - ux * tip_offset
+        ty = y2 - uy * tip_offset
+
+        eff_len = math.sqrt((tx - sx) ** 2 + (ty - sy) ** 2)
+
+        head_len = min(square_size * 0.38, eff_len * 0.45)
+        head_width = square_size * 0.36
+        shaft_start_width = square_size * 0.11
+        shaft_end_width = square_size * 0.15
+
+        hb_x = tx - ux * head_len
+        hb_y = ty - uy * head_len
+
+        # Single 7-point polygon to prevent double alpha-blending and overlapping lines
+        p1 = QPointF(sx + px * (shaft_start_width / 2), sy + py * (shaft_start_width / 2))
+        p2 = QPointF(hb_x + px * (shaft_end_width / 2), hb_y + py * (shaft_end_width / 2))
+        p3 = QPointF(hb_x + px * (head_width / 2), hb_y + py * (head_width / 2))
+        p4 = QPointF(tx, ty)
+        p5 = QPointF(hb_x - px * (head_width / 2), hb_y - py * (head_width / 2))
+        p6 = QPointF(hb_x - px * (shaft_end_width / 2), hb_y - py * (shaft_end_width / 2))
+        p7 = QPointF(sx - px * (shaft_start_width / 2), sy - py * (shaft_start_width / 2))
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setBrush(color)
+
+        # Subtle crisp outline matching the arrow color with slightly higher opacity
+        outline_alpha = min(255, color.alpha() + 50)
+        outline_color = QColor(color.red(), color.green(), color.blue(), outline_alpha)
+        painter.setPen(QPen(outline_color, scale(1.2), Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.MiterJoin))
+
+        painter.drawPolygon(QPolygonF([p1, p2, p3, p4, p5, p6, p7]))
+        painter.restore()
 
     # ──────────────────────────────────────────────────────────────────────
     #   PAINT SYSTEM — Split into static board rendering + animation overlay

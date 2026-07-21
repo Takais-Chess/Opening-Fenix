@@ -520,7 +520,7 @@ class MainWindow(QMainWindow):
         try:
             self.repertoire_manager.set_active_repertoire(repo_name)
         except DatabaseCorruptedException as e:
-            QMessageBox.critical(self, "Datenbank defekt", f"Das Repertoire '{repo_name}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}")
+            QMessageBox.critical(self, tr_ui("main.dlg_db_defective_title", "Datenbank defekt"), f"Das Repertoire '{repo_name}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}")
             self.repertoire_manager.set_active_repertoire(None)
             self.lbl_elo.setText("🎓 800")
             self.progress_bar.update_stats(0, 0, {})
@@ -1213,7 +1213,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(path):
             os.startfile(path)
         else:
-            QMessageBox.warning(self, "Ordner nicht gefunden", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}")
+            QMessageBox.warning(self, tr_ui("main.dlg_folder_not_found_title", "Ordner nicht gefunden"), f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}")
 
     def repolish(self, widget):
         if widget:

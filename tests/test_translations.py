@@ -84,3 +84,6 @@ def test_translation_formatting():
     translator.load_language("en")
     loading_text_en = tr_ui("login.loading_trainer", "Loading...", profile_name="Hikaru")
     assert "Hikaru" in loading_text_en
+
+    # Reset back to German default for other test suites
+    translator.load_language("de")

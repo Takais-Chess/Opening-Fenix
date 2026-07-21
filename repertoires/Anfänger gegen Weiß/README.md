@@ -1,11 +1,17 @@
-# Anfänger gegen Weiß
+# ♟️ Anfänger gegen Weiß
 
-## Details
-- Farbe: Schwarz
-- Datum: 07.04.2026
+### 📌 Course Overview
+| Property | Detail |
+| :--- | :--- |
+| **Side / Color** | 🔴 Black |
+| **Created Date** | 07.04.2026 |
+| **Format** | Opening Fenix V2 Repertoire |
 
-## Levels
-- L1: Basics
-- L2: Grundlagen 2
-- L3: Tiefe Theorie
-- L4: Nachschlagewerk
+---
+
+### 🎓 Repertoire Levels
+| Level | Name & Description |
+| :---: | :--- |
+| **L1** | **Grundlagen** (Essential Defensive Lines) |
+| **L2** | **Tiefe Theorie** (Deep Defensive Theory) |
+| **L3** | **Nachschlagewerk** (Reference Lines) |

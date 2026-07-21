@@ -3447,7 +3447,7 @@ class CreatorWindow(QMainWindow):
         menu = QMenu(self)
 
         # Always add Debug info at the top
-        act_debug = QAction("🛠 Debug: Stellungs-Info anzeigen", self)
+        act_debug = QAction(tr_ui("creator.act_debug_info", "🛠 Debug: Stellungs-Info anzeigen"), self)
         act_debug.triggered.connect(self.show_debug_position_info)
         menu.addAction(act_debug)
         menu.addSeparator()
@@ -3458,17 +3458,17 @@ class CreatorWindow(QMainWindow):
         
         uci = it.data(0, Qt.ItemDataRole.UserRole)
         mid = it.data(0, Qt.ItemDataRole.UserRole + 1)
-        act_del = QAction("Löschen", self)
+        act_del = QAction(tr_ui("creator.act_delete", "Löschen"), self)
         act_del.triggered.connect(lambda: self.delete_move_action(uci))
         menu.addAction(act_del)
         
         if mid:
-            act_active = QAction("Aktiv / Inaktiv umschalten", self)
+            act_active = QAction(tr_ui("creator.act_toggle_active", "Aktiv / Inaktiv umschalten"), self)
             act_active.triggered.connect(lambda: self.on_tree_click(it, 1))
             menu.addAction(act_active)
 
         menu.addSeparator()
-        nag_menu = menu.addMenu("Annotation (NAG)")
+        nag_menu = menu.addMenu(tr_ui("creator.menu_nag", "Annotation (NAG)"))
         nags = {
             "None": (0, "Keine Annotation"),
             "!": (1, "Guter Zug"),
@@ -3484,14 +3484,14 @@ class CreatorWindow(QMainWindow):
             a.setStatusTip(tooltip)
             a.triggered.connect(lambda checked, v=val: self.set_nag_action(uci, v))
             nag_menu.addAction(a)
-        lvl_menu = menu.addMenu("Setze Level")
+        lvl_menu = menu.addMenu(tr_ui("creator.menu_set_level", "Setze Level"))
         for lvl in self.backend.get_repertoire_levels():
             a = QAction(lvl['name'], self)
             a.triggered.connect(lambda checked, l=lvl['order']: self.set_level_action(mid, l))
             lvl_menu.addAction(a)
             
         if mid:
-            lvl_stark_menu = menu.addMenu("Setze Level stark")
+            lvl_stark_menu = menu.addMenu(tr_ui("creator.menu_set_level_strong", "Setze Level stark"))
             for lvl in self.backend.get_repertoire_levels():
                 a = QAction(lvl['name'], self)
                 a.triggered.connect(lambda checked, l=lvl['order']: self.set_level_strong_action(mid, l))
@@ -3507,12 +3507,12 @@ class CreatorWindow(QMainWindow):
         clean_fen = " ".join(fen.split(" ")[:4])
         
         if not self.backend.session:
-            QMessageBox.warning(self, "Debug Info", "Datenbank-Verbindung ist nicht aktiv. Bitte das Repertoire neu laden.")
+            QMessageBox.warning(self, tr_ui("creator.dlg_debug_info_title", "Debug Info"), tr_ui("creator.dlg_debug_info_no_db", "Datenbank-Verbindung ist nicht aktiv. Bitte das Repertoire neu laden."))
             return
 
         pos_entry = self.backend.session.query(Position).filter_by(fen=clean_fen).first()
 
-        title = "Stellungs-Analyse (Debug)"
+        title = tr_ui("creator.dlg_position_analysis_title", "Stellungs-Analyse (Debug)")
         msg = f"<b>Aktuelle FEN:</b><br><code style='background-color: #eee;'>{fen}</code><br><br>"
         
         if pos_entry:
@@ -3573,10 +3573,10 @@ class CreatorWindow(QMainWindow):
         text_edit = QTextEdit()
         text_edit.setReadOnly(True)
         text_edit.setHtml(msg)
-        layout.insertWidget(0, QLabel("Details zu dieser Stellung:"))
+        layout.insertWidget(0, QLabel(tr_ui("creator.lbl_position_details", "Details zu dieser Stellung:")))
         layout.insertWidget(1, text_edit)
         
-        btn_close = QPushButton("Schließen")
+        btn_close = QPushButton(tr_ui("creator.btn_close", "Schließen"))
         btn_close.clicked.connect(d.accept)
         layout.addWidget(btn_close)
         d.resize(600, 500)
@@ -3586,7 +3586,7 @@ class CreatorWindow(QMainWindow):
         self.backend.manually_fix_gap(mid)
         dialog.accept()
         self.update_ui_from_fen()
-        QMessageBox.information(self, "Erfolg", "Zug wurde hinzugefügt. Ändere nun das Level erneut, um die Kaskadierung zu triggern.")
+        QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), tr_ui("creator.dlg_gap_fixed_msg", "Zug wurde hinzugefügt. Ändere nun das Level erneut, um die Kaskadierung zu triggern."))
 
     def delete_move_action(self, u):
         res = self.backend.scan_and_get_impact(u, self.board_widget.board.fen())
@@ -3594,7 +3594,7 @@ class CreatorWindow(QMainWindow):
             m, p = res
         else:
             m, p = [], []
-        if QMessageBox.question(self, "Löschen", f"Sicher? {m} Züge und {p} Positionen werden gelöscht.") == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, tr_ui("creator.dlg_delete_title", "Löschen"), tr_ui("creator.dlg_delete_confirm_msg", "Sicher? {moves} Züge und {positions} Positionen werden gelöscht.", moves=m, positions=p)) == QMessageBox.StandardButton.Yes:
             self.backend.delete_move(u, self.board_widget.board.fen())
             self.update_ui_from_fen()
 
@@ -3622,20 +3622,20 @@ class CreatorWindow(QMainWindow):
             var_str += f", ..."
             
         msg = f"Achtung: Du wirst {count} Züge in den folgenden Varianten ändern:\n\n\"{var_str}\"\n\nFortfahren?"
-        if QMessageBox.warning(self, "Starkes Level setzen", msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+        if QMessageBox.warning(self, tr_ui("creator.dlg_set_strong_level_title", "Starkes Level setzen"), msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             self.backend.update_move_level_strong(mid, l)
             self.update_ui_from_fen()
 
     def set_engine_button_blocked(self, blocked, message=""):
         self.btn_engine_toggle.setEnabled(not blocked)
         if blocked:
-            self.btn_engine_toggle.setText("🚫 Engine blockiert")
+            self.btn_engine_toggle.setText(tr_ui("creator.btn_engine_blocked", "🚫 Engine blockiert"))
             self.btn_engine_toggle.setToolTip(message)
             # Stop local engine if it was running
             if self.btn_engine_toggle.isChecked():
                 self.btn_engine_toggle.setChecked(False)
         else:
-            self.btn_engine_toggle.setText("▶ Analyse Starten")
+            self.btn_engine_toggle.setText(tr_ui("creator.btn_engine_start", "▶ Analyse Starten"))
             self.btn_engine_toggle.setToolTip("")
             self.repolish(self.btn_engine_toggle)
 
@@ -3644,10 +3644,10 @@ class CreatorWindow(QMainWindow):
         # POLISH: Added "..." to indicate it's thinking
     def _on_engine_toggle_toggled(self, checked):
         if checked:
-            self.btn_engine_toggle.setText("⏹ Analyse Stoppen")
+            self.btn_engine_toggle.setText(tr_ui("creator.btn_engine_stop", "⏹ Analyse Stoppen"))
             self.btn_engine_toggle.setStyleSheet(f"background-color: {COLORS['error_red']}; color: white; border-radius: 18px;")
         else:
-            self.btn_engine_toggle.setText("▶ Analyse Starten")
+            self.btn_engine_toggle.setText(tr_ui("creator.btn_engine_start", "▶ Analyse Starten"))
             self.btn_engine_toggle.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; border-radius: 18px;")
         self.toggle_engine(checked)
 
@@ -3677,7 +3677,7 @@ class CreatorWindow(QMainWindow):
                 self.engine_thread.set_position(self.board_widget.board.fen())
         elif active:
             # Situation 1: Engine thread was not initialized due to missing path
-            QMessageBox.warning(self, "Engine Fehler", 
+            QMessageBox.warning(self, tr_ui("creator.dlg_engine_error_title", "Engine Fehler"), 
                 "Kein gültiger Engine-Pfad gefunden.\n\nBitte setze einen gültigen Engine-Pfad in den Repertoire-Einstellungen (Werkzeuge-Tab), um die Analyse nutzen zu können.")
             
             # Reset button UI state
@@ -3764,7 +3764,7 @@ class CreatorWindow(QMainWindow):
             # 6. Close the creator window
             self.close()
         else:
-            QMessageBox.critical(self, "Fehler beim Löschen", 
+            QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"), 
                 f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {last_err}")
 
     def import_pgn_file_dialog(self):
@@ -3791,7 +3791,7 @@ class CreatorWindow(QMainWindow):
         """Asks for target level and starts the import thread."""
         levels = self.backend.get_repertoire_levels()
         if not levels:
-            QMessageBox.warning(self, "Import", "Keine Level gefunden. Bitte erstelle zuerst ein Level in den Einstellungen.")
+            QMessageBox.warning(self, tr_ui("creator.dlg_import_title", "Import"), "Keine Level gefunden. Bitte erstelle zuerst ein Level in den Einstellungen.")
             return
             
         level_choices = [f"Lvl {l['order']}: {l['name']}" for l in levels]
@@ -3820,11 +3820,11 @@ class CreatorWindow(QMainWindow):
     def _on_pgn_import_finished(self, success, message):
         if hasattr(self, 'p_pgn'): self.p_pgn.close()
         if success:
-            QMessageBox.information(self, "Erfolg", message)
+            QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
             self.update_ui_from_fen()
             self.update_structure_tree()
         else:
-            QMessageBox.warning(self, "Import Fehler", message)
+            QMessageBox.warning(self, tr_ui("creator.dlg_import_error_title", "Import Fehler"), message)
 
     def update_structure_tree(self):
         self.combo_structure.blockSignals(True)
@@ -4042,7 +4042,7 @@ class CreatorWindow(QMainWindow):
         if os.path.exists(path):
             os.startfile(path)
         else:
-            QMessageBox.warning(self, "Ordner nicht gefunden", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}")
+            QMessageBox.warning(self, tr_ui("main.dlg_folder_not_found_title", "Ordner nicht gefunden"), tr_ui("main.dlg_folder_not_found_text", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}"))
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
@@ -4455,7 +4455,7 @@ class CreatorWindow(QMainWindow):
             self.table_transpositions.setItem(i, 1, depth_item)
             
             # Col 2: Ranking / Qualität
-            rank_item = QTableWidgetItem("Bewerte...")
+            rank_item = QTableWidgetItem(tr_ui("creator.evaluating", "Bewerte..."))
             rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_transpositions.setItem(i, 2, rank_item)
 
@@ -4904,7 +4904,7 @@ class CreatorWindow(QMainWindow):
             return
             
         if not self.backend.active_repo_name:
-            QMessageBox.warning(self, "Fehler", "Bitte lade zuerst ein Repertoire.")
+            QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), "Bitte lade zuerst ein Repertoire.")
             return
             
         mode = self.combo_hole_mode.currentData()
@@ -4914,16 +4914,16 @@ class CreatorWindow(QMainWindow):
         if self.combo_hole_level.isVisible():
             level = self.combo_hole_level.currentData()
             if mode == "priority" and level is None:
-                QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+                QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), "Bitte wähle zuerst ein Level aus.")
                 return
         else:
             level = None
 
         self.btn_hole_scan.setEnabled(False)
-        self.btn_hole_scan.setText("Scannend")
+        self.btn_hole_scan.setText(tr_ui("creator.scanning", "Scannend"))
         self._hole_dots = 0
         self.hole_anim_timer.start(500)
-        self.lbl_hole_scan_res.setText("Scan läuft...")
+        self.lbl_hole_scan_res.setText(tr_ui("creator.scan_running", "Scan läuft..."))
         self.table_holes.setRowCount(0)
         
         # We don't have the elo combo box anymore in the UI redesign, we default to the globally selected Lichess Category
@@ -4944,14 +4944,14 @@ class CreatorWindow(QMainWindow):
     def _animate_hole_button(self):
         self._hole_dots = (self._hole_dots + 1) % 4
         dots = "." * self._hole_dots
-        self.btn_hole_scan.setText(f"Scannend{dots}")
+        self.btn_hole_scan.setText(f"{tr_ui('creator.scanning', 'Scannend')}{dots}")
 
     def _on_hole_scan_finished(self, holes, mode):
         self.hole_anim_timer.stop()
         self.btn_hole_scan.setEnabled(True)
         
         # Reset button text
-        self.btn_hole_scan.setText("🔎 Suchen")
+        self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
         
         count = len(holes)
         self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
@@ -4977,32 +4977,32 @@ class CreatorWindow(QMainWindow):
             item_type = QTableWidgetItem(h['type'].upper())
             if h['type'] == 'user':
                 item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                item_type.setText("BENUTZER")
+                item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
             elif h['type'] == 'opponent':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText("GEGNER")
+                item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
             elif h['type'] == 'priority_check':
                 if mode == "level_down":
                     item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText("ZU SELTEN?")
+                    item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
                 else:
                     item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                    item_type.setText("ZU WICHTIG?")
+                    item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
             elif h['type'] == 'level_mismatch':
                 item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
-                item_type.setText("AUFSTIEG")
+                item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
             elif h['type'] == 'orphaned_move':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText("ISOLIERT")
-                item_pop.setText("Unstimmig")
+                item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
+                item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
                 # Add diagnostic level info to the move text
                 if 'from_level' in h and 'to_level' in h:
                     move_text = h.get('move_san', '—')
                     h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
             elif h['type'] == 'repertoire_gap':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText("LÜCKE")
-                item_pop.setText("Unfertig")
+                item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
+                item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
 
             item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -5033,7 +5033,7 @@ class CreatorWindow(QMainWindow):
             # START NEW SESSION
             lvl = self.combo_overhaul_level.currentData()
             if lvl is None:
-                QMessageBox.warning(self, "Fehler", "Bitte wähle zuerst ein Level aus.")
+                QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), "Bitte wähle zuerst ein Level aus.")
                 return
 
             self.overhaul_active = True
@@ -5052,7 +5052,7 @@ class CreatorWindow(QMainWindow):
                 self.overhaul_paused = False
             else:
                 # STOP/CLOSE SESSION
-                if QMessageBox.question(self, "Session beenden", "Möchtest du diese Session wirklich endgültig beenden?") == QMessageBox.StandardButton.No:
+                if QMessageBox.question(self, tr_ui("creator.dlg_end_session_title", "Session beenden"), "Möchtest du diese Session wirklich endgültig beenden?") == QMessageBox.StandardButton.No:
                     return
                 self.overhaul_active = False
                 self.overhaul_paused = False
@@ -5070,7 +5070,7 @@ class CreatorWindow(QMainWindow):
             self._update_overhaul_ui_state()
             return
 
-        if QMessageBox.question(self, "Session beenden", "Möchtest du die aktuelle Session wirklich beenden?\nDies ermöglicht es dir, die Filter neu zu setzen.") == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, tr_ui("creator.dlg_end_session_title", "Session beenden"), "Möchtest du die aktuelle Session wirklich beenden?\nDies ermöglicht es dir, die Filter neu zu setzen.") == QMessageBox.StandardButton.Yes:
             self.overhaul_active = False
             self.overhaul_paused = False
             self.overhaul_start = None
@@ -5118,7 +5118,7 @@ class CreatorWindow(QMainWindow):
             if variation_filter:
                 msg = f"Glückwunsch! Alle Stellungen der Variante '{variation_filter}' wurden geprüft."
             
-            QMessageBox.information(self, "Fertig!", msg)
+            QMessageBox.information(self, tr_ui("creator.dlg_done", "Fertig!"), msg)
             if not variation_filter:
                 self.toggle_overhaul_session()
     def closeEvent(self, event):

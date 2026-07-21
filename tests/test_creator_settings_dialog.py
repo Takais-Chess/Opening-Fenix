@@ -129,10 +129,10 @@ class TestRepoSettingsGeneralPage:
             settings_dialog.combo_repertoire_elo.itemText(i)
             for i in range(settings_dialog.combo_repertoire_elo.count())
         ]
-        assert "Hobby Spieler" in elo_texts
-        assert "Vereins Spieler" in elo_texts
-        assert "Lichess Meister Elo" in elo_texts
-        assert "Meister Datenbank" in elo_texts
+        assert any("Hobby Spieler" in t for t in elo_texts)
+        assert any("Vereins Spieler" in t for t in elo_texts)
+        assert any("Lichess Meister Elo" in t for t in elo_texts)
+        assert any("Meister Datenbank" in t for t in elo_texts)
 
     def test_level_table_populated(self, settings_dialog):
         """Level-Tabelle ist nach dem Laden befüllt."""
@@ -347,6 +347,41 @@ class TestRepoSettingsAnalysisPage:
         """Fortschrittsbalken für Engine und Lichess sind vorhanden."""
         assert hasattr(settings_dialog, "pb_eng")
         assert hasattr(settings_dialog, "pb_lich")
+
+    def test_engine_scan_toggle_start_and_stop(self, settings_dialog, monkeypatch, tmp_path):
+        """Start-Button wird beim Starten zum Stopp-Button und bricht beim erneuten Klick ab."""
+        fake_engine = tmp_path / "stockfish.exe"
+        fake_engine.write_text("fake binary")
+        settings_dialog.txt_engine_path.setText(str(fake_engine))
+
+        # Mock AnalysisThread.start so it stays running
+        class DummyWorker:
+            def __init__(self):
+                self._running = True
+                self.cancelled = False
+                class Signal:
+                    def connect(self, fn): pass
+                self.progress_signal = Signal()
+                self.finished_signal = Signal()
+            def isRunning(self):
+                return self._running
+            def start(self):
+                pass
+            def cancel(self):
+                self.cancelled = True
+                self._running = False
+
+        dummy = DummyWorker()
+        monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.AnalysisThread", lambda *args, **kwargs: dummy)
+
+        # 1. Start scan
+        settings_dialog.start_analysis()
+        assert "stoppen" in settings_dialog.btn_start_eng.text().lower() or "stop" in settings_dialog.btn_start_eng.text().lower()
+        assert settings_dialog.w_eng == dummy
+
+        # 2. Click again to stop scan
+        settings_dialog.start_analysis()
+        assert dummy.cancelled is True
 
 
 # ─── Seite 5: Wartung Center ───────────────────────────────────────────────────

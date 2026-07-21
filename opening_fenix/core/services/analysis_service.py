@@ -69,6 +69,10 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                 # Fast look
                 discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
                 
+                if check_cancel and check_cancel():
+                    session.commit()
+                    return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
+
                 # --- STAGE 2: DECISION & DEEPENING ---
                 final_multipv = 1
                 if len(discovery_res) > 1:
