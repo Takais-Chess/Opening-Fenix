@@ -139,7 +139,8 @@ class RepertoireService:
                 except sqlite3.DatabaseError as e:
                     logger.debug(f"Skipping {repo_name} due to database error: {e}")
                     
-        return valid_repos
+        from opening_fenix.core.utils import filter_repertoires_by_build_type
+        return filter_repertoires_by_build_type(valid_repos)
 
     def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = False) -> None:
         self.close()

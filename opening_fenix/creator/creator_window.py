@@ -1886,6 +1886,190 @@ class CreatorBackend:
                 except Exception as e:
                     print(f"Failed to update profile {f}: {e}")
 
+    def delete_repertoire_level(self, level_order, target_level_order=None, delete_moves=False):
+        """
+        Deletes the level at level_order.
+        If delete_moves is False: reassigns all its moves to target_level_order.
+        If delete_moves is True: deletes all moves in this level and their orphaned subtrees.
+        Also shifts higher order levels down by 1 so level orders remain contiguous (1..N).
+        """
+        if not self.session:
+            return False, "Kein Repertoire geladen."
+        try:
+            levels = self.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+            if len(levels) <= 1:
+                return False, "Das letzte verbleibende Level kann nicht gelöscht werden."
+                
+            lvl_to_delete = self.session.query(RepertoireLevel).filter_by(order=level_order).first()
+            if not lvl_to_delete:
+                return False, "Das zu löschende Level wurde nicht gefunden."
+
+            if delete_moves:
+                # 1. Gather all moves in this level
+                rm_entries = self.session.query(RepertoireMove).filter(RepertoireMove.level == level_order).all()
+                move_ids = [rm.move_id for rm in rm_entries]
+                
+                deleted_moves_set = set()
+                deleted_pos_set = set()
+
+                for mid in move_ids:
+                    m = self.session.query(Move).filter_by(id=mid).first()
+                    if m:
+                        dm, dp = self.get_delete_impact(m.from_position_id, m.uci)
+                        deleted_moves_set.update(dm)
+                        deleted_pos_set.update(dp)
+
+                if deleted_moves_set:
+                    del_move_list = list(deleted_moves_set)
+                    del_pos_list = list(deleted_pos_set)
+                    
+                    # Delete in chunks of 900 for SQLite limits
+                    chunk_size = 900
+                    for i in range(0, len(del_move_list), chunk_size):
+                        chunk_m = del_move_list[i:i+chunk_size]
+                        self.session.query(RepertoireMove).filter(RepertoireMove.move_id.in_(chunk_m)).delete(synchronize_session=False)
+                        self.session.query(Move).filter(Move.id.in_(chunk_m)).delete(synchronize_session=False)
+
+                    if del_pos_list:
+                        for i in range(0, len(del_pos_list), chunk_size):
+                            chunk_p = del_pos_list[i:i+chunk_size]
+                            self.session.query(Position).filter(Position.id.in_(chunk_p)).delete(synchronize_session=False)
+
+            else:
+                target_lvl = self.session.query(RepertoireLevel).filter_by(order=target_level_order).first()
+                if not target_lvl or target_level_order == level_order:
+                    return False, "Ungültiges Ziel-Level."
+
+                # 1. Reassign moves in deleted level to target_level_order
+                self.session.query(RepertoireMove).filter(RepertoireMove.level == level_order).update(
+                    {RepertoireMove.level: target_level_order},
+                    synchronize_session=False
+                )
+                self.session.flush()
+
+            # 2. Delete the level record
+            self.session.delete(lvl_to_delete)
+            self.session.flush()
+
+            # 3. Shift levels and move assignments above level_order down by 1
+            levels_to_shift = self.session.query(RepertoireLevel).filter(RepertoireLevel.order > level_order).order_by(RepertoireLevel.order).all()
+            for lvl in levels_to_shift:
+                lvl.order -= 1
+                self.session.flush()
+
+            self.session.query(RepertoireMove).filter(RepertoireMove.level > level_order).update(
+                {RepertoireMove.level: RepertoireMove.level - 1},
+                synchronize_session=False
+            )
+            self.session.flush()
+
+            self.session.commit()
+
+            if delete_moves:
+                try:
+                    from opening_fenix.core.services.repair_service import repair_repertoire_health
+                    repair_repertoire_health(self.session)
+                except Exception as e:
+                    from opening_fenix.core.logger import logger
+                    logger.warning(f"Health repair after level delete failed: {e}")
+
+            # 4. Update profile active level tracking
+            try:
+                self._update_profiles_level_shift(self.active_repo_name, level_order + 1, -1)
+            except Exception as e:
+                from opening_fenix.core.logger import logger
+                logger.warning(f"Could not update profile level tracking: {e}")
+
+            self.clear_cache()
+            return True, "Level erfolgreich gelöscht."
+        except Exception as e:
+            self.session.rollback()
+            return False, str(e)
+
+    def get_low_popularity_prune_impact(self, threshold_pct, level_filter=None):
+        """
+        Returns (moves_count, positions_count) that would be pruned when deleting
+        moves with priority_score < threshold_pct / 100.0.
+        """
+        if not self.session: return 0, 0
+        threshold = threshold_pct / 100.0
+
+        query = self.session.query(RepertoireMove).join(Move, RepertoireMove.move_id == Move.id).filter(Move.priority_score < threshold)
+        if level_filter is not None:
+            query = query.filter(RepertoireMove.level == level_filter)
+
+        candidate_rms = query.all()
+        if not candidate_rms:
+            return 0, 0
+
+        dm_total = set()
+        dp_total = set()
+
+        for rm in candidate_rms:
+            m = rm.move
+            if m and m.from_position_id:
+                dm, dp = self.get_delete_impact(m.from_position_id, m.uci)
+                dm_total.update(dm)
+                dp_total.update(dp)
+
+        return len(dm_total), len(dp_total)
+
+    def apply_low_popularity_prune(self, threshold_pct, level_filter=None):
+        """
+        Deletes all moves with priority_score < threshold_pct / 100.0 (optionally filtered by level),
+        along with any orphaned downstream moves, positions, and Lichess data.
+        """
+        if not self.session: return 0
+        threshold = threshold_pct / 100.0
+
+        query = self.session.query(RepertoireMove).join(Move, RepertoireMove.move_id == Move.id).filter(Move.priority_score < threshold)
+        if level_filter is not None:
+            query = query.filter(RepertoireMove.level == level_filter)
+
+        candidate_rms = query.all()
+        if not candidate_rms:
+            return 0
+
+        dm_total = set()
+        dp_total = set()
+
+        for rm in candidate_rms:
+            m = rm.move
+            if m and m.from_position_id:
+                dm, dp = self.get_delete_impact(m.from_position_id, m.uci)
+                dm_total.update(dm)
+                dp_total.update(dp)
+
+        if not dm_total:
+            return 0
+
+        dm_list = list(dm_total)
+        for i in range(0, len(dm_list), 900):
+            chunk = dm_list[i:i+900]
+            self.session.query(RepertoireMove).filter(RepertoireMove.move_id.in_(chunk)).delete(synchronize_session=False)
+            self.session.query(Move).filter(Move.id.in_(chunk)).delete(synchronize_session=False)
+
+        if dp_total:
+            dp_list = list(dp_total)
+            fens_to_delete = []
+            for i in range(0, len(dp_list), 900):
+                chunk = dp_list[i:i+900]
+                res = self.session.query(Position.fen).filter(Position.id.in_(chunk)).all()
+                fens_to_delete.extend([r[0] for r in res])
+                self.session.query(Position).filter(Position.id.in_(chunk)).delete(synchronize_session=False)
+
+            if fens_to_delete:
+                for i in range(0, len(fens_to_delete), 900):
+                    chunk_fens = fens_to_delete[i:i+900]
+                    self.session.query(LichessData).filter(LichessData.fen.in_(chunk_fens)).delete(synchronize_session=False)
+
+        from opening_fenix.core.services.repair_service import repair_repertoire_health
+        repair_repertoire_health(self.session)
+
+        self.session.commit()
+        self.clear_cache()
+        return len(dm_list)
+
     def rename_repertoire_level(self, old_name, new_name):
         if not self.session: return False, "No repo."
         try:

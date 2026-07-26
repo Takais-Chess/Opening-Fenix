@@ -139,3 +139,27 @@ def test_login_auto_login_selection(qapp, mock_user_dir, monkeypatch):
     with open(config_path, "r") as f:
         config2 = json.load(f)
     assert config2.get("auto_login_profile") is None
+
+def test_auto_trigger_create_profile_when_no_profiles(qapp, mock_user_dir, monkeypatch):
+    """Test that if there are no profiles on startup, showEvent triggers create_new_profile."""
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+    
+    # Ensure profiles directory is empty
+    profiles_dir = os.path.join(mock_user_dir, "profiles")
+    if os.path.exists(profiles_dir):
+        for f in os.listdir(profiles_dir):
+            os.remove(os.path.join(profiles_dir, f))
+            
+    login = LoginDialog()
+    created_called = []
+    monkeypatch.setattr(login, "create_new_profile", lambda: created_called.append(True))
+    
+    # Simulate show event
+    from PyQt6.QtGui import QShowEvent
+    login.showEvent(QShowEvent())
+    
+    # Process pending events for singleShot timer
+    qapp.processEvents()
+    
+    assert len(created_called) == 1
+

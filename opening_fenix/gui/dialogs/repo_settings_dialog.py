@@ -9,7 +9,7 @@ from PyQt6.QtWidgets import (
     QSlider, QSpinBox, QDoubleSpinBox, QRadioButton, QButtonGroup,
     QProgressBar, QProgressDialog, QListWidget, QListWidgetItem,
     QGridLayout, QTableWidget, QStackedWidget, QPlainTextEdit, QWidget, QFrame, QApplication,
-    QTableWidgetItem, QFileDialog, QAbstractItemView
+    QTableWidgetItem, QFileDialog, QAbstractItemView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QEvent, QThread
 from PyQt6.QtGui import QFont, QIcon
@@ -298,6 +298,111 @@ class DiagnosticDialog(QDialog):
             self.parent().refresh_info()
 
 
+class DeleteLevelDialog(QDialog):
+    """Dialog to select a level to delete and either reassign its moves or delete them if highest level."""
+    def __init__(self, levels, default_del_order=None, parent=None):
+        super().__init__(parent)
+        set_consistent_icon(self)
+        self.setWindowTitle(tr_ui("repo_settings.delete_level_dialog_title", "Level löschen"))
+        self.setMinimumWidth(scale(460))
+        self.setStyleSheet(get_bw_glass_style())
+        self.levels = sorted(levels, key=lambda x: x['order'])
+        self.default_del_order = default_del_order
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(scale(15))
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+
+        lbl_prompt = QLabel(tr_ui("repo_settings.delete_level_prompt", "Wähle das zu löschende Level und die gewünschte Aktion für die enthaltenen Züge:"))
+        lbl_prompt.setWordWrap(True)
+        lbl_prompt.setStyleSheet("font-weight: 500; font-size: 13px;")
+        layout.addWidget(lbl_prompt)
+
+        form = QFormLayout()
+        form.setSpacing(scale(10))
+
+        self.combo_del = NoWheelComboBox()
+        for lvl in self.levels:
+            self.combo_del.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+
+        if self.default_del_order:
+            idx = self.combo_del.findData(self.default_del_order)
+            if idx >= 0:
+                self.combo_del.setCurrentIndex(idx)
+
+        form.addRow(tr_ui("repo_settings.delete_level_select_del", "Zu löschendes Level:"), self.combo_del)
+
+        # Radio Group for Action Mode (Reassign vs Delete Moves)
+        self.g_mode = QGroupBox(tr_ui("repo_settings.delete_level_mode_group", "Aktion für enthaltene Züge:"))
+        v_mode = QVBoxLayout(self.g_mode)
+        v_mode.setSpacing(scale(8))
+
+        self.radio_reassign = QRadioButton(tr_ui("repo_settings.delete_level_mode_reassign", "Züge in ein anderes Level verschieben"))
+        self.radio_delete_moves = QRadioButton(tr_ui("repo_settings.delete_level_mode_delete_moves", "Alle Züge in diesem Level unwiderruflich löschen"))
+        self.radio_reassign.setChecked(True)
+
+        v_mode.addWidget(self.radio_reassign)
+        v_mode.addWidget(self.radio_delete_moves)
+
+        self.combo_target = NoWheelComboBox()
+        form.addRow(tr_ui("repo_settings.delete_level_select_target", "Züge neu zuweisen nach:"), self.combo_target)
+
+        layout.addLayout(form)
+        layout.addWidget(self.g_mode)
+
+        self.radio_reassign.toggled.connect(self._on_mode_toggled)
+        self.radio_delete_moves.toggled.connect(self._on_mode_toggled)
+        self.combo_del.currentIndexChanged.connect(self._update_target_combo)
+        self._update_target_combo()
+
+        h_btn = QHBoxLayout()
+        h_btn.addStretch()
+
+        btn_cancel = QPushButton(tr_ui("login.cancel", "Abbrechen"))
+        btn_cancel.clicked.connect(self.reject)
+
+        btn_ok = QPushButton(tr_ui("repo_settings.btn_delete_level", "🗑️ Level löschen"))
+        btn_ok.setProperty("class", "Danger")
+        btn_ok.clicked.connect(self.accept)
+
+        h_btn.addWidget(btn_cancel)
+        h_btn.addWidget(btn_ok)
+        layout.addLayout(h_btn)
+
+    def _on_mode_toggled(self):
+        delete_moves = self.radio_delete_moves.isChecked()
+        self.combo_target.setEnabled(not delete_moves)
+
+    def _update_target_combo(self):
+        self.combo_target.clear()
+        del_order = self.combo_del.currentData()
+        max_order = max((lvl['order'] for lvl in self.levels), default=0)
+        is_highest = (del_order == max_order)
+
+        # Only allow deleting all moves if it's the highest level
+        if is_highest:
+            self.g_mode.setVisible(True)
+        else:
+            self.radio_reassign.setChecked(True)
+            self.g_mode.setVisible(False)
+
+        for lvl in self.levels:
+            if lvl['order'] != del_order:
+                self.combo_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+
+        self._on_mode_toggled()
+
+    def get_selection(self):
+        del_order = self.combo_del.currentData()
+        target_order = self.combo_target.currentData()
+        max_order = max((lvl['order'] for lvl in self.levels), default=0)
+        is_highest = (del_order == max_order)
+        delete_moves = is_highest and self.radio_delete_moves.isChecked()
+        return del_order, target_order, delete_moves
+
+
 class MaintenanceRepoWidget(QWidget):
     """Custom row widget for the Centralized Maintenance list."""
     def __init__(self, name, current_elo, parent=None):
@@ -407,6 +512,7 @@ class RepoSettingsDialog(QDialog):
 
         # Content Area
         self.pages = QStackedWidget()
+        self.pages.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         
         # Initialize Pages
         self.page_gen = QWidget(); self.init_page_general(self.page_gen)
@@ -415,6 +521,9 @@ class RepoSettingsDialog(QDialog):
         self.page_tools = QWidget(); self.init_page_tools(self.page_tools)
         self.page_maintenance = QWidget(); self.init_page_maintenance(self.page_maintenance)
         
+        for p in [self.page_gen, self.page_design, self.page_imex, self.page_tools, self.page_maintenance]:
+            p.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
         self.pages.addWidget(self.page_gen)
         self.pages.addWidget(self.page_design)
         self.pages.addWidget(self.page_imex)
@@ -424,6 +533,7 @@ class RepoSettingsDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(self.pages)
         main_layout.addWidget(scroll, 1)
         
@@ -438,124 +548,277 @@ class RepoSettingsDialog(QDialog):
     def init_page_general(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
 
-        # 📋 Repertoire Identität
+        # 📋 Repertoire Identität (Modern Card-Based Layout)
         g_info = QGroupBox(tr_ui("repo_settings.identity_title", "📋 Repertoire Identität"))
-        f_info = QFormLayout(g_info)
-        f_info.setSpacing(scale(15))
-        f_info.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
-        f_info.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        v_info = QVBoxLayout(g_info)
+        v_info.setSpacing(scale(15))
+        v_info.setContentsMargins(scale(18), scale(22), scale(18), scale(18))
+
+        # --- 1. Header Card (Title & Rename Button) ---
+        card_header = QFrame()
+        card_header.setMinimumWidth(0)
+        card_header.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['glass_bg']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(12)}px;
+            }}
+        """)
+        h_header = QHBoxLayout(card_header)
+        h_header.setContentsMargins(scale(16), scale(12), scale(16), scale(12))
+        h_header.setSpacing(scale(15))
+
+        lbl_header_icon = QLabel("🏆")
+        lbl_header_icon.setStyleSheet(f"font-size: {scale(22)}px;")
         
-        # Name Row
-        lbl_name_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_name", "Name:"))
-        lbl_name_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
+        v_name_box = QVBoxLayout()
+        v_name_box.setSpacing(scale(2))
+        
+        lbl_name_sub = QLabel(tr_ui("repo_settings.label_name", "Repertoire Name"))
+        lbl_name_sub.setStyleSheet(f"font-size: {scale(11)}px; font-weight: 600; color: {COLORS['text_muted']}; text-transform: uppercase;")
         
         self.l_n = QLabel()
-        self.l_n.setStyleSheet("font-weight: bold; font-size: 16px; color: #2c3e50;")
+        self.l_n.setStyleSheet(f"font-weight: 900; font-size: {scale(20)}px; color: {COLORS['burnt_orange']};")
+        self.l_n.setWordWrap(True)
+        self.l_n.setMinimumWidth(0)
         
-        btn_rename = QPushButton(tr_ui("repo_settings.btn_rename", "✎ Umbenennen"))
-        btn_rename.setFixedWidth(scale(140))
-        btn_rename.clicked.connect(self.rename_repertoire)
-        
-        h_name_field = QHBoxLayout()
-        h_name_field.addWidget(self.l_n)
-        h_name_field.addStretch()
-        h_name_field.addWidget(btn_rename)
-        f_info.addRow(lbl_name_h, h_name_field)
+        v_name_box.addWidget(lbl_name_sub)
+        v_name_box.addWidget(self.l_n)
 
-        # Description Row
-        lbl_desc_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_description", "Beschreibung:"))
-        lbl_desc_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
+        btn_rename = QPushButton(tr_ui("repo_settings.btn_rename", "✎ Umbenennen"))
+        btn_rename.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_rename.setMinimumWidth(scale(110))
+        btn_rename.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.85);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: {scale(8)}px {scale(16)}px;
+                font-weight: 600;
+                font-size: {scale(13)}px;
+                color: {COLORS['dark_accent']};
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border-color: {COLORS['burnt_orange']};
+            }}
+        """)
+        btn_rename.clicked.connect(self.rename_repertoire)
+
+        h_header.addWidget(lbl_header_icon)
+        h_header.addLayout(v_name_box, 1)
+        h_header.addWidget(btn_rename, 0, Qt.AlignmentFlag.AlignVCenter)
+        
+        v_info.addWidget(card_header)
+
+        # --- 2. Metadata Grid (2x2 Badges / Cards) ---
+        grid_meta = QGridLayout()
+        grid_meta.setSpacing(scale(10))
+        grid_meta.setColumnStretch(0, 1)
+        grid_meta.setColumnStretch(1, 1)
+
+        def create_mini_card(title_text, widget_or_layout):
+            card = QFrame()
+            card.setMinimumWidth(0)
+            card.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background-color: {COLORS['glass_bg']};
+                    border: 1px solid {COLORS['glass_border']};
+                    border-radius: {scale(10)}px;
+                }}
+            """)
+            c_layout = QVBoxLayout(card)
+            c_layout.setContentsMargins(scale(12), scale(10), scale(12), scale(10))
+            c_layout.setSpacing(scale(4))
+            
+            lbl_title = QLabel(title_text)
+            lbl_title.setWordWrap(True)
+            lbl_title.setMinimumWidth(0)
+            lbl_title.setStyleSheet(f"font-size: {scale(11)}px; font-weight: 600; color: {COLORS['text_muted']};")
+            c_layout.addWidget(lbl_title)
+            
+            if isinstance(widget_or_layout, QWidget):
+                c_layout.addWidget(widget_or_layout)
+            else:
+                c_layout.addLayout(widget_or_layout)
+            return card
+
+        # Card A: Prio score ELO
+        self.combo_repertoire_elo = NoWheelComboBox()
+        self.combo_repertoire_elo.addItems([get_elo_display(k) for k in ELO_DISPLAY_MAP.keys()])
+        self.combo_repertoire_elo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_repertoire_elo.setMinimumContentsLength(5)
+        self.combo_repertoire_elo.setMinimumWidth(0)
+        self.combo_repertoire_elo.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
+        card_elo = create_mini_card(tr_ui("repo_settings.label_prio_elo", "🎯 Prio score ELO"), self.combo_repertoire_elo)
+
+        # Card B: Your Color
+        self.combo_repertoire_color = NoWheelComboBox()
+        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_white", "♔ Weiß"), "w")
+        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_black", "♚ Schwarz"), "b")
+        self.combo_repertoire_color.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_repertoire_color.setMinimumContentsLength(5)
+        self.combo_repertoire_color.setMinimumWidth(0)
+        self.combo_repertoire_color.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.combo_repertoire_color.currentTextChanged.connect(self.save_repertoire_color)
+        card_color = create_mini_card(tr_ui("repo_settings.label_color", "🎨 Deine Farbe"), self.combo_repertoire_color)
+
+        # Card C: Analysis Status
+        self.lbl_ana_status = QLabel("-")
+        self.lbl_ana_status.setStyleSheet(f"font-weight: 700; font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
+        self.lbl_ana_status.setWordWrap(True)
+        self.lbl_ana_status.setMinimumWidth(0)
+        card_ana = create_mini_card(tr_ui("repo_settings.label_analysis_status", "🔍 Analyse-Status"), self.lbl_ana_status)
+
+        # Card D: DB Coverage
+        self.lbl_db_cov = QLabel("-")
+        self.lbl_db_cov.setStyleSheet(f"font-weight: 700; font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
+        self.lbl_db_cov.setWordWrap(True)
+        self.lbl_db_cov.setMinimumWidth(0)
+        card_cov = create_mini_card(tr_ui("repo_settings.label_db_coverage", "📊 Prio. Score Datenbank Elo"), self.lbl_db_cov)
+
+        grid_meta.addWidget(card_elo, 0, 0)
+        grid_meta.addWidget(card_color, 0, 1)
+        grid_meta.addWidget(card_ana, 1, 0)
+        grid_meta.addWidget(card_cov, 1, 1)
+
+        v_info.addLayout(grid_meta)
+
+        # --- 3. Description Section Card ---
+        card_desc = QFrame()
+        card_desc.setMinimumWidth(0)
+        card_desc.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['glass_bg']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(12)}px;
+            }}
+        """)
+        v_desc_layout = QVBoxLayout(card_desc)
+        v_desc_layout.setContentsMargins(scale(14), scale(12), scale(14), scale(14))
+        v_desc_layout.setSpacing(scale(8))
+
+        lbl_desc_title = QLabel(tr_ui("repo_settings.label_description", "📝 Beschreibung"))
+        lbl_desc_title.setStyleSheet(f"font-size: {scale(12)}px; font-weight: 700; color: {COLORS['dark_accent']};")
         
         self.txt_description = QPlainTextEdit()
         self.txt_description.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
-        self.txt_description.setMinimumHeight(scale(140))
-        self.txt_description.setMaximumHeight(scale(200))
+        self.txt_description.setMinimumHeight(scale(100))
+        self.txt_description.setMaximumHeight(scale(150))
+        self.txt_description.setMinimumWidth(0)
+        self.txt_description.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: rgba(255, 255, 255, 0.6);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(10)}px;
+                padding: {scale(10)}px;
+                font-size: {scale(13)}px;
+                color: {COLORS['brown_text']};
+                line-height: 1.5;
+            }}
+            QPlainTextEdit:focus {{
+                border: 1.5px solid {COLORS['burnt_orange']};
+                background-color: rgba(255, 255, 255, 0.95);
+            }}
+        """)
         self.txt_description.textChanged.connect(self.save_description)
-        f_info.addRow(lbl_desc_h, self.txt_description)
 
-        # Elo Row
-        lbl_elo_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_prio_elo", "Prio score ELO:"))
-        lbl_elo_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        
-        self.combo_repertoire_elo = NoWheelComboBox()
-        self.combo_repertoire_elo.addItems([get_elo_display(k) for k in ELO_DISPLAY_MAP.keys()])
-        self.combo_repertoire_elo.setFixedWidth(scale(200))
-        self.combo_repertoire_elo.currentTextChanged.connect(self.save_repertoire_elo)
-        
-        h_elo_field = QHBoxLayout()
-        h_elo_field.addWidget(self.combo_repertoire_elo)
-        h_elo_field.addStretch()
-        f_info.addRow(lbl_elo_h, h_elo_field)
-        
-        # Color Row
-        lbl_color_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_color", "Deine Farbe:"))
-        lbl_color_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        
-        self.combo_repertoire_color = NoWheelComboBox()
-        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_white", "Weiß"), "w")
-        self.combo_repertoire_color.addItem(tr_ui("repo_settings.color_black", "Schwarz"), "b")
-        self.combo_repertoire_color.setFixedWidth(scale(140))
-        self.combo_repertoire_color.currentTextChanged.connect(self.save_repertoire_color)
-        
-        h_color_field = QHBoxLayout()
-        h_color_field.addWidget(self.combo_repertoire_color)
-        h_color_field.addStretch()
-        f_info.addRow(lbl_color_h, h_color_field)
-        
-        # Analysis Status Row
-        lbl_ana_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_analysis_status", "Analyse-Status:"))
-        lbl_ana_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        self.lbl_ana_status = QLabel("-")
-        self.lbl_ana_status.setStyleSheet("font-weight: 600; color: #2c3e50;")
-        
-        h_ana_field = QHBoxLayout()
-        h_ana_field.addWidget(self.lbl_ana_status)
-        h_ana_field.addStretch()
-        f_info.addRow(lbl_ana_h, h_ana_field)
+        v_desc_layout.addWidget(lbl_desc_title)
+        v_desc_layout.addWidget(self.txt_description)
 
-        # DB Coverage Row
-        lbl_cov_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_db_coverage", "Prio. Score Datenbank Elo:"))
-        lbl_cov_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        self.lbl_db_cov = QLabel("-")
-        self.lbl_db_cov.setStyleSheet("font-weight: 600; color: #2c3e50;")
-        
-        h_cov_field = QHBoxLayout()
-        h_cov_field.addWidget(self.lbl_db_cov)
-        h_cov_field.addStretch()
-        f_info.addRow(lbl_cov_h, h_cov_field)
-        
-        # Cover Image Row
-        lbl_cover_h = AutoShrinkWrapLabel(tr_ui("repo_settings.label_cover_image", "Cover-Bild:"))
-        lbl_cover_h.setStyleSheet("font-size: 14px; font-weight: 500; color: #555;")
-        
+        v_info.addWidget(card_desc)
+
+        # --- 4. Cover Image Row ---
+        card_cover = QFrame()
+        card_cover.setMinimumWidth(0)
+        card_cover.setStyleSheet(f"""
+            QFrame {{
+                background-color: {COLORS['glass_bg']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(12)}px;
+            }}
+        """)
+        h_cover_layout = QHBoxLayout(card_cover)
+        h_cover_layout.setContentsMargins(scale(14), scale(12), scale(14), scale(12))
+        h_cover_layout.setSpacing(scale(15))
+
+        lbl_cover_title = QLabel(tr_ui("repo_settings.label_cover_image", "🖼️ Cover-Bild"))
+        lbl_cover_title.setMinimumWidth(0)
+        lbl_cover_title.setWordWrap(True)
+        lbl_cover_title.setStyleSheet(f"font-size: {scale(12)}px; font-weight: 700; color: {COLORS['dark_accent']};")
+
         self.lbl_cover_preview = QLabel(tr_ui("repo_settings.no_image", "Kein Bild"))
-        self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
-        self.lbl_cover_preview.setFixedSize(scale(80), scale(80))
+        self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 8px; background-color: rgba(255, 255, 255, 0.5);")
+        self.lbl_cover_preview.setFixedSize(scale(64), scale(64))
         self.lbl_cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_cover_preview.setScaledContents(True)
-        
+
         btn_select_cover = QPushButton(tr_ui("repo_settings.btn_select_image", "Bild wählen..."))
-        btn_select_cover.setFixedWidth(scale(130))
+        btn_select_cover.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_select_cover.setMinimumWidth(scale(100))
+        btn_select_cover.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.85);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: {scale(8)}px {scale(14)}px;
+                font-weight: 600;
+                font-size: {scale(12)}px;
+                color: {COLORS['dark_accent']};
+            }}
+            QPushButton:hover {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+            }}
+        """)
         btn_select_cover.clicked.connect(self.select_cover_image)
-        
+
         self.btn_remove_cover = QPushButton(tr_ui("repo_settings.btn_remove", "Entfernen"))
-        self.btn_remove_cover.setFixedWidth(scale(100))
+        self.btn_remove_cover.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_remove_cover.setMinimumWidth(scale(90))
+        self.btn_remove_cover.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.85);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: {scale(8)}px {scale(14)}px;
+                font-weight: 600;
+                font-size: {scale(12)}px;
+                color: #c0392b;
+            }}
+            QPushButton:hover {{
+                background-color: #e74c3c;
+                color: white;
+            }}
+        """)
         self.btn_remove_cover.clicked.connect(self.remove_cover_image)
-        
-        h_cover_field = QHBoxLayout()
-        h_cover_field.addWidget(self.lbl_cover_preview)
-        h_cover_field.addWidget(btn_select_cover)
-        h_cover_field.addWidget(self.btn_remove_cover)
-        h_cover_field.addStretch()
-        f_info.addRow(lbl_cover_h, h_cover_field)
-        
+
+        v_cover_btns = QHBoxLayout()
+        v_cover_btns.setSpacing(scale(8))
+        v_cover_btns.addWidget(btn_select_cover)
+        v_cover_btns.addWidget(self.btn_remove_cover)
+
+        h_cover_layout.addWidget(lbl_cover_title)
+        h_cover_layout.addStretch()
+        h_cover_layout.addWidget(self.lbl_cover_preview)
+        h_cover_layout.addLayout(v_cover_btns)
+
+        v_info.addWidget(card_cover)
+
+        g_info.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         layout.addWidget(g_info)
 
         # 📈 Level-Struktur
-        g_levels = QGroupBox(tr_ui("repo_settings.levels_title", "📈 Level-Struktur"))
-        v_levels = QVBoxLayout(g_levels)
+        self.g_levels = QGroupBox(tr_ui("repo_settings.levels_title", "📈 Level-Struktur"))
+        self.g_levels.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        v_levels = QVBoxLayout(self.g_levels)
+        v_levels.setSpacing(scale(10))
+        v_levels.setContentsMargins(scale(18), scale(18), scale(18), scale(18))
         
         self.tbl_levels = QTableWidget()
         self.tbl_levels.setColumnCount(3)
@@ -565,23 +828,26 @@ class RepoSettingsDialog(QDialog):
             tr_ui("repo_settings.header_target_elo", "Ziel-Elo (Trainer)")
         ])
         self.tbl_levels.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.tbl_levels.setMinimumHeight(scale(180))
         self.tbl_levels.verticalHeader().setVisible(False)
-        self.tbl_levels.verticalHeader().setDefaultSectionSize(scale(45))
+        self.tbl_levels.verticalHeader().setDefaultSectionSize(scale(42))
         self.tbl_levels.itemDoubleClicked.connect(self.rename_level)
         v_levels.addWidget(self.tbl_levels)
         
         h_lvl_btns = QHBoxLayout()
         btn_add_lvl = QPushButton(tr_ui("repo_settings.btn_add_level", "➕ Level hinzufügen"))
         btn_add_lvl.clicked.connect(self.add_level)
+        btn_delete_lvl = QPushButton(tr_ui("repo_settings.btn_delete_level", "🗑️ Level löschen"))
+        btn_delete_lvl.clicked.connect(self.delete_level)
         h_lvl_btns.addWidget(btn_add_lvl)
+        h_lvl_btns.addWidget(btn_delete_lvl)
         h_lvl_btns.addStretch()
         v_levels.addLayout(h_lvl_btns)
         
-        layout.addWidget(g_levels)
+        layout.addWidget(self.g_levels)
 
         # ⚠️ Gefahrenzone
         g_danger = QGroupBox(tr_ui("repo_settings.danger_zone_title", "⚠️ Gefahrenzone"))
+        g_danger.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
         v_danger = QVBoxLayout(g_danger)
         btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_repertoire", "🗑️ Repertoire unwiderruflich löschen"))
         btn_delete.setProperty("class", "Danger")
@@ -750,8 +1016,14 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_clean)
 
         # 3. 🤖 Engine Analyse
-        g_engine = QGroupBox(tr_ui("repo_settings.engine_scan_title", "🤖 Alternativ gute Züge berechnen mit Engine Analyse des gesamten Repertoires"))
-        f_engine = QFormLayout(g_engine)
+        g_engine = QGroupBox(tr_ui("repo_settings.engine_scan_title", "🤖 Engine-Analyse"))
+        v_eng_main = QVBoxLayout(g_engine)
+        lbl_eng_desc = QLabel(tr_ui("repo_settings.engine_scan_desc", "Alternativ gute Züge berechnen mit Engine-Analyse des gesamten Repertoires."))
+        lbl_eng_desc.setWordWrap(True)
+        lbl_eng_desc.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 6px;")
+        v_eng_main.addWidget(lbl_eng_desc)
+
+        f_engine = QFormLayout()
         self.txt_engine_path = QLineEdit()
         self.txt_engine_path.setText(self.main_window.config.get("engine_path", ""))
         btn_browse = QPushButton("...")
@@ -778,11 +1050,17 @@ class RepoSettingsDialog(QDialog):
         v_eng_prog = QVBoxLayout()
         v_eng_prog.addWidget(self.l_eng_status); v_eng_prog.addWidget(self.pb_eng)
         f_engine.addRow(tr_ui("repo_settings.progress_label", "Fortschritt:"), v_eng_prog)
+        v_eng_main.addLayout(f_engine)
         layout.addWidget(g_engine)
 
-        # 4. 🌐 Lichess Datenbank Daten herunterladen und Prio scores berechnen lassen
-        g_lichess = QGroupBox(tr_ui("repo_settings.lichess_scan_title", "🌐 Lichess Datenbank Daten herunterladen und Prio scores berechnen lassen"))
+        # 4. 🌐 Lichess Datenbank
+        g_lichess = QGroupBox(tr_ui("repo_settings.lichess_scan_title", "🌐 Lichess-Datenbank && Prio Scores"))
         v_lich = QVBoxLayout(g_lichess)
+        lbl_lich_desc = QLabel(tr_ui("repo_settings.lichess_scan_desc", "Lichess-Datenbank-Daten herunterladen und Prio-Scores berechnen lassen."))
+        lbl_lich_desc.setWordWrap(True)
+        lbl_lich_desc.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 6px;")
+        v_lich.addWidget(lbl_lich_desc)
+
         f_token = QFormLayout()
         
         h_token_row = QHBoxLayout()
@@ -819,8 +1097,13 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_lichess)
 
         # 5. ⚡ Prio basiertes Leveling
-        g_prio = QGroupBox(tr_ui("repo_settings.prio_leveling_title", "⚡ Alle Züge basierend auf dem Prio Score auf ein Level niedrigere Level setzen"))
+        g_prio = QGroupBox(tr_ui("repo_settings.prio_leveling_title", "⚡ Level-Anpassung per Prio-Score"))
         v_prio = QVBoxLayout(g_prio)
+        lbl_prio_desc = QLabel(tr_ui("repo_settings.prio_leveling_desc", "Alle Züge basierend auf dem Prio-Score auf ein anderes Level setzen."))
+        lbl_prio_desc.setWordWrap(True)
+        lbl_prio_desc.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 6px;")
+        v_prio.addWidget(lbl_prio_desc)
+
         f_prio = QFormLayout()
         self.spin_prio_threshold = QSpinBox(); self.spin_prio_threshold.setRange(1, 100); self.spin_prio_threshold.setSuffix(" %"); self.spin_prio_threshold.setValue(10)
         self.combo_prio_target = QComboBox()
@@ -845,7 +1128,39 @@ class RepoSettingsDialog(QDialog):
         v_global.addLayout(h_global)
         layout.addWidget(g_global)
 
-        # 7. 📁 System-Ordner im Explorer öffnen
+        # 7. 🗑️ Massen-Löschung basierend auf Popularity / Prio Score
+        g_prune = QGroupBox(tr_ui("repo_settings.popularity_prune_title", "🗑️ Massen-Löschung basierend auf Popularity / Prio Score"))
+        v_prune = QVBoxLayout(g_prune)
+        lbl_prune_desc = QLabel(tr_ui("repo_settings.popularity_prune_desc", "Löscht alle Züge und deren Unter-Varianten, deren Popularitäts-/Prio-Score unter dem gewählten Schwellenwert liegt."))
+        lbl_prune_desc.setWordWrap(True)
+        lbl_prune_desc.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 8px;")
+        v_prune.addWidget(lbl_prune_desc)
+
+        f_prune = QFormLayout()
+        self.spin_prune_threshold = NoWheelSpinBox()
+        self.spin_prune_threshold.setRange(1, 90)
+        self.spin_prune_threshold.setSuffix(" %")
+        self.spin_prune_threshold.setValue(5)
+
+        self.combo_prune_target_level = NoWheelComboBox()
+
+        f_prune.addRow(tr_ui("repo_settings.prune_threshold_label", "Popularitäts-Schwellenwert (Prio < X%):"), self.spin_prune_threshold)
+        f_prune.addRow(tr_ui("repo_settings.prune_target_level_label", "Fokus Level:"), self.combo_prune_target_level)
+        v_prune.addLayout(f_prune)
+
+        h_prune_btns = QHBoxLayout()
+        self.btn_prune_preview = QPushButton(tr_ui("repo_settings.btn_prune_preview", "🔍 Auswirkung prüfen"))
+        self.btn_prune_preview.clicked.connect(self.preview_popularity_prune)
+        self.btn_prune_apply = QPushButton(tr_ui("repo_settings.btn_prune_apply", "🗑️ Züge löschen"))
+        self.btn_prune_apply.setProperty("class", "Danger")
+        self.btn_prune_apply.clicked.connect(self.apply_popularity_prune)
+
+        h_prune_btns.addWidget(self.btn_prune_preview)
+        h_prune_btns.addWidget(self.btn_prune_apply)
+        v_prune.addLayout(h_prune_btns)
+        layout.addWidget(g_prune)
+
+        # 8. 📁 System-Ordner im Explorer öffnen
         g_folders = QGroupBox(tr_ui("repo_settings.folder_access_title", "📁 System-Ordner im Explorer öffnen"))
         h_folders = QHBoxLayout(g_folders)
         btn_open_active = QPushButton(tr_ui("repo_settings.btn_open_active_repo", "📁 Aktuellen Repertoire-Ordner im Explorer öffnen"))
@@ -1037,23 +1352,40 @@ class RepoSettingsDialog(QDialog):
             QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_all_levels_elo_done", "Alle Level wurden auf {val} Elo gesetzt.", val=val))
 
     def delete_level(self):
+        if not self.backend: return
         levels = self.backend.get_repertoire_levels()
-        if not levels: return
-        last = levels[-1]
-        
-        reply = QMessageBox.question(self, tr_ui("repo_settings.dlg_delete_level_title", "Level löschen"), 
-            tr_ui("repo_settings.dlg_delete_level_msg", "Möchtest du das Level '{name}' wirklich löschen?\n\nACHTUNG: Züge in diesem Level werden NICHT gelöscht, behalten aber ihre Level-Nummer (was zu Inkonsistenzen führen kann).", name=last['name']),
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            
-        if reply == QMessageBox.StandardButton.Yes:
+        if not levels or len(levels) <= 1:
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.delete_level_min_warn", "Mindestens 1 Level ist erforderlich. Das letzte verbleibende Level kann nicht gelöscht werden."))
+            return
+
+        selected_order = None
+        curr_row = self.tbl_levels.currentRow()
+        if curr_row >= 0:
             try:
-                lvl_obj = self.backend.session.query(RepertoireLevel).filter_by(order=last['order']).first()
-                if lvl_obj:
-                    self.backend.session.delete(lvl_obj)
-                    self.backend.session.commit()
+                selected_order = int(self.tbl_levels.item(curr_row, 0).text())
+            except (ValueError, AttributeError):
+                selected_order = None
+
+        dlg = DeleteLevelDialog(levels, default_del_order=selected_order, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            del_order, target_order, delete_moves = dlg.get_selection()
+            if del_order:
+                if delete_moves:
+                    reply = QMessageBox.question(
+                        self,
+                        tr_ui("repo_settings.delete_level_dialog_title", "Level löschen"),
+                        tr_ui("repo_settings.delete_level_confirm_delete_moves", "Möchtest du wirklich Level {level} und ALLE darin enthaltenen Züge unwiderruflich löschen?", level=del_order),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+
+                success, msg = self.backend.delete_repertoire_level(del_order, target_level_order=target_order, delete_moves=delete_moves)
+                if success:
                     self.refresh_info()
-            except Exception as e:
-                QMessageBox.critical(self, tr_ui("repo_settings.dlg_error", "Fehler"), str(e))
+                    QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), msg)
+                else:
+                    QMessageBox.warning(self, tr_ui("repo_settings.dlg_error", "Fehler"), msg)
 
     def preview_priority_level(self):
         threshold = self.spin_prio_threshold.value()
@@ -1079,6 +1411,45 @@ class RepoSettingsDialog(QDialog):
             modified = self.backend.apply_priority_level_update(threshold, target_lvl)
             self.refresh_info()
             QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), tr_ui("repo_settings.dlg_moves_updated", "{count} Züge wurden aktualisiert.", count=modified))
+
+    def preview_popularity_prune(self):
+        if not self.backend: return
+        threshold = self.spin_prune_threshold.value()
+        lvl_filter = self.combo_prune_target_level.currentData()
+        moves_cnt, pos_cnt = self.backend.get_low_popularity_prune_impact(threshold, lvl_filter)
+        QMessageBox.information(
+            self,
+            tr_ui("repo_settings.dlg_preview_title", "Vorschau"),
+            tr_ui("repo_settings.prune_preview_msg", "Bei einer Popularität < {threshold}% würden {moves} Züge und {positions} Stellungen gelöscht werden.", threshold=threshold, moves=moves_cnt, positions=pos_cnt)
+        )
+
+    def apply_popularity_prune(self):
+        if not self.backend: return
+        threshold = self.spin_prune_threshold.value()
+        lvl_filter = self.combo_prune_target_level.currentData()
+        moves_cnt, pos_cnt = self.backend.get_low_popularity_prune_impact(threshold, lvl_filter)
+        if moves_cnt == 0:
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_preview_title", "Vorschau"),
+                tr_ui("repo_settings.prune_preview_msg", "Bei einer Popularität < {threshold}% würden {moves} Züge und {positions} Stellungen gelöscht werden.", threshold=threshold, moves=0, positions=0)
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            tr_ui("repo_settings.popularity_prune_title", "Massen-Löschung"),
+            tr_ui("repo_settings.prune_apply_confirm", "Möchtest du wirklich {moves} Züge mit Popularität < {threshold}% unwiderruflich löschen?", moves=moves_cnt, threshold=threshold),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            deleted_count = self.backend.apply_low_popularity_prune(threshold, lvl_filter)
+            self.refresh_info()
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_done", "Fertig"),
+                tr_ui("repo_settings.prune_done", "{count} Züge wurden erfolgreich gelöscht.", count=deleted_count)
+            )
 
     def clean_comments(self):
         n = self.backend.deduplicate_comments_in_repo()
@@ -1367,7 +1738,7 @@ class RepoSettingsDialog(QDialog):
         if hasattr(self, 'lbl_lichess_target_elo'):
             self.lbl_lichess_target_elo.setText(tr_ui("repo_settings.target_elo_label", "Ziel-Elo: {elo}", elo=elo_display))
         if hasattr(self, 'btn_wipe_lichess'):
-            self.btn_wipe_lichess.setText(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess Datenbank-Daten löschen für alle Elos außer [{elo}]", elo=elo_display))
+            self.btn_wipe_lichess.setText(tr_ui("repo_settings.btn_wipe_lichess", "🗑️ Lichess-Daten löschen (außer Elo [{elo}])", elo=elo_display))
 
         # Refresh Table
         self.tbl_levels.setRowCount(0)
@@ -1376,6 +1747,9 @@ class RepoSettingsDialog(QDialog):
         # Tools Level Combos
         self.combo_prio_target.clear()
         self.combo_global_level.clear()
+        if hasattr(self, 'combo_prune_target_level'):
+            self.combo_prune_target_level.clear()
+            self.combo_prune_target_level.addItem(tr_ui("repo_settings.prune_all_levels", "Alle Level"), None)
 
         for idx, lvl in enumerate(levels):
             self.tbl_levels.insertRow(idx)
@@ -1390,20 +1764,39 @@ class RepoSettingsDialog(QDialog):
             
             self.combo_prio_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
             self.combo_global_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+            if hasattr(self, 'combo_prune_target_level'):
+                self.combo_prune_target_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
             
             spin = NoWheelSpinBox()
             spin.setRange(800, 4000)
+            spin.setSingleStep(50)
             spin.setButtonSymbols(QSpinBox.ButtonSymbols.NoButtons)
             spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
             spin.setStyleSheet("QSpinBox { border: none; background: transparent; font-size: 16px; font-weight: 500; } QSpinBox:focus { background: rgba(0,0,0,0.05); }")
-            spin.setValue(lvl.get('target_elo', 1500))
-            spin.setMinimumHeight(scale(40))
+            spin.setValue(int(lvl.get('target_elo') or 1500))
             spin.valueChanged.connect(lambda val, lo=lvl['order']: self.backend.update_level_elo(lo, val))
             self.tbl_levels.setCellWidget(idx, 2, spin)
+            self.tbl_levels.setRowHeight(idx, scale(42))
             
+        self._update_levels_table_height()
+
         # self._refresh_maintenance_repo_list()  <-- Lazy loaded now!
         if hasattr(self, "update_cover_preview"):
             self.update_cover_preview()
+
+    def _update_levels_table_height(self):
+        if not hasattr(self, "tbl_levels"): return
+        self.tbl_levels.verticalHeader().setDefaultSectionSize(scale(42))
+        header_h = self.tbl_levels.horizontalHeader().height()
+        if header_h <= 0:
+            header_h = scale(38)
+        row_cnt = self.tbl_levels.rowCount()
+        rows_h = 0
+        for i in range(row_cnt):
+            r_h = self.tbl_levels.rowHeight(i)
+            rows_h += r_h if r_h > 0 else scale(42)
+        total_h = header_h + rows_h + scale(6)
+        self.tbl_levels.setFixedHeight(max(scale(80), total_h))
 
 
 

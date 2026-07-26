@@ -250,6 +250,7 @@ class LoginDialog(QDialog):
         self.login_in_progress = False
 
         self.open_creator_requested = False
+        self._auto_create_checked = False
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setStyleSheet(get_login_dialog_style())
@@ -403,6 +404,20 @@ class LoginDialog(QDialog):
         super().resizeEvent(event)
         if hasattr(self, 'loading_overlay'):
             self.loading_overlay.setGeometry(self.rect())
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, '_auto_create_checked', False):
+            self._auto_create_checked = True
+            profiles_dir = os.path.join(get_user_dir(), "profiles")
+            has_profiles = False
+            if os.path.exists(profiles_dir):
+                has_profiles = any(
+                    (f.endswith(".db") or (f.endswith(".json") and not f.endswith("_settings.json")))
+                    for f in os.listdir(profiles_dir)
+                )
+            if not has_profiles:
+                QTimer.singleShot(0, self.create_new_profile)
 
     def show_loading_state(self, profile_name):
         """Displays a loading message and disables interaction."""

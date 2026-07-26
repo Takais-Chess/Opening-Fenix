@@ -69,7 +69,17 @@ def _get_all_repertoire_db_paths():
                 if os.path.exists(db_path):
                     paths.append((f, db_path))
                     
-    return paths
+    from opening_fenix.core.utils import is_public_version, is_example_repertoire
+    is_pub = is_public_version()
+    filtered_paths = []
+    for repo_name, db_p in paths:
+        is_ex = is_example_repertoire(repo_name)
+        if is_pub and is_ex:
+            filtered_paths.append((repo_name, db_p))
+        elif not is_pub and not is_ex:
+            filtered_paths.append((repo_name, db_p))
+
+    return filtered_paths
 
 def check_all_databases_integrity() -> str:
     """

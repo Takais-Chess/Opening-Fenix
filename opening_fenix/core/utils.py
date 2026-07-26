@@ -97,6 +97,7 @@ def ensure_user_data_seeded():
                     print(f"Warning: Could not copy config.json from {src_config}: {e}")
 
     # 2. Seed profiles and repertoires
+    is_pub = is_public_version()
     for folder in ["profiles", "repertoires"]:
         dest_folder = os.path.join(user_dir, folder)
         if not os.path.exists(dest_folder):
@@ -108,6 +109,14 @@ def ensure_user_data_seeded():
                 for item in os.listdir(src_folder):
                     s_path = os.path.join(src_folder, item)
                     d_path = os.path.join(dest_folder, item)
+                    
+                    if folder == "repertoires":
+                        is_ex = is_example_repertoire(item)
+                        if is_pub and not is_ex:
+                            continue
+                        if not is_pub and is_ex:
+                            continue
+
                     if not os.path.exists(d_path):
                         try:
                             if os.path.isdir(s_path):
@@ -290,3 +299,68 @@ def localize_san(san: str, language: str = 'en') -> str:
         return san
         
     return san
+
+
+def is_public_version() -> bool:
+    """
+    Returns True if running the public release/version, False if private.
+    Checks:
+    1. Environment variable FENIX_SHARE_BUILD == '1', FENIX_PUBLIC_BUILD == '1', or APP_BUILD_TYPE == 'Public'
+    2. config.json 'is_public' setting
+    3. Bundled 'PUBLIC_VERSION' or 'public.flag' file in base path or user path
+    """
+    env_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
+    env_public = os.environ.get('FENIX_PUBLIC_BUILD') == '1'
+    env_build_type = os.environ.get('APP_BUILD_TYPE', '').lower() == 'public'
+    if env_share or env_public or env_build_type:
+        return True
+
+    # Check config.json in user dir or base dir
+    for dir_path in [get_user_dir(), get_base_path()]:
+        config_path = os.path.join(dir_path, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                    if cfg.get("is_public") is True:
+                        return True
+                    if cfg.get("is_public") is False:
+                        return False
+            except Exception:
+                pass
+
+    # Check for marker file in base_path or user_dir
+    for dir_path in [get_base_path(), get_user_dir()]:
+        if os.path.exists(os.path.join(dir_path, "PUBLIC_VERSION")) or os.path.exists(os.path.join(dir_path, "public.flag")):
+            return True
+
+    return False
+
+
+def is_example_repertoire(name: str) -> bool:
+    """
+    Returns True if the repertoire name indicates an example/sample course/repertoire.
+    """
+    if not name:
+        return False
+    name_lower = name.lower()
+    return "example" in name_lower or "sample" in name_lower
+
+
+def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
+    """
+    Filters repertoire names depending on whether the app is in Public or Private build mode.
+    - Public mode: returns ONLY example repertoires.
+    - Private mode: returns ONLY non-example (personal) repertoires.
+    """
+    is_pub = is_public_version()
+    filtered = []
+    for name in repo_names:
+        is_ex = is_example_repertoire(name)
+        if is_pub and is_ex:
+            filtered.append(name)
+        elif not is_pub and not is_ex:
+            filtered.append(name)
+    return filtered
+
+

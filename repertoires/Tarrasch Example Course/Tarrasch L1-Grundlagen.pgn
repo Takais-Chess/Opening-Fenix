@@ -1,0 +1,232 @@
+[Event "Tarrasch"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "?"]
+[Black "?"]
+[Result "*"]
+
+1. d4 ( 1. Sf3
+{ There are a few systems for White here, but nothing that requires deep theoretical knowledge; otherwise it will likely transpose into the Tarrasch. }
+1... d5 2. g3 ( 2. d4
+{ Position is examined in detail in this move order: 1. d4 d5 2. Nf3 }
+) ( 2. c4 e6 3. d4
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nf3 }
+) 2... c5
+{ Of course, this move has to be played if we want to stick true to the Tarrasch. }
+3. Lg2 ( 3. d4
+{ Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. g3 }
+) 3... Sc6
+{ It is important to bring this knight out first, and not the g8-knight, as we will actually develop it to e7 at times. If we started with 4...Nf6 , we would most likely be forced into playing a Catalan or reverse-Grunfeld type of position, both of which are playable but not exactly what we are looking for here. Developing this knight first allows us some extra options, that will funk the game up. }
+4. d4 { Really the only critical try. } ( 4. O-O
+{ Here we take the center. } 4... e5 5. d3 Le7 6. e4 d4 7. a4 h5
+{ And we are fine with the h4 idea. } ) 4... e6 5. O-O cxd4
+{ This is where Pragg's idea starts. } 6. Sxd4 Lc5
+{ Immediately challenging White's central knight is the point of capturing on d4 the move before. Now, White is at crossroads, with both 7.Nb3 and r1bqk1nr/pp3ppp/2n1p3/2bp4/3N4/6P1/PPP1PPBP/RNBQ1RK1 w kq - 1 7 7.Nxc6 being viable options that need to be investigated. }
+7. Sb3
+{ Retreating with the knight will lead to completely different positions than the sharp variations happening after 7.Nxc6 . The good news is that we will be able to achieve positions which are very similar to the Tarrasch, albeit with a knight on e7 instead of the usual f6. }
+7... Lb6 { Comfortable position } ) ( 1. c4
+{ We are quite happy because we can play e6 and d5, and White will eventually transpose into a 1.d4 opening.}
+1... e6 2. Sc3 ( 2. g3 d5 3. Lg2 c5 { Comfortable position } ) 2... d5 3. d4
+{ With the knight on c3 there are a few independent systems, but mostly it will transpose into the main Tarrasch variation.| With 3.Nc3 , White could intend to play 3...c5 4.cxd5 or rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3 3...c5 4.dxc5 . However, reaching the fianchetto main lines (with Nc3) is still the most likely scenario. | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 }
+( 3. cxd5 exd5 4. d4
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. cxd5 exd5 4. Nc3 }
+) ) 1... d5 2. c4 ( 2. Sf3 c5
+{ One of the great benefits of playing the Tarrasch is that virtually any other move than 2.c4 can be met by 2...c5. Especially after 2.Nf3, this is a great shortcut, avoiding loads of sidelines. For example, many London players may wish to play 2.Nf3 and then 3.Bf4, but now they no longer have such an option. Objectively, White's best move is 3.c4 , but after 3...e6 we transpose back to the main body of the course. I recently was able to use this in my own practice when facing GM Tabatabaei from Iran in the 2022 Olympiad. }
+3. e3
+{ Against the Colle, we go for a setup that gives us a comfortable position. }
+( 3. c4 e6
+{ Starting position of the Tarrasch| Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nf3 c5 }
+) ( 3. c3
+{ A rather timid approach, but possible if White just wishes to get a game of chess without too much theory. }
+3... Sf6 4. Lf4
+{ The only independent option, hoping to transpose to the London. However, these days this particular move order is not popular, as Black has a couple of attractive extra options at their disposal. The only independent option, hoping to transpose to the London. However, these days this particular move order is not popular, as Black has a couple of attractive extra options at their disposal. Both 4.dxc5 and 4.e3 transpose to variations analysed elsewhere in this chapter. }
+( 4. dxc5
+{ I recently faced this line although from the move order rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1 1.d4 d5 2.Nf3 Nf6 3.c3 c5 4.dxc5 , when playing Arjun Erigaisi in the Abu Dhabi open. I did not react accurately and soon drifted into a slightly worse position. The point of the line is that White wants to try and hang on to the c5-pawn, for as long as possible. 4.e3 e6 5.b4 a5 6.c3 transposes to 2.Nf3 c5 3.e3 #2. }
+4... e6 5. b4 a5 { Fine position } ) ( 4. e3
+{ Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. e3 Nf6 4. c3 }
+) 4... Sc6 5. e3 Sh5
+{ Good position | Specifically this idea of immediately chasing after White's bishop seems to be rather tough to face for White. }
+) ( 3. dxc5
+{ If White does not wish to transpose to theoretical variations at all costs, this may be the best try, at least gaining a pawn for the moment. }
+3... e6 4. e4 Lxc5 5. exd5 exd5 { Fine position } ) ( 3. g3 cxd4 4. Sxd4 e5
+{ Good position } ) ( 3. Lf4
+{ Now we can capture on d5 and build a strong center. | Not a very likely possibility, unless you are playing an online blitz game and your opponent has premoved 3.Bf4 . In that case, it is useful to be ready. }
+3... cxd4
+{ White is already in a tough situation since exchanging the c-pawn for d-pawn benefits us. }
+4. Sxd4 { A logical recapture, but quite a serious mistake. } 4... f6
+{ Next we play e5 and have a strong center. | ;2.Nf3 c5 3.Bf4?! #1-13) Odds & Ends Lifetime Repertoires: Tarrasch Defense (17.10) Intending to build a great center with ...e5. The white pieces are completely misplaced and serve as easy targets for an attack. Black is already quite a bit better. }
+) 3... Sf6 4. c3 e6 5. Ld3 Sbd7
+{ We start with this move because we don't yet know whether we want to play Be7 or Bd6. }
+6. Sbd2 b6
+{ Here it is wise to quickly put the bishop on b7 to suppress e4 ideas. }
+7. O-O Lb7 { Good position } ) ( 2. Lf4
+{ The Tricky London. An unwanted opening for many people, but we play a fun setup against it. }
+2... c5 { Direct complications are our friend. } 3. e3 ( 3. c3 Sc6 4. e3
+{ Here we try to ask White a few questions, and in the main line we have a nice gambit. | Position is examined in detail in this move order: 1. d4 d5 2. Bf4 c5 3. e3 Nc6 4. c3 }
+) ( 3. Sf3
+{ Now we can capture on d5 and build a strong center. | Not a very likely possibility, unless you are playing an online blitz game and your opponent has premoved 3.Bf4 . In that case, it is useful to be ready. | Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. Bf4 }
+) ( 3. Sc3 { Here the Jobava London setup is not as good.} 3... Sc6
+{ Increasing the pressure to the d4-pawn, which must be addressed. } 4. e3
+{ Position is examined in detail in this move order: 1. d4 d5 2. Bf4 c5 3. e3 Nc6 4. Nc3 }
+) 3... Sc6 4. c3
+{ Here we try to ask White a few questions, and in the main line we have a nice gambit. }
+( 4. Sf3
+{ Here we enter a Carlsbad pawn structure and we still have a few surprises for White. }
+4... cxd4 { With this exchange we're heading for a Carlsbad structure. } 5.
+exd4 ( 5. Sxd4 f6 6. Lb5 { Here we must be careful of the threat Qh5. } 6...
+Dd7 { We play e5 on the next move and are slightly better. } ) 5...
+Lf5
+{ Now we are in a so-called Carlsbad structure. Typically we would start a minority attack with b5-b4 while White tries to attack our king. That would definitely be an option, but that would be way too nice to London players. Let's give them something to worry about! }
+6. c3 e6 7. Sbd2 { The fun begins } 7... h5
+{ This will surprise your opponent for the first time. } 8. Le2
+{ And the fun continues!} 8... f6
+{ White should prevent g4 now. If he doesn't, we play g4 and get a good position. }
+9. h4
+{ Here we stop with the weird moves for a moment and play a solid standard move. }
+9... Ld6 10. Lxd6 Dxd6 11. O-O Sh6
+{ The knight is well placed here and can support either g4 or f7 and e4.
+We have an interesting position and White won't know the theory.
+Laut Engine ist es ausbalanciert }
+) ( 4. Sc3 cxd4 5. exd4 Lf5
+{ We get a good Carlsbad structure with similar plans to the main line London.}
+) 4... Db6
+{ Immediately hitting White where it hurts, as the b2-pawn is often a target in the London system. }
+5. Db3 { Here we play an interesting move that is strong. } ( 5. Dc2
+{ Against Qc7 we develop and try to get the bishop pair. } 5...
+Sf6 6. Sf3 Sh5
+{ We get the bishop pair and have a comfortable position. } ) 5... c4
+{ A typical idea since trading queens would help us. } 6. Dc2
+{ Here we now have a strong gambit. } ( 6. Dxb6 axb6
+{ This pawn structure helps us more than it hurts.
+We will develop and then play with b5 and b4. }
+7. Sf3 Lf5 8. Le2 Sf6 9. O-O e6 10. h3 Le7 11. Sbd2
+{ Here we start with b5 because after 0-0 the moves g4 and/or Nh4 are strong. }
+11... b5 { Good position für uns } ) 6... e5
+{ Here White should take the pawn. Everything else loses. } 7. dxe5 Lf5
+{ eine weitere typische Idee. } 8. Dc1 { And another wild move } ( 8. Dxf5
+Dxb2 { We win the rook and are significantly better. } ) 8... g5
+{ Play with a lot of energy } 9. Lg3 ( 9. Lxg5 { White's best move }
+9... Sxe5 10. Lf4 Sd3+ 11. Lxd3 Lxd3 { We stand well, aber es bleibt komplex }
+) 9... Lg7
+{ Interesting position, welche laut Engine etwas besser für uns ist } 10. Sf3
+h5 { With the idea of trapping the bishop. White gets no time to breathe. }
+11. h3 h4 12. Lh2 Sh6
+{ We will play g4 very soon and keep playing. This is even confirmed by the engine, which says we are a bit better. }
+) ( 2. Sc3
+{ The Jobava London has gained a lot of popularity in recent years. Old wisdom says not to place the knight in front of the c-pawn, but concrete lines show it's actually quite good. }
+2... c5
+{ Here only e4 is actually dangerous; everything else is harmless. } 3.
+e4 ( 3. Lf4
+{ Here the Jobava London setup is not as good. | Position is examined in detail in this move order: 1. d4 d5 2. Bf4 c5 3. Nc3 }
+) ( 3. dxc5
+{ d4 doesn't work here, so normal development where we prevent e4. }
+3... Sf6
+{ We will develop normally, win back the pawn, and stand well. } )
+3... dxe4 { Here White has 2 options and we are fine in both. } 4. d5
+{ An interesting gambit, but not that dangerous. } ( 4. Lb5+ Ld7 5. dxc5 Sf6
+{ We have a good position und werden nun mit e6 versuchen den c5 Bauern anzugreifen. }
+) 4... Sf6 { We develop and won't be worse :) } )
+( 2. e3 c5 3. c3 ( 3. Sf3
+{ Against the Colle, we go for a setup that gives us a comfortable position. | Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. e3 }
+) ( 3. dxc5 e6 ) ( 3. Ld3 Sf6 4. c3
+{ Position is examined in detail in this move order: 1. d4 d5 2. e3 c5 3. c3 Nf6 4. Bd3 }
+) 3... Sf6 4. Ld3 ( 4. Sf3
+{ Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. e3 Nf6 4. c3 }
+) 4... Sc6 5. dxc5 e6 6. b4 a5 { Typical idea. We stand fine. } ) ( 2. Lg5
+{ We stay true to our c5 move.} 2... c5 3. dxc5 h6
+{ ein Nice move der uns eine Good position gibt. Wir würden gerne e6 spielen und den Bauern zurückgewinnen aber das geht daweil noch nicht }
+4. Lh4 g5 { Nice move } 5. Lg3 Lg7 6. c3 Sf6
+{ We are a pawn down, but the pawn can easily be attacked with Nbd7. We have a decent development advantage and the engine already gives us a good edge. }
+) ( 2. e4 { We accept the Blackmar-Diemer Gambit. } 2... dxe4 3. Sc3 Sf6 4. f3
+exf3 5. Sxf3
+{ Here we should place our dark-squared bishop on the long diagonal and then castle. }
+( 5. Dxf3
+{ Here we should take the pawn and then play a specific variation. }
+5... Dxd4 6. Le3 Dh4+ 7. g3 Dg4 8. Df2 Df5
+{ We stand well und White ist ned happy } ) 5... g6 { Fine position } ) ( 2.
+g3 c5 3. Sf3
+{ Position is examined in detail in this move order: 1. d4 d5 2. Nf3 c5 3. g3 }
+) 2... e6 3. Sc3
+{ With the knight on c3 there are a few independent systems, but mostly it will transpose into the main Tarrasch variation.| With 3.Nc3 , White could intend to play 3...c5 4.cxd5 or rnbqkbnr/ppp2ppp/4p3/3p4/2PP4/2N5/PP2PPPP/R1BQKBNR b KQkq - 1 3 3...c5 4.dxc5 . However, reaching the fianchetto main lines (with Nc3) is still the most likely scenario. }
+( 3. Sf3 c5 { Starting position of the Tarrasch} 4. cxd5 ( 4. e3
+{ A fairly harmless option from White. } 4... Sf6 5. Sc3
+{ Here one could try to break the symmetry, but actually Nc3 is our best option. | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. e3 Nf6 5. Nf3 }
+) ( 4. Sc3
+{ Not a good move | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. Nf3 }
+) ( 4. g3 cxd4
+{ I think cxd4 is the most challenging and also the most fun variation. } 5.
+Sxd4 e5 6. Sf3 d4 7. Lg2 Sc6 { We are fine. } ) 4... exd5 5. Sc3
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 }
+( 5. g3
+{ The Fianchetto variation has always been critical for the Tarrasch, as the bishop on g2 puts pressure on the d5 pawn. }
+5... Sf6 { Nf6 before Nc6 is important and is a useful rule of thumb to remember. } 6. Lg2
+( 6. Sc3
+{ A popular and also good variation | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. g3 }
+) 6... Sc6 7. O-O
+{ Here I recommend the old main line with Be7. But for future adventures, you could look into the Dubov variation. }
+( 7. Sc3
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. g3 Nc6 7. Bg2 }
+) 7... Le7 8. Sc3
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. g3 Nc6 7. Bg2 Be7 8. O-O }
+( 8. dxc5
+{ White releases the central tension and brings us into an Isolani position. With the knight on b1, White has a few other options worth checking out. }
+8... Lxc5 9. a3 Se4
+{ Important idea to remember against a3: we want to place our dark-squared bishop on f6 to avoid sliding into a bad position. }
+10. b4 Le7 { Here we will now regroup our bishop to f6. } 11. Lb2
+Lf6 { Good position } ) ) ( 5. dxc5
+{ This allows us to develop our bishop in one move, which is desirable for us. }
+5... Lxc5 6. e3 { Not good preparation from White. } 6... Sf6
+{ The bishop can now recapture without wasting any time. } ) ( 5. Lg5 Sf6 6.
+Sc3
+{ A rather dangerous variation for us | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. Bg5 }
+) ) ( 3. cxd5 exd5 4. Sc3 c5
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 }
+) ( 3. e3 c5 4. Sf3
+{ A fairly harmless option from White. | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nf3 c5 4. e3 }
+( 4. Sc3
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. e3 }
+) ) 3... c5
+{ Starting position of the Tarrasch| Once in a while, you might face an adventurous opponent or simply someone that is scared to enter the frightening Tarrasch Defense main lines and then it is good to be prepared for such scenarios by checking out the sidelines. }
+4. cxd5 ( 4. e3 Sf6 5. Sf3
+{ Here one could try to break the symmetry, but actually Nc3 is our best option. }
+5... Sc6
+{ Here White has countless options, but everything should be acceptable for us if we calculate correctly. }
+6. cxd5 ( 6. a3 a6 { Fine position } ) ( 6. Le2 Ld6
+{ We have a good position } ) 6... exd5
+{ Here we have a good position. White should play Bg5 before e3. | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. e3 Nc6 }
+) ( 4. Sf3 $6 { Not a good move } 4... cxd4 5. Sxd4 e5
+{ Let the knights dance! } 6. Sf3 $2 ( 6. Sdb5 a6 7. Da4 Ld7 8. cxd5 Sf6
+{ Interesting position } ) 6... d4 7. Sd5 ( 7. Se4 f5 { We stand very well }
+) 7... Se7
+{ Here Ne7 was important. Surprisingly, White would be back in the game after the natural Nc6. }
+8. Sxe5 Sxd5 9. cxd5 Dxd5 10. Sf3 Sc6 { We stand well } ) ( 4. dxc5
+{ A greedy move } 4... d4 { Here we need a concrete response. } 5. Se4 $6
+{ An intuitive move, but it is a mistake. } 5... Sf6
+{ White can't really hold his knight in the center. } 6. Lg5 Sa6
+{ Black hat eine Good position. } ) 4... exd5 5. Sf3 ( 5. dxc5 d4 6. Se4 Sf6
+{ Direct play } 7. Sxf6+ ( 7. Lg5 { Here we play dynamically. } 7... Lf5
+{ More pressure is better } 8. Sxf6+ { . } 8... gxf6
+{ We stand fine and White now has to show why he isn't worse. }
+) 7... Dxf6 { We are fine } ) ( 5. e3 Sf6 6. Sf3
+{ Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. e3 }
+) 5... Sf6 6. Lg5 { A rather dangerous variation for us } ( 6. g3
+{ A popular and also good variation } 6... Sc6 7. Lg2 Le7 8. O-O ( 8.
+dxc5 Lxc5 { Comfortable position } 9. O-O O-O
+{ Fine Isolani position |There is an option of gambitting the pawn entirely through 9...d4 , but practice has shown that it is best to restore material balance instead. White is at crossroads here, having several ways of completing development. As for our ideal piece configuration, it is quite straightforward. For the rooks, the ideal positions are generally e8 and c8 or d8, standing useful on the (semi-)open files. The real question remains for our light-squared bishop, as it might stand well on either e6, f5 or g4 depending on the situation. As usual, when playing with the isolani we should always be on the lookout for opportunities of pushing it forward at an opportune moment, as the further it advances the more of a menace it becomes to the opponent. | Position is examined in detail in this move order: 1. d4 d5 2. c4 e6 3. Nc3 c5 4. cxd5 exd5 5. Nf3 Nf6 6. g3 Nc6 7. Bg2 Be7 8. O-O O-O 9. dxc5 Bxc5 }
+) 8... O-O 9. Lg5 { Here we need to take care of our c5 pawn. } ( 9.
+dxc5 Lxc5
+{ Fine Isolani position |There is an option of gambitting the pawn entirely through 9...d4 , but practice has shown that it is best to restore material balance instead. White is at crossroads here, having several ways of completing development. As for our ideal piece configuration, it is quite straightforward. For the rooks, the ideal positions are generally e8 and c8 or d8, standing useful on the (semi-)open files. The real question remains for our light-squared bishop, as it might stand well on either e6, f5 or g4 depending on the situation. As usual, when playing with the isolani we should always be on the lookout for opportunities of pushing it forward at an opportune moment, as the further it advances the more of a menace it becomes to the opponent. }
+) 9... c4
+{ An interesting position | This closing of the center, and thus precluding White's chance of giving us an isolani is an idea we use frequently in the Tarrasch Defense. Having created a majority on the queenside, our play will often revolve around utilizing it through ...b7-b5. White, on the other hand, will often attempt to break our structure through b2-b3 or create a central play using e2-e4 and/or f2-f4. We will extensively analyse this move in the course. I did my best to bring 9...cxd4 back with the aid of modern engines, but I didn't succeed. Nevertheless, this line deserves a brief overview of its history. 10.Nxd4 h6 11.Be3 Re8 This move is played with the idea of retreating the bishop back to f8, which facilitates the idea of an exchange sacrifice on e3. During the World Championship match, Karpov played 12.Qb3 here, with good results. The games were so disastrous, that Kasparov stopped playing the Tarrasch altogether in the match. While 12.Qb3 continues to be a serious option, I discovered that the subtle 12.a3 is even stronger. Its main point is that after an eventual Qb3 Na5, the queen can drop back to a2. It turns out that the isolated d5-pawn is too much of a burden and Black doesn't have enough activity to compensate for it. Therefore, to play this variation one has to accept a passive position. And that's certainly not what we intend to do! Luckily, 9...c4 offers us much better prospects. }
+) ( 6. e3 Sc6
+{ Here we have a good position. White should play Bg5 before e3. } ) 6...
+Le6
+{ Here White has a lot of ideas, but 3 main ones: 1. a fast e4, 2. slow development with e3, 3. development with g3 is good as always. }
+7. e3 { Here we play c4 and get a fine position. } ( 7. Lxf6
+{ This might be the most poisonous variation in the entire course. We need to know our theory here. }
+7... Dxf6 8. e4
+{ The idea of the system. Quite tricky, but it will certainly be a fun game to play. }
+8... dxe4 9. Sxe4 Df4 { Interesting position } ) 7... c4 8. Le2
+{ We develop actively. } ( 8. b3 $4 Lb4 9. Tc1 Da5 10. Dc2 Se4
+{ We win } ) 8... Lb4 9. O-O Sbd7 { Fine position } *

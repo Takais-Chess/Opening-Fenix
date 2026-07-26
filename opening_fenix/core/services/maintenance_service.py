@@ -57,6 +57,8 @@ def list_all_repertoires(include_elo=False):
                     names.append(item)
                     
     unique_names = sorted(list(set(names)))
+    from opening_fenix.core.utils import filter_repertoires_by_build_type
+    unique_names = filter_repertoires_by_build_type(unique_names)
     return [{'name': n, 'elo': get_repertoire_elo(n) if include_elo else "Laden..."} for n in unique_names]
 
 class MaintenanceOrchestrator:

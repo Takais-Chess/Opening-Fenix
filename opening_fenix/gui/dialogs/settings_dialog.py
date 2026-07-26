@@ -339,21 +339,8 @@ class SettingsDialog(QDialog):
         lbl_intro.setStyleSheet("color: #666; font-size: 14px;")
         layout.addWidget(lbl_intro)
 
-        from opening_fenix.gui.dialogs.faq_dialog import FAQItem
-        faqs = [
-            (
-                tr_ui("settings_faq.q1", "Wie soll ich mein Training gestalten?"),
-                tr_ui("settings_faq.a1", "Ich empfehle immer, zuerst die fälligen Züge zu üben und falls danach noch Zeit ist, ein paar Varianten auf einen Schlag zu lernen (ca. 20–50 Züge) und diese direkt zu üben.\n\nDiesem Muster ein paar Mal pro Woche folgen, bis das Repertoire sits, und danach alle paar Wochen die fälligen Züge erledigen.")
-            ),
-            (
-                tr_ui("settings_faq.q2", "Wie soll ich reagieren, wenn ich einen Zug falsch habe?"),
-                tr_ui("settings_faq.a2", "Denke kurz darüber nach, warum der Zug falsch ist, und schaue dann mithilfe des Lichess-Buttons nach, warum dein gewählter Zug schlecht ist.")
-            ),
-            (
-                tr_ui("settings_faq.q3", "Wie ändere ich das Trainingslevel und wann soll ich das machen?"),
-                tr_ui("settings_faq.a3", "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.")
-            )
-        ]
+        from opening_fenix.gui.dialogs.faq_dialog import FAQItem, get_faq_items
+        faqs = get_faq_items()
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)

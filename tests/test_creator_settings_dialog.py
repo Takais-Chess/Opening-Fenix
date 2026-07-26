@@ -143,6 +143,22 @@ class TestRepoSettingsGeneralPage:
         """Level-Tabelle hat genau drei Spalten."""
         assert settings_dialog.tbl_levels.columnCount() == 3
 
+    def test_level_target_elo_spinbox_loads_and_saves_value(self, settings_dialog, creator_backend):
+        """Ziel-Elo SpinBox lädt gespeicherten Wert, erlaubt Spin und speichert Wert."""
+        with patch.object(creator_backend, 'get_repertoire_levels', return_value=[{"id": 1, "name": "Level 1", "order": 1, "target_elo": 1250}]), \
+             patch.object(creator_backend, 'update_level_elo') as mock_update:
+            settings_dialog.refresh_info()
+            spin = settings_dialog.tbl_levels.cellWidget(0, 2)
+            assert spin is not None
+            assert spin.value() == 1250
+            spin.setValue(1300)
+            mock_update.assert_called_with(1, 1300)
+
+    def test_level_groupbox_size_policy(self, settings_dialog):
+        """g_levels besitzt Maximum Vertical SizePolicy um übermäßige Höhe zu verhindern."""
+        from PyQt6.QtWidgets import QSizePolicy
+        assert settings_dialog.g_levels.sizePolicy().verticalPolicy() == QSizePolicy.Policy.Maximum
+
     def test_elo_change_saves_to_backend_no_crash(self, settings_dialog):
         """Elo-Änderung verursacht keinen Absturz (Backend-Guard greift)."""
         # Direkt die Methode aufrufen – sollte nicht abstürzen

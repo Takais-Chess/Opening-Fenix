@@ -115,6 +115,9 @@ repertoires/**/*.db-wal
 repertoires/**/*.pgn
 config.json
 
+# Allow public example courses in git
+!repertoires/*Example Course*/**
+
 # IDEs
 .idea/
 .vscode/
@@ -129,6 +132,7 @@ Thumbs.db
 engines/*.exe
 dist/
 build/
+Output/
 
 # AI Agent Metadata
 .antigravity/
