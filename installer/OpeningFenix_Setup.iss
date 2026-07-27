@@ -6,7 +6,7 @@
 #endif
 
 #define MyAppName "Opening Fenix"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "0.9.0"
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
 #define MyAppExeName "Opening Fenix.exe"

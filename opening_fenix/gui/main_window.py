@@ -108,6 +108,22 @@ class MainWindow(QMainWindow):
         self.set_button_state('start')
         self.setStyleSheet(get_main_window_style())
 
+        # Trigger background update check 2 seconds after startup
+        QTimer.singleShot(2000, self.check_for_updates)
+
+    def check_for_updates(self):
+        from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
+        if not should_check_for_updates(manual=False):
+            return
+
+        self.update_checker = UpdateCheckWorker(manual=False, parent=self)
+        self.update_checker.update_found.connect(self.on_update_found)
+        self.update_checker.start()
+
+    def on_update_found(self, release_info: dict):
+        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+        UpdateDialog(release_info, self).exec()
+
     def showEvent(self, event):
         super().showEvent(event)
         # Re-apply icon after native handle is created (needed for FramelessWindowHint on Windows)

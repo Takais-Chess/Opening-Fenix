@@ -118,12 +118,13 @@ def main():
         print("ERROR: Public Inno Setup compilation failed.")
         sys.exit(res_pub.returncode)
 
+    from opening_fenix.core.version import APP_VERSION
     output_dir = os.path.join(project_root, 'Output')
     print("\n" + "=" * 50)
     print("         BOTH INSTALLERS BUILT SUCCESSFUL!")
     print("=" * 50)
-    print(f"1. Private Installer: Output\\OpeningFenix_Setup_v1.0.0_Private.exe")
-    print(f"2. Public Installer:  Output\\OpeningFenix_Setup_v1.0.0_Public.exe")
+    print(f"1. Private Installer: Output\\OpeningFenix_Setup_v{APP_VERSION}_Private.exe")
+    print(f"2. Public Installer:  Output\\OpeningFenix_Setup_v{APP_VERSION}_Public.exe")
 
 if __name__ == '__main__':
     main()

@@ -97,16 +97,15 @@ if __name__ == "__main__":
         except Exception:
             pass
             
-        # More unique and descriptive ID to ensure Windows taskbar grouping matches the logo.
-        # This string should be unique to the app (including version if needed).
-        myappid = 'OpeningFenix.Lab.V2.2.0' 
+        from opening_fenix.core.version import APP_VERSION
+        myappid = f'OpeningFenix.Lab.V{APP_VERSION}' 
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except (AttributeError, OSError):
              pass
 
     try:
-        logger.info("Opening Fenix starting...")
+        logger.info(f"Opening Fenix starting (v{APP_VERSION})...")
 
         # Enable High DPI scaling and rounding policies for sharp UI
         QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
@@ -117,7 +116,7 @@ if __name__ == "__main__":
         # Explicitly set application identity for Windows taskbar grouping
         app.setApplicationName("OpeningFenix")
         app.setOrganizationName("OpeningFenixLab")
-        app.setApplicationVersion("2.2.0")
+        app.setApplicationVersion(APP_VERSION)
         app.setApplicationDisplayName("Opening Fenix")
         
         # Set icon on the app instance immediately

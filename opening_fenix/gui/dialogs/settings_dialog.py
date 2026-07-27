@@ -210,6 +210,13 @@ class SettingsDialog(QDialog):
 
     def display_page(self, index):
         self.pages.setCurrentIndex(index)
+        if index == 1:
+            QTimer.singleShot(0, self.rearrange_cards_grid)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self.rearrange_cards_grid)
+
 
 
     # ─── Seite 1: Darstellung & Audio ──────────────────────────────────────────
@@ -294,7 +301,74 @@ class SettingsDialog(QDialog):
         f_behavior.addRow(tr_ui("settings.auto_delay", "Verzögerung bei Variantenwechsel (Auto-Weiter):"), self.spin_delay)
         layout.addWidget(g_behavior)
 
+        # Software-Updates
+        from PyQt6.QtWidgets import QCheckBox, QMessageBox
+        from opening_fenix.core.services.update_service import UpdateCheckWorker, get_config_dict, save_config_dict
+        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+
+        g_updates = QGroupBox(tr_ui("settings.update_title", "🔄 Software-Updates"))
+        v_updates = QVBoxLayout(g_updates)
+        v_updates.setSpacing(scale(10))
+
+        cfg = get_config_dict()
+        chk_auto = QCheckBox(tr_ui("settings.auto_check_updates", "Automatisch nach Updates suchen"))
+        chk_auto.setChecked(cfg.get("auto_check_updates", True))
+        chk_auto.toggled.connect(self.on_auto_check_updates_toggled)
+        v_updates.addWidget(chk_auto)
+
+        h_check = QHBoxLayout()
+        self.btn_manual_update = QPushButton(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        self.btn_manual_update.clicked.connect(self.run_manual_update_check)
+        h_check.addWidget(self.btn_manual_update)
+        h_check.addStretch()
+        v_updates.addLayout(h_check)
+
+        layout.addWidget(g_updates)
         layout.addStretch()
+
+    def on_auto_check_updates_toggled(self, checked: bool):
+        from opening_fenix.core.services.update_service import get_config_dict, save_config_dict
+        cfg = get_config_dict()
+        cfg["auto_check_updates"] = checked
+        save_config_dict(cfg)
+
+    def run_manual_update_check(self):
+        from opening_fenix.core.services.update_service import UpdateCheckWorker
+        self.btn_manual_update.setEnabled(False)
+        self.btn_manual_update.setText(tr_ui("settings.checking_updates", "Suche läuft..."))
+
+        self.update_worker = UpdateCheckWorker(manual=True, parent=self)
+        self.update_worker.update_found.connect(self.on_manual_update_found)
+        self.update_worker.no_update_found.connect(self.on_manual_no_update)
+        self.update_worker.check_error.connect(self.on_manual_update_error)
+        self.update_worker.start()
+
+    def on_manual_update_found(self, release_info: dict):
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+        UpdateDialog(release_info, self).exec()
+
+    def on_manual_no_update(self):
+        from PyQt6.QtWidgets import QMessageBox
+        from opening_fenix.core.version import APP_VERSION
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        QMessageBox.information(
+            self,
+            tr_ui("settings.no_update_title", "Auf dem neuesten Stand"),
+            tr_ui("settings.no_update_msg", "Du nutzt bereits die aktuellste Version ({version}).", version=APP_VERSION)
+        )
+
+    def on_manual_update_error(self, err_msg: str):
+        from PyQt6.QtWidgets import QMessageBox
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        QMessageBox.warning(
+            self,
+            tr_ui("settings.update_error_title", "Fehler bei Update-Prüfung"),
+            tr_ui("settings.update_error_msg", "Konnte GitHub nicht nach Updates prüfen:\n{err}", err=err_msg)
+        )
 
     def on_theme_changed(self, theme_name):
         self.main_window.training_manager.set_setting("theme", theme_name)
@@ -384,6 +458,8 @@ class SettingsDialog(QDialog):
         self.card_layout.setSpacing(scale(8))
         
         self.scroll_cards.setWidget(self.card_container)
+        self.scroll_cards.installEventFilter(self)
+        self.scroll_cards.viewport().installEventFilter(self)
         v_sel.addWidget(self.scroll_cards)
         layout.addWidget(g_sel)
         
@@ -673,15 +749,27 @@ class SettingsDialog(QDialog):
             card.clicked.connect(lambda n=r_name: self.on_repo_selected(n))
             self.card_layout.addWidget(card)
             
+        self._current_cols = -1
         self.rearrange_cards_grid()
 
     def rearrange_cards_grid(self):
-        # Calculate dynamic columns
+        if not hasattr(self, "scroll_cards") or not hasattr(self, "card_layout"):
+            return
+            
         width = self.scroll_cards.viewport().width()
-        card_min_width = scale(260) # Card fixed/minimum width
-        spacing = scale(10)
+        if width <= 10:
+            return
+            
+        card_min_width = scale(250)
+        spacing = scale(8)
+        margins = self.card_layout.contentsMargins()
+        avail_width = width - (margins.left() + margins.right()) - scale(8)
         
-        cols = max(1, width // (card_min_width + spacing))
+        cols = max(1, avail_width // (card_min_width + spacing))
+        
+        if hasattr(self, "_current_cols") and self._current_cols == cols:
+            return
+        self._current_cols = cols
         
         cards = []
         for i in range(self.card_layout.count()):
@@ -692,6 +780,9 @@ class SettingsDialog(QDialog):
         for card in cards:
             self.card_layout.removeWidget(card)
             
+        for c in range(max(cols, 10)):
+            self.card_layout.setColumnStretch(c, 1 if c < cols else 0)
+            
         for idx, card in enumerate(cards):
             r = idx // cols
             c = idx % cols
@@ -699,7 +790,7 @@ class SettingsDialog(QDialog):
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
-        if obj == self.scroll_cards and event.type() == QEvent.Type.Resize:
+        if hasattr(self, "scroll_cards") and (obj == self.scroll_cards or obj == self.scroll_cards.viewport()) and event.type() == QEvent.Type.Resize:
             self.rearrange_cards_grid()
         elif hasattr(self, "levels_container") and obj == self.levels_container and event.type() == QEvent.Type.Resize:
             self.rearrange_levels_grid()
@@ -784,6 +875,7 @@ class RepertoireConfigCard(QFrame):
         self.is_active = is_active
         self.parent_dlg = parent_dlg
         self.main_window = parent_dlg.main_window
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.init_ui()
         self.update_style()
         
@@ -819,6 +911,7 @@ class RepertoireConfigCard(QFrame):
         
         self.lbl_name = QLabel(self.repo_name)
         self.lbl_name.setObjectName("RepoName")
+        self.lbl_name.setWordWrap(True)
         self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(16)}px;")
         self.info_layout.addWidget(self.lbl_name)
         
@@ -846,7 +939,8 @@ class RepertoireConfigCard(QFrame):
         
         # Level combobox (no prefix text, shown in its own row below)
         self.combo_level = NoWheelComboBox()
-        self.combo_level.setMinimumWidth(scale(150))
+        self.combo_level.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo_level.setMinimumWidth(scale(120))
         self.combo_level.setFixedHeight(scale(35))
         self.populate_levels()
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
@@ -859,9 +953,11 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setVisible(self.is_active)
         
         if self.is_active:
-            self.setFixedHeight(scale(130))
+            self.setMinimumHeight(scale(130))
+            self.setMaximumHeight(scale(160))
         else:
-            self.setFixedHeight(scale(64))
+            self.setMinimumHeight(scale(64))
+            self.setMaximumHeight(scale(75))
 
     def fetch_user_elo(self):
         try:
@@ -935,9 +1031,11 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setVisible(self.is_active)
         
         if self.is_active:
-            self.setFixedHeight(scale(130))
+            self.setMinimumHeight(scale(130))
+            self.setMaximumHeight(scale(160))
         else:
-            self.setFixedHeight(scale(64))
+            self.setMinimumHeight(scale(64))
+            self.setMaximumHeight(scale(75))
         
         self.main_window.training_manager.set_repo_visibility(self.repo_name, self.is_active)
         self.main_window.refresh_repertoire_buttons()
