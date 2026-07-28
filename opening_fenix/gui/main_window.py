@@ -28,7 +28,7 @@ from PyQt6.QtMultimedia import QSoundEffect
 from opening_fenix.core.repertoire import RepertoireManager
 from opening_fenix.core.training import TrainingManager
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
-from opening_fenix.core.utils import localize_san
+from opening_fenix.core.utils import localize_san, parse_comment, is_free_training_profile
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget
 from opening_fenix.gui.widgets.charts import PieChartWidget
 from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame
@@ -45,6 +45,7 @@ from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.logger import logger
 from opening_fenix.core.db.database import DatabaseCorruptedException
+from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.translation import tr_ui
 
 
@@ -53,7 +54,8 @@ class MainWindow(QMainWindow):
     def __init__(self, profile_name):
         super().__init__()
         self.profile_name = profile_name
-        self.setWindowTitle(tr_ui("main_window.window_title", "Opening Fenix - {profile}", profile=profile_name))
+        display_profile_name = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(profile_name) else profile_name
+        self.setWindowTitle(tr_ui("main_window.window_title", "Opening Fenix v{version} - {profile}", version=APP_VERSION, profile=display_profile_name))
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         
         set_consistent_icon(self)
@@ -65,9 +67,18 @@ class MainWindow(QMainWindow):
         self.repertoire_manager = RepertoireManager(profile_name=profile_name)
         self.training_manager = TrainingManager(profile_name=profile_name, repertoire_manager=self.repertoire_manager)
         
-        # Load profile-specific language setting before initializing UI
-        profile_lang = self.training_manager.get_setting("ui_language") or "de"
+        # Load profile-specific or global language setting before initializing UI
         from opening_fenix.core.translation import translator
+        profile_lang = self.training_manager.get_setting("ui_language") or getattr(translator, "current_lang", None)
+        if not profile_lang:
+            try:
+                config_path = os.path.join(get_user_dir(), "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r") as f:
+                        profile_lang = json.load(f).get("ui_language")
+            except Exception:
+                pass
+        profile_lang = profile_lang or "de"
         translator.load_language(profile_lang)
         
         self.current_move_obj = None
@@ -120,6 +131,10 @@ class MainWindow(QMainWindow):
         self.update_checker.update_found.connect(self.on_update_found)
         self.update_checker.start()
 
+        from opening_fenix.core.threads import AutoBackupThread
+        self.backup_worker = AutoBackupThread(parent=self)
+        self.backup_worker.start()
+
     def on_update_found(self, release_info: dict):
         from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
         UpdateDialog(release_info, self).exec()
@@ -132,6 +147,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self.trigger_board_adjust)
         # Start the onboarding tour if not shown yet
         QTimer.singleShot(500, self.check_for_onboarding)
+        if is_free_training_profile(self.profile_name) and not getattr(self, '_free_training_setup_shown', False):
+            self._free_training_setup_shown = True
+            QTimer.singleShot(200, self.open_free_training_setup)
 
     def trigger_board_adjust(self):
         if hasattr(self, 'board_panel') and hasattr(self, 'main_splitter'):
@@ -156,7 +174,7 @@ class MainWindow(QMainWindow):
 
     def check_for_onboarding(self):
         """Check if the guided tour should be started for this profile."""
-        if self.profile_name == "Freies Training":
+        if is_free_training_profile(self.profile_name):
             return
             
         guide_shown = self.training_manager.get_setting("guide_shown")
@@ -250,7 +268,8 @@ class MainWindow(QMainWindow):
         main_layout.setSpacing(0)
 
         # --- 0. CUSTOM TITLE BAR (MERGED) ---
-        self.custom_title_bar = CustomTitleBar(self, title=f" {self.profile_name}")
+        display_profile_name = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        self.custom_title_bar = CustomTitleBar(self, title=f" {display_profile_name}")
         self.custom_title_bar.setFixedHeight(scale(65))
         main_layout.addWidget(self.custom_title_bar)
 
@@ -321,14 +340,15 @@ class MainWindow(QMainWindow):
         self.lbl_elo = QLabel("🎓 800")
         self.lbl_elo.setStyleSheet(f"font-size: {scale(20)}px; color: {COLORS['burnt_orange']}; font-weight: bold;")
 
-        self.btn_switch_profile = QPushButton(self.profile_name)
+        display_profile_name = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        self.btn_switch_profile = QPushButton(display_profile_name)
         self.btn_switch_profile.setFlat(True)
         self.btn_switch_profile.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
             QPushButton:hover {{ background-color: rgba(255, 255, 255, 0.7); }}
         """)
 
-        self.btn_switch_profile.clicked.connect(self.switch_profile)
+        self.btn_switch_profile.clicked.connect(self.handle_profile_button_click)
         self.btn_settings = QPushButton("⚙")
         self.btn_settings.setFixedSize(scale(40), scale(40))
         self.btn_settings.setStyleSheet(f"""
@@ -380,7 +400,7 @@ class MainWindow(QMainWindow):
         # --- 2. CONTENT AREA (Now with Splitter) ---
         content_wrapper = QWidget()
         content_layout = QVBoxLayout(content_wrapper)
-        content_layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        content_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
         content_layout.setSpacing(0)
         
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -389,7 +409,7 @@ class MainWindow(QMainWindow):
         self.board_panel = AspectRatioFrame()
         self.board_panel.setObjectName("BoardPanel")
         board_inner_layout = QVBoxLayout(self.board_panel)
-        board_inner_layout.setContentsMargins(15, 15, 15, 15)
+        board_inner_layout.setContentsMargins(0, 0, 0, 0)
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.check_user_move)
         board_inner_layout.addWidget(self.board_widget)
@@ -435,6 +455,9 @@ class MainWindow(QMainWindow):
         self.btn_learn_new.setCheckable(True)
         self.btn_learn_new.clicked.connect(self.toggle_learning_mode)
         self.btn_learn_new.setToolTip(tr_ui("main_window.learn_mode_tooltip", "<b>Lern-Modus</b><br>Trainiere neue Züge, die du noch nicht kennst."))
+        if is_free_training_profile(self.profile_name):
+            self.btn_learn_new.setChecked(False)
+            self.btn_learn_new.setEnabled(False)
         
         self.btn_auto_continue = QPushButton("⚡")
         self.btn_auto_continue.setObjectName("ActionButton")
@@ -604,7 +627,7 @@ class MainWindow(QMainWindow):
             # Show Course Intro Splash if no moves have been learned yet and not free training
             # BUGFIX: Don't show if the onboarding tour is currently active or not yet shown
             guide_shown = self.training_manager.get_setting("guide_shown")
-            if learned == 0 and due == 0 and repo_name and self.profile_name != "Freies Training" and guide_shown:
+            if learned == 0 and due == 0 and repo_name and not is_free_training_profile(self.profile_name) and guide_shown:
                 repo_info = self.repertoire_manager.get_repertoire_info()
                 self._current_intro = CourseIntroDialog(self, repo_info)
                 self._current_intro.setWindowModality(Qt.WindowModality.NonModal)
@@ -628,6 +651,9 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self.on_smart_click)
 
     def show_filter_menu(self):
+        if is_free_training_profile(self.profile_name):
+            self.open_free_training_setup()
+            return
         if not self.repertoire_manager.active_repertoire_name: return
         menu = QMenu(self)
         action_all = QAction(f"Alle {self.repertoire_manager.active_repertoire_name}", self)
@@ -675,6 +701,12 @@ class MainWindow(QMainWindow):
 
         visible_repos = self.training_manager.get_visible_repos()
         active_repo = self.repertoire_manager.active_repertoire_name
+        
+        if is_free_training_profile(self.profile_name):
+            if active_repo:
+                visible_repos = [active_repo]
+            elif visible_repos:
+                visible_repos = [visible_repos[0]]
         
         # 1. Collect stats for all visible repertoires and sort if necessary
         repo_data = [] # List of (repo_name, stats_tuple)
@@ -864,6 +896,8 @@ class MainWindow(QMainWindow):
         else:
             self.btn_smart.setText(tr_ui("main_window.btn_done", "🎉 FERTIG!"))
             self.btn_smart.setEnabled(False)
+            if is_free_training_profile(self.profile_name):
+                QTimer.singleShot(400, self.open_free_training_setup)
 
     def on_notation_click(self, url):
         # Extract the FEN from the URL and properly decode percent-encoding (e.g., %20 -> " ")
@@ -997,6 +1031,21 @@ class MainWindow(QMainWindow):
                     
                 QTimer.singleShot(0, process_after_fail)
 
+    def get_effective_comment_language(self) -> str:
+        from opening_fenix.core.translation import translator
+        lang_setting = self.training_manager.get_setting("comment_language")
+        if lang_setting and lang_setting != "auto":
+            return lang_setting
+        current_app_lang = getattr(translator, "current_lang", None)
+        if current_app_lang:
+            return current_app_lang
+        if self.repertoire_manager and self.repertoire_manager.repo_session:
+            from opening_fenix.core.data_tools import get_meta
+            repo_lang = get_meta(self.repertoire_manager.repo_session, "comment_language", "auto")
+            if repo_lang and repo_lang != "auto":
+                return repo_lang
+        return self.training_manager.get_setting("notation_language") or "de"
+
     def update_notation_display(self, temp_hist=None, reveal_move=False):
         hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter)
         if not hist:
@@ -1005,7 +1054,8 @@ class MainWindow(QMainWindow):
 
         html = "<body style='line-height: 1.6;'>"
         start_move_offset = self.repertoire_manager.get_repertoire_start_move() - 1
-        lang = self.training_manager.get_setting("notation_language") or "en"
+        notation_lang = self.training_manager.get_setting("notation_language") or "en"
+        comment_lang = self.get_effective_comment_language()
         
         # Determine if the first move in history is Black (to adjust numbering/dots)
         # In hist, 'fen' is the position AFTER the move. If 'w' follows, Black just moved.
@@ -1030,9 +1080,12 @@ class MainWindow(QMainWindow):
             if is_last and reveal_move: style += f" background-color: {COLORS['burnt_orange']}; color: white; border-radius: 3px; padding: 0 2px;"
             nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
             nag_text = nag_map.get(item.get('nag'), "")
-            san = localize_san(item['san'], lang)
+            san = localize_san(item['san'], notation_lang)
             html += f"<a href='fen:{item['fen']}' style='{style}'>{san}{nag_text}</a> "
-            if item.get('comment'): html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{item['comment']}</p>"
+            if item.get('comment'):
+                comment_text = parse_comment(item['comment'], comment_lang)
+                if comment_text:
+                    html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{comment_text}</p>"
         html += "</body>"
         self.txt_notation.setHtml(html)
         # Use a singleShot timer to ensure the layout is complete before scrolling.
@@ -1067,6 +1120,51 @@ class MainWindow(QMainWindow):
 
     def switch_profile(self):
         self.switch_requested = True; self.close()
+
+    def handle_profile_button_click(self):
+        if is_free_training_profile(self.profile_name):
+            menu = QMenu(self)
+            act_setup = QAction(tr_ui("main_window.menu_setup_open_training", "🎯 Training anpassen (Repertoire, Level, Variation)"), self)
+            act_setup.triggered.connect(self.open_free_training_setup)
+            act_switch = QAction(tr_ui("main_window.menu_switch_profile", "👤 Profil wechseln"), self)
+            act_switch.triggered.connect(self.switch_profile)
+            menu.addAction(act_setup)
+            menu.addSeparator()
+            menu.addAction(act_switch)
+            menu.exec(self.btn_switch_profile.mapToGlobal(QPoint(0, self.btn_switch_profile.height())))
+        else:
+            self.switch_profile()
+
+    def open_free_training_setup(self):
+        from opening_fenix.gui.dialogs.open_training_dialog import OpenTrainingSetupDialog
+        from opening_fenix.core.db.models import TrainingData
+
+        dlg = OpenTrainingSetupDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            selections = dlg.get_selections()
+            selected_repo = selections[0]
+            selected_level = selections[1]
+            selected_variation = selections[2]
+            selected_comment_lang = selections[3] if len(selections) > 3 else "auto"
+            if selected_repo:
+                self.training_manager.set_setting("comment_language", selected_comment_lang)
+                self.change_repertoire(selected_repo)
+                self.training_manager.set_active_level(selected_level, selected_repo)
+                self.set_variation_filter(selected_variation)
+                if self.training_manager.user_session:
+                    try:
+                        self.training_manager.user_session.query(TrainingData).filter_by(
+                            repertoire_name=selected_repo
+                        ).delete(synchronize_session=False)
+                        self.training_manager.user_session.commit()
+                    except Exception:
+                        pass
+                self.training_manager._td_cache = None
+                self.training_manager._reachable_moves_cache = None
+                self.training_manager._last_stats_cache = None
+                
+                self.update_stats_display()
+                QTimer.singleShot(100, self.on_smart_click)
 
     def init_sounds(self):
         volume = self.training_manager.get_setting("master_volume") or 100
@@ -1238,6 +1336,15 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
+        from PyQt6.QtWidgets import QDialog, QApplication
+        for w in list(QApplication.topLevelWidgets()):
+            if isinstance(w, QDialog) and w != self:
+                try:
+                    w.reject()
+                except:
+                    try: w.close()
+                    except: pass
+
         if hasattr(self, 'creator_window') and self.creator_window:
             try:
                 self.creator_window.close()

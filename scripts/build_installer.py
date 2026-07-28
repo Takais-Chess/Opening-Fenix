@@ -60,9 +60,9 @@ def main():
     print(f" -> Found Inno Setup Compiler: {iscc_exe}")
 
     # ----------------------------------------------------
-    # BUILD 1: PRIVATE INSTALLER (Includes user data, excludes example repertoires)
+    # BUILD 1: PRIVATE INSTALLER (Includes profiles & all repertoires, including example courses for editing)
     # ----------------------------------------------------
-    print("\n3a. Compiling PRIVATE Installer (with profiles & personal repertoires)...")
+    print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires)...")
     pub_marker = os.path.join(dist_dir, 'PUBLIC_VERSION')
     if os.path.exists(pub_marker):
         os.remove(pub_marker)
@@ -72,14 +72,6 @@ def main():
             dst = os.path.join(dist_dir, folder)
             if os.path.exists(dst): shutil.rmtree(dst)
             shutil.copytree(folder, dst)
-            if folder == 'repertoires':
-                # Remove example repertoires from Private build
-                for item in os.listdir(dst):
-                    item_path = os.path.join(dst, item)
-                    item_lower = item.lower()
-                    if os.path.isdir(item_path) and ("example" in item_lower or "sample" in item_lower):
-                        shutil.rmtree(item_path, ignore_errors=True)
-                        print(f" -> Removed example repertoire '{item}' from private bundle")
             print(f" -> Synced {folder} to {dst}")
 
     res_priv = subprocess.run([iscc_exe, '/DAppBuildType=Private', iss_file], capture_output=False)

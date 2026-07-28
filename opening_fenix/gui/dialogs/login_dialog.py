@@ -556,22 +556,21 @@ class LoginDialog(QDialog):
                 json.dump(config, f, indent=4)
                 
             # Write profile-specific UI language setting (so MainWindow loads correctly)
-            if name != "Freies Training":
-                settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
-                profile_settings = {}
-                if os.path.exists(settings_path):
-                    try:
-                        with open(settings_path, "r") as f:
-                            profile_settings = json.load(f)
-                    except:
-                        pass
-                
-                profile_settings["ui_language"] = translator.current_lang
+            settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
+            profile_settings = {}
+            if os.path.exists(settings_path):
                 try:
-                    with open(settings_path, "w") as f:
-                        json.dump(profile_settings, f, indent=4)
+                    with open(settings_path, "r") as f:
+                        profile_settings = json.load(f)
                 except:
                     pass
+            
+            profile_settings["ui_language"] = translator.current_lang
+            try:
+                with open(settings_path, "w") as f:
+                    json.dump(profile_settings, f, indent=4)
+            except:
+                pass
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Failed to save profile selections on login: {e}")

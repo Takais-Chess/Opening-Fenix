@@ -76,7 +76,7 @@ def _get_all_repertoire_db_paths():
         is_ex = is_example_repertoire(repo_name)
         if is_pub and is_ex:
             filtered_paths.append((repo_name, db_p))
-        elif not is_pub and not is_ex:
+        elif not is_pub:
             filtered_paths.append((repo_name, db_p))
 
     return filtered_paths

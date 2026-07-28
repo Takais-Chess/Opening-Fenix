@@ -33,6 +33,15 @@ def get_elo_internal(display_name):
         pass
     return "high"
 
+def is_free_training_profile(name: str) -> bool:
+    if not name:
+        return False
+    try:
+        from opening_fenix.core.translation import tr_ui
+        return name in ("Freies Training", "Open Training") or name == tr_ui("login.free_training", "Freies Training")
+    except Exception:
+        return name in ("Freies Training", "Open Training")
+
 def get_base_path():
     """Gibt den Basispfad der Anwendung zurück, um Probleme mit dem Arbeitsverzeichnis zu vermeiden."""
     if getattr(sys, 'frozen', False):
@@ -95,6 +104,19 @@ def ensure_user_data_seeded():
                     break
                 except Exception as e:
                     print(f"Warning: Could not copy config.json from {src_config}: {e}")
+
+    # Ensure build mode (is_public) is persistently recorded in user config if missing
+    if os.path.exists(user_config):
+        try:
+            with open(user_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if "is_public" not in cfg:
+                base_pub = os.path.exists(os.path.join(get_base_path(), "PUBLIC_VERSION")) or os.path.exists(os.path.join(get_base_path(), "public.flag"))
+                cfg["is_public"] = True if base_pub else False
+                with open(user_config, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            print(f"Warning: Could not save build type to user config: {e}")
 
     # 2. Seed profiles and repertoires
     is_pub = is_public_version()
@@ -351,7 +373,7 @@ def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
     """
     Filters repertoire names depending on whether the app is in Public or Private build mode.
     - Public mode: returns ONLY example repertoires.
-    - Private mode: returns ONLY non-example (personal) repertoires.
+    - Private mode: returns ALL repertoires (personal + example repertoires so example courses can be viewed & edited).
     """
     is_pub = is_public_version()
     filtered = []
@@ -359,8 +381,168 @@ def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
         is_ex = is_example_repertoire(name)
         if is_pub and is_ex:
             filtered.append(name)
-        elif not is_pub and not is_ex:
+        elif not is_pub:
             filtered.append(name)
     return filtered
+
+
+def get_multilingual_comment_dict(raw_comment: str, default_lang: str = "de") -> dict:
+    """
+    Parses a raw position comment string.
+    Returns a dictionary mapping language codes (e.g. 'de', 'en') to text strings.
+    If raw_comment is a plain string, returns a dict with default_lang key.
+    """
+    if not raw_comment or not raw_comment.strip():
+        return {}
+    raw = raw_comment.strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {k.lower(): str(v).strip() for k, v in data.items() if v and str(v).strip()}
+        except Exception:
+            pass
+    target = default_lang.lower() if default_lang else "de"
+    return {target: raw}
+
+
+def parse_comment(raw_comment: str, lang: str = "de") -> str:
+    """
+    Resolves a position comment for a target language code (e.g. 'de', 'en').
+    Hierarchy: requested lang -> 'en' -> 'de' -> first non-empty -> raw string.
+    """
+    if not raw_comment or not raw_comment.strip():
+        return ""
+    
+    # If not a JSON object string, return raw text directly
+    raw = raw_comment.strip()
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return raw
+
+    comment_dict = get_multilingual_comment_dict(raw)
+    if not comment_dict:
+        return raw
+
+    target_lang = lang.lower() if lang else "de"
+    if target_lang in comment_dict and comment_dict[target_lang]:
+        return comment_dict[target_lang]
+    alt_lang = "en" if target_lang == "de" else "de"
+    if alt_lang in comment_dict and comment_dict[alt_lang]:
+        return comment_dict[alt_lang]
+    for val in comment_dict.values():
+        if val:
+            return val
+    return raw
+
+
+def format_multilingual_comment(comment_dict: dict) -> str:
+    """
+    Serializes a dictionary of language comments (e.g. {'de': '...', 'en': '...'})
+    into a database-ready comment string.
+    If only one language is present, returns plain text string.
+    If multiple languages are present, returns a JSON string.
+    """
+    if not comment_dict:
+        return ""
+    cleaned = {k.lower(): str(v).strip() for k, v in comment_dict.items() if v and str(v).strip()}
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1 and "de" in cleaned:
+        return cleaned["de"]
+    return json.dumps(cleaned, ensure_ascii=False)
+
+
+def parse_pgn_tagged_comment(comment_text: str) -> dict:
+    """
+    Parses inline PGN language tags like '[:de] Deutscher Text [:en] English text'
+    or '[de] Deutscher Text [en] English text'.
+    Returns a dictionary mapping language codes to comment strings.
+    """
+    if not comment_text or not comment_text.strip():
+        return {}
+    import re
+    matches = re.findall(r'\[:?([a-zA-Z]{2})\]\s*([^\[]+)', comment_text)
+    if matches:
+        res = {}
+        for lang, text in matches:
+            t = text.strip()
+            if t:
+                res[lang.lower()] = t
+        return res
+    return {}
+
+
+def combine_comments(existing_comment: str, new_comment: str, default_lang: str = "de") -> str:
+    """
+    Combines an incoming comment with an existing position comment,
+    preserving multilingual JSON payload structures and PGN language tags.
+    """
+    if not new_comment or not new_comment.strip():
+        return existing_comment or ""
+    
+    target = default_lang.lower() if default_lang else "de"
+    # 1. Parse incoming comment (check for PGN tags, JSON, or plain text)
+    tagged = parse_pgn_tagged_comment(new_comment)
+    if tagged:
+        inc_dict = tagged
+    else:
+        inc_dict = get_multilingual_comment_dict(new_comment, default_lang=target)
+        
+    if not existing_comment or not existing_comment.strip():
+        return format_multilingual_comment(inc_dict)
+        
+    ext_dict = get_multilingual_comment_dict(existing_comment, default_lang=target)
+    
+    # Merge dictionaries key by key
+    merged = dict(ext_dict)
+    for lang, val in inc_dict.items():
+        if lang in merged and merged[lang]:
+            if val not in merged[lang]:
+                merged[lang] = merged[lang] + " | " + val
+        else:
+            merged[lang] = val
+            
+    return format_multilingual_comment(merged)
+
+
+def get_repertoire_comment_stats(session) -> str:
+    """
+    Scans comments in a repertoire database session and returns a formatted string such as:
+    '1,548 EN (86%), 245 DE (14%)' or 'Keine Kommentare'.
+    """
+    if not session:
+        return "Keine Kommentare"
+    from opening_fenix.core.db.models import Position
+    
+    try:
+        comments = session.query(Position.comment).filter(
+            Position.comment.isnot(None),
+            Position.comment != ""
+        ).all()
+    except Exception:
+        return "Keine Kommentare"
+        
+    if not comments:
+        return "Keine Kommentare"
+        
+    counts = {}
+    for (raw_c,) in comments:
+        c_dict = get_multilingual_comment_dict(raw_c)
+        for lang in c_dict.keys():
+            if lang:
+                lang_upper = lang.upper()
+                counts[lang_upper] = counts.get(lang_upper, 0) + 1
+                
+    if not counts:
+        return "Keine Kommentare"
+        
+    total = sum(counts.values())
+    parts = []
+    for lang_code, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True):
+        pct = int(round((cnt / total) * 100))
+        parts.append(f"{cnt:,} {lang_code} ({pct}%)")
+        
+    return ", ".join(parts)
+
 
 

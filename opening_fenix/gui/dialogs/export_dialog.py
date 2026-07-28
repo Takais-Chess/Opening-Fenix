@@ -9,6 +9,11 @@ from opening_fenix.core.translation import tr_ui
 
 
 
+class NoWheelComboBox(QComboBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 class ExportDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
@@ -73,7 +78,7 @@ class ExportDialog(QDialog):
 
         
         # Transpositions handling
-        self.combo_transpos = QComboBox()
+        self.combo_transpos = NoWheelComboBox()
         self.combo_transpos.addItem(tr_ui("export.transpos_all", "Alle Züge anzeigen (Nicht abschneiden)"))
         self.combo_transpos.addItem(tr_ui("export.transpos_cut", "Abschneiden (Ohne Kommentar)"))
         self.combo_transpos.addItem(tr_ui("export.transpos_cut_comment", "Abschneiden (Mit Zugfolge-Kommentar)"))
@@ -83,9 +88,10 @@ class ExportDialog(QDialog):
         l_opt.addRow(tr_ui("export.transpos_label", "Transpositionen:"), self.combo_transpos)
         
         # Language Selection
-        self.combo_lang = QComboBox()
+        self.combo_lang = NoWheelComboBox()
         self.combo_lang.addItem(tr_ui("export.lang_en", "Standard (English)"), "en")
         self.combo_lang.addItem(tr_ui("export.lang_de", "Deutsch"), "de")
+        self.combo_lang.addItem(tr_ui("export.lang_multilingual", "Mehrsprachig (PGN-Tags)"), "multilingual")
         
         # Default to current profile setting if available
         if parent and hasattr(parent, 'get_notation_lang'):
@@ -97,7 +103,7 @@ class ExportDialog(QDialog):
         
         # Level Selection
         self.chk_limit = QCheckBox(tr_ui("export.limit_checkbox", "Nur bis Level exportieren:"))
-        self.combo_level = QComboBox()
+        self.combo_level = NoWheelComboBox()
         
         # Fetch actual levels from backend
         self.level_data = []

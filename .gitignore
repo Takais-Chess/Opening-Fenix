@@ -148,6 +148,10 @@ test_cleanup_repo.db
 Compressed (zipped) folder/
 *.zip
 *.rar
+BulkNAGTest/
+ImportServiceTest/
+SmallRepo/
+TestRepo/
 
 # Coverage & Reports
 coverage.json

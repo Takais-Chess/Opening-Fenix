@@ -9,6 +9,7 @@ from sqlalchemy.orm import joinedload
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, TrainingData, UserBase, UserRepertoireSettings
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.data_tools import get_user_dir
+from opening_fenix.core.utils import is_free_training_profile
 from opening_fenix.core.services.navigator_service import RepertoireNavigator
 
 BOX_INTERVALS = {
@@ -58,7 +59,7 @@ class TrainingManager:
         self.load_settings()
 
     def init_user_db(self) -> None:
-        if self.profile_name == "Freies Training":
+        if is_free_training_profile(self.profile_name):
             # Use in-memory DB for free training to avoid saving progress
             # DatabaseManager constructor already calls create_all()
             self.user_db = DatabaseManager(":memory:", base=UserBase)
@@ -96,7 +97,7 @@ class TrainingManager:
         self.save_settings()
 
     def get_visible_repos(self) -> List[str]:
-        if self.profile_name == "Freies Training":
+        if is_free_training_profile(self.profile_name):
             # All repertoires are visible in free training
             return self.repertoire_manager.get_all_repertoires()
             
@@ -121,18 +122,17 @@ class TrainingManager:
         return self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).count() > 0
 
     def get_active_level(self, repo_name: Optional[str] = None) -> int:
-        if self.profile_name == "Freies Training":
-            return 999 # All levels active
-            
         if not repo_name:
             repo_name = self.repertoire_manager.active_repertoire_name
             
         if not self.user_session or not repo_name: 
-            return 1
+            return 999 if is_free_training_profile(self.profile_name) else 1
             
         with self.user_session.no_autoflush:
             settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-            return settings.active_level if settings else 1
+            if settings:
+                return settings.active_level
+            return 999 if is_free_training_profile(self.profile_name) else 1
 
     def set_active_level(self, level_order: int, repo_name: Optional[str] = None) -> None:
         if not self.user_session: return
@@ -218,51 +218,50 @@ class TrainingManager:
             return False, f"Error updating user data: {e}"
 
     def _ensure_forward_cache(self):
-        if self._forward_moves_cache is not None:
-            return
-            
         if not self.repertoire_manager.repo_session:
             return
             
-        self._forward_moves_cache = {}
-        self._pos_cache = {}
-        self._move_by_id_cache = {}
-        self._move_by_fen_uci_cache = {}
-        self._move_parent_cache = {} # Local parent cache for training algorithms
-        
-        # Load all positions to memory
-        for p in self.repertoire_manager.repo_session.query(Position).all():
-            self._pos_cache[p.id] = p
+        if self._forward_moves_cache is None:
+            self._forward_moves_cache = {}
+            self._pos_cache = {}
+            self._move_by_id_cache = {}
+            self._move_by_fen_uci_cache = {}
+            self._move_parent_cache = {} # Local parent cache for training algorithms
             
-        # Get all moves via public API
-        all_moves = self.repertoire_manager.core.get_all_moves()
-            
-        for m in all_moves:
-            # Build Forward Cache
-            if m.from_position_id not in self._forward_moves_cache:
-                self._forward_moves_cache[m.from_position_id] = []
-            self._forward_moves_cache[m.from_position_id].append(m)
-            
-            # Build Parent Cache
-            if m.to_position_id not in self._move_parent_cache:
-                self._move_parent_cache[m.to_position_id] = []
-            self._move_parent_cache[m.to_position_id].append(m)
-            
-            # Build O(1) index caches
-            self._move_by_id_cache[m.id] = m
-            if m.from_position_id in self._pos_cache:
-                pos_fen = self._pos_cache[m.from_position_id].fen
-                self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
+            # Load all positions to memory
+            for p in self.repertoire_manager.repo_session.query(Position).all():
+                self._pos_cache[p.id] = p
                 
-        for k in self._forward_moves_cache:
-            self._forward_moves_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
+            # Get all moves via public API
+            all_moves = self.repertoire_manager.core.get_all_moves()
+                
+            for m in all_moves:
+                # Build Forward Cache
+                if m.from_position_id not in self._forward_moves_cache:
+                    self._forward_moves_cache[m.from_position_id] = []
+                self._forward_moves_cache[m.from_position_id].append(m)
+                
+                # Build Parent Cache
+                if m.to_position_id not in self._move_parent_cache:
+                    self._move_parent_cache[m.to_position_id] = []
+                self._move_parent_cache[m.to_position_id].append(m)
+                
+                # Build O(1) index caches
+                self._move_by_id_cache[m.id] = m
+                if m.from_position_id in self._pos_cache:
+                    pos_fen = self._pos_cache[m.from_position_id].fen
+                    self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
+                    
+            for k in self._forward_moves_cache:
+                self._forward_moves_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
+                
+            # Sort parent cache too for predictable ancestor selection
+            for k in self._move_parent_cache:
+                self._move_parent_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
             
-        # Sort parent cache too for predictable ancestor selection
-        for k in self._move_parent_cache:
-            self._move_parent_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
-            
-        all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
-        self._rep_move_cache = {rm.move_id: rm for rm in all_rep_moves}
+        if self._rep_move_cache is None:
+            all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
+            self._rep_move_cache = {rm.move_id: rm for rm in all_rep_moves}
 
     def _ensure_td_cache(self):
         if self._td_cache is not None:
@@ -390,7 +389,7 @@ class TrainingManager:
         
         for fen, uci in reachable_repo_moves:
             entry = user_map.get((fen, uci))
-            if self.profile_name == "Freies Training":
+            if is_free_training_profile(self.profile_name):
                 if not entry: due_c += 1
                 else: done_dist[7] = done_dist.get(7, 0) + 1
             else:
@@ -464,7 +463,7 @@ class TrainingManager:
                 
                 return self._get_ancestor(found_move, check_due=True, variation_filter=variation_filter), []
 
-            if self.profile_name == "Freies Training":
+            if is_free_training_profile(self.profile_name):
                 # In free training, we only pick moves not yet successfully trained in this session
                 learned_keys = set(self._td_cache.keys())
                 candidates = []
@@ -609,7 +608,8 @@ class TrainingManager:
                         if valid_move_ids is not None and m.id not in valid_move_ids: continue
                         
                         td = self._td_cache.get((pos.fen, m.uci))
-                        if (mode == 'due' and td and td.next_due <= lookahead) or (mode == 'new' and not td):
+                        is_free = is_free_training_profile(self.profile_name)
+                        if (is_free and not td) or (mode == 'due' and td and td.next_due <= lookahead) or (mode == 'new' and not td):
                             return m, path
                         
                         # Only follow player moves that ARE in the active repertoire
@@ -718,7 +718,7 @@ class TrainingManager:
     def register_success(self, move_id, success):
         # In free training, if move is correct, mark it as learned for the session.
         # If move is wrong, don't create/update entry so it remains in the queue.
-        if self.profile_name == "Freies Training":
+        if is_free_training_profile(self.profile_name):
             if not success: return # Keep as "due"
             
             self._ensure_forward_cache()
@@ -729,8 +729,18 @@ class TrainingManager:
             if not pos: return
             fen = pos.fen
             
-            entry = TrainingData(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci, box=7, next_due=datetime.datetime.max)
-            self.user_session.add(entry)
+            repo_name = self.repertoire_manager.active_repertoire_name
+            entry = self.user_session.query(TrainingData).filter_by(
+                repertoire_name=repo_name,
+                fen=fen,
+                move_uci=move.uci
+            ).first()
+            if not entry:
+                entry = TrainingData(repertoire_name=repo_name, fen=fen, move_uci=move.uci, box=7, next_due=datetime.datetime.max)
+                self.user_session.add(entry)
+            else:
+                entry.box = 7
+                entry.next_due = datetime.datetime.max
             self.user_session.commit()
             if self._td_cache is not None: self._td_cache[(fen, move.uci)] = entry
             return

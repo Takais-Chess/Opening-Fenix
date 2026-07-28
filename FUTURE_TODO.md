@@ -22,16 +22,17 @@ Analyze your own recent Lichess games against your active repertoire. The system
 **Concept:**
 Add a feature that detects when the user is currently playing a live game on Lichess and blocks access to the Trainer and Repertoire Creator during the game to prevent accidental assistance and maintain fair play.
 
-### 💬 26. Multilingual Repertoire Comments
+### ♟️ 27. High-Quality Chess-Aware Comment Re-Translation
 **Concept:**
-Support language tags for repertoire move comments. A user setting allows switching between languages (e.g. showing comments in German or English), allowing course creators to distribute multi-language repertoires within a single file.
+Re-translate all course comments marked with `(translated)` or `(übersetzt)` using a move-masked chess translation pipeline:
+1. **Move Masking**: Protect move notation (`1... e5`, `Nf3`, `6.Re1`, `Qd5`, `f6-knight`) with regex placeholders so chess symbols are never mangled.
+2. **Chess Terminology Mapping**: Enforce proper chess terms (*Knight* -> *Springer*, *Bishop* -> *Läufer*, *Rook* -> *Turm*, *Pawn* -> *Bauer*, *Pin* -> *Fesselung*, *Fork* -> *Gabel*, *Castling* -> *Rochade*).
+3. **Targeted Replacement**: Query only position comments where `comment` contains `(translated)` or `(übersetzt)` to replace automated machine translations with high-context, natural chess annotations.
+
 
 ---
 
 ## 🚀 Future Enhancements Roadmap
-
-### 1. Multi-Language UI Translation (`QTranslator`)
-- Full dynamic UI translation using `QTranslator` to localize all menus, dialogs, and button labels (English/German).
 
 ### 4. Tactic & Endgame Trainer (Prebuilt Scenarios)
 - Dedicated module independent of opening repertoires for solving puzzles and practice scenarios (e.g., *"Lucena Position"*, *"Mate in 3"*).
@@ -63,6 +64,7 @@ Support language tags for repertoire move comments. A user setting allows switch
 
 | Item | Feature | Completion Date |
 | :--- | :--- | :--- |
+| **1** | **Multi-Language UI Translation (`QTranslator`)** | 2026-07-27 |
 | **5** | **Glassmorphism UI & Visual Enhancements** | 2026-03-25 |
 | **6** | **Performance Audit & AI Code Modularity** | 2026-04-14 |
 | **8** | **Core Testing Suite & Stability (65%+ Coverage)** | 2026-03-29 |
@@ -72,6 +74,7 @@ Support language tags for repertoire move comments. A user setting allows switch
 | **13** | **Priority-Based Level Reclassification** | 2026-04-01 |
 | **15** | **Course Introduction & First-Time User Experience** | 2026-04-02 |
 | **17** | **Directory-Based Repertoire Storage (`repertoires/{name}/`)** | 2026-04-03 |
+| **26** | **Multilingual Repertoire Comments** | 2026-07-27 |
 
 ---
 *Roadmap updated for Opening Fenix V2.*

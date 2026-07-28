@@ -3,7 +3,7 @@ import json
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QFormLayout, QComboBox, 
     QHBoxLayout, QLabel, QListWidget, QScrollArea, QFrame, 
-    QGroupBox, QSpinBox, QPushButton, QCheckBox, QProgressBar, QSlider, 
+    QGroupBox, QSpinBox, QDoubleSpinBox, QPushButton, QCheckBox, QProgressBar, QSlider, 
     QLineEdit, QFileDialog, QMessageBox, QStackedWidget, QListWidgetItem,
     QTextEdit, QGridLayout, QApplication, QAbstractButton, QSizePolicy
 )
@@ -11,18 +11,32 @@ from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QIcon, QFont
 from PyQt6 import sip
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
-from opening_fenix.core.utils import get_elo_display
+from opening_fenix.core.utils import get_elo_display, get_repertoire_comment_stats
 from opening_fenix.gui.widgets.board_widget import THEMES
 
 # Import centralized styles
 from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
+from opening_fenix.gui.widgets.common import AutoAdjustButton
 
 
 class NoWheelComboBox(QComboBox):
     def wheelEvent(self, event):
         event.ignore()
+
+class NoWheelSpinBox(QSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+class NoWheelSlider(QSlider):
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 class RepoLoadButton(QPushButton):
     def __init__(self, name, parent=None):
@@ -159,6 +173,8 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(tr_ui("settings.window_title", "Trainer Einstellungen"))
         self.setMinimumSize(scale(900), scale(680))
         self.setStyleSheet(get_bw_glass_style())
+        if QApplication.instance():
+            QApplication.instance().aboutToQuit.connect(self.reject)
         
         self.stats_loader = None
         self.loading_dots = 0
@@ -231,16 +247,23 @@ class SettingsDialog(QDialog):
         f_design = QFormLayout(g_design)
         f_design.setSpacing(scale(15))
 
-        self.combo_theme = QComboBox()
-        self.combo_theme.addItems(THEMES.keys())
-        self.combo_theme.setCurrentText(
-            self.main_window.training_manager.get_setting("theme") or "Blau (Turnier)"
-        )
-        self.combo_theme.currentTextChanged.connect(self.on_theme_changed)
+        self.combo_theme = NoWheelComboBox()
+        for t_key in THEMES.keys():
+            self.combo_theme.addItem(tr_ui(f"themes.{t_key}", t_key), t_key)
+
+        current_theme = self.main_window.training_manager.get_setting("theme") or "Blau (Turnier)"
+        idx = self.combo_theme.findData(current_theme)
+        if idx < 0:
+            idx = self.combo_theme.findText(current_theme)
+        if idx >= 0:
+            self.combo_theme.setCurrentIndex(idx)
+
+        self.combo_theme.currentIndexChanged.connect(self.on_theme_changed)
         f_design.addRow(tr_ui("settings.board_design", "Schachbrett-Design:"), self.combo_theme)
 
-        self.spin_anim = QSpinBox()
+        self.spin_anim = NoWheelSpinBox()
         self.spin_anim.setRange(50, 1000)
+        self.spin_anim.setSingleStep(50)
         self.spin_anim.setSuffix(" ms")
         self.spin_anim.setValue(self.main_window.training_manager.get_setting("anim_speed") or 300)
         self.spin_anim.valueChanged.connect(
@@ -249,7 +272,7 @@ class SettingsDialog(QDialog):
         self.spin_anim.setToolTip(tr_ui("settings.anim_speed_tooltip", "Wie schnell Figuren über das Brett gleiten (Millisekunden)."))
         f_design.addRow(tr_ui("settings.anim_speed", "Animations-Tempo:"), self.spin_anim)
 
-        self.combo_notation = QComboBox()
+        self.combo_notation = NoWheelComboBox()
         self.combo_notation.addItem(tr_ui("settings.notation_standard", "Standard (English) – K, Q, R, B, N"), "en")
         self.combo_notation.addItem(tr_ui("settings.notation_german", "Deutsch – K, D, T, L, S"), "de")
         curr_lang = self.main_window.training_manager.get_setting("notation_language") or "en"
@@ -265,7 +288,7 @@ class SettingsDialog(QDialog):
         f_audio = QFormLayout(g_audio)
         f_audio.setSpacing(scale(15))
 
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(
             self.main_window.training_manager.get_setting("master_volume") or 100
@@ -286,8 +309,9 @@ class SettingsDialog(QDialog):
         f_behavior = QFormLayout(g_behavior)
         f_behavior.setSpacing(scale(15))
 
-        self.spin_delay = QSpinBox()
+        self.spin_delay = NoWheelSpinBox()
         self.spin_delay.setRange(0, 2000)
+        self.spin_delay.setSingleStep(50)
         self.spin_delay.setSuffix(" ms")
         self.spin_delay.setValue(
             self.main_window.training_manager.get_setting("auto_delay") if self.main_window.training_manager.get_setting("auto_delay") is not None else 0
@@ -299,6 +323,7 @@ class SettingsDialog(QDialog):
             tr_ui("settings.auto_delay_tooltip", "Wartezeit (Millisekunden) nach einem korrekten Zug, bis die nächste Aufgabe automatisch geladen wird.")
         )
         f_behavior.addRow(tr_ui("settings.auto_delay", "Verzögerung bei Variantenwechsel (Auto-Weiter):"), self.spin_delay)
+
         layout.addWidget(g_behavior)
 
         # Software-Updates
@@ -370,7 +395,10 @@ class SettingsDialog(QDialog):
             tr_ui("settings.update_error_msg", "Konnte GitHub nicht nach Updates prüfen:\n{err}", err=err_msg)
         )
 
-    def on_theme_changed(self, theme_name):
+    def on_theme_changed(self, index):
+        theme_name = self.combo_theme.currentData()
+        if not theme_name:
+            theme_name = self.combo_theme.currentText()
         self.main_window.training_manager.set_setting("theme", theme_name)
         self.main_window.apply_theme()
 
@@ -495,11 +523,26 @@ class SettingsDialog(QDialog):
         self.lbl_color.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_col.addWidget(self.lbl_color)
 
+        # Single Meta Pill container for Database & Comments (same color & style)
+        self.meta_pill = QFrame()
+        self.meta_pill.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 12px;")
+        meta_lay = QVBoxLayout(self.meta_pill)
+        meta_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
+        meta_lay.setSpacing(scale(4))
+
         self.lbl_db_info = QLabel("-")
         self.lbl_db_info.setWordWrap(True)
         self.lbl_db_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_db_info.setStyleSheet("color: #555555; font-size: 12px;")
-        left_col.addWidget(self.lbl_db_info)
+        self.lbl_db_info.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+
+        self.lbl_comment_stats = QLabel("-")
+        self.lbl_comment_stats.setWordWrap(True)
+        self.lbl_comment_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_comment_stats.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+
+        meta_lay.addWidget(self.lbl_db_info)
+        meta_lay.addWidget(self.lbl_comment_stats)
+        left_col.addWidget(self.meta_pill)
 
         self.lbl_levels = QLabel("-")
         self.levels_container = QWidget()
@@ -530,9 +573,9 @@ class SettingsDialog(QDialog):
         # Ordner-Zugriff
         g_folder = QGroupBox(tr_ui("settings.folder_access_title", "📁 Ordner-Zugriff"))
         h_folder = QHBoxLayout(g_folder)
-        btn_open_repos = QPushButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
+        btn_open_repos = AutoAdjustButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
         btn_open_repos.clicked.connect(self.open_repertoires_folder)
-        btn_open_profs = QPushButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs = AutoAdjustButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
         btn_open_profs.clicked.connect(self.open_profiles_folder)
         h_folder.addWidget(btn_open_repos)
         h_folder.addWidget(btn_open_profs)
@@ -579,11 +622,21 @@ class SettingsDialog(QDialog):
             self.on_repo_selected(active_repo)
 
     def closeEvent(self, event):
-        if self.stats_loader and self.stats_loader.isRunning():
-            self.stats_loader.requestInterruption()
-            self.stats_loader.wait()
-        if self.loading_timer:
-            self.loading_timer.stop()
+        if hasattr(self, "stats_loader") and self.stats_loader and self.stats_loader.isRunning():
+            try:
+                self.stats_loader.requestInterruption()
+                if not self.stats_loader.wait(200):
+                    self.stats_loader.terminate()
+            except: pass
+        if hasattr(self, "update_worker") and self.update_worker and self.update_worker.isRunning():
+            try:
+                self.update_worker.requestInterruption()
+                if not self.update_worker.wait(200):
+                    self.update_worker.terminate()
+            except: pass
+        if hasattr(self, "loading_timer") and self.loading_timer:
+            try: self.loading_timer.stop()
+            except: pass
         super().closeEvent(event)
 
     def start_loading_animation(self):
@@ -626,14 +679,21 @@ class SettingsDialog(QDialog):
         try:
             info = fetch_repertoire_info(session, repo_name, fast_only=True)
             color = get_meta(session, "color", "w")
+            comment_stats_str = get_repertoire_comment_stats(session)
         except:
             info = {"name": repo_name, "description": ""}
             color = 'w'
+            comment_stats_str = "Keine Kommentare"
         finally:
             session.close()
             db_manager.close()
 
-        self.lbl_name.setText(info.get("name", "-"))
+        if hasattr(self, 'lbl_comment_stats'):
+            if not comment_stats_str or comment_stats_str == "Keine Kommentare":
+                stats_display = tr_ui("settings.no_comments", "Keine Kommentare")
+            else:
+                stats_display = comment_stats_str
+            self.lbl_comment_stats.setText(tr_ui("settings.comments_format", "💬 Kommentare: {stats}", stats=stats_display))
         
         # Color Badge Styling (Both Weiß and Schwarz have white backgrounds now)
         if color == 'w':
@@ -688,7 +748,7 @@ class SettingsDialog(QDialog):
         rating_info = get_elo_display(elo_cat)
         self.lbl_db_info.setText(tr_ui("settings.db_info_format", "📚 Datenbank: {rating_info}", rating_info=rating_info))
         
-        # Clear and build levels list as grid pills with white background
+        # Clear and build levels list as a single combined pill container
         self.level_pills = []
         while self.levels_layout.count():
             item = self.levels_layout.takeAt(0)
@@ -700,14 +760,13 @@ class SettingsDialog(QDialog):
             lbl.setStyleSheet("color: #777; font-size: 13px;")
             self.levels_layout.addWidget(lbl)
         else:
+            single_levels_pill = QFrame()
+            single_levels_pill.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 12px;")
+            p_lay = QVBoxLayout(single_levels_pill)
+            p_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
+            p_lay.setSpacing(scale(6))
+
             for ld in lvl_details:
-                pill = QFrame()
-                # White background and border
-                pill.setStyleSheet("background: white; border: 1px solid rgba(0,0,0,0.12); border-radius: 12px;")
-                p_lay = QHBoxLayout(pill)
-                p_lay.setContentsMargins(scale(10), scale(4), scale(10), scale(4))
-                
-                # Format moves count safely (e.g. 14.115 instead of 14115, default to 0 if None)
                 moves_val = ld.get('moves')
                 if moves_val is None:
                     moves_val = 0
@@ -721,8 +780,8 @@ class SettingsDialog(QDialog):
                 p_lbl.setWordWrap(True)
                 p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 p_lay.addWidget(p_lbl)
-                self.level_pills.append(pill)
-                
+
+            self.level_pills = [single_levels_pill]
             self.rearrange_levels_grid()
 
     def refresh_repertoire_cards(self):
@@ -961,7 +1020,7 @@ class RepertoireConfigCard(QFrame):
 
     def fetch_user_elo(self):
         try:
-            from opening_fenix.core.db.profile import UserRepertoireSettings, TrainingData
+            from opening_fenix.core.db.models import UserRepertoireSettings, TrainingData
             from opening_fenix.core.db.database import DatabaseManager
             from opening_fenix.core.utils import get_repertoire_db_path
             from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels

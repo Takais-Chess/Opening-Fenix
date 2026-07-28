@@ -86,9 +86,9 @@ class TestRepoSettingsDialogStructure:
         assert "Einstellungen" in settings_dialog.windowTitle()
         assert "Repertoire" in settings_dialog.windowTitle()
 
-    def test_sidebar_has_five_pages(self, settings_dialog):
-        """Sidebar hat genau fünf Seiten."""
-        assert settings_dialog.sidebar.count() == 5
+    def test_sidebar_has_six_pages(self, settings_dialog):
+        """Sidebar hat genau sechs Seiten."""
+        assert settings_dialog.sidebar.count() == 6
 
     def test_sidebar_items_have_emojis(self, settings_dialog):
         """Alle Sidebar-Einträge haben Emoji-Icons."""
@@ -98,7 +98,7 @@ class TestRepoSettingsDialogStructure:
 
     def test_page_switching_via_sidebar(self, settings_dialog):
         """Navigation über Sidebar wechselt Seiten korrekt."""
-        for i in range(5):
+        for i in range(6):
             settings_dialog.sidebar.setCurrentRow(i)
             assert settings_dialog.pages.currentIndex() == i
 

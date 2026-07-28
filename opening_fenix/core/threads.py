@@ -96,13 +96,14 @@ class PGNImportThread(QThread):
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, pgn_path, repo_name, side, level_name, level_order):
+    def __init__(self, pgn_path, repo_name, side, level_name, level_order, target_lang="de"):
         super().__init__()
         self.pgn_path = pgn_path
         self.repo_name = repo_name
         self.side = side
         self.level_name = level_name
         self.level_order = level_order
+        self.target_lang = target_lang
 
     def run(self):
         success, msg = import_pgn_to_db(
@@ -111,9 +112,11 @@ class PGNImportThread(QThread):
             self.side,
             self.level_name,
             self.level_order,
-            progress_callback=self.progress_signal.emit
+            progress_callback=self.progress_signal.emit,
+            target_lang=self.target_lang
         )
         self.finished_signal.emit(success, msg)
+
 
 from opening_fenix.core.services.maintenance_service import run_group_maintenance
 
@@ -697,4 +700,30 @@ class PathQualityEvalThread(QThread):
         # Sort: 🟡 Möglich first (depth ascending), then 🔴 mit Fehlern (depth ascending)
         classified.sort(key=lambda x: (0 if x["quality"] == "möglich" else 1, x["depth"]))
         self.finished.emit(classified)
+
+
+class AutoBackupThread(QThread):
+    """
+    Background worker thread that iterates through all user repertoires on application startup,
+    runs checksum deduplication, and creates daily backup snapshots silently.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        from opening_fenix.core.services.maintenance_service import list_all_repertoires
+        from opening_fenix.core.services.backup_service import create_repertoire_backup
+        from opening_fenix.core.logger import logger
+
+        try:
+            repos = list_all_repertoires()
+            for r in repos:
+                if self.isInterruptionRequested():
+                    break
+                try:
+                    create_repertoire_backup(r, trigger_type="auto")
+                except Exception as e:
+                    logger.warning(f"AutoBackupThread error for repertoire '{r}': {e}")
+        except Exception as ex:
+            logger.error(f"AutoBackupThread main error: {ex}")
 

@@ -34,7 +34,7 @@ from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -43,6 +43,7 @@ from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
 from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
 from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon
@@ -263,7 +264,7 @@ class CreatorBackend:
         self._ui_cache[cache_key] = data
         return data
 
-    def update_position_data(self, fen, comment, var1, var2, var3, append=False, auto_review=False):
+    def update_position_data(self, fen, comment, var1, var2, var3, append=False, auto_review=False, target_lang="de"):
         if not self.session: return
         # Robust FEN Cleaning for query consistency
         clean_fen = " ".join(fen.strip().split(" ")[:4])
@@ -280,13 +281,9 @@ class CreatorBackend:
         names_changed = (pos.variation_1 != v1) or (pos.variation_2 != v2) or (pos.variation_3 != v3)
 
         if append and comment:
-            if pos.comment:
-                if comment not in pos.comment:
-                    pos.comment += " | " + comment
-            else:
-                pos.comment = comment
+            pos.comment = combine_comments(pos.comment, comment, default_lang=target_lang)
         else:
-            pos.comment = comment
+            pos.comment = combine_comments("", comment, default_lang=target_lang) if comment else ""
         pos.variation_1 = v1
         pos.variation_2 = v2
         pos.variation_3 = v3
@@ -1746,7 +1743,15 @@ class CreatorBackend:
             
             # Position comment is already loaded via eager loading
             np = m_db.to_position
-            if np and np.comment: new.comment = np.comment
+            if np and np.comment:
+                if language == 'multilingual':
+                    cdict = get_multilingual_comment_dict(np.comment)
+                    if len(cdict) > 1:
+                        new.comment = " ".join([f"[:{k}] {v}" for k, v in cdict.items()])
+                    else:
+                        new.comment = parse_comment(np.comment, 'de')
+                else:
+                    new.comment = parse_comment(np.comment, language)
             
             mn = board.fullmove_number
             san = localize_san(m_db.san, language)
@@ -2371,7 +2376,7 @@ class CreatorWindow(QMainWindow):
 
     def __init__(self, repertoire_name=None, initial_fen=None, training_manager=None, is_test=False):
         super().__init__()
-        self.setWindowTitle(tr_ui("creator.window_title", "Opening Fenix - Repertoire Creator"))
+        self.setWindowTitle(tr_ui("creator.window_title", "Opening Fenix v{version} - Repertoire Creator", version=APP_VERSION))
         set_consistent_icon(self)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
         self.resize(scale(1400), scale(900))
@@ -2414,6 +2419,10 @@ class CreatorWindow(QMainWindow):
         self.overhaul_active = False
         self.overhaul_paused = True
         self.overhaul_start = None
+
+        # Multilingual Comment Editor State
+        self.active_comment_lang = self.get_notation_lang() or "de"
+        self.current_position_comments = {}
 
         # Tab visibility defaults
         if "creator_active_tabs" not in self.config:
@@ -2581,13 +2590,13 @@ class CreatorWindow(QMainWindow):
         # Board Container
         cc = QWidget()
         cl = QVBoxLayout(cc)
-        cl.setContentsMargins(0, 0, scale(10), scale(10)) # 0 left (inner_widget provides 10px), 10 right gap to splitter, 10 bottom
+        cl.setContentsMargins(0, 0, scale(10), 0) # 0 left (inner_widget provides 10px), 10 right gap to splitter, 0 bottom (inner_widget provides 10px)
         cl.setSpacing(scale(10))
 
         self.board_panel = AspectRatioFrame()
         self.board_panel.setObjectName("BoardPanel")
         board_layout = QVBoxLayout(self.board_panel)
-        board_layout.setContentsMargins(0, 0, 0, 0) # Remove internal padding, use layout margins
+        board_layout.setContentsMargins(0, 0, 0, 0)
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.on_board_move)
         board_layout.addWidget(self.board_widget)
@@ -2713,7 +2722,19 @@ class CreatorWindow(QMainWindow):
             btn.clicked.connect(lambda _, x=s: self.insert_symbol(x))
             sym_layout.addWidget(btn)
         sym_layout.addStretch()
+
+        # Multilingual Comment Language Selector Button (positioned on the right side of sym_layout)
+        self.btn_lang_comment = QPushButton(f"🌐 {self.active_comment_lang.upper()}")
+        self.btn_lang_comment.setFixedHeight(scale(30))
+        self.btn_lang_comment.setMinimumWidth(scale(65))
+        self.btn_lang_comment.setProperty("class", "SymbolButton")
+        self.btn_lang_comment.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.repolish(self.btn_lang_comment)
+        self.btn_lang_comment.clicked.connect(self.show_comment_lang_menu)
+        sym_layout.addWidget(self.btn_lang_comment)
+
         dv.addLayout(sym_layout)
+
 
         # Variant Name Section (Dynamic)
         self.variant_layout = QFormLayout()
@@ -3094,15 +3115,129 @@ class CreatorWindow(QMainWindow):
 
         self.tabs.blockSignals(False)
 
+    def show_comment_lang_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet(self.styleSheet())
+        
+        # Standard languages
+        langs = [("de", "🇩🇪 Deutsch (DE)"), ("en", "🇬🇧 English (EN)")]
+        
+        # Add any extra custom languages currently in this position's comment dictionary
+        known_codes = {code for code, label in langs}
+        for code in self.current_position_comments.keys():
+            if code and code not in known_codes:
+                langs.append((code, f"🌐 {code.upper()}"))
+                
+        for code, label in langs:
+            has_comment = bool(self.current_position_comments.get(code, "").strip())
+            badge = " 📝" if has_comment else ""
+            is_active = (code == self.active_comment_lang)
+            prefix = "✓ " if is_active else "   "
+            
+            action = menu.addAction(f"{prefix}{label}{badge}")
+            action.triggered.connect(lambda _, c=code: self.switch_comment_lang(c))
+            
+        menu.addSeparator()
+        add_action = menu.addAction(tr_ui("creator.add_comment_lang", "+ Andere Sprache..."))
+        add_action.triggered.connect(self.add_custom_comment_lang)
+        
+        if hasattr(self, 'btn_lang_comment'):
+            menu.exec(self.btn_lang_comment.mapToGlobal(QPoint(0, self.btn_lang_comment.height())))
+
+    def switch_comment_lang(self, lang_code):
+        if hasattr(self, 'txt_c'):
+            txt = self.txt_c.toPlainText().strip()
+            if txt:
+                self.current_position_comments[self.active_comment_lang] = txt
+            elif self.active_comment_lang in self.current_position_comments:
+                del self.current_position_comments[self.active_comment_lang]
+            
+        self.active_comment_lang = lang_code.lower()
+        
+        self.block_signals_details(True)
+        self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
+        self.block_signals_details(False)
+        
+        self.update_comment_lang_button_style()
+        self.refresh_candidate_moves_table()
+
+    def add_custom_comment_lang(self):
+        code, ok = QInputDialog.getText(
+            self, 
+            tr_ui("creator.dlg_add_lang_title", "Sprache hinzufügen"),
+            tr_ui("creator.dlg_add_lang_prompt", "Gib den 2-stelligen Sprachcode ein (z. B. es, fr, ru):")
+        )
+        if ok and code.strip():
+            c = code.strip().lower()[:5]
+            self.switch_comment_lang(c)
+
+    def update_comment_lang_button_style(self):
+        if not hasattr(self, 'btn_lang_comment'): return
+        
+        code_str = self.active_comment_lang.upper()
+        self.btn_lang_comment.setText(f"🌐 {code_str}")
+        
+        curr_text = self.current_position_comments.get(self.active_comment_lang, "").strip()
+        other_langs = [k.upper() for k, v in self.current_position_comments.items() if k != self.active_comment_lang and v and v.strip()]
+        
+        if not curr_text and other_langs:
+            # Highlight state: BRIGHTER color when current lang is empty but comments exist in another lang!
+            self.btn_lang_comment.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {COLORS['burnt_orange']};
+                    color: white;
+                    border: 2px solid #e67e22;
+                    border-radius: {scale(4)}px;
+                    font-weight: bold;
+                    font-size: {scale(13)}px;
+                    padding: 0px {scale(6)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: #e67e22;
+                }}
+            """)
+            self.btn_lang_comment.setToolTip(
+                f"Kommentar-Sprache: {code_str} (Leer)\n"
+                f"⚠️ Kommentar in anderer Sprache ({', '.join(other_langs)}) vorhanden!"
+            )
+        else:
+            # Normal lowkey style matching SymbolButton
+            self.btn_lang_comment.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {COLORS['glass_bg']};
+                    border: 1px solid {COLORS['glass_border']};
+                    border-radius: {scale(4)}px;
+                    font-weight: bold;
+                    font-size: {scale(13)}px;
+                    color: {COLORS['brown_text']};
+                    padding: 0px {scale(6)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(255, 255, 255, 0.7);
+                }}
+            """)
+            self.btn_lang_comment.setToolTip(f"Kommentar-Sprache wählen (Aktuell: {code_str})")
+
+
     def on_details_changed(self):
         if not self._is_ui_valid() or not self.backend.current_fen: return
+        
+        txt = self.txt_c.toPlainText().strip()
+        if txt:
+            self.current_position_comments[self.active_comment_lang] = txt
+        elif self.active_comment_lang in self.current_position_comments:
+            del self.current_position_comments[self.active_comment_lang]
+            
+        full_comment = format_multilingual_comment(self.current_position_comments)
+        
         self.backend.save_position_details(
             self.backend.current_fen,
-            self.txt_c.toPlainText(),
+            full_comment,
             self.i_v1.text(),
             self.i_v2.text(),
             self.i_v3.text()
         )
+        self.update_comment_lang_button_style()
 
     def _update_variant_visibility(self):
         if not self._is_ui_valid(): return
@@ -3428,12 +3563,17 @@ class CreatorWindow(QMainWindow):
                 self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else tr_ui("creator.variant_placeholder_2", "Variante 2"))
                 self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
                 self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
-                self.txt_c.setPlainText(str(d.get('comment','')))
+                raw_c = str(d.get('comment',''))
+                self.current_position_comments = get_multilingual_comment_dict(raw_c)
+                self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
             else:
                 self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
                 self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
                 self.i_v3.setText(""); self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
+                self.current_position_comments = {}
                 self.txt_c.setPlainText("")
+            
+            self.update_comment_lang_button_style()
             
             # Ensure visibility is updated after text changes
             self._update_variant_visibility()
@@ -3441,12 +3581,18 @@ class CreatorWindow(QMainWindow):
             self.details_changed = False
             self.block_signals_details(False)
 
+        self.refresh_candidate_moves_table()
+        if self.engine_thread: self.engine_thread.set_position(f)
+
+    def refresh_candidate_moves_table(self):
+        if not self._is_ui_valid(): return
+        f = self.board_widget.board.fen()
+        if not f: return
+        
         self.tree_widget.clear()
         
-        # This function was heavily optimized with eager loading!
         cs = self.backend.get_candidate_moves(f)
         
-        # Hide/show Aktiv column dynamically
         repo_color = self.backend.get_repertoire_color()
         is_my_turn = True if repo_color not in ['w', 'b'] else (self.board_widget.board.turn == (repo_color == 'w'))
         if is_my_turn and len(cs) > 1:
@@ -3469,9 +3615,7 @@ class CreatorWindow(QMainWindow):
             lang = self.get_notation_lang()
             san_text = f"{prefix}{localize_san(c['san'], lang)}{nag_s}"
             
-            # OVERHAUL V2: Add checkmark if branch is fully reviewed
             if self.overhaul_active and not self.overhaul_paused:
-                # Use .get() for safety, though it should be there now
                 to_pos_id = c.get('to_pos_id')
                 if to_pos_id and self.backend.is_branch_fully_reviewed(to_pos_id, self.overhaul_start):
                     san_text += "  ✅"
@@ -3479,7 +3623,7 @@ class CreatorWindow(QMainWindow):
             it = SortableTreeWidgetItem([
                 san_text, 
                 f"{c['priority']*100:.2f}%", 
-                c['comment'], 
+                get_multilingual_comment_dict(c['comment']).get(self.active_comment_lang, ""), 
                 l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
                 "" 
             ])
@@ -3511,7 +3655,6 @@ class CreatorWindow(QMainWindow):
                     
             self.tree_widget.addTopLevelItem(it)
         self.tree_widget.sortItems(1, Qt.SortOrder.DescendingOrder)
-        if self.engine_thread: self.engine_thread.set_position(f)
         
         # Update Common Moves Table
         cat = self.combo_lichess_cat.currentText()
@@ -5305,13 +5448,24 @@ class CreatorWindow(QMainWindow):
             QMessageBox.information(self, tr_ui("creator.dlg_done", "Fertig!"), msg)
             if not variation_filter:
                 self.toggle_overhaul_session()
+
     def closeEvent(self, event):
         """Clean up background resources before closing."""
+        from PyQt6.QtWidgets import QDialog, QApplication
+        for w in list(QApplication.topLevelWidgets()):
+            if isinstance(w, QDialog) and w != self:
+                try:
+                    w.reject()
+                except:
+                    try: w.close()
+                    except: pass
+
         if hasattr(self, 'engine_thread') and self.engine_thread:
             try:
                 self.engine_thread.stop_engine()
                 self.engine_thread.running = False
-                self.engine_thread.wait(500)
+                if not self.engine_thread.wait(200):
+                    self.engine_thread.terminate()
             except: pass
             
         if hasattr(self, 'backend') and self.backend:
@@ -5319,9 +5473,6 @@ class CreatorWindow(QMainWindow):
                 self.backend.close()
             except: pass
             
-        # We do NOT close the training_manager here because it is owned by the MainWindow
-        # and closing it would break the user session in the active trainer.
-
         super().closeEvent(event)
 
 if __name__ == "__main__":

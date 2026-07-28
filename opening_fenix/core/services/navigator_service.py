@@ -109,7 +109,7 @@ class RepertoireNavigator:
         pos_cache = cache_data['pos_cache']
         forward_moves_cache = cache_data['forward_moves_cache']
         move_parent_cache = cache_data['move_parent_cache']
-        rep_move_cache = cache_data['rep_move_cache']
+        rep_move_cache = cache_data.get('rep_move_cache') or {}
         
         valid_move_ids = self.build_variation_move_set(variation_filter, cache_data) if variation_filter else None
         reachable = []

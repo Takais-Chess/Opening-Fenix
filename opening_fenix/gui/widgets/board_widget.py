@@ -20,6 +20,15 @@ THEMES = {
     "Icy Sea": (QColor(211, 220, 227), QColor(108, 166, 192))
 }
 
+THEME_FALLBACKS = {
+    "Dark (Modern)": "Dunkel (Modern)",
+    "Green (Lichess)": "Grün (Lichess)",
+    "Brown (Classic)": "Braun (Klassisch)",
+    "Blue (Tournament)": "Blau (Turnier)",
+    "Grey (Neutral)": "Grau (Neutral)",
+}
+
+
 class ChessBoardWidget(QWidget):
     move_executed = pyqtSignal(chess.Move)
     piece_slide_finished = pyqtSignal()
@@ -29,7 +38,7 @@ class ChessBoardWidget(QWidget):
         self.main_window = main_window
         self.board = chess.Board()
         self.flipped = False
-        self.padding = scale(25) # Space for notation labels
+        self.padding = scale(26) # Space for notation labels
         self.pieces = {}
 
         self.piece_pixmaps = {} 
@@ -71,6 +80,8 @@ class ChessBoardWidget(QWidget):
     def set_theme(self, theme_name):
         if theme_name in THEMES:
             self.light_color, self.dark_color = THEMES[theme_name]
+        elif theme_name in THEME_FALLBACKS:
+            self.light_color, self.dark_color = THEMES[THEME_FALLBACKS[theme_name]]
         else:
             self.light_color, self.dark_color = THEMES["Blau (Turnier)"]
         self._board_snapshot = None  # Theme changed, invalidate snapshot
@@ -269,15 +280,20 @@ class ChessBoardWidget(QWidget):
         painter.setPen(QColor("#4b4b4b"))
         font = painter.font()
         font.setBold(True)
-        font.setPointSize(max(scale(9), int(square_size / 5.5)))
+        font.setPointSize(max(9, int(square_size / 6.0)))
         painter.setFont(font)
+        
+        fm = painter.fontMetrics()
+        baseline_y = 8 * square_size + (self.padding + fm.ascent() - fm.descent()) / 2.0
+        
         for i in range(8):
             rank_num = i + 1 if self.flipped else 8 - i
             rank_rect = QRectF(-self.padding, i * square_size, self.padding - scale(5), square_size)
             painter.drawText(rank_rect, Qt.AlignmentFlag.AlignCenter, str(rank_num))
+            
             file_char = chr(ord('h') - i if self.flipped else ord('a') + i)
-            file_rect = QRectF(i * square_size, 8 * square_size, square_size, self.padding)
-            painter.drawText(file_rect, Qt.AlignmentFlag.AlignCenter, file_char)
+            x_center = (i + 0.5) * square_size
+            painter.drawText(QPointF(x_center - fm.horizontalAdvance(file_char) / 2.0, baseline_y), file_char)
         
         # 3. Last move highlight
         if self.last_move:

@@ -18,65 +18,32 @@ from sqlalchemy import func, text
 import stat
 
 class NoWheelComboBox(QComboBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._can_wheel = False
-        self._wheel_timer = QTimer(self)
-        self._wheel_timer.setSingleShot(True)
-        self._wheel_timer.timeout.connect(self._enable_wheel)
-
-    def enterEvent(self, event):
-        self._wheel_timer.start(200)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._wheel_timer.stop()
-        self._can_wheel = False
-        super().leaveEvent(event)
-
-    def _enable_wheel(self):
-        self._can_wheel = True
-
     def wheelEvent(self, event):
-        if self._can_wheel:
-            super().wheelEvent(event)
-        else:
-            event.ignore()
+        event.ignore()
 
 class NoWheelSpinBox(QSpinBox):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._can_wheel = False
-        self._wheel_timer = QTimer(self)
-        self._wheel_timer.setSingleShot(True)
-        self._wheel_timer.timeout.connect(self._enable_wheel)
-
-    def enterEvent(self, event):
-        self._wheel_timer.start(200)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        self._wheel_timer.stop()
-        self._can_wheel = False
-        super().leaveEvent(event)
-
-    def _enable_wheel(self):
-        self._can_wheel = True
-
     def wheelEvent(self, event):
-        if self._can_wheel:
-            super().wheelEvent(event)
-        else:
-            event.ignore()
+        event.ignore()
+
+class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def wheelEvent(self, event):
+        event.ignore()
+
+class NoWheelSlider(QSlider):
+    def wheelEvent(self, event):
+        event.ignore()
+
 
 from opening_fenix.core.models import (
     Position, Move, RepertoireMove, RepertoireLevel
 )
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, localize_san, ELO_DISPLAY_MAP, get_elo_display, get_elo_internal
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, localize_san, ELO_DISPLAY_MAP, get_elo_display, get_elo_internal, get_repertoire_comment_stats
+from opening_fenix.core.services.backup_service import create_repertoire_backup, list_repertoire_backups, restore_repertoire_from_backup
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.data_tools import get_base_path, get_user_dir
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, PGNImportThread, MaintenanceThread, RepertoireStatsWorker
 from opening_fenix.gui.widgets.board_widget import THEMES
+from opening_fenix.gui.widgets.common import AutoAdjustButton
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.styles import (
     get_bw_glass_style, COLORS, set_consistent_icon
@@ -472,6 +439,8 @@ class RepoSettingsDialog(QDialog):
         self.setMinimumSize(scale(1080), scale(700))
         self.backend = backend
         self.setStyleSheet(get_bw_glass_style())
+        if QApplication.instance():
+            QApplication.instance().aboutToQuit.connect(self.reject)
         
         self.maintenance_loaded = False
         self.stats_loader = None
@@ -500,6 +469,7 @@ class RepoSettingsDialog(QDialog):
             (tr_ui("repo_settings.sidebar_gen", "📊 Repertoire-Daten"), tr_ui("repo_settings.sidebar_gen_sub", "Stammdaten und Level")),
             (tr_ui("repo_settings.sidebar_design", "🎨 Design & Audio"), tr_ui("repo_settings.sidebar_design_sub", "Optik und Sound")),
             (tr_ui("repo_settings.sidebar_imex", "📥 Import & Export"), tr_ui("repo_settings.sidebar_imex_sub", "Datentransfer")),
+            (tr_ui("repo_settings.sidebar_backups", "⏮️ Backups & Restore"), tr_ui("repo_settings.sidebar_backups_sub", "Wiederherstellung")),
             (tr_ui("repo_settings.sidebar_tools", "🛠️ Repertoire-Werkzeuge"), tr_ui("repo_settings.sidebar_tools_sub", "Wartung & Analyse")),
             (tr_ui("repo_settings.sidebar_maintenance", "🚜 Wartung Center"), tr_ui("repo_settings.sidebar_maintenance_sub", "Stapelverarbeitung"))
         ]
@@ -518,15 +488,17 @@ class RepoSettingsDialog(QDialog):
         self.page_gen = QWidget(); self.init_page_general(self.page_gen)
         self.page_design = QWidget(); self.init_page_design(self.page_design)
         self.page_imex = QWidget(); self.init_page_imex(self.page_imex)
+        self.page_backups = QWidget(); self.init_page_backups(self.page_backups)
         self.page_tools = QWidget(); self.init_page_tools(self.page_tools)
         self.page_maintenance = QWidget(); self.init_page_maintenance(self.page_maintenance)
         
-        for p in [self.page_gen, self.page_design, self.page_imex, self.page_tools, self.page_maintenance]:
+        for p in [self.page_gen, self.page_design, self.page_imex, self.page_backups, self.page_tools, self.page_maintenance]:
             p.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.pages.addWidget(self.page_gen)
         self.pages.addWidget(self.page_design)
         self.pages.addWidget(self.page_imex)
+        self.pages.addWidget(self.page_backups)
         self.pages.addWidget(self.page_tools)
         self.pages.addWidget(self.page_maintenance)
         
@@ -541,7 +513,9 @@ class RepoSettingsDialog(QDialog):
 
     def display_page(self, index): 
         self.pages.setCurrentIndex(index)
-        if index == 4 and not self.maintenance_loaded:
+        if index == 3:
+            self.refresh_backups_list()
+        elif index == 5 and not self.maintenance_loaded:
             self._refresh_maintenance_repo_list()
             self.maintenance_loaded = True
 
@@ -570,8 +544,10 @@ class RepoSettingsDialog(QDialog):
         h_header.setContentsMargins(scale(16), scale(12), scale(16), scale(12))
         h_header.setSpacing(scale(15))
 
-        lbl_header_icon = QLabel("🏆")
-        lbl_header_icon.setStyleSheet(f"font-size: {scale(22)}px;")
+        self.lbl_header_icon = QLabel("🏆")
+        self.lbl_header_icon.setFixedSize(scale(52), scale(52))
+        self.lbl_header_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_header_icon.setStyleSheet(f"font-size: {scale(22)}px;")
         
         v_name_box = QVBoxLayout()
         v_name_box.setSpacing(scale(2))
@@ -608,7 +584,7 @@ class RepoSettingsDialog(QDialog):
         """)
         btn_rename.clicked.connect(self.rename_repertoire)
 
-        h_header.addWidget(lbl_header_icon)
+        h_header.addWidget(self.lbl_header_icon)
         h_header.addLayout(v_name_box, 1)
         h_header.addWidget(btn_rename, 0, Qt.AlignmentFlag.AlignVCenter)
         
@@ -682,10 +658,31 @@ class RepoSettingsDialog(QDialog):
         self.lbl_db_cov.setMinimumWidth(0)
         card_cov = create_mini_card(tr_ui("repo_settings.label_db_coverage", "📊 Prio. Score Datenbank Elo"), self.lbl_db_cov)
 
+        # Card E: Preferred Comment Language (Trainer)
+        self.combo_comment_lang = NoWheelComboBox()
+        self.combo_comment_lang.addItem(tr_ui("repo_settings.comment_lang_auto", "Automatisch (Profil-Einstellung)"), "auto")
+        self.combo_comment_lang.addItem("🇩🇪 Deutsch (DE)", "de")
+        self.combo_comment_lang.addItem("🇬🇧 English (EN)", "en")
+        self.combo_comment_lang.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_comment_lang.setMinimumContentsLength(5)
+        self.combo_comment_lang.setMinimumWidth(0)
+        self.combo_comment_lang.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
+        self.combo_comment_lang.currentIndexChanged.connect(self.save_repertoire_comment_lang)
+        card_comment_lang = create_mini_card(tr_ui("repo_settings.label_comment_lang", "💬 Kommentar-Sprache (Trainer)"), self.combo_comment_lang)
+
+        # Card F: Comment Statistics
+        self.lbl_comment_stats = QLabel("-")
+        self.lbl_comment_stats.setStyleSheet(f"font-weight: 700; font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
+        self.lbl_comment_stats.setWordWrap(True)
+        self.lbl_comment_stats.setMinimumWidth(0)
+        card_comment_stats = create_mini_card(tr_ui("repo_settings.label_comment_stats", "💬 Kommentare im Kurs"), self.lbl_comment_stats)
+
         grid_meta.addWidget(card_elo, 0, 0)
         grid_meta.addWidget(card_color, 0, 1)
         grid_meta.addWidget(card_ana, 1, 0)
         grid_meta.addWidget(card_cov, 1, 1)
+        grid_meta.addWidget(card_comment_lang, 2, 0)
+        grid_meta.addWidget(card_comment_stats, 2, 1)
 
         v_info.addLayout(grid_meta)
 
@@ -865,12 +862,16 @@ class RepoSettingsDialog(QDialog):
         # 🎨 Oberfläche
         g_ui = QGroupBox(tr_ui("repo_settings.ui_title", "🎨 Oberfläche"))
         f_ui = QFormLayout(g_ui)
-        self.combo_theme = QComboBox()
-        for t in THEMES.keys(): self.combo_theme.addItem(t)
-        current_theme = self.main_window.config.get("theme", "Blau (Turnier)")
-        idx = self.combo_theme.findText(current_theme)
-        if idx >= 0: self.combo_theme.setCurrentIndex(idx)
-        self.combo_theme.currentTextChanged.connect(self.change_board_theme)
+        self.combo_theme = NoWheelComboBox()
+        for t in THEMES.keys():
+            self.combo_theme.addItem(tr_ui(f"themes.{t}", t), t)
+        current_theme = self.main_window.config.get("theme", "Blau (Turnier)") if (self.main_window and hasattr(self.main_window, 'config')) else "Blau (Turnier)"
+        idx = self.combo_theme.findData(current_theme)
+        if idx < 0:
+            idx = self.combo_theme.findText(current_theme)
+        if idx >= 0:
+            self.combo_theme.setCurrentIndex(idx)
+        self.combo_theme.currentIndexChanged.connect(self.change_board_theme)
         f_ui.addRow(tr_ui("repo_settings.board_design", "Schachbrett Design:"), self.combo_theme)
         layout.addWidget(g_ui)
 
@@ -878,7 +879,7 @@ class RepoSettingsDialog(QDialog):
         g_sound = QGroupBox(tr_ui("repo_settings.sound_language_title", "🔊 Sound && Sprache"))
         f_sound = QFormLayout(g_sound)
         
-        self.slider_vol = QSlider(Qt.Orientation.Horizontal)
+        self.slider_vol = NoWheelSlider(Qt.Orientation.Horizontal)
         self.slider_vol.setRange(0, 100)
         try:
             vol_val = int(self.main_window.config.get("master_volume", 100))
@@ -888,7 +889,7 @@ class RepoSettingsDialog(QDialog):
         self.slider_vol.valueChanged.connect(self.change_volume)
         f_sound.addRow(tr_ui("repo_settings.volume", "Lautstärke:"), self.slider_vol)
         
-        self.combo_not = QComboBox()
+        self.combo_not = NoWheelComboBox()
         self.combo_not.addItem(tr_ui("repo_settings.notation_standard", "Standard (English)"), "en")
         self.combo_not.addItem(tr_ui("repo_settings.notation_german", "Deutsch (S,D,L,K,T)"), "de")
         curr_not = self.main_window.config.get("notation_language", "en")
@@ -1105,14 +1106,14 @@ class RepoSettingsDialog(QDialog):
         v_prio.addWidget(lbl_prio_desc)
 
         f_prio = QFormLayout()
-        self.spin_prio_threshold = QSpinBox(); self.spin_prio_threshold.setRange(1, 100); self.spin_prio_threshold.setSuffix(" %"); self.spin_prio_threshold.setValue(10)
-        self.combo_prio_target = QComboBox()
+        self.spin_prio_threshold = NoWheelSpinBox(); self.spin_prio_threshold.setRange(1, 100); self.spin_prio_threshold.setSuffix(" %"); self.spin_prio_threshold.setValue(10)
+        self.combo_prio_target = NoWheelComboBox()
         f_prio.addRow(tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio > X):"), self.spin_prio_threshold)
         f_prio.addRow(tr_ui("repo_settings.target_level_label", "Ziel-Level:"), self.combo_prio_target)
         v_prio.addLayout(f_prio)
         h_prio_btns = QHBoxLayout()
-        self.btn_prio_preview = QPushButton(tr_ui("repo_settings.btn_prio_preview", "🔍 Auswirkung prüfen")); self.btn_prio_preview.clicked.connect(self.preview_priority_level)
-        self.btn_prio_apply = QPushButton(tr_ui("repo_settings.btn_prio_apply", "🚀 Level anpassen")); self.btn_prio_apply.setProperty("class", "Primary"); self.btn_prio_apply.clicked.connect(self.apply_priority_level)
+        self.btn_prio_preview = AutoAdjustButton(tr_ui("repo_settings.btn_prio_preview", "🔍 Auswirkung prüfen")); self.btn_prio_preview.clicked.connect(self.preview_priority_level)
+        self.btn_prio_apply = AutoAdjustButton(tr_ui("repo_settings.btn_prio_apply", "🚀 Level anpassen")); self.btn_prio_apply.setProperty("class", "Primary"); self.btn_prio_apply.clicked.connect(self.apply_priority_level)
         h_prio_btns.addWidget(self.btn_prio_preview); h_prio_btns.addWidget(self.btn_prio_apply)
         v_prio.addLayout(h_prio_btns)
         layout.addWidget(g_prio)
@@ -1121,8 +1122,8 @@ class RepoSettingsDialog(QDialog):
         g_global = QGroupBox(tr_ui("repo_settings.global_leveling_title", "🏗️ Alle Züge auf ein gewisses Level setzen"))
         v_global = QVBoxLayout(g_global)
         h_global = QHBoxLayout()
-        self.combo_global_level = QComboBox()
-        btn_global_apply = QPushButton(tr_ui("repo_settings.btn_global_apply", "Alle Züge auf dieses Level setzen"))
+        self.combo_global_level = NoWheelComboBox()
+        btn_global_apply = AutoAdjustButton(tr_ui("repo_settings.btn_global_apply", "Alle Züge auf dieses Level setzen"))
         btn_global_apply.clicked.connect(self.global_move_all_level)
         h_global.addWidget(self.combo_global_level); h_global.addWidget(btn_global_apply)
         v_global.addLayout(h_global)
@@ -1149,9 +1150,9 @@ class RepoSettingsDialog(QDialog):
         v_prune.addLayout(f_prune)
 
         h_prune_btns = QHBoxLayout()
-        self.btn_prune_preview = QPushButton(tr_ui("repo_settings.btn_prune_preview", "🔍 Auswirkung prüfen"))
+        self.btn_prune_preview = AutoAdjustButton(tr_ui("repo_settings.btn_prune_preview", "🔍 Auswirkung prüfen"))
         self.btn_prune_preview.clicked.connect(self.preview_popularity_prune)
-        self.btn_prune_apply = QPushButton(tr_ui("repo_settings.btn_prune_apply", "🗑️ Züge löschen"))
+        self.btn_prune_apply = AutoAdjustButton(tr_ui("repo_settings.btn_prune_apply", "🗑️ Züge löschen"))
         self.btn_prune_apply.setProperty("class", "Danger")
         self.btn_prune_apply.clicked.connect(self.apply_popularity_prune)
 
@@ -1163,11 +1164,11 @@ class RepoSettingsDialog(QDialog):
         # 8. 📁 System-Ordner im Explorer öffnen
         g_folders = QGroupBox(tr_ui("repo_settings.folder_access_title", "📁 System-Ordner im Explorer öffnen"))
         h_folders = QHBoxLayout(g_folders)
-        btn_open_active = QPushButton(tr_ui("repo_settings.btn_open_active_repo", "📁 Aktuellen Repertoire-Ordner im Explorer öffnen"))
+        btn_open_active = AutoAdjustButton(tr_ui("repo_settings.btn_open_active_repo", "📁 Aktuellen Repertoire-Ordner im Explorer öffnen"))
         btn_open_active.clicked.connect(self.open_active_repertoire_folder)
-        btn_open_all_r = QPushButton(tr_ui("repo_settings.btn_open_all_repos", "📁 Alle Repertoires-Ordner im Explorer öffnen"))
+        btn_open_all_r = AutoAdjustButton(tr_ui("repo_settings.btn_open_all_repos", "📁 Alle Repertoires-Ordner im Explorer öffnen"))
         btn_open_all_r.clicked.connect(self.open_all_repertoires_folder)
-        btn_open_profs = QPushButton(tr_ui("repo_settings.btn_open_profiles", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs = AutoAdjustButton(tr_ui("repo_settings.btn_open_profiles", "📁 Profile-Ordner im Explorer öffnen"))
         btn_open_profs.clicked.connect(self.open_profiles_folder)
         h_folders.addWidget(btn_open_active)
         h_folders.addWidget(btn_open_all_r)
@@ -1275,7 +1276,7 @@ class RepoSettingsDialog(QDialog):
         v_tasks.addWidget(self.chk_m_stats)
         f_conf.addRow(tr_ui("repo_settings.tasks_label", "Aufgaben:"), v_tasks)
         
-        self.spin_m_depth = QSpinBox()
+        self.spin_m_depth = NoWheelSpinBox()
         self.spin_m_depth.setRange(10, 40)
         try:
             depth_val = int(self.main_window.config.get("engine_depth", 20))
@@ -1284,7 +1285,7 @@ class RepoSettingsDialog(QDialog):
         self.spin_m_depth.setValue(depth_val)
         f_conf.addRow(tr_ui("repo_settings.engine_depth_label", "Engine Tiefe:"), self.spin_m_depth)
         
-        self.spin_m_threads = QSpinBox()
+        self.spin_m_threads = NoWheelSpinBox()
         self.spin_m_threads.setRange(1, multiprocessing.cpu_count())
         self.spin_m_threads.setValue(max(1, multiprocessing.cpu_count() - 1))
         f_conf.addRow(tr_ui("repo_settings.engine_threads_label", "Engine Threads:"), self.spin_m_threads)
@@ -1327,6 +1328,18 @@ class RepoSettingsDialog(QDialog):
         if hasattr(self.main_window, 'board_widget'):
             self.main_window.board_widget.flipped = (color == 'b')
             self.main_window.board_widget.update()
+
+    def save_repertoire_comment_lang(self, _=None):
+        if not self.backend or not getattr(self.backend, 'session', None): return
+        lang = self.combo_comment_lang.currentData()
+        if lang:
+            self.backend.set_meta("comment_language", lang)
+            self.backend.session.commit()
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "update_notation_display"):
+                    w.update_notation_display()
+                if hasattr(w, "update_ui_from_fen"):
+                    w.update_ui_from_fen()
 
     def save_tab_settings(self, _=None):
         active = []
@@ -1472,9 +1485,210 @@ class RepoSettingsDialog(QDialog):
             self.refresh_info()
             QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), tr_ui("repo_settings.dlg_moves_set_to_level", "{count} Züge wurden auf Level {level} gesetzt.", count=n, level=target_lvl))
 
-    def change_board_theme(self, theme):
-        self.main_window.board_widget.set_theme(theme)
-        self.main_window.set_setting("theme", theme)
+    def init_page_backups(self, page):
+        layout = QVBoxLayout(page)
+        layout.setSpacing(scale(15))
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+
+        lbl_title = QLabel(tr_ui("repo_settings.backups_title", "⏮️ Repertoire-Backups & Wiederherstellung"))
+        lbl_title.setStyleSheet(f"color: {COLORS['dark_accent']}; font-size: {scale(20)}px; font-weight: 800;")
+        layout.addWidget(lbl_title)
+
+        lbl_sub = QLabel(tr_ui("repo_settings.backups_sub", "Automatische und manuelle Sicherungspunkte deines Repertoires inklusive aller Partien, Kommentare und PGN-Ressourcen (Typical Ideas, Model Games, Tactics)."))
+        lbl_sub.setWordWrap(True)
+        lbl_sub.setStyleSheet("color: #666; font-size: 13px;")
+        layout.addWidget(lbl_sub)
+
+        h_bar = QHBoxLayout()
+        btn_now = QPushButton(tr_ui("repo_settings.btn_create_backup_now", "📸 Manuelles Backup jetzt erstellen"))
+        btn_now.setProperty("class", "Primary")
+        btn_now.clicked.connect(self.create_manual_backup_now)
+        h_bar.addWidget(btn_now)
+        h_bar.addStretch()
+        layout.addLayout(h_bar)
+
+        self.tbl_backups = QTableWidget()
+        self.tbl_backups.setColumnCount(4)
+        self.tbl_backups.setHorizontalHeaderLabels([
+            tr_ui("repo_settings.col_backup_date", "Datum & Uhrzeit"),
+            tr_ui("repo_settings.col_backup_details", "Repertoire-Details"),
+            tr_ui("repo_settings.col_backup_size", "Größe"),
+            tr_ui("repo_settings.col_backup_action", "Aktion")
+        ])
+        self.tbl_backups.verticalHeader().setVisible(False)
+        self.tbl_backups.setWordWrap(True)
+        self.tbl_backups.horizontalHeader().setMinimumHeight(scale(38))
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.tbl_backups.setColumnWidth(0, scale(150))
+        self.tbl_backups.setColumnWidth(3, scale(165))
+        self.tbl_backups.verticalHeader().setDefaultSectionSize(scale(85))
+        self.tbl_backups.setStyleSheet("QTableWidget { background-color: white; border-radius: 8px; border: 1px solid rgba(0,0,0,0.1); } QTableWidget::item { padding: 4px 8px; } QHeaderView::section { font-size: 13px; font-weight: 700; padding: 4px; }")
+        layout.addWidget(self.tbl_backups)
+
+    def format_backup_details_text(self, b: dict) -> str:
+        en_cnt = b.get("en_comments", 0)
+        de_cnt = b.get("de_comments", 0)
+        levels = b.get("levels_info", [])
+        total_moves = b.get("total_moves", 0)
+        pgns = b.get("pgn_resources", {})
+
+        lines = []
+
+        # 1. Comments
+        if en_cnt > 0 or de_cnt > 0:
+            lines.append(f"💬 {en_cnt:,} EN | {de_cnt:,} DE")
+        else:
+            lines.append(f"💬 {tr_ui('repo_settings.no_comments', 'Keine Kommentare')}")
+
+        # 2. Levels (each level on a new line)
+        if levels:
+            levels_word = tr_ui("repo_settings.levels_label", "Level")
+            tot_word = tr_ui("repo_settings.total_moves_unit", "Züge gesamt")
+            moves_word = tr_ui("repo_settings.moves_unit", "Züge")
+            lines.append(f"🎯 {len(levels)} {levels_word} [{total_moves:,} {tot_word}]:")
+            for item in levels:
+                lines.append(f"   • L{item['level']} ({item['name']}): {item['moves']:,} {moves_word}")
+        else:
+            lines.append(f"🎯 {tr_ui('repo_settings.no_levels', 'Keine Level')}")
+
+        # 3. PGNs (each PGN resource category on a new line)
+        if pgns:
+            lines.append(f"📚 {tr_ui('repo_settings.pgn_resources_header', 'Extra-PGNs:')}")
+            for cat, files_list in sorted(pgns.items()):
+                cat_display = tr_ui("repo_settings.main_pgn", "Haupt-PGN") if cat == "Haupt-PGN" else cat
+                if isinstance(files_list, list):
+                    file_names = ", ".join(files_list[:3])
+                    if len(files_list) > 3:
+                        file_names += f" +{len(files_list)-3}"
+                    lines.append(f"   • {cat_display}: {file_names}")
+                elif isinstance(files_list, int):
+                    lines.append(f"   • {cat_display}: {files_list}")
+        else:
+            lines.append(f"📚 {tr_ui('repo_settings.no_extra_pgns', 'Keine Extra-PGNs')}")
+
+        return "\n".join(lines)
+
+    def refresh_backups_list(self):
+        if not hasattr(self, 'tbl_backups') or not self.backend: return
+        repo_name = getattr(self.backend, 'active_repo_name', None) or getattr(self.backend, 'repo_name', None)
+        if not repo_name: return
+
+        from opening_fenix.core.services.backup_service import list_repertoire_backups
+        backups = list_repertoire_backups(repo_name)
+        
+        self.tbl_backups.setRowCount(len(backups))
+
+        for row, b in enumerate(backups):
+            dt_str = b["created_at"].strftime("%d.%m.%Y %H:%M:%S")
+            size_mb = f"{b['size_bytes'] / (1024 * 1024):.2f} MB"
+
+            summary_txt = self.format_backup_details_text(b)
+
+            it_date = QTableWidgetItem(dt_str)
+            it_stats = QTableWidgetItem(summary_txt)
+            it_stats.setToolTip(summary_txt)
+            it_size = QTableWidgetItem(size_mb)
+
+            it_date.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            it_stats.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            it_size.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.tbl_backups.setItem(row, 0, it_date)
+            self.tbl_backups.setItem(row, 1, it_stats)
+            self.tbl_backups.setItem(row, 2, it_size)
+
+            btn_restore = QPushButton(tr_ui("repo_settings.btn_restore", "⏮️ Wiederherstellen"))
+            btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_restore.setMinimumWidth(scale(140))
+            btn_restore.setFixedHeight(scale(30))
+            btn_restore.setStyleSheet("QPushButton { background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: 5px; font-size: 12px; font-weight: 600; padding: 2px 8px; } QPushButton:hover { background-color: #ebf5ff; border-color: #357abd; }")
+            btn_restore.clicked.connect(lambda _, path=b["path"], dt=dt_str: self.restore_backup_selected(path, dt))
+
+            btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_backup", "🗑️ Löschen"))
+            btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_delete.setMinimumWidth(scale(140))
+            btn_delete.setFixedHeight(scale(30))
+            btn_delete.setStyleSheet("QPushButton { background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: 5px; font-size: 12px; font-weight: 600; padding: 2px 8px; } QPushButton:hover { background-color: #fadbd8; border-color: #c93b2b; }")
+            btn_delete.clicked.connect(lambda _, path=b["path"], dt=dt_str: self.delete_backup_selected(path, dt))
+
+            cell_widget = QWidget()
+            cell_layout = QVBoxLayout(cell_widget)
+            cell_layout.setContentsMargins(4, 4, 4, 4)
+            cell_layout.setSpacing(6)
+            cell_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cell_layout.addWidget(btn_restore)
+            cell_layout.addWidget(btn_delete)
+            self.tbl_backups.setCellWidget(row, 3, cell_widget)
+
+        self.tbl_backups.resizeRowsToContents()
+        for r in range(self.tbl_backups.rowCount()):
+            if self.tbl_backups.rowHeight(r) < scale(90):
+                self.tbl_backups.setRowHeight(r, scale(90))
+
+    def create_manual_backup_now(self):
+        repo_name = getattr(self.backend, 'active_repo_name', None) or getattr(self.backend, 'repo_name', None)
+        if not repo_name: return
+        from opening_fenix.core.services.backup_service import create_repertoire_backup
+        res = create_repertoire_backup(repo_name, trigger_type="manual")
+        self.refresh_backups_list()
+        if res:
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_backup_created_title", "Backup erstellt"), tr_ui("repo_settings.dlg_backup_created_msg", "Manuelles Backup erfolgreich gespeichert!"))
+        else:
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_backup_created_title", "Backup unverändert"), tr_ui("repo_settings.dlg_backup_unchanged_msg", "Seit dem letzten Backup gab es keine Änderungen im Kurs."))
+
+    def delete_backup_selected(self, zip_path, dt_str):
+        repo_name = getattr(self.backend, 'active_repo_name', None) or getattr(self.backend, 'repo_name', None)
+        if not repo_name: return
+
+        reply = QMessageBox.question(
+            self,
+            tr_ui("repo_settings.dlg_delete_confirm_title", "Backup löschen"),
+            tr_ui("repo_settings.dlg_delete_confirm_msg", "Möchtest du das Backup vom {date} wirklich dauerhaft löschen?", date=dt_str),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                if os.path.exists(zip_path):
+                    os.remove(zip_path)
+                self.refresh_backups_list()
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_delete_success_title", "Gelöscht"), tr_ui("repo_settings.dlg_delete_success_msg", "Das Backup wurde erfolgreich gelöscht."))
+            except Exception as e:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_delete_error_title", "Fehler"), tr_ui("repo_settings.dlg_delete_error_msg", f"Fehler beim Löschen des Backups: {e}"))
+
+    def restore_backup_selected(self, zip_path, dt_str):
+        repo_name = getattr(self.backend, 'active_repo_name', None) or getattr(self.backend, 'repo_name', None)
+        if not repo_name: return
+
+        reply = QMessageBox.question(
+            self,
+            tr_ui("repo_settings.dlg_restore_confirm_title", "Wiederherstellen bestätigen"),
+            tr_ui("repo_settings.dlg_restore_confirm_msg", "Möchtest du das Repertoire '{repo}' wirklich auf den Stand vom {date} zurücksetzen?\n\nVor dem Überschreiben wird automatisch ein Sicherheitsschnappschuss erstellt.", repo=repo_name, date=dt_str),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            from opening_fenix.core.services.backup_service import restore_repertoire_from_backup
+            ok = restore_repertoire_from_backup(repo_name, zip_path)
+            self.refresh_backups_list()
+            self.refresh_info()
+            if ok:
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_restore_success_title", "Erfolgreich"), tr_ui("repo_settings.dlg_restore_success_msg", "Repertoire wurde erfolgreich auf den Stand vom {date} zurückgesetzt!", date=dt_str))
+            else:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_restore_error_title", "Fehler"), tr_ui("repo_settings.dlg_restore_error_msg", "Fehler beim Wiederherstellen des Backups."))
+
+    def change_board_theme(self, index_or_text):
+        if isinstance(index_or_text, str):
+            theme = index_or_text
+        elif isinstance(index_or_text, int) and hasattr(self, "combo_theme") and 0 <= index_or_text < self.combo_theme.count():
+            theme = self.combo_theme.itemData(index_or_text) or self.combo_theme.itemText(index_or_text)
+        else:
+            theme = self.combo_theme.currentData() or self.combo_theme.currentText() if hasattr(self, "combo_theme") else index_or_text
+        if hasattr(self.main_window, "board_widget") and self.main_window.board_widget:
+            self.main_window.board_widget.set_theme(theme)
+        if hasattr(self.main_window, "set_setting"):
+            self.main_window.set_setting("theme", theme)
 
     def change_volume(self, val):
         self.main_window.set_setting("master_volume", val)
@@ -1488,32 +1702,79 @@ class RepoSettingsDialog(QDialog):
         for w in QApplication.instance().topLevelWidgets():
             if hasattr(w, "update_notation_display"): w.update_notation_display()
 
+    def _make_rounded_pixmap(self, src_pixmap, size, radius):
+        from PyQt6.QtGui import QPixmap, QPainter, QPainterPath
+        from PyQt6.QtCore import QRectF, Qt
+        
+        if src_pixmap.isNull() or size.width() <= 0 or size.height() <= 0:
+            return src_pixmap
+            
+        scaled_pix = src_pixmap.scaled(
+            size,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        x = (scaled_pix.width() - size.width()) // 2
+        y = (scaled_pix.height() - size.height()) // 2
+        cropped = scaled_pix.copy(x, y, size.width(), size.height())
+        
+        target = QPixmap(size)
+        target.fill(Qt.GlobalColor.transparent)
+        
+        painter = QPainter(target)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, size.width(), size.height()), radius, radius)
+        painter.setClipPath(path)
+        painter.drawPixmap(0, 0, cropped)
+        painter.end()
+        
+        return target
+
     def update_cover_preview(self):
         from PyQt6.QtGui import QPixmap
         from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
         import os
         
-        name = self.l_n.text()
+        name = self.l_n.text() if hasattr(self, "l_n") and self.l_n.text() else None
         if not name or name == "Unbekannt":
-            self.lbl_cover_preview.clear()
-            self.lbl_cover_preview.setText(tr_ui("repo_settings.no_cover_image", "Kein Bild"))
-            self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
-            self.btn_remove_cover.setEnabled(False)
-            return
-            
-        cover_path = get_repertoire_cover_path(name)
+            if self.backend and getattr(self.backend, "active_repo_name", None):
+                name = self.backend.active_repo_name
+                
+        cover_path = get_repertoire_cover_path(name) if name else None
+        has_cover = False
+        
         if cover_path and os.path.exists(cover_path):
             pix = QPixmap(cover_path)
             if not pix.isNull():
-                self.lbl_cover_preview.setPixmap(pix)
-                self.lbl_cover_preview.setStyleSheet("border: 1px solid #ddd; border-radius: 4px;")
-                self.btn_remove_cover.setEnabled(True)
-                return
+                has_cover = True
+                if hasattr(self, "lbl_cover_preview") and not sip.isdeleted(self.lbl_cover_preview):
+                    rounded_preview = self._make_rounded_pixmap(pix, self.lbl_cover_preview.size(), scale(8))
+                    self.lbl_cover_preview.setPixmap(rounded_preview)
+                    self.lbl_cover_preview.setStyleSheet(f"border: 1px solid {COLORS['glass_border']}; border-radius: {scale(8)}px;")
+                if hasattr(self, "btn_remove_cover") and not sip.isdeleted(self.btn_remove_cover):
+                    self.btn_remove_cover.setEnabled(True)
+                    
+                if hasattr(self, "lbl_header_icon") and not sip.isdeleted(self.lbl_header_icon):
+                    self.lbl_header_icon.clear()
+                    rounded_header = self._make_rounded_pixmap(pix, self.lbl_header_icon.size(), scale(10))
+                    self.lbl_header_icon.setPixmap(rounded_header)
+                    self.lbl_header_icon.setStyleSheet(f"border: 1px solid {COLORS['glass_border']}; border-radius: {scale(10)}px;")
+
+        if not has_cover:
+            if hasattr(self, "lbl_cover_preview") and not sip.isdeleted(self.lbl_cover_preview):
+                self.lbl_cover_preview.clear()
+                self.lbl_cover_preview.setText(tr_ui("repo_settings.no_cover_image", "Kein Bild"))
+                self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
+            if hasattr(self, "btn_remove_cover") and not sip.isdeleted(self.btn_remove_cover):
+                self.btn_remove_cover.setEnabled(False)
                 
-        self.lbl_cover_preview.clear()
-        self.lbl_cover_preview.setText(tr_ui("repo_settings.no_cover_image", "Kein Bild"))
-        self.lbl_cover_preview.setStyleSheet("color: #777; font-style: italic; border: 1px dashed #ccc; border-radius: 4px; background-color: #f9f9f9;")
-        self.btn_remove_cover.setEnabled(False)
+            if hasattr(self, "lbl_header_icon") and not sip.isdeleted(self.lbl_header_icon):
+                self.lbl_header_icon.clear()
+                self.lbl_header_icon.setText("🏆")
+                self.lbl_header_icon.setStyleSheet(f"font-size: {scale(22)}px; border: none; background: transparent;")
 
     def select_cover_image(self):
         import shutil
@@ -1722,6 +1983,17 @@ class RepoSettingsDialog(QDialog):
         idx = self.combo_repertoire_color.findData(color)
         if idx >= 0: self.combo_repertoire_color.setCurrentIndex(idx)
         self.combo_repertoire_color.blockSignals(False)
+        
+        comment_lang = self.backend.get_meta("comment_language", "auto")
+        if hasattr(self, 'combo_comment_lang'):
+            self.combo_comment_lang.blockSignals(True)
+            idx_cl = self.combo_comment_lang.findData(comment_lang)
+            if idx_cl >= 0:
+                self.combo_comment_lang.setCurrentIndex(idx_cl)
+            self.combo_comment_lang.blockSignals(False)
+            
+        if hasattr(self, 'lbl_comment_stats') and self.backend and getattr(self.backend, 'session', None):
+            self.lbl_comment_stats.setText(get_repertoire_comment_stats(self.backend.session))
         
         # Update extra info rows
         if fast_only:
@@ -2242,8 +2514,9 @@ class RepoSettingsDialog(QDialog):
 
     def closeEvent(self, event):
         """Clean up background threads and timers before closing."""
-        if self.loading_timer:
-            self.loading_timer.stop()
+        if hasattr(self, 'loading_timer') and self.loading_timer:
+            try: self.loading_timer.stop()
+            except: pass
 
         workers = [
             getattr(self, 'stats_worker', None),
@@ -2261,6 +2534,8 @@ class RepoSettingsDialog(QDialog):
                 if hasattr(w, 'stop'): w.stop()
                 if hasattr(w, 'cancel'): w.cancel()
                 w.requestInterruption()
-                w.wait()
+                if not w.wait(200):
+                    try: w.terminate()
+                    except: pass
                     
         super().closeEvent(event)

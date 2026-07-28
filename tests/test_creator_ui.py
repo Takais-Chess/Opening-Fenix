@@ -25,7 +25,7 @@ def test_details_panel_updates(creator_window, qapp):
     """Test that the details panel updates when changing FEN."""
     backend = creator_window.backend
     start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
-    backend.update_position_data(start_fen, "Initial Position Comment", "Var1", "Var2", "Var3")
+    backend.update_position_data(start_fen, "Initial Position Comment", "Var1", "Var2", "Var3", target_lang=creator_window.active_comment_lang)
     
     creator_window.update_ui_from_fen()
     qapp.processEvents()
