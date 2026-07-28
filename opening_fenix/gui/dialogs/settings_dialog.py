@@ -688,6 +688,9 @@ class SettingsDialog(QDialog):
             session.close()
             db_manager.close()
 
+        if hasattr(self, 'lbl_name'):
+            self.lbl_name.setText(info.get("name", repo_name) or repo_name)
+
         if hasattr(self, 'lbl_comment_stats'):
             if not comment_stats_str or comment_stats_str == "Keine Kommentare":
                 stats_display = tr_ui("settings.no_comments", "Keine Kommentare")
