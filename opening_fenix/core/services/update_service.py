@@ -12,7 +12,7 @@ from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.utils import get_user_dir
 from opening_fenix.core.logger import logger
 
-GITHUB_REPO = "felixbrunner12-lab/Opening-Fenix"
+GITHUB_REPO = "Takais-Chess/Opening-Fenix"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 
 def parse_version(v_str: str) -> Tuple[int, ...]:

@@ -42,7 +42,7 @@ Get up and running in under 2 minutes:
 
 ```powershell
 # 1. Clone the repository
-git clone https://github.com/felixbrunner12-lab/Opening-Fenix.git
+git clone https://github.com/Takais-Chess/Opening-Fenix.git
 cd Opening-Fenix
 
 # 2. Create and activate a virtual environment

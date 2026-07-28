@@ -70,5 +70,5 @@ All notable changes to this project will be documented in this file.
 - **Course Introduction Window**: Beautiful splash screen for new learners.
 - **Dynamic Rating System**: Implementation of "Opening Elo" to track mastery progress.
 
-[2.1.0]: https://github.com/felixbrunner12-lab/Opening-Fenix/compare/v2.0.0...v2.1.0
-[2.0.0]: https://github.com/felixbrunner12-lab/Opening-Fenix/releases/tag/v2.0.0
+[2.1.0]: https://github.com/Takais-Chess/Opening-Fenix/compare/v2.0.0...v2.1.0
+[2.0.0]: https://github.com/Takais-Chess/Opening-Fenix/releases/tag/v2.0.0
