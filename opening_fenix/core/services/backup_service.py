@@ -306,8 +306,13 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
                             if not is_resource_pgn_file(file, repo_name, is_root):
                                 continue
                         full_p = os.path.join(root, file)
+                        if not os.path.isfile(full_p):
+                            continue
                         rel_p = os.path.relpath(full_p, repo_dir)
-                        zf.write(full_p, rel_p)
+                        try:
+                            zf.write(full_p, rel_p)
+                        except Exception as file_err:
+                            logger.warning(f"Skipped backing up resource file {full_p}: {file_err}")
                         
             # 3. Add manifest.json
             manifest_json = json.dumps(manifest_data, indent=2, ensure_ascii=False)

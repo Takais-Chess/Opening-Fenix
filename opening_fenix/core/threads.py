@@ -718,12 +718,15 @@ class AutoBackupThread(QThread):
         try:
             repos = list_all_repertoires()
             for r in repos:
+                repo_name = r["name"] if isinstance(r, dict) and "name" in r else r
+                if not repo_name or not isinstance(repo_name, str):
+                    continue
                 if self.isInterruptionRequested():
                     break
                 try:
-                    create_repertoire_backup(r, trigger_type="auto")
+                    create_repertoire_backup(repo_name, trigger_type="auto")
                 except Exception as e:
-                    logger.warning(f"AutoBackupThread error for repertoire '{r}': {e}")
+                    logger.warning(f"AutoBackupThread error for repertoire '{repo_name}': {e}")
         except Exception as ex:
             logger.error(f"AutoBackupThread main error: {ex}")
 
