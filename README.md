@@ -4,16 +4,11 @@
 [![UI Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-**Opening Fenix V2** is a modern, high-performance chess repertoire management and training platform. Designed for players of all levels, it combines a **premium Glassmorphism interface** with **Spaced Repetition (SRS)**, **Lichess statistical integration**, **Stockfish evaluation**, and **smart gap analysis** to build an unshakeable opening repertoire.
+**Opening Fenix V2** is a modern, high-performance chess repertoire management and training platform. Designed for players of all levels, it combines **Spaced Repetition (SRS)**, **Lichess statistical integration**, **Stockfish evaluation**, and **smart gap analysis** to build an unshakeable opening repertoire.
 
 ---
 
 ## ✨ Highlights & Key Features
-
-### 🎨 Premium Glassmorphism Interface
-- **Modern Visuals**: High-contrast, dark-mode aesthetics with smooth semi-transparent cards and dynamic ambient highlights.
-- **High-DPI & 4K Ready**: Fully responsive scaling across all display resolutions.
-- **Tactile Board Animations**: Smooth piece sliding, lifting effects, and subtle move highlights.
 
 ### 🧠 Intelligent Spaced Repetition (SRS) Training
 - **Leitner 7-Box System**: Automatically schedules move reviews based on your recall performance (from 5 minutes up to 6 months).
