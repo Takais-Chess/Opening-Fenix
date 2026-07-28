@@ -426,9 +426,10 @@ def parse_comment(raw_comment: str, lang: str = "de") -> str:
     target_lang = lang.lower() if lang else "de"
     if target_lang in comment_dict and comment_dict[target_lang]:
         return comment_dict[target_lang]
-    alt_lang = "en" if target_lang == "de" else "de"
-    if alt_lang in comment_dict and comment_dict[alt_lang]:
-        return comment_dict[alt_lang]
+    if "en" in comment_dict and comment_dict["en"]:
+        return comment_dict["en"]
+    if "de" in comment_dict and comment_dict["de"]:
+        return comment_dict["de"]
     for val in comment_dict.values():
         if val:
             return val

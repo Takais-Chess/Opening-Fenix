@@ -175,7 +175,7 @@ class TestSettingsDialogRepoPage:
 
     def test_repo_selection_populates_info(self, settings_dialog, sample_repertoire):
         """Repertoire auswählen füllt die Informationsfelder."""
-        settings_dialog.sidebar.setCurrentRow(2)
+        settings_dialog.sidebar.setCurrentRow(1)
         settings_dialog.on_repo_selected(sample_repertoire)
         assert settings_dialog.lbl_name.text() != "-"
         assert settings_dialog.lbl_name.text() == sample_repertoire

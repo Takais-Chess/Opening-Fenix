@@ -145,11 +145,11 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         
         # 4. BULK DB EXECUTION
         if new_positions_to_insert:
-            session.bulk_insert_mappings(Position, [{"id": pid, "fen": fen} for fen, pid in new_positions_to_insert.items()])
+            session.bulk_save_objects(list(new_positions_to_insert.values()))
         if new_moves_to_insert:
-            session.bulk_insert_mappings(Move, [{"id": m.id, "from_position_id": m.from_position_id, "to_position_id": m.to_position_id, "uci": m.uci, "san": m.san, "nag": m.nag} for m in new_moves_to_insert])
+            session.bulk_save_objects(new_moves_to_insert)
         if new_rep_moves_to_insert:
-            session.bulk_insert_mappings(RepertoireMove, [{"move_id": rm.move_id, "level": rm.level} for rm in new_rep_moves_to_insert])
+            session.bulk_save_objects(new_rep_moves_to_insert)
         
         # 6. UPDATE COMMENTS 
         if comments_to_append:
