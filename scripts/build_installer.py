@@ -11,6 +11,9 @@ def main():
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    from opening_fenix.core.version import APP_VERSION
 
     dist_dir = os.path.join(project_root, 'dist', 'Opening Fenix')
     if os.path.exists(dist_dir):
@@ -74,7 +77,7 @@ def main():
             shutil.copytree(folder, dst)
             print(f" -> Synced {folder} to {dst}")
 
-    res_priv = subprocess.run([iscc_exe, '/DAppBuildType=Private', iss_file], capture_output=False)
+    res_priv = subprocess.run([iscc_exe, f'/DMyAppVersion={APP_VERSION}', '/DAppBuildType=Private', iss_file], capture_output=False)
     if res_priv.returncode != 0:
         print("ERROR: Private Inno Setup compilation failed.")
         sys.exit(res_priv.returncode)
@@ -107,12 +110,11 @@ def main():
                 print(f" -> Removed non-example repertoire '{item}' from public bundle")
         print(" -> Synced example repertoires to public bundle")
 
-    res_pub = subprocess.run([iscc_exe, '/DAppBuildType=Public', iss_file], capture_output=False)
+    res_pub = subprocess.run([iscc_exe, f'/DMyAppVersion={APP_VERSION}', '/DAppBuildType=Public', iss_file], capture_output=False)
     if res_pub.returncode != 0:
         print("ERROR: Public Inno Setup compilation failed.")
         sys.exit(res_pub.returncode)
 
-    from opening_fenix.core.version import APP_VERSION
     output_dir = os.path.join(project_root, 'Output')
     print("\n" + "=" * 50)
     print("         BOTH INSTALLERS BUILT SUCCESSFUL!")
