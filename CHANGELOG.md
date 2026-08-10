@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-08-10
+
+### Added
+- **PGN Import Comment Language Selection**: PGN import (file import & text paste) now prompts the user to select both Target Level and Comment Language (e.g. DE, EN, ES, FR, IT, RU, or Auto).
+- **Source Comment Deletion (Move Mode)**: Added option in Comment Transfer dialog to delete source language comments after transferring to a new target language.
+- **Dedicated Repertoire Tools Container**: Relocated "Kommentare übertragen" (Transfer Comments) from Repertoire Data to a dedicated container section inside Repertoire Tools.
+
+### Fixed
+- **Full Localization & Translation Parity**: Fixed untranslated UI elements across Comment Transfer and PGN import dialogs, progress bars, and status notifications in both German and English.
+
 ## [2.4.0] - 2026-04-15
 
 ### Fixed

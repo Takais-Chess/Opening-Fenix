@@ -9,7 +9,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove
-from opening_fenix.core.db.database import DatabaseManager
+from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
@@ -48,7 +48,7 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
 
         for i, pos in enumerate(positions_to_analyze):
             if check_cancel and check_cancel():
-                session.commit()
+                commit_with_retry(session)
                 return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
             
             board = chess.Board(pos.fen)
@@ -70,7 +70,7 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                 discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
                 
                 if check_cancel and check_cancel():
-                    session.commit()
+                    commit_with_retry(session)
                     return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
 
                 # --- STAGE 2: DECISION & DEEPENING ---
@@ -117,11 +117,11 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                 progress_callback(int((i + 1) * 100 / total_positions))
             
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
-                 session.commit()
+                 commit_with_retry(session)
         
         # Invalidate cache after successful analysis
         set_meta(session, "ana_cache_count", "-1")
-        session.commit()
+        commit_with_retry(session)
         
         return True, f"Analyse von {total_positions} Positionen abgeschlossen."
 

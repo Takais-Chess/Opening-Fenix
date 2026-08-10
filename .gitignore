@@ -152,6 +152,7 @@ BulkNAGTest/
 ImportServiceTest/
 SmallRepo/
 TestRepo/
+LangImportRepo/
 
 # Coverage & Reports
 coverage.json

@@ -86,11 +86,13 @@ def main():
     with open(pub_marker, 'w', encoding='utf-8') as f:
         f.write('1')
 
-    # Remove personal profiles
-    dst_profiles = os.path.join(dist_dir, 'profiles')
-    if os.path.exists(dst_profiles):
-        shutil.rmtree(dst_profiles)
-        print(" -> Removed personal profiles from public bundle")
+    # Remove all profiles from public bundle (root and subdirectories like _internal/profiles)
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'profiles':
+                p_dir = os.path.join(root_dir_path, d)
+                shutil.rmtree(p_dir, ignore_errors=True)
+                print(f" -> Removed profile directory '{p_dir}' from public bundle")
 
     # Sync repertoires folder keeping ONLY example repertoires
     if os.path.exists('repertoires'):

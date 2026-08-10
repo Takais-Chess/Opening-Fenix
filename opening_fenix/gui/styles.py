@@ -550,21 +550,53 @@ def get_creator_toolbar_style():
         background: transparent; 
         border: none; 
         spacing: {scale(10)}px; 
-        padding: {scale(5)}px; 
+        padding: 0px; 
+        margin: 0px;
+    }}
+    QToolBar QPushButton, QToolBar QComboBox {{ 
+        background-color: {COLORS['glass_bg']}; 
+        border: 1px solid {COLORS['glass_border']}; 
+        font-weight: bold; 
+        font-size: {scale(14)}px; 
+        color: {COLORS['brown_text']}; 
+        padding: {scale(4)}px {scale(18)}px;
+        border-radius: {scale(20)}px;
+        min-height: {scale(40)}px;
+        max-height: {scale(40)}px;
+    }}
+    QToolBar QPushButton:hover, QToolBar QComboBox:hover {{ 
+        background-color: rgba(255, 255, 255, 0.7); 
+    }}
+    QToolBar QComboBox {{
+        padding-left: {scale(14)}px;
+        padding-right: {scale(26)}px;
+    }}
+    QToolBar QComboBox::drop-down {{
+        border: none;
+        width: {scale(22)}px;
+        subcontrol-origin: padding;
+        subcontrol-position: top right;
+    }}
+    QToolBar QComboBox::down-arrow {{
+        width: {scale(12)}px;
+        height: {scale(12)}px;
     }}
     QToolButton {{ 
         background-color: {COLORS['glass_bg']}; 
         border: 1px solid {COLORS['glass_border']}; 
         font-weight: bold; 
+        font-size: {scale(14)}px; 
         color: {COLORS['brown_text']}; 
-        padding: {scale(8)}px {scale(24)}px;
-        border-radius: {scale(25)}px;
-        margin: {scale(2)}px;
+        padding: {scale(4)}px {scale(18)}px;
+        border-radius: {scale(20)}px;
+        min-height: {scale(40)}px;
+        margin: 0px;
     }}
     QToolButton:hover {{ 
         background-color: rgba(255, 255, 255, 0.7); 
     }}
 """
+
 
 
 

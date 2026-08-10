@@ -342,3 +342,71 @@ class RepertoireService:
         except Exception as e:
             logger.error(f"Error repairing logical integrity: {e}")
             return 0
+
+def copy_repertoire_comments(repo_name: str, src_lang: str, target_lang: str, overwrite: bool = False, remove_source: bool = False) -> Tuple[bool, str, int]:
+    """
+    Copies or transfers comments from src_lang to target_lang across all positions in the given repertoire database.
+    If remove_source is True, deletes comments from src_lang after copying (move operation).
+    
+    Args:
+        repo_name: Name of the repertoire.
+        src_lang: Language code of the source comments (e.g. 'de', 'en').
+        target_lang: Language code of the target comments (e.g. 'en', 'de').
+        overwrite: If True, overwrites existing target language comments. If False, only fills empty target comments.
+        remove_source: If True, removes comments from src_lang after transferring.
+        
+    Returns:
+        (success: bool, message: str, count_modified: int)
+    """
+    from opening_fenix.core.utils import get_repertoire_db_path, get_multilingual_comment_dict, format_multilingual_comment
+    from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
+    from opening_fenix.core.db.models import Position
+    
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return False, tr_ui("repo_settings.msg_db_not_found", "Repertoire-Datenbank nicht gefunden."), 0
+        
+    src_key = src_lang.lower().strip()
+    target_key = target_lang.lower().strip()
+    
+    if src_key == target_key:
+        return False, tr_ui("repo_settings.msg_same_lang", "Quell- und Zielsprache müssen unterschiedlich sein."), 0
+
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    try:
+        positions = session.query(Position).filter(
+            Position.comment.isnot(None),
+            Position.comment != ""
+        ).all()
+        
+        count = 0
+        for pos in positions:
+            cdict = get_multilingual_comment_dict(pos.comment)
+            src_text = cdict.get(src_key)
+            if src_text and src_text.strip():
+                existing_target = cdict.get(target_key)
+                if overwrite or not existing_target or not existing_target.strip():
+                    cdict[target_key] = src_text.strip()
+                    if remove_source and src_key in cdict:
+                        del cdict[src_key]
+                    pos.comment = format_multilingual_comment(cdict)
+                    count += 1
+                    
+        if count > 0:
+            commit_with_retry(session)
+            
+        session.close()
+        db.close()
+        if remove_source:
+            msg = tr_ui("repo_settings.msg_transfer_move_success", "{count} Kommentare von '{src}' nach '{target}' verschoben.", count=count, src=src_key.upper(), target=target_key.upper())
+        else:
+            msg = tr_ui("repo_settings.msg_transfer_success", "{count} Kommentare von '{src}' nach '{target}' übertragen.", count=count, src=src_key.upper(), target=target_key.upper())
+        return True, msg, count
+    except Exception as e:
+        session.rollback()
+        session.close()
+        db.close()
+        return False, tr_ui("repo_settings.msg_transfer_error", "Fehler beim Übertragen der Kommentare: {error}", error=str(e)), 0
+

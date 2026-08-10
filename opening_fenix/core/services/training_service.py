@@ -175,6 +175,10 @@ class TrainingManager:
         self._reachable_moves_cache = None
         self._last_stats_cache = None
 
+    def invalidate_caches(self):
+        """Invalidates all internal caches when priority scores or repertoire data change."""
+        self.on_repertoire_changed()
+
     def reset_repertoire_progress(self) -> Tuple[bool, str]:
         if not self.repertoire_manager.active_repertoire_name: return False, "Kein Repertoire aktiv."
         try:
@@ -253,11 +257,11 @@ class TrainingManager:
                     self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
                     
             for k in self._forward_moves_cache:
-                self._forward_moves_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
+                self._forward_moves_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
                 
             # Sort parent cache too for predictable ancestor selection
             for k in self._move_parent_cache:
-                self._move_parent_cache[k].sort(key=lambda m: m.priority_score, reverse=True)
+                self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
             
         if self._rep_move_cache is None:
             all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
@@ -444,7 +448,7 @@ class TrainingManager:
             due_items = [td for td in due_items if td.next_due <= lookahead]
             
             # IMPROVEMENT: Use the actual priority from the cache to sort due items.
-            due_items.sort(key=lambda x: (x.box, -self.repertoire_manager.priority_cache.get((x.fen, x.move_uci), 0.0)))
+            due_items.sort(key=lambda x: (x.box, -(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0)))
             
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
             reachable_keys = set(reachable_repo_moves)
@@ -474,7 +478,7 @@ class TrainingManager:
                             if exclude_move_ids and m.id in exclude_move_ids: continue
                             candidates.append(m)
                 if candidates:
-                    candidates.sort(key=lambda x: x.priority_score, reverse=True)
+                    candidates.sort(key=lambda x: (x.priority_score or 0.0), reverse=True)
                     return self._get_ancestor(candidates[0], check_due=False, variation_filter=variation_filter), []
                 return None, [] # All moves trained
 
@@ -501,7 +505,7 @@ class TrainingManager:
                 
                 if lead_up_candidates:
                     # Prioritize the earliest unlearned lead-up move (highest priority first)
-                    lead_up_candidates.sort(key=lambda x: x.priority_score, reverse=True)
+                    lead_up_candidates.sort(key=lambda x: (x.priority_score or 0.0), reverse=True)
                     return self._get_ancestor(lead_up_candidates[0], check_due=False, variation_filter=None), []
 
             learned_keys = set(self._td_cache.keys())
@@ -515,11 +519,22 @@ class TrainingManager:
                         candidates.append(m)
             
             if candidates:
-                # Sort by priority score DESCENDING (highest first)
-                candidates.sort(key=lambda x: x.priority_score, reverse=True)
-                top_prio = candidates[0].priority_score
-                # Pick among those that share the absolute highest priority score
-                best = [m for m in candidates if m.priority_score == top_prio]
+                def get_candidate_sort_key(m):
+                    pos = self._pos_cache.get(m.from_position_id)
+                    depth = 0
+                    if pos:
+                        try:
+                            parts = pos.fen.split(" ")
+                            move_num = int(parts[-1])
+                            is_black = (parts[1] == 'b')
+                            depth = (move_num - 1) * 2 + (1 if is_black else 0)
+                        except Exception:
+                            depth = 0
+                    return (m.priority_score or 0.0, -depth)
+
+                candidates.sort(key=get_candidate_sort_key, reverse=True)
+                top_key = get_candidate_sort_key(candidates[0])
+                best = [m for m in candidates if get_candidate_sort_key(m) == top_key]
                 return self._get_ancestor(random.choice(best), check_due=False, variation_filter=variation_filter), []
         
         return None, []

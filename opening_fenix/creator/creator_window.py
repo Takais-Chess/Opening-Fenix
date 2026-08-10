@@ -46,7 +46,7 @@ from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, D
 from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
@@ -2511,7 +2511,7 @@ class CreatorWindow(QMainWindow):
 
 
         top_layout = QHBoxLayout()
-        top_layout.setContentsMargins(scale(10), scale(6), scale(20), scale(6))
+        top_layout.setContentsMargins(scale(10), scale(2), scale(20), scale(2))
         top_layout.setSpacing(0)
 
 
@@ -2523,6 +2523,7 @@ class CreatorWindow(QMainWindow):
         # Toolbar Buttons using QPushButtons for reliable CSS rounding
         btn_load = QPushButton(tr_ui("creator.toolbar_load", "📂 Laden"))
         btn_load.setProperty("class", "GlassPill")
+        btn_load.setFixedHeight(scale(40))
         self.repolish(btn_load)
         btn_load.setToolTip(tr_ui("creator.toolbar_load_tooltip", "Ein anderes Repertoire laden"))
         btn_load.clicked.connect(self.load_repertoire_dialog)
@@ -2530,6 +2531,7 @@ class CreatorWindow(QMainWindow):
 
         btn_new = QPushButton(tr_ui("creator.toolbar_new", "➕ Neu"))
         btn_new.setProperty("class", "GlassPill")
+        btn_new.setFixedHeight(scale(40))
         self.repolish(btn_new)
         btn_new.setToolTip(tr_ui("creator.toolbar_new_tooltip", "Ein neues, leeres Repertoire erstellen"))
         btn_new.clicked.connect(self.new_repertoire_dialog)
@@ -2537,14 +2539,20 @@ class CreatorWindow(QMainWindow):
 
         btn_repo = QPushButton(tr_ui("creator.toolbar_settings", "⚙ Einstellungen"))
         btn_repo.setProperty("class", "GlassPill")
+        btn_repo.setFixedHeight(scale(40))
         self.repolish(btn_repo)
         btn_repo.setToolTip(tr_ui("creator.toolbar_settings_tooltip", "Repertoire-Einstellungen öffnen"))
         btn_repo.clicked.connect(self.open_repo_settings)
         self.toolbar.addWidget(btn_repo)
 
         self.combo_structure = QComboBox()
-        self.combo_structure.setMinimumWidth(scale(220))
-        self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "🧩 Struktur Explorer"))
+        self.combo_structure.setMinimumWidth(scale(240))
+        self.combo_structure.setFixedHeight(scale(40))
+        tree_icon_path = os.path.join(get_base_path(), "assets", "Icons", "decision_tree.svg")
+        if os.path.exists(tree_icon_path):
+            self.combo_structure.addItem(QIcon(tree_icon_path), tr_ui("creator.toolbar_structure", "Variantenbaum"))
+        else:
+            self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "Variantenbaum"))
         self.combo_structure.setProperty("class", "GlassPill")
         self.repolish(self.combo_structure)
         self.combo_structure.currentIndexChanged.connect(self.on_structure_combo_changed)
@@ -2553,10 +2561,12 @@ class CreatorWindow(QMainWindow):
         # Lichess Button (NEW)
         self.btn_lichess = QPushButton()
         self.btn_lichess.setProperty("class", "GlassPill")
+        self.btn_lichess.setFixedHeight(scale(40))
+        self.btn_lichess.setMinimumWidth(scale(50))
         lichess_icon_path = os.path.join(get_base_path(), "assets", "Icons", "lichess.png")
         if os.path.exists(lichess_icon_path):
             self.btn_lichess.setIcon(QIcon(lichess_icon_path))
-            self.btn_lichess.setIconSize(QSize(scale(22), scale(22)))
+            self.btn_lichess.setIconSize(QSize(scale(26), scale(26)))
         else:
             self.btn_lichess.setText("🔬")
         self.btn_lichess.setToolTip(tr_ui("creator.toolbar_lichess_tooltip", "<b>Lichess Analyse</b><br>Öffne die aktuelle Stellung in der Lichess-Analyse."))
@@ -2567,6 +2577,7 @@ class CreatorWindow(QMainWindow):
         # Repertoire Resources Button
         self.btn_resources = QPushButton(tr_ui("creator.toolbar_resources", "📁 Ressourcen"))
         self.btn_resources.setProperty("class", "GlassPill")
+        self.btn_resources.setFixedHeight(scale(40))
         self.repolish(self.btn_resources)
         self.btn_resources.setToolTip(tr_ui("creator.toolbar_resources_tooltip", "Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)"))
         self.btn_resources.clicked.connect(self.open_repertoire_folder)
@@ -3009,13 +3020,7 @@ class CreatorWindow(QMainWindow):
         header_font.setPointSize(16)
         self.tree_widget.header().setFont(header_font)
 
-        # Apply Drop Shadows for glass depth
-        for panel in [self.board_panel, self.tree_group, self.tabs]:
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(20)
-            shadow.setColor(QColor(0, 0, 0, 50))
-            shadow.setOffset(0, 6)
-            panel.setGraphicsEffect(shadow)
+        # Panels maintain crisp CSS border styling without software Gaussian blur overhead
 
         # Ensure "DETAILS" tab is selected by default on startup if visible
         for i in range(self.tabs.count()):
@@ -3119,6 +3124,14 @@ class CreatorWindow(QMainWindow):
         menu = QMenu(self)
         menu.setStyleSheet(self.styleSheet())
         
+        # Option to show all languages
+        is_all = (self.active_comment_lang == "all")
+        prefix_all = "✓ " if is_all else "   "
+        act_all = menu.addAction(f"{prefix_all}🌐 {tr_ui('creator.lang_all', 'Alle Sprachen ([:de]... [:en]...)')}")
+        act_all.triggered.connect(lambda: self.switch_comment_lang("all"))
+        
+        menu.addSeparator()
+        
         # Standard languages
         langs = [("de", "🇩🇪 Deutsch (DE)"), ("en", "🇬🇧 English (EN)")]
         
@@ -3145,17 +3158,34 @@ class CreatorWindow(QMainWindow):
             menu.exec(self.btn_lang_comment.mapToGlobal(QPoint(0, self.btn_lang_comment.height())))
 
     def switch_comment_lang(self, lang_code):
-        if hasattr(self, 'txt_c'):
+        if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
             txt = self.txt_c.toPlainText().strip()
-            if txt:
-                self.current_position_comments[self.active_comment_lang] = txt
-            elif self.active_comment_lang in self.current_position_comments:
-                del self.current_position_comments[self.active_comment_lang]
+            if self.active_comment_lang == "all":
+                from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
+                tagged = parse_pgn_tagged_comment(txt)
+                if tagged:
+                    self.current_position_comments = tagged
+                elif txt:
+                    self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
+                else:
+                    self.current_position_comments = {}
+            else:
+                if txt:
+                    self.current_position_comments[self.active_comment_lang] = txt
+                elif self.active_comment_lang in self.current_position_comments:
+                    del self.current_position_comments[self.active_comment_lang]
             
         self.active_comment_lang = lang_code.lower()
         
         self.block_signals_details(True)
-        self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
+        if self.active_comment_lang == "all":
+            if self.current_position_comments:
+                formatted_all = "\n".join([f"[:{k}] {v}" for k, v in self.current_position_comments.items()])
+                self.txt_c.setPlainText(formatted_all)
+            else:
+                self.txt_c.setPlainText("")
+        else:
+            self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
         self.block_signals_details(False)
         
         self.update_comment_lang_button_style()
@@ -3174,6 +3204,26 @@ class CreatorWindow(QMainWindow):
     def update_comment_lang_button_style(self):
         if not hasattr(self, 'btn_lang_comment'): return
         
+        if self.active_comment_lang == "all":
+            all_btn_text = tr_ui("creator.lang_all_btn", "ALLE")
+            self.btn_lang_comment.setText(f"🌐 {all_btn_text}")
+            self.btn_lang_comment.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {COLORS['glass_bg']};
+                    border: 1px solid {COLORS['glass_border']};
+                    border-radius: {scale(4)}px;
+                    font-weight: bold;
+                    font-size: {scale(13)}px;
+                    color: {COLORS['brown_text']};
+                    padding: 0px {scale(6)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(255, 255, 255, 0.7);
+                }}
+            """)
+            self.btn_lang_comment.setToolTip(tr_ui("creator.lang_all_tooltip", "Kommentar-Sprache: Alle Sprachen ([:de] ... [:en] ...)"))
+            return
+
         code_str = self.active_comment_lang.upper()
         self.btn_lang_comment.setText(f"🌐 {code_str}")
         
@@ -3196,9 +3246,12 @@ class CreatorWindow(QMainWindow):
                     background-color: #e67e22;
                 }}
             """)
+            prefix_txt = tr_ui("creator.lang_tooltip_prefix", "Kommentar-Sprache:")
+            empty_txt = tr_ui("creator.lang_empty", "Leer")
+            other_txt = tr_ui("creator.lang_other_exists", "Kommentar in anderer Sprache ({langs}) vorhanden!", langs=", ".join(other_langs))
             self.btn_lang_comment.setToolTip(
-                f"Kommentar-Sprache: {code_str} (Leer)\n"
-                f"⚠️ Kommentar in anderer Sprache ({', '.join(other_langs)}) vorhanden!"
+                f"{prefix_txt} {code_str} ({empty_txt})\n"
+                f"⚠️ {other_txt}"
             )
         else:
             # Normal lowkey style matching SymbolButton
@@ -3216,17 +3269,27 @@ class CreatorWindow(QMainWindow):
                     background-color: rgba(255, 255, 255, 0.7);
                 }}
             """)
-            self.btn_lang_comment.setToolTip(f"Kommentar-Sprache wählen (Aktuell: {code_str})")
+            self.btn_lang_comment.setToolTip(tr_ui("creator.lang_select_tooltip", "Kommentar-Sprache wählen (Aktuell: {code_str})", code_str=code_str))
 
 
     def on_details_changed(self):
         if not self._is_ui_valid() or not self.backend.current_fen: return
         
         txt = self.txt_c.toPlainText().strip()
-        if txt:
-            self.current_position_comments[self.active_comment_lang] = txt
-        elif self.active_comment_lang in self.current_position_comments:
-            del self.current_position_comments[self.active_comment_lang]
+        if self.active_comment_lang == "all":
+            from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
+            tagged = parse_pgn_tagged_comment(txt)
+            if tagged:
+                self.current_position_comments = tagged
+            elif txt:
+                self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
+            else:
+                self.current_position_comments = {}
+        else:
+            if txt:
+                self.current_position_comments[self.active_comment_lang] = txt
+            elif self.active_comment_lang in self.current_position_comments:
+                del self.current_position_comments[self.active_comment_lang]
             
         full_comment = format_multilingual_comment(self.current_position_comments)
         
@@ -3303,9 +3366,10 @@ class CreatorWindow(QMainWindow):
                 if move in self.board_widget.board.legal_moves:
                     san = self.board_widget.board.san(move)
                     fen = self.board_widget.board.fen()
+                    is_cap = self.board_widget.board.is_capture(move)
                     self.board_widget.board.push(move)
                     self.board_widget.update()
-                    self.play_sound("move")
+                    self.play_sound("capture" if is_cap else "move")
                     self.backend.add_move(fen, move.uci(), san)
                     self.update_ui_from_fen()
                     self.trigger_background_enrichment(self.board_widget.board.fen())
@@ -3387,10 +3451,11 @@ class CreatorWindow(QMainWindow):
         # Evaluate FEN BEFORE pushing the move
         from_fen = self.board_widget.board.fen()
         s = self.board_widget.board.san(move)
+        is_cap = 'x' in s
         
         self.board_widget.board.push(move)
         self.board_widget.update()
-        self.play_sound("move")
+        self.play_sound("capture" if is_cap else "move")
         
         self.backend.add_move(from_fen, move.uci(), s)
         self.update_ui_from_fen()
@@ -3565,7 +3630,14 @@ class CreatorWindow(QMainWindow):
                 self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
                 raw_c = str(d.get('comment',''))
                 self.current_position_comments = get_multilingual_comment_dict(raw_c)
-                self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
+                if self.active_comment_lang == "all":
+                    if self.current_position_comments:
+                        formatted_all = "\n".join([f"[:{k}] {v}" for k, v in self.current_position_comments.items()])
+                        self.txt_c.setPlainText(formatted_all)
+                    else:
+                        self.txt_c.setPlainText("")
+                else:
+                    self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
             else:
                 self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
                 self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
@@ -3620,10 +3692,19 @@ class CreatorWindow(QMainWindow):
                 if to_pos_id and self.backend.is_branch_fully_reviewed(to_pos_id, self.overhaul_start):
                     san_text += "  ✅"
             
+            cdict = get_multilingual_comment_dict(c['comment'])
+            if self.active_comment_lang == "all":
+                if len(cdict) > 1:
+                    comment_disp = " ".join([f"[:{k}] {v}" for k, v in cdict.items()])
+                else:
+                    comment_disp = cdict.get("de", list(cdict.values())[0]) if cdict else ""
+            else:
+                comment_disp = cdict.get(self.active_comment_lang, "")
+
             it = SortableTreeWidgetItem([
                 san_text, 
                 f"{c['priority']*100:.2f}%", 
-                get_multilingual_comment_dict(c['comment']).get(self.active_comment_lang, ""), 
+                comment_disp, 
                 l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
                 "" 
             ])
@@ -4097,14 +4178,23 @@ class CreatorWindow(QMainWindow):
     def import_pgn_file_dialog(self):
         """Opens a file dialog to select and import a PGN file."""
         if not self.backend.active_repo_name: return
-        path, _ = QFileDialog.getOpenFileName(self, "PGN Datei wählen", "", "PGN Dateien (*.pgn)")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            tr_ui("creator.dlg_select_pgn_file_title", "PGN-Datei auswählen"),
+            "",
+            tr_ui("creator.dlg_select_pgn_file_filter", "PGN-Dateien (*.pgn)")
+        )
         if not path: return
         self._start_pgn_import(path)
 
     def paste_pgn_dialog(self):
         """Opens a multi-line input dialog to paste PGN text."""
         if not self.backend.active_repo_name: return
-        text, ok = QInputDialog.getMultiLineText(self, "PGN Text einfügen", "PGN Inhalt:")
+        text, ok = QInputDialog.getMultiLineText(
+            self,
+            tr_ui("creator.dlg_paste_pgn_title", "PGN-Text einfügen"),
+            tr_ui("creator.dlg_paste_pgn_label", "PGN-Inhalt:")
+        )
         if not (ok and text.strip()): return
         
         # Save to temp file
@@ -4115,20 +4205,80 @@ class CreatorWindow(QMainWindow):
         self._start_pgn_import(path)
 
     def _start_pgn_import(self, pgn_path):
-        """Asks for target level and starts the import thread."""
+        """Asks for target level and comment language, then starts the import thread."""
         levels = self.backend.get_repertoire_levels()
         if not levels:
-            QMessageBox.warning(self, tr_ui("creator.dlg_import_title", "Import"), "Keine Level gefunden. Bitte erstelle zuerst ein Level in den Einstellungen.")
+            QMessageBox.warning(
+                self,
+                tr_ui("creator.dlg_import_title", "Import"),
+                tr_ui("creator.dlg_no_levels_msg", "Keine Level gefunden. Bitte erstelle zuerst ein Level in den Einstellungen.")
+            )
             return
             
-        level_choices = [f"Lvl {l['order']}: {l['name']}" for l in levels]
-        choice, ok = QInputDialog.getItem(self, "Ziel-Level", "In welches Level sollen die Züge importiert werden?", level_choices, 0, False)
-        if not ok: return
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr_ui("creator.dlg_import_pgn_options_title", "PGN Importieren"))
+        dlg.setMinimumWidth(scale(400))
+        dlg.setStyleSheet(get_bw_glass_style())
         
-        idx = level_choices.index(choice)
-        target_lvl = levels[idx]
+        v = QVBoxLayout(dlg)
+        v.setSpacing(scale(12))
         
-        self.p_pgn = QProgressDialog("Importiere PGN...", "Abbrechen", 0, 100, self)
+        lbl_intro = QLabel(tr_ui("creator.dlg_import_pgn_options_intro", "Wähle das Ziel-Level und die Sprache für die zu importierenden Kommentare:"))
+        lbl_intro.setWordWrap(True)
+        lbl_intro.setStyleSheet(f"font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
+        v.addWidget(lbl_intro)
+        
+        f_layout = QFormLayout()
+        
+        c_level = QComboBox()
+        for l in levels:
+            c_level.addItem(f"Lvl {l['order']}: {l['name']}", userData=l)
+        c_level.setCurrentIndex(0)
+        
+        c_lang = QComboBox()
+        c_lang.addItem(tr_ui("creator.comment_lang_auto", "Automatisch (Profil/DE)"), "auto")
+        c_lang.addItem("🇩🇪 Deutsch (DE)", "de")
+        c_lang.addItem("🇬🇧 English (EN)", "en")
+        c_lang.addItem("🇪🇸 Español (ES)", "es")
+        c_lang.addItem("🇫🇷 Français (FR)", "fr")
+        c_lang.addItem("🇮🇹 Italiano (IT)", "it")
+        c_lang.addItem("🇷🇺 Русский (RU)", "ru")
+        
+        active_lang = getattr(self, "active_comment_lang", "de")
+        if active_lang and active_lang != "all":
+            idx = c_lang.findData(active_lang.lower())
+            if idx >= 0:
+                c_lang.setCurrentIndex(idx)
+                
+        f_layout.addRow(tr_ui("creator.dlg_import_target_level", "Ziel-Level:"), c_level)
+        f_layout.addRow(tr_ui("creator.dlg_import_comment_lang", "Kommentar-Sprache:"), c_lang)
+        v.addLayout(f_layout)
+        
+        h_btns = QHBoxLayout()
+        h_btns.addStretch()
+        
+        btn_cancel = QPushButton(tr_ui("login.cancel", "Abbrechen"))
+        btn_cancel.clicked.connect(dlg.reject)
+        
+        btn_run = QPushButton(tr_ui("creator.btn_import_start", "📥 Importieren"))
+        btn_run.setProperty("class", "Primary")
+        btn_run.clicked.connect(dlg.accept)
+        
+        h_btns.addWidget(btn_cancel)
+        h_btns.addWidget(btn_run)
+        v.addLayout(h_btns)
+        
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+            
+        target_lvl = c_level.currentData()
+        target_lang = c_lang.currentData()
+        
+        self.p_pgn = QProgressDialog(
+            tr_ui("creator.dlg_import_progress_text", "Importiere PGN..."),
+            tr_ui("login.cancel", "Abbrechen"),
+            0, 100, self
+        )
         self.p_pgn.setWindowModality(Qt.WindowModality.WindowModal)
         self.p_pgn.show()
         
@@ -4138,7 +4288,8 @@ class CreatorWindow(QMainWindow):
             self.backend.active_repo_name, 
             side, 
             target_lvl['name'], 
-            target_lvl['order']
+            target_lvl['order'],
+            target_lang=target_lang
         )
         self.w_pgn.progress_signal.connect(self.p_pgn.setValue)
         self.w_pgn.finished_signal.connect(self._on_pgn_import_finished)
@@ -4156,7 +4307,11 @@ class CreatorWindow(QMainWindow):
     def update_structure_tree(self):
         self.combo_structure.blockSignals(True)
         self.combo_structure.clear()
-        self.combo_structure.addItem("🧩 Struktur Explorer", userData=None)
+        tree_icon_path = os.path.join(get_base_path(), "assets", "Icons", "decision_tree.svg")
+        if os.path.exists(tree_icon_path):
+            self.combo_structure.addItem(QIcon(tree_icon_path), tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
+        else:
+            self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
         if not self.backend.active_repo_name:
             self.combo_structure.blockSignals(False)
             return

@@ -121,6 +121,8 @@ def ensure_user_data_seeded():
     # 2. Seed profiles and repertoires
     is_pub = is_public_version()
     for folder in ["profiles", "repertoires"]:
+        if is_pub and folder == "profiles":
+            continue
         dest_folder = os.path.join(user_dir, folder)
         if not os.path.exists(dest_folder):
             os.makedirs(dest_folder, exist_ok=True)

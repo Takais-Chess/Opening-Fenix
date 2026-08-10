@@ -139,10 +139,20 @@ class MaintenanceOrchestrator:
             name = cfg['name']
             elo = cfg['elo']
             
+            def on_progress(pct, *args):
+                if len(args) == 3:
+                    cur, total, eta = args
+                    status_text = f"{cur}/{total} ~{eta}"
+                elif len(args) == 1 and isinstance(args[0], str):
+                    status_text = args[0]
+                else:
+                    status_text = f"{pct}%"
+                self.repo_status_cb(name, "lichess", pct, status_text)
+
             self.repo_status_cb(name, "lichess", 0, "Lichess...")
             success, msg = run_lichess_import(
                 name, elo,
-                progress_callback=lambda p: self.repo_status_cb(name, "lichess", p, "Lichess..."),
+                progress_callback=on_progress,
                 check_cancel=self.check_cancel
             )
             

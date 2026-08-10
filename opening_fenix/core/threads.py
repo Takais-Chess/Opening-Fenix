@@ -35,6 +35,7 @@ class AnalysisThread(QThread):
 
 class LichessImportThread(QThread):
     progress_signal = pyqtSignal(int)
+    status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
     def __init__(self, repo_name, elo_category):
@@ -44,10 +45,18 @@ class LichessImportThread(QThread):
         self._is_canceled = False
 
     def run(self):
+        def on_progress(pct, *args):
+            self.progress_signal.emit(pct)
+            if len(args) == 3:
+                cur, total, eta = args
+                self.status_signal.emit(f"{cur}/{total} (ca. {eta} verbleibend)")
+            elif len(args) == 1 and isinstance(args[0], str):
+                self.status_signal.emit(args[0])
+
         success, msg = run_lichess_import_and_calculate_scores(
             self.repo_name, 
             self.elo_category, 
-            progress_callback=self.progress_signal.emit,
+            progress_callback=on_progress,
             check_cancel=lambda: self._is_canceled
         )
         self.finished_signal.emit(success, msg)
@@ -727,6 +736,7 @@ class AutoBackupThread(QThread):
                     create_repertoire_backup(repo_name, trigger_type="auto")
                 except Exception as e:
                     logger.warning(f"AutoBackupThread error for repertoire '{repo_name}': {e}")
+                self.msleep(100)  # Yield GIL to keep GUI animation butter-smooth
         except Exception as ex:
             logger.error(f"AutoBackupThread main error: {ex}")
 

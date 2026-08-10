@@ -7,6 +7,7 @@ from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments
 from opening_fenix.core.services.repair_service import repair_repertoire_health
+from opening_fenix.core.translation import tr_ui
 
 def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None, target_lang: str = "de") -> Tuple[bool, str]:
     """Imports a PGN file into a new or existing repertoire database using bulk operations."""
@@ -171,16 +172,16 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             set_meta(session, "ana_cache_count", "-1")
             set_meta(session, "cov_cache_count", "-1")
             session.commit()
-            return True, f"{new_moves_count} Züge erfolgreich importiert."
+            return True, tr_ui("creator.msg_import_success", "{count} Züge erfolgreich importiert.", count=new_moves_count)
         else:
             session.rollback()
-            return False, "Keine neuen Züge in der PGN-Datei gefunden, die importiert werden konnten."
+            return False, tr_ui("creator.msg_import_no_moves", "Keine neuen Züge in der PGN-Datei gefunden, die importiert werden konnten.")
 
     except Exception as e:
         session.rollback()
         import traceback
         print(traceback.format_exc())
-        return False, f"Fehler beim Import: {e}"
+        return False, tr_ui("creator.msg_import_error", "Fehler beim Import: {error}", error=str(e))
     finally:
         session.close()
         db.close()

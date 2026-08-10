@@ -69,3 +69,79 @@ def test_combine_comments_with_target_lang():
     dict_en = get_multilingual_comment_dict(res_en, default_lang="en")
     assert dict_en.get("en") == "English plain comment"
     assert dict_en.get("de") is None
+
+def test_copy_repertoire_comments(mock_user_dir, sample_repertoire):
+    from opening_fenix.core.data_tools import copy_repertoire_comments
+    from opening_fenix.core.utils import get_repertoire_db_path, get_multilingual_comment_dict
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.db.models import Position
+    
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    # Add german comment to first position
+    pos = session.query(Position).first()
+    pos.comment = "Taktischer Zug im Zentrum."
+    session.commit()
+    session.close()
+    db.close()
+    
+    # Copy from DE to EN
+    success, msg, count = copy_repertoire_comments(sample_repertoire, "de", "en", overwrite=False)
+    assert success is True
+    assert count >= 1
+    
+    # Verify comment dict now has 'en'
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    pos = session.query(Position).first()
+    cdict = get_multilingual_comment_dict(pos.comment)
+    assert cdict.get("de") == "Taktischer Zug im Zentrum."
+    assert cdict.get("en") == "Taktischer Zug im Zentrum."
+    session.close()
+    db.close()
+
+def test_copy_repertoire_comments_remove_source(mock_user_dir, sample_repertoire):
+    from opening_fenix.core.data_tools import copy_repertoire_comments
+    from opening_fenix.core.utils import get_repertoire_db_path, get_multilingual_comment_dict
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.db.models import Position
+    
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    pos = session.query(Position).first()
+    pos.comment = "Deutscher Text zum Verschieben."
+    session.commit()
+    session.close()
+    db.close()
+    
+    success, msg, count = copy_repertoire_comments(sample_repertoire, "de", "en", overwrite=True, remove_source=True)
+    assert success is True
+    assert count >= 1
+    
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    pos = session.query(Position).first()
+    cdict = get_multilingual_comment_dict(pos.comment)
+    assert cdict.get("de") is None
+    assert cdict.get("en") == "Deutscher Text zum Verschieben."
+    session.close()
+    db.close()
+
+def test_all_languages_comment_mode(creator_window, qapp):
+    """Test switching to 'all' comment language mode in CreatorWindow."""
+    creator_window.current_position_comments = {
+        "de": "Deutscher Kommentar",
+        "en": "English comment"
+    }
+    creator_window.switch_comment_lang("all")
+    assert creator_window.active_comment_lang == "all"
+    assert "🌐 ALLE" in creator_window.btn_lang_comment.text()
+    plain_text = creator_window.txt_c.toPlainText()
+    assert "[:de] Deutscher Kommentar" in plain_text
+    assert "[:en] English comment" in plain_text
+
+

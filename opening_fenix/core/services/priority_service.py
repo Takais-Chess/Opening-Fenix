@@ -7,7 +7,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
-from opening_fenix.core.db.database import DatabaseManager
+from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.lichess_service import ELO_MAPPING
@@ -62,39 +62,45 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                 db.close()
                 return False, "Database contains no positions."
 
-        positions_by_depth = []
-        visited_pos_ids = set()
-        queue = deque([(root_id, 0) for root_id in roots])
-        
+        pos_depths = {root_id: 0 for root_id in roots}
+        visit_count = {root_id: 1 for root_id in roots}
+        queue = deque(roots)
+
         while queue:
-            pos_id, depth = queue.popleft()
-            if pos_id in visited_pos_ids:
-                continue
-            visited_pos_ids.add(pos_id)
-    
-            while len(positions_by_depth) <= depth:
-                positions_by_depth.append([])
-            positions_by_depth[depth].append(pos_id)
-            
+            pos_id = queue.popleft()
+            curr_d = pos_depths[pos_id]
+
             outgoing_moves = outgoing_moves_cache.get(pos_id, [])
             for move in outgoing_moves:
-                if move.to_position_id and move.to_position_id not in visited_pos_ids:
-                    queue.append((move.to_position_id, depth + 1))
-    
+                to_id = move.to_position_id
+                if to_id:
+                    new_d = curr_d + 1
+                    if to_id not in pos_depths or new_d > pos_depths[to_id]:
+                        pos_depths[to_id] = new_d
+                        vc = visit_count.get(to_id, 0) + 1
+                        visit_count[to_id] = vc
+                        if vc <= 100:  # Prevent infinite loops in case of cyclic graphs
+                            queue.append(to_id)
+
+        max_d = max(pos_depths.values()) if pos_depths else 0
+        positions_by_depth = [[] for _ in range(max_d + 1)]
+        for pid, d in pos_depths.items():
+            positions_by_depth[d].append(pid)
+
         id_probabilities = {pos_id: 0.0 for pos_id in id_to_fen.keys()}
         for root_id in roots:
             id_probabilities[root_id] = 1.0
-    
+
         lichess_data_cache = {" ".join(ld.fen.split(" ")[:4]): json.loads(ld.moves_json) for ld in session.query(LichessData).filter_by(elo_range=elo_category).all()}
-    
+
         user_turn_char = get_meta(session, "color", "w")
-    
+
         total_depths = len(positions_by_depth)
         for depth, pos_ids in enumerate(positions_by_depth):
             if check_cancel and check_cancel():
                 session.rollback()
                 return False, "Calculation cancelled."
-    
+
             for pos_id in pos_ids:
                 current_prob = id_probabilities.get(pos_id, 0.0)
                 if current_prob == 0.0:
@@ -121,7 +127,7 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                 else:
                     if not all_outgoing_moves:
                         continue
-    
+
                     # LICESS DATA & TOTAL GAMES LOGIC
                     lichess_move_data = lichess_data_cache.get(clean_pos_fen) or {}
                     total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
@@ -184,11 +190,11 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                             move.priority_score = split_prob
                             if move.to_position_id:
                                 id_probabilities[move.to_position_id] += split_prob
-    
+
             if progress_callback:
                 progress_callback(int((depth + 1) * 100 / total_depths))
             
-        session.commit()
+        commit_with_retry(session)
         return True, "Priority scores calculated successfully."
 
     except Exception as e:
@@ -213,7 +219,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         if clean_start_fen == start_fen_normalized or not incoming_moves:
             start_prob = 1.0
         else:
-            start_prob = sum(m.priority_score for m in incoming_moves)
+            start_prob = sum((m.priority_score or 0.0) for m in incoming_moves)
             
         if start_prob <= 0 and clean_start_fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
             return True, "No probability to propagate."
@@ -234,9 +240,6 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         reachable_ids = {row[0] for row in session.execute(sql_reachable, {"start_id": start_pos_id}).fetchall()}
         
         # ── 2. Bulk fetch all relevant Moves efficiently (handling SQLite limits) ──
-        # Avoid parameter limitations by chunking the IN clause or joining against the CTE.
-        # The simplest way without repeating the CTE is to fetch ALL moves if the DB is small, 
-        # or chunk the reachable_ids if we want to be memory efficient. We'll chunk.
         all_moves_in_subtree = []
         seen_move_ids = set()
         reachable_list = list(reachable_ids)
@@ -263,23 +266,30 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
             if m.to_position_id in incoming_moves_cache:
                 incoming_moves_cache[m.to_position_id].append(m)
 
-        # ── 3. Build queue dynamically (BFS in memory) ──
-        subtree_positions_by_depth = []
-        visited_pos_ids = set()
-        queue = deque([(start_pos_id, 0)])
-        
+        # ── 3. Build queue dynamically (BFS in memory with max depth tracking) ──
+        pos_depths = {start_pos_id: 0}
+        visit_count = {start_pos_id: 1}
+        queue = deque([start_pos_id])
+
         while queue:
-            pos_id, depth = queue.popleft()
-            if pos_id in visited_pos_ids: continue
-            visited_pos_ids.add(pos_id)
-            
-            while len(subtree_positions_by_depth) <= depth:
-                subtree_positions_by_depth.append([])
-            subtree_positions_by_depth[depth].append(pos_id)
-            
+            pos_id = queue.popleft()
+            curr_d = pos_depths[pos_id]
+
             for m in outgoing_moves_cache.get(pos_id, []):
-                if m.to_position_id and m.to_position_id not in visited_pos_ids:
-                    queue.append((m.to_position_id, depth + 1))
+                to_id = m.to_position_id
+                if to_id and to_id in reachable_ids:
+                    new_d = curr_d + 1
+                    if to_id not in pos_depths or new_d > pos_depths[to_id]:
+                        pos_depths[to_id] = new_d
+                        vc = visit_count.get(to_id, 0) + 1
+                        visit_count[to_id] = vc
+                        if vc <= 100:
+                            queue.append(to_id)
+
+        max_d = max(pos_depths.values()) if pos_depths else 0
+        subtree_positions_by_depth = [[] for _ in range(max_d + 1)]
+        for pid, d in pos_depths.items():
+            subtree_positions_by_depth[d].append(pid)
         
         id_probabilities = {pid: 0.0 for pid in reachable_ids}
         id_probabilities[start_pos_id] = start_prob
@@ -287,7 +297,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         for pid in reachable_ids:
             if pid == start_pos_id: continue
             incoming = incoming_moves_cache.get(pid, [])
-            ext_prob = sum(m.priority_score for m in incoming if m.from_position_id not in reachable_ids)
+            ext_prob = sum((m.priority_score or 0.0) for m in incoming if m.from_position_id not in reachable_ids)
             id_probabilities[pid] = ext_prob
 
         rep_moves_db = session.query(RepertoireMove.move_id).filter_by(is_active=True).all()

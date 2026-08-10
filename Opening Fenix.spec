@@ -1,11 +1,11 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 
-is_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
+is_share = os.environ.get('FENIX_SHARE_BUILD') == '1' or os.environ.get('FENIX_PUBLIC_BUILD') == '1' or os.environ.get('APP_BUILD_TYPE', '').lower() == 'public'
 app_name = 'Opening Fenix Public' if is_share else 'Opening Fenix'
 
 datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
-if os.path.exists('profiles'):
+if not is_share and os.path.exists('profiles'):
     datas_list.append(('profiles', 'profiles'))
 if os.path.exists('repertoires'):
     datas_list.append(('repertoires', 'repertoires'))

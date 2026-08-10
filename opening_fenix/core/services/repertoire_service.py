@@ -203,10 +203,13 @@ class RepertoireManager:
             try:
                 q = self.repo_session.query(Position.fen, Move.uci, Move.priority_score)\
                     .join(Move, Position.id == Move.from_position_id)
-                self.priority_cache = {(fen, uci): prio for fen, uci, prio in q.all()}
+                self.priority_cache = {(fen, uci): (prio or 0.0) for fen, uci, prio in q.all()}
             except Exception as e:
                 logger.error(f"Error loading priority cache: {e}")
                 self.priority_cache = {}
+
+    def invalidate_priority_cache(self):
+        self.priority_cache = None
 
     def check_if_alternative_good_move(self, move_obj, played_uci):
         return bool(self.get_alternative_move_type(move_obj, played_uci))
@@ -238,3 +241,5 @@ class RepertoireManager:
                 logger.debug(f"Error parsing good_moves in get_alternative_move_type: {e}")
                 
         return None
+
+

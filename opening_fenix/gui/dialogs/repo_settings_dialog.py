@@ -671,11 +671,16 @@ class RepoSettingsDialog(QDialog):
         card_comment_lang = create_mini_card(tr_ui("repo_settings.label_comment_lang", "💬 Kommentar-Sprache (Trainer)"), self.combo_comment_lang)
 
         # Card F: Comment Statistics
+        layout_comment_card = QVBoxLayout()
+        layout_comment_card.setSpacing(scale(4))
+
         self.lbl_comment_stats = QLabel("-")
         self.lbl_comment_stats.setStyleSheet(f"font-weight: 700; font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
         self.lbl_comment_stats.setWordWrap(True)
         self.lbl_comment_stats.setMinimumWidth(0)
-        card_comment_stats = create_mini_card(tr_ui("repo_settings.label_comment_stats", "💬 Kommentare im Kurs"), self.lbl_comment_stats)
+        layout_comment_card.addWidget(self.lbl_comment_stats)
+
+        card_comment_stats = create_mini_card(tr_ui("repo_settings.label_comment_stats", "💬 Kommentare im Kurs"), layout_comment_card)
 
         grid_meta.addWidget(card_elo, 0, 0)
         grid_meta.addWidget(card_color, 0, 1)
@@ -1016,7 +1021,20 @@ class RepoSettingsDialog(QDialog):
         v_clean.addWidget(btn_brackets)
         layout.addWidget(g_clean)
 
-        # 3. 🤖 Engine Analyse
+        # 3. 🌐 Kommentare übertragen
+        g_transfer = QGroupBox(tr_ui("repo_settings.transfer_comments_group_title", "🌐 Kommentare übertragen"))
+        v_transfer = QVBoxLayout(g_transfer)
+        lbl_transfer_desc = QLabel(tr_ui("repo_settings.transfer_comments_group_desc", "Übertrage oder verschiebe Kommentare von einer Sprache in eine andere im gesamten Kurs."))
+        lbl_transfer_desc.setWordWrap(True)
+        lbl_transfer_desc.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 6px;")
+        v_transfer.addWidget(lbl_transfer_desc)
+        
+        self.btn_transfer_comments = QPushButton(tr_ui("repo_settings.btn_transfer_comments", "🌐 Kommentare übertragen..."))
+        self.btn_transfer_comments.clicked.connect(self.open_transfer_comments_dialog)
+        v_transfer.addWidget(self.btn_transfer_comments)
+        layout.addWidget(g_transfer)
+
+        # 4. 🤖 Engine Analyse
         g_engine = QGroupBox(tr_ui("repo_settings.engine_scan_title", "🤖 Engine-Analyse"))
         v_eng_main = QVBoxLayout(g_engine)
         lbl_eng_desc = QLabel(tr_ui("repo_settings.engine_scan_desc", "Alternativ gute Züge berechnen mit Engine-Analyse des gesamten Repertoires."))
@@ -2256,6 +2274,8 @@ class RepoSettingsDialog(QDialog):
         self.pb_lich.setRange(0, 100)
         self.pb_lich.setValue(0)
         self.w_lich.progress_signal.connect(self.pb_lich.setValue)
+        if hasattr(self.w_lich, 'status_signal'):
+            self.w_lich.status_signal.connect(self.l_lich_status.setText)
         
         def on_finished(success, message):
             try:
@@ -2510,7 +2530,70 @@ class RepoSettingsDialog(QDialog):
             QMessageBox.information(self, tr_ui("repo_settings.dlg_orphan_cleanup_title", "Bereinigung fertig"), tr_ui("repo_settings.dlg_orphan_cleanup_done", "Erfolgreich {count} verwaiste Lichess-Einträge gelöscht.", count=count))
         else:
             QMessageBox.information(self, tr_ui("repo_settings.dlg_orphan_cleanup_title", "Bereinigung fertig"), tr_ui("repo_settings.dlg_orphan_cleanup_empty", "Keine verwaisten Lichess-Daten gefunden."))
-        self.refresh_info()
+    def open_transfer_comments_dialog(self):
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_comments_title", "Kommentare übertragen"))
+        dlg.setMinimumWidth(scale(380))
+        dlg.setStyleSheet(get_bw_glass_style())
+        
+        v = QVBoxLayout(dlg)
+        v.setSpacing(scale(12))
+        
+        lbl_intro = QLabel(tr_ui("repo_settings.dlg_transfer_comments_intro", "Übertrage alle Kommentare einer Sprache in eine andere Sprache im aktuellen Kurs:"))
+        lbl_intro.setWordWrap(True)
+        lbl_intro.setStyleSheet(f"font-size: {scale(13)}px; color: {COLORS['dark_accent']};")
+        v.addWidget(lbl_intro)
+        
+        f_layout = QFormLayout()
+        c_src = NoWheelComboBox()
+        c_src.addItems(["DE", "EN", "ES", "FR", "IT", "RU"])
+        c_src.setCurrentText("DE")
+        
+        c_target = NoWheelComboBox()
+        c_target.addItems(["EN", "DE", "ES", "FR", "IT", "RU"])
+        c_target.setCurrentText("EN")
+        
+        f_layout.addRow(tr_ui("repo_settings.dlg_transfer_src", "Quellsprache:"), c_src)
+        f_layout.addRow(tr_ui("repo_settings.dlg_transfer_target", "Zielsprache:"), c_target)
+        v.addLayout(f_layout)
+        
+        chk_overwrite = QCheckBox(tr_ui("repo_settings.dlg_transfer_overwrite", "Vorhandene Zielkommentare überschreiben"))
+        v.addWidget(chk_overwrite)
+        
+        chk_remove_source = QCheckBox(tr_ui("repo_settings.dlg_transfer_remove_source", "Kommentare in Quellsprache löschen (Verschieben)"))
+        v.addWidget(chk_remove_source)
+        
+        h_btns = QHBoxLayout()
+        h_btns.addStretch()
+        
+        btn_cancel = QPushButton(tr_ui("login.cancel", "Abbrechen"))
+        btn_cancel.clicked.connect(dlg.reject)
+        
+        btn_run = QPushButton(tr_ui("repo_settings.btn_transfer_exec", "🌐 Übertragen"))
+        btn_run.setProperty("class", "Primary")
+        
+        def on_run():
+            src = c_src.currentText().lower()
+            target = c_target.currentText().lower()
+            if src == target:
+                QMessageBox.warning(dlg, tr_ui("repo_settings.dlg_error", "Fehler"), tr_ui("repo_settings.msg_same_lang", "Quell- und Zielsprache müssen unterschiedlich sein."))
+                return
+            overwrite = chk_overwrite.isChecked()
+            remove_source = chk_remove_source.isChecked()
+            from opening_fenix.core.data_tools import copy_repertoire_comments
+            success, msg, count = copy_repertoire_comments(self.backend.active_repo_name, src, target, overwrite, remove_source)
+            if success:
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_success", "Erfolg"), msg)
+                self.refresh_info()
+                dlg.accept()
+            else:
+                QMessageBox.warning(dlg, tr_ui("repo_settings.dlg_error", "Fehler"), msg)
+                
+        btn_run.clicked.connect(on_run)
+        h_btns.addWidget(btn_cancel)
+        h_btns.addWidget(btn_run)
+        v.addLayout(h_btns)
+        dlg.exec()
 
     def closeEvent(self, event):
         """Clean up background threads and timers before closing."""

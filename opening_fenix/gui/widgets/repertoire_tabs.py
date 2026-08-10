@@ -124,13 +124,7 @@ class RepertoireTabsWidget(QWidget):
         
         self.layout.addWidget(self.res_pill)
 
-        # Effects
-        for pill in [self.repo_scroll, self.right_container, self.res_pill]:
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(10)
-            shadow.setColor(QColor(0, 0, 0, 30))
-            shadow.setOffset(0, 4)
-            pill.setGraphicsEffect(shadow)
+        # Pill styling maintained cleanly via CSS
 
     def _on_button_clicked(self, button):
         self.repertoire_changed.emit(button.property("repo_name"))

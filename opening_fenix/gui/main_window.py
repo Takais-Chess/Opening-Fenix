@@ -129,11 +129,21 @@ class MainWindow(QMainWindow):
 
         self.update_checker = UpdateCheckWorker(manual=False, parent=self)
         self.update_checker.update_found.connect(self.on_update_found)
-        self.update_checker.start()
 
         from opening_fenix.core.threads import AutoBackupThread
         self.backup_worker = AutoBackupThread(parent=self)
-        self.backup_worker.start()
+
+        # Delay heavy background workers until 3 seconds after window startup to avoid GIL animation starvation
+        QTimer.singleShot(3000, self._start_background_workers)
+
+    def _start_background_workers(self):
+        try:
+            if hasattr(self, 'update_checker') and self.update_checker and not self.update_checker.isRunning():
+                self.update_checker.start(QThread.Priority.LowPriority)
+            if hasattr(self, 'backup_worker') and self.backup_worker and not self.backup_worker.isRunning():
+                self.backup_worker.start(QThread.Priority.IdlePriority)
+        except Exception:
+            pass
 
     def on_update_found(self, release_info: dict):
         from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
@@ -384,15 +394,10 @@ class MainWindow(QMainWindow):
         
         top_layout.addWidget(self.res_pill)
         
-        # Apply GlassPill classes and small drop shadows to the top elements
+        # Apply GlassPill classes to the top elements
         for pill in [self.repo_scroll, top_right_container, self.res_pill]:
             pill.setProperty("class", "GlassPill")
             self.repolish(pill)
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(10)
-            shadow.setColor(QColor(0, 0, 0, 30))
-            shadow.setOffset(0, 4)
-            pill.setGraphicsEffect(shadow)
         
         # Inject merged top bar into the custom title bar before the stretch and window controls
         self.custom_title_bar.layout.insertLayout(1, top_layout, 1)
@@ -512,13 +517,7 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(content_wrapper, 1)
 
-        # Apply Drop Shadows for glass depth
-        for panel in [self.board_panel, self.side_panel]:
-            shadow = QGraphicsDropShadowEffect()
-            shadow.setBlurRadius(20)
-            shadow.setColor(QColor(0, 0, 0, 50))
-            shadow.setOffset(0, 6)
-            panel.setGraphicsEffect(shadow)
+        # Panels maintain crisp CSS border styling without software Gaussian blur overhead
 
     def scroll_tabs_left(self):
         sb = self.repo_scroll.horizontalScrollBar()
@@ -983,7 +982,8 @@ class MainWindow(QMainWindow):
     def check_user_move(self, move):
         if self.button_state not in ['waiting_for_move', 'show_solution_prompt'] or not self.current_move_obj: return
         if move.uci() == self.current_move_obj.uci:
-            self.play_sound("move")
+            is_cap = self.board_widget.board.is_capture(move)
+            self.play_sound("capture" if is_cap else "move")
             self.board_widget.board.push(move)
             self.board_widget.solution_arrow = None
             
@@ -1006,7 +1006,8 @@ class MainWindow(QMainWindow):
         else:
             alt_type = self.repertoire_manager.get_alternative_move_type(self.current_move_obj, move.uci())
             if alt_type:
-                self.play_sound("move")
+                is_cap = self.board_widget.board.is_capture(move)
+                self.play_sound("capture" if is_cap else "move")
                 if alt_type == 'repertoire':
                     self.btn_smart.setText(tr_ui("main_window.btn_alt_repertoire", "GUTER ZUG (ANDERER REPERTOIRE-WEG)"))
                 else:
@@ -1255,7 +1256,8 @@ class MainWindow(QMainWindow):
             self.finalize_animation_state()
 
     def animation_step(self):
-        self.play_sound("move")
+        is_cap = getattr(self.board_widget, 'last_move_was_capture', False)
+        self.play_sound("capture" if is_cap else "move")
         self._advance_animation_sequence()
 
     def skip_all_animations(self):
@@ -1263,7 +1265,12 @@ class MainWindow(QMainWindow):
         if not (self.board_widget.is_animating or self.animation_moves):
             return
 
-        self.play_sound("move")
+        is_cap = False
+        if self.board_widget.is_animating and self.board_widget.animating_piece_data:
+            m = self.board_widget.animating_piece_data['move']
+            if self.board_widget.board.is_capture(m):
+                is_cap = True
+        self.play_sound("capture" if is_cap else "move")
         
         # 1. Handle currently sliding piece
         if self.board_widget.is_animating:

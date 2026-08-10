@@ -6,7 +6,7 @@ import urllib.parse
 from typing import Tuple, Callable, Optional, Dict, List
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
-from opening_fenix.core.db.database import DatabaseManager
+from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, _update_lichess_delay_config
 
@@ -52,7 +52,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
             set_meta(session, "lichess_elo", elo_category)
             # Invalidate coverage cache to force recalculation with new Elo if changed
             set_meta(session, "cov_cache_count", "-1")
-            session.commit()
+            commit_with_retry(session)
             return True, f"Alle Positionen haben bereits Lichess-Daten für ELO '{elo_category}'."
 
         lichess_ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
@@ -60,6 +60,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         new_data_points_added = 0
         successful_requests_in_a_row = 0
         last_failure_delay = None
+        start_time = time.time()
         
         i = 0
         while i < len(positions_to_query):
@@ -71,7 +72,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 continue
                 
             if check_cancel and check_cancel():
-                session.commit()
+                commit_with_retry(session)
                 _update_lichess_delay_config(current_delay)
                 return False, "Import abgebrochen."
 
@@ -177,15 +178,34 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
             i += 1
             
             if new_data_points_added > 0 and new_data_points_added % 10 == 0:
-                session.commit()
+                commit_with_retry(session)
 
             if progress_callback:
-                progress_callback(int(i * 100 / total_pos))
+                pct = int(i * 100 / total_pos)
+                elapsed = max(time.time() - start_time, 0.001)
+                avg_per_item = elapsed / i
+                remaining_items = total_pos - i
+                eta_sec = int(remaining_items * avg_per_item)
+                if eta_sec < 60:
+                    eta_str = f"{eta_sec}s"
+                elif eta_sec < 3600:
+                    eta_str = f"{eta_sec // 60}m {eta_sec % 60}s"
+                else:
+                    eta_str = f"{eta_sec // 3600}h {(eta_sec % 3600) // 60}m"
+                
+                try:
+                    progress_callback(pct, i, total_pos, eta_str)
+                except TypeError:
+                    try:
+                        status_text = f"{i}/{total_pos} (ca. {eta_str} verbleibend)"
+                        progress_callback(pct, status_text)
+                    except TypeError:
+                        progress_callback(pct)
             
             time.sleep(current_delay)
 
         set_meta(session, "lichess_elo", elo_category)
-        session.commit()
+        commit_with_retry(session)
         _update_lichess_delay_config(current_delay)
         return True, f"{new_data_points_added} neue Lichess-Datenpunkte für ELO '{elo_category}' erfolgreich importiert."
 
@@ -199,12 +219,19 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         db.close()
 
 
-def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[..., None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
     from opening_fenix.core.services.priority_service import calculate_priority_scores
 
-    def import_progress_wrapper(percent):
+    def import_progress_wrapper(percent, *args):
         if progress_callback:
-            progress_callback(int(percent * 0.95))
+            scaled_pct = int(percent * 0.95)
+            if args:
+                try:
+                    progress_callback(scaled_pct, *args)
+                except TypeError:
+                    progress_callback(scaled_pct)
+            else:
+                progress_callback(scaled_pct)
 
     import_success, import_msg = run_lichess_import(
         repo_name, elo_category,

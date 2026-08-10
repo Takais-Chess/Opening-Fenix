@@ -1,14 +1,36 @@
 import os
 import threading
+import time
+import sqlite3
 from typing import Type
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.decl_api import DeclarativeMeta
 from sqlalchemy.pool import NullPool, StaticPool
-from sqlalchemy.exc import DatabaseError
+from sqlalchemy.exc import DatabaseError, OperationalError
 from opening_fenix.core.db.models import Base, UserBase
 
 _db_init_lock = threading.RLock()
+
+def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: float = 0.1) -> None:
+    """
+    Commits a SQLAlchemy session, retrying automatically with exponential backoff if 
+    a SQLite database lock error ('database is locked' / 'database is busy') occurs.
+    """
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            session.commit()
+            return
+        except (OperationalError, DatabaseError, sqlite3.OperationalError) as e:
+            err_str = str(e).lower()
+            if "database is locked" in err_str or "locked" in err_str or "busy" in err_str:
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(delay)
+                delay = min(delay * 1.5, 2.0)
+            else:
+                raise
 
 class DatabaseCorruptedException(Exception):
     """Raised when a SQLite database is physically corrupted or malformed."""
@@ -19,8 +41,8 @@ class DatabaseManager:
     Manages SQLite database connections, configuration, and migrations.
 
     This class handles the creation of the SQLAlchemy engine, configures
-    SQLite PRAGMAS for optimal performance (e.g., WAL mode), and applies
-    schema migrations automatically on startup.
+    SQLite PRAGMAS for optimal performance (e.g., WAL mode, 60s busy_timeout),
+    and applies schema migrations automatically on startup.
     """
 
     def __init__(self, db_filename: str, base: Type = Base) -> None:
@@ -36,18 +58,19 @@ class DatabaseManager:
                 self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
             else:
                 os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
-                self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 15}, poolclass=NullPool)
-            
-            # Set journal_mode to WAL once during initialization (persistent database setting)
+                self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 60, 'check_same_thread': False}, poolclass=NullPool)
+
             if db_filename != ":memory:":
-                try:
-                    with self.engine.connect() as conn:
-                        current_mode = conn.execute(text("PRAGMA journal_mode")).scalar()
-                        if current_mode != "wal":
-                            conn.execute(text("PRAGMA journal_mode=WAL"))
-                except Exception as e:
-                    from opening_fenix.core.logger import logger
-                    logger.warning(f"Could not set journal_mode to WAL: {e}")
+                @event.listens_for(self.engine, "connect")
+                def _set_sqlite_pragmas(dbapi_connection, connection_record):
+                    try:
+                        cursor = dbapi_connection.cursor()
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.execute("PRAGMA busy_timeout=60000")
+                        cursor.execute("PRAGMA synchronous=NORMAL")
+                        cursor.close()
+                    except Exception:
+                        pass
 
             try:
                 base.metadata.create_all(self.engine)

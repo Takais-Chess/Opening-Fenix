@@ -107,3 +107,30 @@ def test_import_pgn_append_comments(backend):
     backend.import_pgn_text(pgn2)
     data = backend.get_position_data(e4_fen)
     assert data['comment'] == "First comment | Second comment"
+
+def test_import_pgn_to_db_target_language(mock_user_dir, temp_dir):
+    import os
+    from opening_fenix.core.services.import_service import import_pgn_to_db
+    from opening_fenix.core.utils import get_repertoire_db_path, get_multilingual_comment_dict
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.db.models import Position
+    
+    pgn_path = os.path.join(temp_dir, "english_comments.pgn")
+    with open(pgn_path, "w", encoding="utf-8") as f:
+        f.write("1. e4 {Strong pawn center} e5")
+        
+    repo_name = "LangImportRepo"
+    success, msg = import_pgn_to_db(pgn_path, repo_name, "w", "Core", 1, target_lang="en")
+    assert success is True
+    
+    db_path = get_repertoire_db_path(repo_name)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    pos = session.query(Position).filter_by(fen=e4_fen).first()
+    assert pos is not None
+    cdict = get_multilingual_comment_dict(pos.comment)
+    assert cdict.get("en") == "Strong pawn center"
+    session.close()
+    db.close()

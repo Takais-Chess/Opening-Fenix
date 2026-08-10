@@ -99,12 +99,7 @@ class TrainingCenterWidget(QFrame):
 
         layout.addWidget(training_hub)
 
-        # Shadow
-        shadow = QGraphicsDropShadowEffect()
-        shadow.setBlurRadius(20)
-        shadow.setColor(QColor(0, 0, 0, 50))
-        shadow.setOffset(0, 6)
-        self.setGraphicsEffect(shadow)
+        # Card styling maintained cleanly via CSS
 
     def update_stats(self, new_c, due_c, dist):
         self.pie_chart.update_stats(new_c, due_c, dist)
