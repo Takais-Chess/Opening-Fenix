@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "0.9.1"
+#define MyAppVersion "0.9.2"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -35,6 +35,9 @@ Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
+UsePreviousLanguage=yes
+ShowLanguageDialog=auto
+CloseApplications=yes
 
 [Languages]
 Name: "en"; MessagesFile: "compiler:Default.isl"
@@ -66,13 +69,71 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
 
 [Code]
 var
   LichessPage: TWizardPage;
   LichessEdit: TNewEdit;
   LichessLinkLabel: TNewStaticText;
+  ExistingLichessToken: String;
+  ExistingLanguage: String;
+  IsUpgradeMode: Boolean;
+
+function ExtractJsonValue(const Json, Key: String): String;
+var
+  P, P2, P3: Integer;
+  SearchKey: String;
+begin
+  Result := '';
+  SearchKey := '"' + Key + '"';
+  P := Pos(SearchKey, Json);
+  if P > 0 then
+  begin
+    P := P + Length(SearchKey);
+    P2 := Pos(':', Copy(Json, P, Length(Json) - P + 1));
+    if P2 > 0 then
+    begin
+      P := P + P2;
+      P2 := Pos('"', Copy(Json, P, Length(Json) - P + 1));
+      if P2 > 0 then
+      begin
+        P := P + P2;
+        P3 := Pos('"', Copy(Json, P, Length(Json) - P + 1));
+        if P3 > 0 then
+        begin
+          Result := Copy(Json, P, P3 - 1);
+        end;
+      end;
+    end;
+  end;
+end;
+
+function LoadExistingConfig(): Boolean;
+var
+  ConfigPath: String;
+  JsonContent: AnsiString;
+begin
+  Result := False;
+  ExistingLichessToken := '';
+  ExistingLanguage := '';
+  
+  ConfigPath := ExpandConstant('{app}') + '\config.json';
+  if not FileExists(ConfigPath) then
+  begin
+    ConfigPath := ExpandConstant('{userappdata}') + '\Opening Fenix\config.json';
+  end;
+
+  if FileExists(ConfigPath) then
+  begin
+    if LoadStringFromFile(ConfigPath, JsonContent) then
+    begin
+      Result := True;
+      ExistingLichessToken := ExtractJsonValue(String(JsonContent), 'lichess_token');
+      ExistingLanguage := ExtractJsonValue(String(JsonContent), 'ui_language');
+    end;
+  end;
+end;
 
 procedure OpenLichessUrl(Sender: TObject);
 var
@@ -87,6 +148,8 @@ var
   PromptLabel: TNewStaticText;
   SkipLabel: TNewStaticText;
 begin
+  IsUpgradeMode := LoadExistingConfig();
+
   { Create custom page after destination folder selection page }
   LichessPage := CreateCustomPage(wpSelectDir, ExpandConstant('{cm:LichessTitle}'), ExpandConstant('{cm:LichessSubTitle}'));
 
@@ -119,6 +182,10 @@ begin
   LichessEdit.Left := 0;
   LichessEdit.Top := PromptLabel.Top + 20;
   LichessEdit.Width := LichessPage.SurfaceWidth;
+  if ExistingLichessToken <> '' then
+  begin
+    LichessEdit.Text := ExistingLichessToken;
+  end;
 
   SkipLabel := TNewStaticText.Create(LichessPage);
   SkipLabel.Parent := LichessPage.Surface;
@@ -130,19 +197,114 @@ begin
   SkipLabel.Font.Style := [fsItalic];
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  // If upgrading and we already have an existing configuration, skip the Lichess token setup page
+  if (PageID = LichessPage.ID) and IsUpgradeMode and (ExistingLichessToken <> '') then
+  begin
+    Result := True;
+  end;
+end;
+
+function FindLastChar(const S: String; C: Char): Integer;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := Length(S) downto 1 do
+  begin
+    if S[I] = C then
+    begin
+      Result := I;
+      Exit;
+    end;
+  end;
+end;
+
+function UpdateOrAddJsonKey(const Json, Key, NewValue: String; IsString: Boolean): String;
+var
+  P, P2, P3, PEnd: Integer;
+  SearchKey: String;
+  FormattedVal: String;
+  NewPair: String;
+begin
+  Result := Json;
+  if IsString then
+    FormattedVal := '"' + NewValue + '"'
+  else
+    FormattedVal := NewValue;
+
+  SearchKey := '"' + Key + '"';
+  P := Pos(SearchKey, Result);
+  if P > 0 then
+  begin
+    P2 := Pos(':', Copy(Result, P, Length(Result) - P + 1));
+    if P2 > 0 then
+    begin
+      P2 := P + P2 - 1;
+      P3 := P2 + 1;
+      while (P3 <= Length(Result)) and ((Result[P3] = ' ') or (Result[P3] = #13) or (Result[P3] = #10) or (Result[P3] = #9)) do
+        P3 := P3 + 1;
+      
+      PEnd := P3;
+      if (PEnd <= Length(Result)) and (Result[PEnd] = '"') then
+      begin
+        PEnd := PEnd + 1;
+        while (PEnd <= Length(Result)) and (Result[PEnd] <> '"') do
+          PEnd := PEnd + 1;
+        if PEnd <= Length(Result) then
+          PEnd := PEnd + 1;
+      end
+      else
+      begin
+        while (PEnd <= Length(Result)) and (Result[PEnd] <> ',') and (Result[PEnd] <> #13) and (Result[PEnd] <> #10) and (Result[PEnd] <> '}') do
+          PEnd := PEnd + 1;
+      end;
+      
+      Result := Copy(Result, 1, P3 - 1) + FormattedVal + Copy(Result, PEnd, Length(Result) - PEnd + 1);
+    end;
+  end
+  else
+  begin
+    PEnd := FindLastChar(Result, '}');
+    if PEnd > 0 then
+    begin
+      NewPair := '    "' + Key + '": ' + FormattedVal;
+      P2 := PEnd - 1;
+      while (P2 > 0) and ((Result[P2] = ' ') or (Result[P2] = #13) or (Result[P2] = #10) or (Result[P2] = #9)) do
+        P2 := P2 - 1;
+      if (P2 > 0) and (Result[P2] <> '{') and (Result[P2] <> ',') then
+      begin
+        Result := Copy(Result, 1, P2) + ',' + Copy(Result, P2 + 1, PEnd - P2 - 1) + #13#10 + NewPair + #13#10 + '}' + Copy(Result, PEnd + 1, Length(Result) - PEnd);
+      end
+      else
+      begin
+        Result := Copy(Result, 1, PEnd - 1) + NewPair + #13#10 + '}' + Copy(Result, PEnd + 1, Length(Result) - PEnd);
+      end;
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ConfigPath: String;
   LichessKey: String;
   LangCode: String;
   EnginePath: String;
-  JsonContent: String;
+  JsonContentStr: String;
+  JsonContentAnsi: AnsiString;
   EscapedEnginePath: String;
   IsPublicStr: String;
+  TargetPaths: array[0..1] of String;
+  I: Integer;
 begin
   if CurStep = ssPostInstall then
   begin
     LichessKey := Trim(LichessEdit.Text);
+    if (LichessKey = '') and (ExistingLichessToken <> '') then
+      LichessKey := ExistingLichessToken;
+
     LangCode := ExpandConstant('{language}');
     if LangCode <> 'de' then
       LangCode := 'en';
@@ -157,20 +319,41 @@ begin
     EscapedEnginePath := EnginePath;
     StringChangeEx(EscapedEnginePath, '\', '\\', True);
 
-    ConfigPath := ExpandConstant('{app}') + '\config.json';
+    TargetPaths[0] := ExpandConstant('{app}') + '\config.json';
+    TargetPaths[1] := ExpandConstant('{userappdata}') + '\Opening Fenix\config.json';
 
-    JsonContent := '{' + #13#10 +
-      '    "engine_path": "' + EscapedEnginePath + '",' + #13#10 +
-      '    "lichess_token": "' + LichessKey + '",' + #13#10 +
-      '    "ui_language": "' + LangCode + '",' + #13#10 +
-      '    "is_public": ' + IsPublicStr + ',' + #13#10 +
-      '    "master_volume": 30,' + #13#10 +
-      '    "engine_threads": "4",' + #13#10 +
-      '    "engine_hash": "256",' + #13#10 +
-      '    "engine_depth": "20",' + #13#10 +
-      '    "engine_multipv": "3"' + #13#10 +
-      '}';
-
-    SaveStringToFile(ConfigPath, JsonContent, False);
+    for I := 0 to 1 do
+    begin
+      ConfigPath := TargetPaths[I];
+      if FileExists(ConfigPath) then
+      begin
+        if LoadStringFromFile(ConfigPath, JsonContentAnsi) then
+        begin
+          JsonContentStr := String(JsonContentAnsi);
+          JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'engine_path', EscapedEnginePath, True);
+          if LichessKey <> '' then
+            JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'lichess_token', LichessKey, True);
+          JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'ui_language', LangCode, True);
+          JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'is_public', IsPublicStr, False);
+          SaveStringToFile(ConfigPath, AnsiString(JsonContentStr), False);
+        end;
+      end
+      else if I = 0 then
+      begin
+        JsonContentStr := '{' + #13#10 +
+          '    "engine_path": "' + EscapedEnginePath + '",' + #13#10 +
+          '    "lichess_token": "' + LichessKey + '",' + #13#10 +
+          '    "ui_language": "' + LangCode + '",' + #13#10 +
+          '    "is_public": ' + IsPublicStr + ',' + #13#10 +
+          '    "master_volume": 30,' + #13#10 +
+          '    "engine_threads": "4",' + #13#10 +
+          '    "engine_hash": "256",' + #13#10 +
+          '    "engine_depth": "20",' + #13#10 +
+          '    "engine_multipv": "3"' + #13#10 +
+          '}';
+        SaveStringToFile(ConfigPath, AnsiString(JsonContentStr), False);
+      end;
+    end;
   end;
 end;
+

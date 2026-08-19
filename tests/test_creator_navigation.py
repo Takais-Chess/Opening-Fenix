@@ -26,9 +26,13 @@ def test_creator_arrow_navigation(qapp, monkeypatch):
     # Mock heavy backend components
     monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorBackend", MagicMock())
     monkeypatch.setattr("opening_fenix.core.engine.EngineThread", MagicMock())
-    # Block the "no repertoire found" dialog from firing via QTimer
+    # Block dialogs from firing via QTimer
     monkeypatch.setattr(
         "opening_fenix.creator.creator_window.CreatorWindow.new_repertoire_dialog",
+        lambda self: None
+    )
+    monkeypatch.setattr(
+        "opening_fenix.creator.creator_window.CreatorWindow.load_repertoire_dialog",
         lambda self: None
     )
     

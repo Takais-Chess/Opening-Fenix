@@ -50,8 +50,8 @@ def get_base_path():
     parent_dir = os.path.dirname(current_dir)
     return os.path.dirname(parent_dir)
 
-def get_user_dir():
-    """Returns the directory where user data (profiles, config, repertoires) is stored."""
+def get_default_user_dir():
+    """Returns the default local directory where user data (profiles, config, repertoires) is stored."""
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
         try:
@@ -69,6 +69,114 @@ def get_user_dir():
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     return os.path.dirname(parent_dir)
+
+def get_custom_data_dir():
+    """Returns the configured custom data directory if set and existing, otherwise None."""
+    default_dir = get_default_user_dir()
+    master_cfg_path = os.path.join(default_dir, "config.json")
+    if os.path.exists(master_cfg_path):
+        try:
+            with open(master_cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            custom_dir = cfg.get("custom_data_dir")
+            if custom_dir and isinstance(custom_dir, str) and custom_dir.strip():
+                custom_dir = os.path.abspath(custom_dir.strip())
+                if os.path.exists(custom_dir):
+                    return custom_dir
+        except Exception:
+            pass
+    return None
+
+def set_custom_data_dir(target_dir):
+    """Updates or clears the custom_data_dir in the master config.json."""
+    default_dir = get_default_user_dir()
+    os.makedirs(default_dir, exist_ok=True)
+    master_cfg_path = os.path.join(default_dir, "config.json")
+    
+    cfg = {}
+    if os.path.exists(master_cfg_path):
+        try:
+            with open(master_cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception:
+            cfg = {}
+
+    if target_dir is None or not str(target_dir).strip():
+        cfg.pop("custom_data_dir", None)
+    else:
+        target_dir = os.path.abspath(str(target_dir).strip())
+        os.makedirs(target_dir, exist_ok=True)
+        os.makedirs(os.path.join(target_dir, "repertoires"), exist_ok=True)
+        os.makedirs(os.path.join(target_dir, "profiles"), exist_ok=True)
+        os.makedirs(os.path.join(target_dir, "backups"), exist_ok=True)
+        cfg["custom_data_dir"] = target_dir
+
+    with open(master_cfg_path, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=4, ensure_ascii=False)
+
+def get_user_dir():
+    """Returns the active user data directory (custom cloud dir if configured, else default)."""
+    custom = get_custom_data_dir()
+    if custom:
+        return custom
+    return get_default_user_dir()
+
+def migrate_user_data(source_dir, target_dir):
+    """
+    Copies repertoires, profiles, and backups from source_dir to target_dir.
+    Returns a dictionary summarizing copied items.
+    """
+    import shutil
+    summary = {"repertoires": 0, "profiles": 0, "backups": 0}
+    if not source_dir or not target_dir:
+        return summary
+    if not os.path.exists(source_dir):
+        return summary
+    if os.path.abspath(source_dir) == os.path.abspath(target_dir):
+        return summary
+
+    os.makedirs(target_dir, exist_ok=True)
+
+    for folder in ["repertoires", "profiles", "backups"]:
+        src_folder = os.path.join(source_dir, folder)
+        dest_folder = os.path.join(target_dir, folder)
+        os.makedirs(dest_folder, exist_ok=True)
+        if os.path.exists(src_folder) and os.path.isdir(src_folder):
+            for item in os.listdir(src_folder):
+                s_path = os.path.join(src_folder, item)
+                d_path = os.path.join(dest_folder, item)
+                try:
+                    if os.path.isdir(s_path):
+                        if not os.path.exists(d_path):
+                            shutil.copytree(s_path, d_path)
+                            summary[folder] += 1
+                        else:
+                            for sub_item in os.listdir(s_path):
+                                sub_s = os.path.join(s_path, sub_item)
+                                sub_d = os.path.join(d_path, sub_item)
+                                if not os.path.exists(sub_d):
+                                    if os.path.isdir(sub_s):
+                                        shutil.copytree(sub_s, sub_d)
+                                    else:
+                                        shutil.copy2(sub_s, sub_d)
+                            summary[folder] += 1
+                    else:
+                        if not os.path.exists(d_path):
+                            shutil.copy2(s_path, d_path)
+                            summary[folder] += 1
+                except Exception as e:
+                    print(f"Warning: Could not copy {s_path} to {d_path}: {e}")
+
+    # Also copy config.json if not present in target
+    src_cfg = os.path.join(source_dir, "config.json")
+    dest_cfg = os.path.join(target_dir, "config.json")
+    if os.path.exists(src_cfg) and not os.path.exists(dest_cfg):
+        try:
+            shutil.copy2(src_cfg, dest_cfg)
+        except Exception:
+            pass
+
+    return summary
 
 def ensure_user_data_seeded():
     r"""

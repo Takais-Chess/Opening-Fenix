@@ -191,10 +191,11 @@ def silence_ui(monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: ("/path/to/save.pgn", "PGN Files (*.pgn)"))
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args, **kwargs: "/path/to/dir")
 
-    # Mock CreatorWindow.new_repertoire_dialog
+    # Mock CreatorWindow dialogs that can fire via QTimer on startup
     try:
         from opening_fenix.creator.creator_window import CreatorWindow
         monkeypatch.setattr(CreatorWindow, "new_repertoire_dialog", lambda *args, **kwargs: None)
+        monkeypatch.setattr(CreatorWindow, "load_repertoire_dialog", lambda *args, **kwargs: None)
     except (ImportError, AttributeError):
         pass
     

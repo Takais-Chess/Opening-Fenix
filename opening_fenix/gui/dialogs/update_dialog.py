@@ -278,8 +278,8 @@ class UpdateDialog(QDialog):
     def launch_installer_and_exit(self):
         if self.downloaded_installer_path and os.path.exists(self.downloaded_installer_path):
             try:
-                logger.info(f"Launching installer: {self.downloaded_installer_path}")
-                subprocess.Popen([self.downloaded_installer_path], shell=True)
+                logger.info(f"Launching installer silently: {self.downloaded_installer_path}")
+                subprocess.Popen([self.downloaded_installer_path, "/SILENT", "/SUPPRESSMSGBOXES"])
                 QApplication.quit()
             except Exception as e:
                 logger.error(f"Failed to launch installer: {e}")

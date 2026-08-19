@@ -75,6 +75,7 @@ Re-translate all course comments marked with `(translated)` or `(übersetzt)` us
 | **15** | **Course Introduction & First-Time User Experience** | 2026-04-02 |
 | **17** | **Directory-Based Repertoire Storage (`repertoires/{name}/`)** | 2026-04-03 |
 | **26** | **Multilingual Repertoire Comments** | 2026-07-27 |
+| **28** | **Custom Storage Directory & Cloud Sync (Google Drive / Multi-PC)** | 2026-08-19 |
 
 ---
 *Roadmap updated for Opening Fenix V2.*

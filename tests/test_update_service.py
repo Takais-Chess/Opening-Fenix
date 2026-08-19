@@ -51,3 +51,31 @@ def test_snooze_and_ignore_logic(tmp_path, monkeypatch):
     save_config_dict(cfg)
     assert should_check_for_updates(manual=False) is False
     assert should_check_for_updates(manual=True) is True
+
+def test_config_preservation_on_update(tmp_path, monkeypatch):
+    monkeypatch.setattr("opening_fenix.core.services.update_service.get_user_dir", lambda: str(tmp_path))
+    
+    initial_cfg = {
+        "engine_path": "C:\\old\\path.exe",
+        "lichess_token": "my_saved_token",
+        "ui_language": "de",
+        "master_volume": 45,
+        "engine_threads": "8"
+    }
+    save_config_dict(initial_cfg)
+    
+    # Simulate reading existing config during update check
+    cfg = get_config_dict()
+    assert cfg.get("lichess_token") == "my_saved_token"
+    assert cfg.get("ui_language") == "de"
+    assert cfg.get("master_volume") == 45
+    
+    # Update snooze / settings without destroying existing keys
+    set_snooze_period("1_week", "v2.0.0")
+    
+    updated_cfg = get_config_dict()
+    assert updated_cfg.get("lichess_token") == "my_saved_token"
+    assert updated_cfg.get("ui_language") == "de"
+    assert updated_cfg.get("master_volume") == 45
+    assert updated_cfg.get("update_snooze_until") is not None
+

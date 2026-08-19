@@ -27,7 +27,7 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QAbstractItemView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QUrl, QRectF, QSize, QEvent
-from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont
+from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont, QPainterPath, QPixmap
 from PyQt6.QtMultimedia import QSoundEffect
 from sqlalchemy import or_, func, desc, text
 from sqlalchemy.orm import joinedload
@@ -2319,45 +2319,155 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
         return self.text(col) < other.text(col)
 
 
-class NewRepertoireDialog(QDialog):
+from .repo_selection_dialog import NewRepertoireDialog, get_repertoire_cover_path
+
+def get_rounded_pixmap(pixmap: QPixmap, size: QSize, radius: int) -> QPixmap:
+    if size.width() <= 0 or size.height() <= 0:
+        size = QSize(scale(28), scale(28))
+    target = QPixmap(size)
+    target.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(target)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    path = QPainterPath()
+    path.addRoundedRect(0, 0, size.width(), size.height(), radius, radius)
+    painter.setClipPath(path)
+    scaled = pixmap.scaled(
+        size,
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+        Qt.TransformationMode.SmoothTransformation
+    )
+    x = max(0, (scaled.width() - size.width()) // 2)
+    y = max(0, (scaled.height() - size.height()) // 2)
+    painter.drawPixmap(0, 0, scaled, x, y, size.width(), size.height())
+    painter.end()
+    return target
+
+
+class ActiveRepoButton(QPushButton):
+    """
+    Toolbar button displaying the active repertoire's cover thumbnail on the left,
+    the repertoire name in the middle, and the load emoji + text '📂 Laden' on the right.
+    Clicking it opens the Repertoire Selection dialog.
+    """
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle(tr_ui("creator.new_repo_title", "Neues Repertoire"))
-        self.setFixedWidth(scale(400))
-        set_consistent_icon(self)
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(scale(15))
-        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
-
-        form = QFormLayout()
-        self.name_input = QLineEdit()
-        self.name_input.setPlaceholderText(tr_ui("creator.new_repo_name_placeholder", "z.B. Caro-Kann für Fortgeschrittene"))
+        super().__init__("", parent)
+        self.setProperty("class", "GlassPill")
+        self.setFixedHeight(scale(40))
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tr_ui("creator.toolbar_load_tooltip", "Ein anderes Repertoire laden"))
         
-        self.color_combo = QComboBox()
-        self.color_combo.addItem(tr_ui("creator.new_repo_color_white", "Weiß"), "w")
-        self.color_combo.addItem(tr_ui("creator.new_repo_color_black", "Schwarz"), "b")
+        self.layout_h = QHBoxLayout(self)
+        self.layout_h.setContentsMargins(scale(6), scale(4), scale(12), scale(4))
+        self.layout_h.setSpacing(scale(5))
+        self.layout_h.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
         
-        form.addRow(tr_ui("creator.new_repo_name_label", "Name:"), self.name_input)
-        form.addRow(tr_ui("creator.new_repo_color_label", "Deine Farbe:"), self.color_combo)
-        layout.addLayout(form)
-
-        btns = QHBoxLayout()
-        btn_ok = QPushButton(tr_ui("creator.new_repo_btn_create", "Erstellen"))
-        btn_ok.setDefault(True)
-        btn_ok.clicked.connect(self.accept)
-        btn_cancel = QPushButton(tr_ui("creator.new_repo_btn_cancel", "Abbrechen"))
-        btn_cancel.clicked.connect(self.reject)
+        # Cover thumbnail
+        self.lbl_cover = QLabel()
+        self.lbl_cover.setFixedSize(scale(28), scale(28))
+        self.lbl_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.layout_h.addWidget(self.lbl_cover)
         
-        btns.addStretch()
-        btns.addWidget(btn_cancel)
-        btns.addWidget(btn_ok)
-        layout.addLayout(btns)
+        # Repertoire name
+        self.lbl_name = QLabel()
+        self.lbl_name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        f_name = QFont("Segoe UI", 10)
+        f_name.setBold(True)
+        self.lbl_name.setFont(f_name)
+        self.lbl_name.setStyleSheet(f"font-weight: bold; font-size: {scale(13)}px; color: {COLORS['brown_text']}; border: none; background: transparent; padding: 0px;")
+        self.layout_h.addWidget(self.lbl_name)
+        
+        # Separator
+        self.lbl_sep = QLabel("│")
+        self.lbl_sep.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.lbl_sep.setStyleSheet("color: rgba(62, 39, 35, 0.25); font-size: 14px; font-weight: normal; border: none; background: transparent; padding: 0px;")
+        self.layout_h.addWidget(self.lbl_sep)
 
-    def get_data(self):
-        return self.name_input.text().strip(), self.color_combo.currentData()
+        # Load action text
+        self.lbl_load = QLabel(tr_ui("creator.toolbar_load", "📂 Laden"))
+        self.lbl_load.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        f_load = QFont("Segoe UI", 10)
+        f_load.setBold(True)
+        self.lbl_load.setFont(f_load)
+        self.lbl_load.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(13)}px; font-weight: bold; border: none; background: transparent; padding: 0px;")
+        self.layout_h.addWidget(self.lbl_load)
+        
+        self.update_repo(None)
+
+    def _calc_required_width(self) -> int:
+        font_name = QFont("Segoe UI")
+        font_name.setPixelSize(scale(13))
+        font_name.setBold(True)
+        fm_name = QFontMetrics(font_name)
+        w_name = fm_name.horizontalAdvance(self.lbl_name.text() or "")
+        
+        font_load = QFont("Segoe UI")
+        font_load.setPixelSize(scale(13))
+        font_load.setBold(True)
+        fm_load = QFontMetrics(font_load)
+        w_load = fm_load.horizontalAdvance(self.lbl_load.text() or "")
+        
+        font_sep = QFont("Segoe UI")
+        font_sep.setPixelSize(scale(14))
+        fm_sep = QFontMetrics(font_sep)
+        w_sep = fm_sep.horizontalAdvance(self.lbl_sep.text() or "│")
+        
+        # Margins (left 6 + right 12 = 18) + cover (28) + 3*spacing (3*5 = 15) + name + sep + load + buffer (2)
+        total_w = scale(28) + w_name + w_sep + w_load + scale(35)
+        return total_w
+
+    def sizeHint(self) -> QSize:
+        return QSize(self._calc_required_width(), scale(40))
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def update_repo(self, name: str):
+        if not name:
+            self.lbl_name.setText(tr_ui("creator.no_repo_loaded", "Kein Repertoire"))
+            self._set_default_cover()
+        else:
+            self.lbl_name.setText(name)
+            cover_path = get_repertoire_cover_path(name)
+            if cover_path and os.path.exists(cover_path):
+                try:
+                    pix = QPixmap(cover_path)
+                    if not pix.isNull():
+                        target_size = self.lbl_cover.size() if (self.lbl_cover.width() > 0 and self.lbl_cover.height() > 0) else QSize(scale(28), scale(28))
+                        rounded = get_rounded_pixmap(pix, target_size, scale(6))
+                        self.lbl_cover.setText("")
+                        self.lbl_cover.setPixmap(rounded)
+                        self.lbl_cover.setStyleSheet("border: none; background: transparent;")
+                    else:
+                        self._set_default_cover()
+                except Exception:
+                    self._set_default_cover()
+            else:
+                self._set_default_cover()
+                
+        # Dynamically adjust minimum width to fit the content perfectly
+        self.lbl_name.adjustSize()
+        self.lbl_load.adjustSize()
+        req_width = self._calc_required_width()
+        self.setMinimumWidth(req_width)
+        self.adjustSize()
+        self.updateGeometry()
+
+    def _set_default_cover(self):
+        self.lbl_cover.setPixmap(QPixmap())
+        self.lbl_cover.setText("♟")
+        self.lbl_cover.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                stop:0 rgba(211, 84, 0, 0.25), 
+                stop:1 rgba(211, 84, 0, 0.05));
+            border-radius: {scale(6)}px;
+            border: 1px solid rgba(211, 84, 0, 0.2);
+            font-size: {scale(16)}px;
+            color: {COLORS['burnt_orange']};
+        """)
+
 
 class CreatorWindow(QMainWindow):
     closed = pyqtSignal()
@@ -2469,8 +2579,8 @@ class CreatorWindow(QMainWindow):
         else:
             # If no repertoire is found, default to creating a new one or opening empty state
             self.setWindowTitle(tr_ui("creator.window_title_no_repo", "Creator - Kein Repertoire"))
-            # We can automatically prompt for a new repertoire if none is found
-            QTimer.singleShot(100, self.new_repertoire_dialog)
+            # We can automatically prompt to select or create a repertoire if none is found
+            QTimer.singleShot(100, self.load_repertoire_dialog)
 
     def get_setting(self, key, default=None):
         if self.training_manager:
@@ -2520,22 +2630,11 @@ class CreatorWindow(QMainWindow):
         self.toolbar.setMovable(False)
         self.toolbar.setStyleSheet(get_creator_toolbar_style())
 
-        # Toolbar Buttons using QPushButtons for reliable CSS rounding
-        btn_load = QPushButton(tr_ui("creator.toolbar_load", "📂 Laden"))
-        btn_load.setProperty("class", "GlassPill")
-        btn_load.setFixedHeight(scale(40))
-        self.repolish(btn_load)
-        btn_load.setToolTip(tr_ui("creator.toolbar_load_tooltip", "Ein anderes Repertoire laden"))
-        btn_load.clicked.connect(self.load_repertoire_dialog)
-        self.toolbar.addWidget(btn_load)
-
-        btn_new = QPushButton(tr_ui("creator.toolbar_new", "➕ Neu"))
-        btn_new.setProperty("class", "GlassPill")
-        btn_new.setFixedHeight(scale(40))
-        self.repolish(btn_new)
-        btn_new.setToolTip(tr_ui("creator.toolbar_new_tooltip", "Ein neues, leeres Repertoire erstellen"))
-        btn_new.clicked.connect(self.new_repertoire_dialog)
-        self.toolbar.addWidget(btn_new)
+        # Active Repertoire Button (Cover Image + Name + "📂 Laden")
+        self.btn_load_repo = ActiveRepoButton(self)
+        self.repolish(self.btn_load_repo)
+        self.btn_load_repo.clicked.connect(self.load_repertoire_dialog)
+        self.toolbar.addWidget(self.btn_load_repo)
 
         btn_repo = QPushButton(tr_ui("creator.toolbar_settings", "⚙ Einstellungen"))
         btn_repo.setProperty("class", "GlassPill")
@@ -4341,9 +4440,23 @@ class CreatorWindow(QMainWindow):
         from .repo_selection_dialog import RepoSelectionDialog
         d = RepoSelectionDialog(self)
         if d.exec():
-            self.load_repertoire(d.selected_repo)
-            self.set_board_to_fen(chess.STARTING_FEN)
-            self.init_management_slots() # Refresh level dropdown
+            if getattr(d, 'is_new_repo', False):
+                n = d.selected_repo
+                color = getattr(d, 'new_color', 'w')
+                if n:
+                    self.load_repertoire(n)
+                    # Set initial color metadata
+                    self.backend.set_meta("color", color)
+                    # Ensure UI reflects the color (flip board)
+                    self.board_widget.flipped = (color == 'b')
+                    self.board_widget.update()
+                    self.set_board_to_fen(chess.STARTING_FEN)
+                    if self.training_manager:
+                        self.training_manager.set_repo_visibility(n, True)
+            elif d.selected_repo:
+                self.load_repertoire(d.selected_repo)
+                self.set_board_to_fen(chess.STARTING_FEN)
+                self.init_management_slots() # Refresh level dropdown
 
     def load_repertoire(self, repo_name, training_manager=None, is_test=False):
         """Switches the active repertoire and refreshes all UI components."""
@@ -4359,6 +4472,8 @@ class CreatorWindow(QMainWindow):
             self.backend.close()
             self.backend.active_repo_name = None
             self.setWindowTitle(tr_ui("creator.window_title_no_repo_loaded", "Creator - Kein Repertoire geladen"))
+            if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
+                self.btn_load_repo.update_repo(None)
             self.update_structure_tree()
             self.init_management_slots()
             self.board_widget.update()
@@ -4366,6 +4481,8 @@ class CreatorWindow(QMainWindow):
             
         self.backend.load_repertoire(repo_name, is_test)
         self._load_saved_elo_or_autoselect()
+        if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
+            self.btn_load_repo.update_repo(repo_name)
         self.update_structure_tree()
         self.init_management_slots()
         self.setWindowTitle(f"Creator - {repo_name}")

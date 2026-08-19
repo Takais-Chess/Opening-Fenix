@@ -87,7 +87,20 @@
     "auto_check_updates": "Automatisch nach Updates suchen",
     "btn_check_updates_now": "🔄 Jetzt nach Updates suchen",
     "comments_format": "💬 Kommentare: {stats}",
-    "no_comments": "Keine Kommentare"
+    "no_comments": "Keine Kommentare",
+    "storage_title": "📁 Speicherort & Cloud-Synchronisation",
+    "storage_desc": "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation).",
+    "storage_current_path": "Aktueller Speicherort:",
+    "storage_btn_change": "📁 Ordner ändern...",
+    "storage_btn_reset": "Standard wiederherstellen",
+    "storage_btn_open": "Im Explorer öffnen",
+    "storage_copy_prompt_title": "Daten übertragen?",
+    "storage_copy_prompt_msg": "Möchtest du deine bestehenden Repertoires und Profile in das neue Verzeichnis kopieren?\n\n(Wähle 'Nein', falls dieser Ordner bereits Repertoires von einem anderen PC enthält.)",
+    "storage_success_title": "Speicherort geändert",
+    "storage_success_msg": "Der Speicherort wurde erfolgreich geändert:\n{path}\n\nBitte starte die Anwendung neu, damit alle Datenbanken aus dem neuen Ordner geladen werden.",
+    "storage_reset_confirm_title": "Standard-Speicherort wiederherstellen?",
+    "storage_reset_confirm_msg": "Möchtest du wirklich zum Standard-Speicherort zurückkehren?\n\nBitte starte die Anwendung danach neu.",
+    "storage_reset_success_msg": "Der Speicherort wurde auf den Standard zurückgesetzt.\n\nBitte starte Opening Fenix neu."
   },
   "themes": {
     "Dunkel (Modern)": "Dunkel (Modern)",

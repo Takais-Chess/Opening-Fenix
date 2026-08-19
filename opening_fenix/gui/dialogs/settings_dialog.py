@@ -9,9 +9,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QIcon, QFont
-from PyQt6 import sip
-from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
-from opening_fenix.core.utils import get_elo_display, get_repertoire_comment_stats
+from opening_fenix.core.data_tools import (
+    get_base_path, get_user_dir, get_default_user_dir, get_custom_data_dir, 
+    set_custom_data_dir, migrate_user_data, get_repertoire_analysis_status
+)
 from opening_fenix.gui.widgets.board_widget import THEMES
 
 # Import centralized styles
@@ -570,16 +571,41 @@ class SettingsDialog(QDialog):
 
         layout.addWidget(self.grp_info)
 
-        # Ordner-Zugriff
-        g_folder = QGroupBox(tr_ui("settings.folder_access_title", "📁 Ordner-Zugriff"))
-        h_folder = QHBoxLayout(g_folder)
+        # Speicherort & Cloud-Synchronisation
+        g_storage = QGroupBox(tr_ui("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation"))
+        v_storage = QVBoxLayout(g_storage)
+        v_storage.setSpacing(scale(8))
+
+        lbl_storage_desc = QLabel(tr_ui("settings.storage_desc", "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation)."))
+        lbl_storage_desc.setWordWrap(True)
+        lbl_storage_desc.setStyleSheet("color: #666; font-size: 12px;")
+        v_storage.addWidget(lbl_storage_desc)
+
+        h_path = QHBoxLayout()
+        self.txt_storage_path = QLineEdit(get_user_dir())
+        self.txt_storage_path.setReadOnly(True)
+        self.txt_storage_path.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; padding: 6px 10px; font-weight: 500; color: #222;")
+        h_path.addWidget(self.txt_storage_path, 1)
+
+        self.btn_change_storage = AutoAdjustButton(tr_ui("settings.storage_btn_change", "📁 Ordner ändern..."))
+        self.btn_change_storage.clicked.connect(self.change_storage_directory)
+        h_path.addWidget(self.btn_change_storage)
+
+        self.btn_reset_storage = AutoAdjustButton(tr_ui("settings.storage_btn_reset", "Standard wiederherstellen"))
+        self.btn_reset_storage.clicked.connect(self.reset_storage_directory)
+        h_path.addWidget(self.btn_reset_storage)
+        v_storage.addLayout(h_path)
+
+        h_open = QHBoxLayout()
         btn_open_repos = AutoAdjustButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
         btn_open_repos.clicked.connect(self.open_repertoires_folder)
         btn_open_profs = AutoAdjustButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
         btn_open_profs.clicked.connect(self.open_profiles_folder)
-        h_folder.addWidget(btn_open_repos)
-        h_folder.addWidget(btn_open_profs)
-        layout.addWidget(g_folder)
+        h_open.addWidget(btn_open_repos)
+        h_open.addWidget(btn_open_profs)
+        v_storage.addLayout(h_open)
+
+        layout.addWidget(g_storage)
 
         # Gefahrenzone
         g_danger = QGroupBox(tr_ui("settings.danger_title", "⚠️ Gefahrenzone"))
@@ -596,6 +622,63 @@ class SettingsDialog(QDialog):
         layout.addWidget(g_danger)
 
         layout.addStretch()
+
+    def change_storage_directory(self):
+        current = get_user_dir()
+        selected_dir = QFileDialog.getExistingDirectory(
+            self,
+            tr_ui("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation"),
+            current
+        )
+        if not selected_dir:
+            return
+
+        selected_dir = os.path.abspath(selected_dir.strip())
+        if selected_dir == os.path.abspath(current):
+            return
+
+        reply = QMessageBox.question(
+            self,
+            tr_ui("settings.storage_copy_prompt_title", "Daten übertragen?"),
+            tr_ui("settings.storage_copy_prompt_msg", "Möchtest du deine bestehenden Repertoires und Profile in das neue Verzeichnis kopieren?\n\n(Wähle 'Nein', falls dieser Ordner bereits Repertoires von einem anderen PC enthält.)"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply == QMessageBox.StandardButton.Cancel:
+            return
+
+        if reply == QMessageBox.StandardButton.Yes:
+            migrate_user_data(current, selected_dir)
+
+        set_custom_data_dir(selected_dir)
+        self.txt_storage_path.setText(get_user_dir())
+        self.refresh_repertoire_cards()
+
+        QMessageBox.information(
+            self,
+            tr_ui("settings.storage_success_title", "Speicherort geändert"),
+            tr_ui("settings.storage_success_msg", "Der Speicherort wurde erfolgreich geändert:\n{path}\n\nBitte starte die Anwendung neu, damit alle Datenbanken aus dem neuen Ordner geladen werden.", path=selected_dir)
+        )
+
+    def reset_storage_directory(self):
+        if not get_custom_data_dir():
+            return
+        reply = QMessageBox.question(
+            self,
+            tr_ui("settings.storage_reset_confirm_title", "Standard-Speicherort wiederherstellen?"),
+            tr_ui("settings.storage_reset_confirm_msg", "Möchtest du wirklich zum Standard-Speicherort zurückkehren?\n\nBitte starte die Anwendung danach neu."),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            set_custom_data_dir(None)
+            self.txt_storage_path.setText(get_user_dir())
+            self.refresh_repertoire_cards()
+            QMessageBox.information(
+                self,
+                tr_ui("settings.reset_success_title", "Erfolg"),
+                tr_ui("settings.storage_reset_success_msg", "Der Speicherort wurde auf den Standard zurückgesetzt.\n\nBitte starte Opening Fenix neu.")
+            )
 
     def open_repertoires_folder(self):
         from PyQt6.QtGui import QDesktopServices

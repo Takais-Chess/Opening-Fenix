@@ -87,7 +87,20 @@
     "auto_check_updates": "Automatically check for updates",
     "btn_check_updates_now": "🔄 Check for updates now",
     "comments_format": "💬 Comments: {stats}",
-    "no_comments": "No comments"
+    "no_comments": "No comments",
+    "storage_title": "📁 Data Storage & Cloud Synchronization",
+    "storage_desc": "Choose where your repertoires and training profiles are stored (e.g. inside your Google Drive or OneDrive folder for multi-PC synchronization).",
+    "storage_current_path": "Current Storage Location:",
+    "storage_btn_change": "📁 Change Folder...",
+    "storage_btn_reset": "Reset to Default",
+    "storage_btn_open": "Open in Explorer",
+    "storage_copy_prompt_title": "Transfer Data?",
+    "storage_copy_prompt_msg": "Would you like to copy your existing repertoires and profiles into the new folder?\n\n(Choose 'No' if this cloud folder already contains your repertoires from another PC.)",
+    "storage_success_title": "Storage Location Changed",
+    "storage_success_msg": "The storage location has been successfully updated:\n{path}\n\nPlease restart the application to load all databases from the new directory.",
+    "storage_reset_confirm_title": "Reset to Default Storage?",
+    "storage_reset_confirm_msg": "Are you sure you want to reset to the default local storage location?\n\nPlease restart the application afterwards.",
+    "storage_reset_success_msg": "Storage location has been reset to default.\n\nPlease restart Opening Fenix."
   },
   "themes": {
     "Dunkel (Modern)": "Dark (Modern)",

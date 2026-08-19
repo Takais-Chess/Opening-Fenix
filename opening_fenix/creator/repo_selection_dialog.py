@@ -1,7 +1,7 @@
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QScrollArea, QWidget, QGridLayout, 
-    QPushButton, QHBoxLayout, QApplication
+    QPushButton, QHBoxLayout, QApplication, QFormLayout, QLineEdit, QComboBox
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap, QFont
@@ -32,6 +32,119 @@ def get_repertoire_cover_path(name):
             except Exception:
                 pass
     return None
+
+class NewRepertoireDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(tr_ui("creator.new_repo_title", "Neues Repertoire"))
+        self.setFixedWidth(scale(420))
+        set_consistent_icon(self)
+        self.setStyleSheet(get_login_dialog_style())
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(scale(15))
+        layout.setContentsMargins(scale(25), scale(25), scale(25), scale(25))
+
+        lbl_title = QLabel(tr_ui("creator.new_repo_title", "Neues Repertoire"))
+        lbl_title.setObjectName("LoginTitle")
+        lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(lbl_title)
+
+        form = QFormLayout()
+        form.setSpacing(scale(12))
+        
+        self.name_input = QLineEdit()
+        self.name_input.setPlaceholderText(tr_ui("creator.new_repo_name_placeholder", "z.B. Caro-Kann für Fortgeschrittene"))
+        self.name_input.setFixedHeight(scale(38))
+        self.name_input.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(10)}px;
+                font-size: {scale(14)}px;
+                color: {COLORS['brown_text']};
+            }}
+            QLineEdit:focus {{
+                border: 2px solid {COLORS['burnt_orange']};
+                background-color: rgba(255, 255, 255, 0.95);
+            }}
+        """)
+        
+        self.color_combo = QComboBox()
+        self.color_combo.addItem(tr_ui("creator.new_repo_color_white", "Weiß"), "w")
+        self.color_combo.addItem(tr_ui("creator.new_repo_color_black", "Schwarz"), "b")
+        self.color_combo.setFixedHeight(scale(38))
+        self.color_combo.setStyleSheet(f"""
+            QComboBox {{
+                background-color: rgba(255, 255, 255, 0.7);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(10)}px;
+                font-size: {scale(14)}px;
+                color: {COLORS['brown_text']};
+            }}
+        """)
+        
+        lbl_name = QLabel(tr_ui("creator.new_repo_name_label", "Name:"))
+        lbl_name.setStyleSheet(f"font-weight: bold; color: {COLORS['brown_text']};")
+        lbl_color = QLabel(tr_ui("creator.new_repo_color_label", "Deine Farbe:"))
+        lbl_color.setStyleSheet(f"font-weight: bold; color: {COLORS['brown_text']};")
+        
+        form.addRow(lbl_name, self.name_input)
+        form.addRow(lbl_color, self.color_combo)
+        layout.addLayout(form)
+
+        btns = QHBoxLayout()
+        btns.setSpacing(scale(10))
+        
+        btn_cancel = QPushButton(tr_ui("creator.new_repo_btn_cancel", "Abbrechen"))
+        btn_cancel.setFixedHeight(scale(40))
+        btn_cancel.setFixedWidth(scale(120))
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.4);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                color: {COLORS['brown_text']};
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.8);
+            }}
+        """)
+        btn_cancel.clicked.connect(self.reject)
+        
+        btn_ok = QPushButton(tr_ui("creator.new_repo_btn_create", "Erstellen"))
+        btn_ok.setDefault(True)
+        btn_ok.setFixedHeight(scale(40))
+        btn_ok.setFixedWidth(scale(140))
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border: none;
+                border-radius: {scale(8)}px;
+                font-weight: bold;
+                font-size: {scale(14)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #e67e22;
+            }}
+        """)
+        btn_ok.clicked.connect(self.accept)
+        
+        btns.addStretch()
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_ok)
+        layout.addLayout(btns)
+
+    def get_data(self):
+        return self.name_input.text().strip(), self.color_combo.currentData()
 
 class RepoSelectionButton(QPushButton):
     def __init__(self, name, parent=None):
@@ -101,6 +214,8 @@ class RepoSelectionDialog(QDialog):
         self.setWindowTitle(tr_ui("repo_selection.window_title", "Repertoire laden"))
         self.setMinimumSize(scale(800), scale(680))
         self.selected_repo = None
+        self.is_new_repo = False
+        self.new_color = 'w'
         
         self.setStyleSheet(get_login_dialog_style())
         
@@ -199,17 +314,67 @@ class RepoSelectionDialog(QDialog):
 
         h_btns = QHBoxLayout()
         h_btns.addStretch()
+        
+        self.btn_new = QPushButton(tr_ui("repo_selection.btn_new", "➕ Neues Repertoire"))
+        self.btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_new.setMinimumWidth(scale(180))
+        self.btn_new.setFixedHeight(scale(45))
+        self.btn_new.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border: none;
+                border-radius: {scale(12)}px;
+                font-size: {scale(14)}px;
+                font-weight: bold;
+                padding: 0 {scale(15)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #e67e22;
+            }}
+            QPushButton:pressed {{
+                background-color: #d35400;
+            }}
+        """)
+        self.btn_new.clicked.connect(self.on_create_new_repertoire)
+        h_btns.addWidget(self.btn_new)
+        h_btns.addSpacing(scale(15))
+
         self.btn_cancel = QPushButton(tr_ui("repo_selection.btn_cancel", "Abbrechen"))
         self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_cancel.setFixedWidth(scale(150))
         self.btn_cancel.setFixedHeight(scale(45))
+        self.btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.4);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(12)}px;
+                color: {COLORS['brown_text']};
+                font-size: {scale(14)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.8);
+            }}
+        """)
         self.btn_cancel.clicked.connect(self.reject)
         h_btns.addWidget(self.btn_cancel)
         h_btns.addStretch()
         layout.addLayout(h_btns)
 
+    def on_create_new_repertoire(self):
+        dlg = NewRepertoireDialog(self)
+        if dlg.exec():
+            name, color = dlg.get_data()
+            if name:
+                self.selected_repo = name
+                self.is_new_repo = True
+                self.new_color = color
+                self.accept()
+
     def on_repo_selected(self, name):
         self.selected_repo = name
+        self.is_new_repo = False
         self.accept()
 
     def close_dialog_or_app(self):

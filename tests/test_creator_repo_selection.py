@@ -54,3 +54,20 @@ def test_dialog_empty_repos(qtbot):
 def test_dialog_cancel(qtbot, repo_selection_dialog):
     with qtbot.waitSignal(repo_selection_dialog.rejected, timeout=1000):
         qtbot.mouseClick(repo_selection_dialog.btn_cancel, Qt.MouseButton.LeftButton)
+
+def test_dialog_has_new_button(qtbot, repo_selection_dialog):
+    assert hasattr(repo_selection_dialog, "btn_new")
+    assert not repo_selection_dialog.btn_new.isHidden()
+    assert "Neu" in repo_selection_dialog.btn_new.text()
+
+def test_dialog_create_new_repertoire(qtbot, repo_selection_dialog):
+    from opening_fenix.creator.repo_selection_dialog import NewRepertoireDialog
+    with patch.object(NewRepertoireDialog, "exec", return_value=1), \
+         patch.object(NewRepertoireDialog, "get_data", return_value=("BrandNewRepo", "b")):
+        with qtbot.waitSignal(repo_selection_dialog.accepted, timeout=1000):
+            qtbot.mouseClick(repo_selection_dialog.btn_new, Qt.MouseButton.LeftButton)
+            
+    assert repo_selection_dialog.selected_repo == "BrandNewRepo"
+    assert repo_selection_dialog.is_new_repo is True
+    assert repo_selection_dialog.new_color == "b"
+
