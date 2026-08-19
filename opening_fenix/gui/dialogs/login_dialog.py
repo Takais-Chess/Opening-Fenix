@@ -1,8 +1,8 @@
 import os
 import json
 from PyQt6.QtWidgets import (
-    QApplication, QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem, 
-    QPushButton, QGroupBox, QFrame, QInputDialog, QMessageBox,
+    QApplication, QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
+    QPushButton, QGroupBox, QFrame, QLineEdit, QMessageBox,
     QHBoxLayout, QCheckBox, QScrollArea, QWidget, QGridLayout, QMenu,
     QGraphicsDropShadowEffect, QButtonGroup
 )
@@ -649,50 +649,106 @@ class LoginDialog(QDialog):
             
             self.load_profiles()
 
-    def create_new_profile(self):
-        name, ok = QInputDialog.getText(
-            self, 
-            tr_ui("login.profile_name_prompt_title", "Neues Profil"), 
-            tr_ui("login.profile_name_prompt_label", "Name des neuen Profils:")
+    def _ask_profile_name(self):
+        """Custom profile-name input dialog that avoids Qt crashes caused by
+        QInputDialog.getText() being parented to a FramelessWindowHint dialog."""
+        dlg = QDialog(self, Qt.WindowType.Dialog)  # explicit non-frameless flags
+        dlg.setWindowTitle(tr_ui("login.profile_name_prompt_title", "Neues Profil"))
+        dlg.setMinimumWidth(scale(360))
+        dlg.setStyleSheet(self.styleSheet())
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        layout.setSpacing(scale(12))
+
+        lbl = QLabel(tr_ui("login.profile_name_prompt_label", "Name des neuen Profils:"))
+        lbl.setStyleSheet(f"font-size: {scale(14)}px; font-weight: bold;")
+        layout.addWidget(lbl)
+
+        line_edit = QLineEdit()
+        line_edit.setPlaceholderText(tr_ui("login.profile_name_placeholder", "z.B. Felix"))
+        line_edit.setFixedHeight(scale(40))
+        line_edit.setStyleSheet(
+            f"QLineEdit {{ border: 1px solid rgba(0,0,0,0.3); border-radius: {scale(8)}px;"
+            f" padding: 0 {scale(8)}px; font-size: {scale(14)}px; background: white; color: black; }}"
         )
-        if ok and name.strip():
-            name = name.strip()
-            # Basic validation
-            if any(c in name for c in '/\\:*?"<>|'):
-                QMessageBox.warning(
-                    self, 
-                    tr_ui("login.invalid_name_error", "Ungültiger Name"), 
-                    tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
-                )
-                return
-            
-            sel_dialog = RepertoireSelectionDialog(self)
-            if sel_dialog.exec() == QDialog.DialogCode.Accepted:
-                from opening_fenix.core.models import DatabaseManager, UserBase, UserRepertoireSettings
-                path = os.path.join(get_user_dir(), "profiles", f"{name}.db")
-                db = DatabaseManager(path, base=UserBase)
-                session = db.get_session()
-                for repo in sel_dialog.selected_repos:
-                    session.add(UserRepertoireSettings(repertoire_name=repo, active_level=1))
-                session.commit()
-                session.close()
-                db.close()
-                
-                # Create initial settings file with selected notation language
-                settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
-                initial_settings = {
-                    "notation_language": sel_dialog.selected_language,
-                    "stop_at_variation_end": True
-                }
-                try:
-                    with open(settings_path, "w") as f:
-                        json.dump(initial_settings, f, indent=4)
-                except Exception as e:
-                    from opening_fenix.core.logger import logger
-                    logger.error(f"Failed to create profile settings: {e}")
-                
-                self.load_profiles()
-                self.select_profile(name)
+        layout.addWidget(line_edit)
+
+        btn_row = QHBoxLayout()
+        btn_ok = QPushButton(tr_ui("login.create", "Erstellen"))
+        btn_ok.setObjectName("PrimaryAction")
+        btn_ok.setFixedHeight(scale(40))
+        btn_cancel = QPushButton(tr_ui("common.cancel", "Abbrechen"))
+        btn_cancel.setFixedHeight(scale(40))
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        line_edit.returnPressed.connect(dlg.accept)
+
+        result = dlg.exec()
+        return line_edit.text(), result == QDialog.DialogCode.Accepted
+
+    def create_new_profile(self):
+        try:
+            from opening_fenix.core.logger import logger
+            logger.info("create_new_profile called")
+
+            name, ok = self._ask_profile_name()
+            if ok and name.strip():
+                name = name.strip()
+                logger.info(f"Profile name entered: '{name}'")
+                # Basic validation
+                if any(c in name for c in '/\\:*?"<>|'):
+                    QMessageBox.warning(
+                        self,
+                        tr_ui("login.invalid_name_error", "Ungültiger Name"),
+                        tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
+                    )
+                    return
+
+                logger.info("Opening RepertoireSelectionDialog")
+                sel_dialog = RepertoireSelectionDialog(self)
+                if sel_dialog.exec() == QDialog.DialogCode.Accepted:
+                    logger.info(f"Repos selected: {sel_dialog.selected_repos}, lang: {sel_dialog.selected_language}")
+                    from opening_fenix.core.models import DatabaseManager, UserBase, UserRepertoireSettings
+                    path = os.path.join(get_user_dir(), "profiles", f"{name}.db")
+                    logger.info(f"Creating profile DB at: {path}")
+                    db = DatabaseManager(path, base=UserBase)
+                    session = db.get_session()
+                    for repo in sel_dialog.selected_repos:
+                        session.add(UserRepertoireSettings(repertoire_name=repo, active_level=1))
+                    session.commit()
+                    session.close()
+                    db.close()
+                    logger.info("Profile DB created successfully")
+
+                    # Create initial settings file with selected notation language
+                    settings_path = os.path.join(get_user_dir(), "profiles", f"{name}_settings.json")
+                    initial_settings = {
+                        "notation_language": sel_dialog.selected_language,
+                        "stop_at_variation_end": True
+                    }
+                    try:
+                        with open(settings_path, "w") as f:
+                            json.dump(initial_settings, f, indent=4)
+                        logger.info("Profile settings file created")
+                    except Exception as e:
+                        logger.error(f"Failed to create profile settings: {e}")
+
+                    self.load_profiles()
+                    self.select_profile(name)
+        except Exception as e:
+            import traceback
+            from opening_fenix.core.logger import logger
+            logger.critical(f"Crash in create_new_profile: {traceback.format_exc()}")
+            QMessageBox.critical(
+                self,
+                "Fehler",
+                f"Profil konnte nicht erstellt werden:\n{e}"
+            )
 
     def request_creator(self):
         self.open_creator_requested = True
