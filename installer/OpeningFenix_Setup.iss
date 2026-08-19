@@ -112,16 +112,32 @@ end;
 function LoadExistingConfig(): Boolean;
 var
   ConfigPath: String;
+  PrevDir: String;
   JsonContent: AnsiString;
 begin
   Result := False;
   ExistingLichessToken := '';
   ExistingLanguage := '';
   
-  ConfigPath := ExpandConstant('{app}') + '\config.json';
+  // 1. Check user app data location first (always safe and available during wizard init)
+  ConfigPath := ExpandConstant('{userappdata}') + '\Opening Fenix\config.json';
+  
+  // 2. Check previous install path from registry
   if not FileExists(ConfigPath) then
   begin
-    ConfigPath := ExpandConstant('{userappdata}') + '\Opening Fenix\config.json';
+    if RegQueryStringValue(HKLM64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{D37E84B1-29A4-4E67-8F12-78A3311E6F01}}_is1', 'Inno Setup: App Path', PrevDir) or
+       RegQueryStringValue(HKCU64, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{D37E84B1-29A4-4E67-8F12-78A3311E6F01}}_is1', 'Inno Setup: App Path', PrevDir) or
+       RegQueryStringValue(HKLM32, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{D37E84B1-29A4-4E67-8F12-78A3311E6F01}}_is1', 'Inno Setup: App Path', PrevDir) or
+       RegQueryStringValue(HKCU32, 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{D37E84B1-29A4-4E67-8F12-78A3311E6F01}}_is1', 'Inno Setup: App Path', PrevDir) then
+    begin
+      ConfigPath := PrevDir + '\config.json';
+    end;
+  end;
+
+  // 3. Check default installation directory
+  if not FileExists(ConfigPath) then
+  begin
+    ConfigPath := ExpandConstant('{autopf}') + '\Opening Fenix\config.json';
   end;
 
   if FileExists(ConfigPath) then
