@@ -640,12 +640,51 @@ class LoginDialog(QDialog):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            profiles_dir = os.path.join(get_user_dir(), "profiles")
-            for ext in [".db", ".json", "_settings.json"]:
-                path = os.path.join(profiles_dir, f"{name}{ext}")
-                if os.path.exists(path):
-                    try: os.remove(path)
-                    except: pass
+            # 1. Clean up from active user directory
+            dirs_to_clean = [os.path.join(get_user_dir(), "profiles")]
+            
+            # Also clean from base path if different and existing
+            base_profiles = os.path.join(get_base_path(), "profiles")
+            if os.path.exists(base_profiles) and base_profiles not in dirs_to_clean:
+                dirs_to_clean.append(base_profiles)
+                
+            for profiles_dir in dirs_to_clean:
+                if os.path.exists(profiles_dir):
+                    for ext in [".db", ".json", "_settings.json", ".db-wal", ".db-shm"]:
+                        path = os.path.join(profiles_dir, f"{name}{ext}")
+                        if os.path.exists(path):
+                            try:
+                                os.remove(path)
+                            except Exception:
+                                pass
+            
+            # 2. Clean up config.json references
+            try:
+                config_path = os.path.join(get_user_dir(), "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    changed = False
+                    if config.get("last_profile") == name:
+                        config.pop("last_profile", None)
+                        changed = True
+                    if config.get("auto_login_profile") == name:
+                        config.pop("auto_login_profile", None)
+                        changed = True
+                    if "profile_last_used" in config and isinstance(config["profile_last_used"], dict):
+                        if name in config["profile_last_used"]:
+                            config["profile_last_used"].pop(name, None)
+                            changed = True
+                    # Ensure profiles_seeded is set to True so startup seeding never re-copies deleted profiles
+                    if not config.get("profiles_seeded"):
+                        config["profiles_seeded"] = True
+                        changed = True
+                    if changed:
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(config, f, indent=4, ensure_ascii=False)
+            except Exception as e:
+                from opening_fenix.core.logger import logger
+                logger.warning(f"Error cleaning up deleted profile from config.json: {e}")
             
             self.load_profiles()
 

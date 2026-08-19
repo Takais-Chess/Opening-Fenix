@@ -228,9 +228,38 @@ def ensure_user_data_seeded():
 
     # 2. Seed profiles and repertoires
     is_pub = is_public_version()
+
+    profiles_seeded = False
+    if os.path.exists(user_config):
+        try:
+            with open(user_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            profiles_seeded = cfg.get("profiles_seeded", False)
+        except Exception:
+            pass
+
+    # If profiles_seeded is not yet recorded, check if profiles already exist in user_dir
+    dest_profiles = os.path.join(user_dir, "profiles")
+    if not profiles_seeded and os.path.exists(dest_profiles) and os.listdir(dest_profiles):
+        profiles_seeded = True
+        if os.path.exists(user_config):
+            try:
+                with open(user_config, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg["profiles_seeded"] = True
+                with open(user_config, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
+
     for folder in ["profiles", "repertoires"]:
         if is_pub and folder == "profiles":
             continue
+        if folder == "profiles" and profiles_seeded:
+            # Do NOT re-seed profiles once initial seeding is complete;
+            # otherwise user-deleted profiles will reappear on restart.
+            continue
+
         dest_folder = os.path.join(user_dir, folder)
         if not os.path.exists(dest_folder):
             os.makedirs(dest_folder, exist_ok=True)
@@ -257,6 +286,17 @@ def ensure_user_data_seeded():
                                 shutil.copy(s_path, d_path)
                         except Exception as e:
                             print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
+
+    # Mark profiles as seeded in config.json after seeding
+    if not profiles_seeded and os.path.exists(user_config):
+        try:
+            with open(user_config, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            cfg["profiles_seeded"] = True
+            with open(user_config, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=4, ensure_ascii=False)
+        except Exception:
+            pass
 
 def _update_lichess_delay_config(delay_value):
     """Safely reads, updates, and writes the lichess_delay to the config file."""

@@ -140,26 +140,62 @@ def test_login_auto_login_selection(qapp, mock_user_dir, monkeypatch):
         config2 = json.load(f)
     assert config2.get("auto_login_profile") is None
 
-def test_auto_trigger_create_profile_when_no_profiles(qapp, mock_user_dir, monkeypatch):
-    """Test that if there are no profiles on startup, showEvent triggers create_new_profile."""
+def test_delete_profile_removes_files_and_config(qapp, mock_user_dir, monkeypatch):
+    """Test that deleting a profile removes all files and cleans up config.json."""
+    from PyQt6.QtWidgets import QMessageBox
+    import json
+    
     monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+    monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
     
-    # Ensure profiles directory is empty
+    profile_name = "UserToDelete"
     profiles_dir = os.path.join(mock_user_dir, "profiles")
-    if os.path.exists(profiles_dir):
-        for f in os.listdir(profiles_dir):
-            os.remove(os.path.join(profiles_dir, f))
-            
+    db_path = os.path.join(profiles_dir, f"{profile_name}.db")
+    settings_path = os.path.join(profiles_dir, f"{profile_name}_settings.json")
+    with open(db_path, "w") as f: f.write("dummy")
+    with open(settings_path, "w") as f: f.write("{}")
+    
+    config_path = os.path.join(mock_user_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump({
+            "last_profile": profile_name,
+            "auto_login_profile": profile_name,
+            "profile_last_used": {profile_name: "2026-08-19T20:00:00"}
+        }, f)
+        
     login = LoginDialog()
-    created_called = []
-    monkeypatch.setattr(login, "create_new_profile", lambda: created_called.append(True))
+    login.delete_profile(profile_name)
     
-    # Simulate show event
-    from PyQt6.QtGui import QShowEvent
-    login.showEvent(QShowEvent())
+    # Assert files are deleted
+    assert not os.path.exists(db_path)
+    assert not os.path.exists(settings_path)
     
-    # Process pending events for singleShot timer
-    qapp.processEvents()
+    # Assert config references are removed and profiles_seeded is set
+    with open(config_path, "r") as f:
+        cfg = json.load(f)
+    assert cfg.get("last_profile") is None
+    assert cfg.get("auto_login_profile") is None
+    assert profile_name not in cfg.get("profile_last_used", {})
+    assert cfg.get("profiles_seeded") is True
+
+def test_deleted_profile_does_not_reseed_on_startup(mock_user_dir, monkeypatch):
+    """Test that ensure_user_data_seeded does not resurrect a deleted profile."""
+    from opening_fenix.core.utils import ensure_user_data_seeded
+    import json
     
-    assert len(created_called) == 1
+    monkeypatch.setattr("opening_fenix.core.utils.get_user_dir", lambda: mock_user_dir)
+    
+    # Simulate config with profiles_seeded = True (profile was previously deleted)
+    config_path = os.path.join(mock_user_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump({"profiles_seeded": True}, f)
+        
+    # Ensure user profiles folder is empty
+    profiles_dir = os.path.join(mock_user_dir, "profiles")
+    os.makedirs(profiles_dir, exist_ok=True)
+    
+    ensure_user_data_seeded()
+    
+    # Should NOT copy bundled profiles back into empty user profiles dir
+    assert len(os.listdir(profiles_dir)) == 0
 
