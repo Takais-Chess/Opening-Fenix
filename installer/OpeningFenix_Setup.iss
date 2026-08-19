@@ -78,6 +78,8 @@ var
   LichessLinkLabel: TNewStaticText;
   ExistingLichessToken: String;
   ExistingLanguage: String;
+  ExistingIsPublicSet: Boolean;
+  ExistingIsPublic: Boolean;
   IsUpgradeMode: Boolean;
 
 function ExtractJsonValue(const Json, Key: String): String;
@@ -109,6 +111,35 @@ begin
   end;
 end;
 
+function ExtractJsonBool(const Json, Key: String; DefaultVal: Boolean): Boolean;
+var
+  P, P2, PEnd: Integer;
+  SearchKey, ValStr: String;
+begin
+  Result := DefaultVal;
+  SearchKey := '"' + Key + '"';
+  P := Pos(SearchKey, Json);
+  if P > 0 then
+  begin
+    P := P + Length(SearchKey);
+    P2 := Pos(':', Copy(Json, P, Length(Json) - P + 1));
+    if P2 > 0 then
+    begin
+      P := P + P2;
+      while (P <= Length(Json)) and ((Json[P] = ' ') or (Json[P] = #13) or (Json[P] = #10) or (Json[P] = #9)) do
+        P := P + 1;
+      PEnd := P;
+      while (PEnd <= Length(Json)) and (Json[PEnd] <> ',') and (Json[PEnd] <> '}') and (Json[PEnd] <> #13) and (Json[PEnd] <> #10) do
+        PEnd := PEnd + 1;
+      ValStr := LowerCase(Trim(Copy(Json, P, PEnd - P)));
+      if ValStr = 'false' then
+        Result := False
+      else if ValStr = 'true' then
+        Result := True;
+    end;
+  end;
+end;
+
 function LoadExistingConfig(): Boolean;
 var
   ConfigPath: String;
@@ -118,6 +149,8 @@ begin
   Result := False;
   ExistingLichessToken := '';
   ExistingLanguage := '';
+  ExistingIsPublicSet := False;
+  ExistingIsPublic := False;
   
   // 1. Check user app data location first (always safe and available during wizard init)
   ConfigPath := ExpandConstant('{userappdata}') + '\Opening Fenix\config.json';
@@ -147,6 +180,11 @@ begin
       Result := True;
       ExistingLichessToken := ExtractJsonValue(String(JsonContent), 'lichess_token');
       ExistingLanguage := ExtractJsonValue(String(JsonContent), 'ui_language');
+      if Pos('"is_public"', String(JsonContent)) > 0 then
+      begin
+        ExistingIsPublicSet := True;
+        ExistingIsPublic := ExtractJsonBool(String(JsonContent), 'is_public', False);
+      end;
     end;
   end;
 end;
@@ -326,10 +364,24 @@ begin
       LangCode := 'en';
 
     #if AppBuildType == "Public"
-    IsPublicStr := 'true';
+    if IsUpgradeMode and ExistingIsPublicSet and (not ExistingIsPublic) then
+    begin
+      // Preserve existing PRIVATE mode even when updating via public package
+      IsPublicStr := 'false';
+    end
+    else
+    begin
+      IsPublicStr := 'true';
+    end;
     #else
     IsPublicStr := 'false';
     #endif
+
+    if IsPublicStr = 'false' then
+    begin
+      if FileExists(ExpandConstant('{app}') + '\PUBLIC_VERSION') then
+        DeleteFile(ExpandConstant('{app}') + '\PUBLIC_VERSION');
+    end;
 
     EnginePath := ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-avx2.exe';
     EscapedEnginePath := EnginePath;

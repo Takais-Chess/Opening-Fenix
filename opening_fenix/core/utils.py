@@ -478,7 +478,7 @@ def is_public_version() -> bool:
     Returns True if running the public release/version, False if private.
     Checks:
     1. Environment variable FENIX_SHARE_BUILD == '1', FENIX_PUBLIC_BUILD == '1', or APP_BUILD_TYPE == 'Public'
-    2. config.json 'is_public' setting
+    2. config.json 'is_public' setting (explicitly True/False)
     3. Bundled 'PUBLIC_VERSION' or 'public.flag' file in base path or user path
     """
     env_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
@@ -487,17 +487,17 @@ def is_public_version() -> bool:
     if env_share or env_public or env_build_type:
         return True
 
-    # Check config.json in user dir or base dir
+    # Check config.json in user dir or base dir first
     for dir_path in [get_user_dir(), get_base_path()]:
         config_path = os.path.join(dir_path, "config.json")
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-                    if cfg.get("is_public") is True:
-                        return True
                     if cfg.get("is_public") is False:
                         return False
+                    if cfg.get("is_public") is True:
+                        return True
             except Exception:
                 pass
 
@@ -521,19 +521,11 @@ def is_example_repertoire(name: str) -> bool:
 
 def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
     """
-    Filters repertoire names depending on whether the app is in Public or Private build mode.
-    - Public mode: returns ONLY example repertoires.
-    - Private mode: returns ALL repertoires (personal + example repertoires so example courses can be viewed & edited).
+    Returns all valid repertoires found in the directory.
+    Exclusion of personal courses from public distributions is performed during packaging,
+    allowing users on all builds to create, import, and manage their own repertoires freely.
     """
-    is_pub = is_public_version()
-    filtered = []
-    for name in repo_names:
-        is_ex = is_example_repertoire(name)
-        if is_pub and is_ex:
-            filtered.append(name)
-        elif not is_pub:
-            filtered.append(name)
-    return filtered
+    return list(repo_names)
 
 
 def get_multilingual_comment_dict(raw_comment: str, default_lang: str = "de") -> dict:
