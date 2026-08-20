@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.3] - 2026-08-20
+
+### Fixed
+- **Settings Dialog Stability**: Added top-level `sip` import and resolved runtime `NameError` exceptions during background statistics loading.
+- **Comment Stats & Elo Display**: Fixed missing import dependencies (`get_elo_display`, `get_repertoire_comment_stats`) in settings dialog.
+- **Checksum Calculation**: Updated `compute_repertoire_checksum` SQL queries to align with Schema V2 tables (`positions`, `moves`, and `repertoire_moves`).
+- **SQLAlchemy 2.0 Compatibility**: Resolved deprecation coercion warnings in `repair_service.py` using `subq.select()`.
+- **Public Build Filtering**: Enforced example course filtering in public distributions via `filter_repertoires_by_build_type`.
+
+### Tested & Quality
+- **Test Suite Expansion**: Added 16 new unit and widget interaction tests across `update_dialog`, `repertoire_tabs`, `training_center`, `tree_navigation_service`, and `board_widget` with 100% pass rate (452 passing tests).
+
 ## [0.9.1] - 2026-08-10
 
 ### Added

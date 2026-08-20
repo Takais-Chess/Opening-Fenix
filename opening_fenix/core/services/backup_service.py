@@ -72,7 +72,13 @@ def compute_repertoire_checksum(repo_name: str) -> str:
             c = conn.cursor()
             c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
             if c.fetchone():
-                c.execute("SELECT id, comment, level, priority FROM positions ORDER BY id")
+                c.execute("""
+                    SELECT p.id, p.comment, rm.level, m.priority_score
+                    FROM positions p
+                    LEFT JOIN moves m ON m.from_position_id = p.id
+                    LEFT JOIN repertoire_moves rm ON rm.move_id = m.id
+                    ORDER BY p.id, m.id
+                """)
                 for row in c.fetchall():
                     hasher.update(str(row).encode("utf-8"))
             conn.close()

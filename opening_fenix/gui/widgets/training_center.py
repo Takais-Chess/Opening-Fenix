@@ -11,6 +11,7 @@ from opening_fenix.gui.styles import COLORS
 from opening_fenix.gui.widgets.common import ZoomableTextBrowser
 from opening_fenix.gui.widgets.charts import PieChartWidget
 from opening_fenix.core.data_tools import get_base_path
+from opening_fenix.core.translation import tr_ui
 
 class TrainingCenterWidget(QFrame):
     """

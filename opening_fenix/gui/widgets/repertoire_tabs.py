@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize, QTimer
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS
+from opening_fenix.core.translation import tr_ui
 
 class RepertoireTabsWidget(QWidget):
     """

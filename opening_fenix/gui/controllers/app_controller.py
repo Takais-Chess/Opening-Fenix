@@ -3,6 +3,7 @@ import json
 from PyQt6.QtWidgets import QMessageBox
 from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
 from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
+from opening_fenix.core.translation import tr_ui
 
 class AppController:
     """

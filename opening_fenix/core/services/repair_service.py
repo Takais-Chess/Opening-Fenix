@@ -21,7 +21,7 @@ def repair_repertoire_health(session, fast=False):
         # Find moves that lead to these positions but aren't repertoire moves
         gaps = session.query(Move).outerjoin(RepertoireMove, Move.id == RepertoireMove.move_id)\
             .filter(RepertoireMove.id == None)\
-            .filter(Move.to_position_id.in_(subq)).all()
+            .filter(Move.to_position_id.in_(subq.select())).all()
         
         if not gaps:
             break

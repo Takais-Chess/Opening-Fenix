@@ -1,5 +1,6 @@
 import os
 import json
+from PyQt6 import sip
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QFormLayout, QComboBox, 
     QHBoxLayout, QLabel, QListWidget, QScrollArea, QFrame, 
@@ -12,6 +13,9 @@ from PyQt6.QtGui import QIcon, QFont
 from opening_fenix.core.data_tools import (
     get_base_path, get_user_dir, get_default_user_dir, get_custom_data_dir, 
     set_custom_data_dir, migrate_user_data, get_repertoire_analysis_status
+)
+from opening_fenix.core.utils import (
+    get_repertoire_db_path, get_elo_display, get_repertoire_comment_stats
 )
 from opening_fenix.gui.widgets.board_widget import THEMES
 
@@ -413,18 +417,12 @@ class SettingsDialog(QDialog):
         self.main_window.training_manager.set_setting("notation_language", lang)
         if hasattr(self.main_window, "update_notation_display"):
             self.main_window.update_notation_display()
-        try:
-            from PyQt6 import sip
-            for w in QApplication.instance().topLevelWidgets():
-                try:
-                    if hasattr(w, "update_ui_from_fen") and not sip.isdeleted(w):
-                        w.update_ui_from_fen()
-                except: pass
-        except ImportError:
-            for w in QApplication.instance().topLevelWidgets():
-                try:
-                    if hasattr(w, "update_ui_from_fen"): w.update_ui_from_fen()
-                except: pass
+        for w in QApplication.instance().topLevelWidgets():
+            try:
+                if hasattr(w, "update_ui_from_fen") and not sip.isdeleted(w):
+                    w.update_ui_from_fen()
+            except Exception:
+                pass
 
     # ─── Seite 3: Hilfe & FAQ ──────────────────────────────────────────────────
 

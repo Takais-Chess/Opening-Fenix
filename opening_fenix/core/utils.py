@@ -521,10 +521,12 @@ def is_example_repertoire(name: str) -> bool:
 
 def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
     """
-    Returns all valid repertoires found in the directory.
-    Exclusion of personal courses from public distributions is performed during packaging,
-    allowing users on all builds to create, import, and manage their own repertoires freely.
+    Filters repertoires based on the build type.
+    In public mode, restricts the initial visible list to example/sample repertoires.
+    In private mode, returns all repertoires.
     """
+    if is_public_version():
+        return [r for r in repo_names if is_example_repertoire(r)]
     return list(repo_names)
 
 
