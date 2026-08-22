@@ -110,10 +110,13 @@ class NewRepertoireDialog(QDialog):
                 border: 1px solid {COLORS['glass_border']};
                 border-radius: {scale(8)}px;
                 color: {COLORS['brown_text']};
+                font-size: {scale(14)}px;
                 font-weight: bold;
+                padding: 0 {scale(16)}px;
             }}
             QPushButton:hover {{
                 background-color: rgba(255, 255, 255, 0.8);
+                border-color: {COLORS['burnt_orange']};
             }}
         """)
         btn_cancel.clicked.connect(self.reject)
@@ -131,6 +134,7 @@ class NewRepertoireDialog(QDialog):
                 border-radius: {scale(8)}px;
                 font-weight: bold;
                 font-size: {scale(14)}px;
+                padding: 0 {scale(16)}px;
             }}
             QPushButton:hover {{
                 background-color: #e67e22;
@@ -352,6 +356,7 @@ class RepoSelectionDialog(QDialog):
                 color: {COLORS['brown_text']};
                 font-size: {scale(14)}px;
                 font-weight: bold;
+                padding: 0 {scale(15)}px;
             }}
             QPushButton:hover {{
                 background-color: rgba(255, 255, 255, 0.8);

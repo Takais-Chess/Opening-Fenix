@@ -3258,21 +3258,7 @@ class CreatorWindow(QMainWindow):
 
     def switch_comment_lang(self, lang_code):
         if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
-            txt = self.txt_c.toPlainText().strip()
-            if self.active_comment_lang == "all":
-                from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
-                tagged = parse_pgn_tagged_comment(txt)
-                if tagged:
-                    self.current_position_comments = tagged
-                elif txt:
-                    self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
-                else:
-                    self.current_position_comments = {}
-            else:
-                if txt:
-                    self.current_position_comments[self.active_comment_lang] = txt
-                elif self.active_comment_lang in self.current_position_comments:
-                    del self.current_position_comments[self.active_comment_lang]
+            self.save_current_details_now()
             
         self.active_comment_lang = lang_code.lower()
         
@@ -3370,36 +3356,6 @@ class CreatorWindow(QMainWindow):
             """)
             self.btn_lang_comment.setToolTip(tr_ui("creator.lang_select_tooltip", "Kommentar-Sprache wählen (Aktuell: {code_str})", code_str=code_str))
 
-
-    def on_details_changed(self):
-        if not self._is_ui_valid() or not self.backend.current_fen: return
-        
-        txt = self.txt_c.toPlainText().strip()
-        if self.active_comment_lang == "all":
-            from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
-            tagged = parse_pgn_tagged_comment(txt)
-            if tagged:
-                self.current_position_comments = tagged
-            elif txt:
-                self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
-            else:
-                self.current_position_comments = {}
-        else:
-            if txt:
-                self.current_position_comments[self.active_comment_lang] = txt
-            elif self.active_comment_lang in self.current_position_comments:
-                del self.current_position_comments[self.active_comment_lang]
-            
-        full_comment = format_multilingual_comment(self.current_position_comments)
-        
-        self.backend.save_position_details(
-            self.backend.current_fen,
-            full_comment,
-            self.i_v1.text(),
-            self.i_v2.text(),
-            self.i_v3.text()
-        )
-        self.update_comment_lang_button_style()
 
     def _update_variant_visibility(self):
         if not self._is_ui_valid(): return
@@ -3903,13 +3859,41 @@ class CreatorWindow(QMainWindow):
         self.txt_c.blockSignals(b)
 
     def on_details_changed(self):
+        if not self._is_ui_valid(): return
+        
+        txt = self.txt_c.toPlainText().strip()
+        if self.active_comment_lang == "all":
+            from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
+            tagged = parse_pgn_tagged_comment(txt)
+            if tagged:
+                self.current_position_comments = tagged
+            elif txt:
+                self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
+            else:
+                self.current_position_comments = {}
+        else:
+            if txt:
+                self.current_position_comments[self.active_comment_lang] = txt
+            elif self.active_comment_lang in self.current_position_comments:
+                del self.current_position_comments[self.active_comment_lang]
+        
+        self.update_comment_lang_button_style()
         self.details_changed = True
         self.save_timer.start()
 
     def save_current_details_now(self):
         if self.save_timer.isActive(): self.save_timer.stop()
         if self.details_changed and self.backend.active_repo_name:
-            self.backend.update_position_data(self.board_widget.board.fen(), self.txt_c.toPlainText(), self.i_v1.text(), self.i_v2.text(), self.i_v3.text(), auto_review=self.overhaul_active)
+            full_comment = format_multilingual_comment(self.current_position_comments)
+            self.backend.update_position_data(
+                self.board_widget.board.fen(), 
+                full_comment, 
+                self.i_v1.text(), 
+                self.i_v2.text(), 
+                self.i_v3.text(), 
+                auto_review=self.overhaul_active,
+                target_lang=self.active_comment_lang
+            )
             self.update_structure_tree()
             self.update_overhaul_progress()
             # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too

@@ -1,8 +1,9 @@
 from PyQt6.QtCore import QThread, pyqtSignal
 import time
 import sys
-import subprocess
-from opening_fenix.core.data_tools import run_db_analysis, run_lichess_import_and_calculate_scores, detect_islands, enrich_position
+from opening_fenix.core.services.analysis_service import run_db_analysis, enrich_position
+from opening_fenix.core.services.priority_service import detect_islands
+from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
 from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
 

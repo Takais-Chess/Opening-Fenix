@@ -8,8 +8,7 @@ from sqlalchemy import or_, and_
 from sqlalchemy.orm import joinedload
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, TrainingData, UserBase, UserRepertoireSettings
 from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.data_tools import get_user_dir
-from opening_fenix.core.utils import is_free_training_profile
+from opening_fenix.core.utils import is_free_training_profile, get_user_dir
 from opening_fenix.core.services.navigator_service import RepertoireNavigator
 
 BOX_INTERVALS = {

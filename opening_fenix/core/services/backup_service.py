@@ -7,8 +7,7 @@ import zipfile
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from opening_fenix.core.data_tools import get_user_dir, get_base_path
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict
+from opening_fenix.core.utils import get_user_dir, get_base_path, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict
 from opening_fenix.core.logger import logger
 
 

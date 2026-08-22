@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional, Tuple, Set
 from opening_fenix.core.db.models import RepertoireLevel, Base, Move, RepertoireMove, Position, LichessData
 from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.data_tools import get_user_dir, get_meta, set_meta, delete_repertoire_db
-from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path
+from opening_fenix.core.db.meta_utils import get_meta, set_meta, delete_repertoire_db
+from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path, get_user_dir
 from opening_fenix.core.services.analysis_service import get_repertoire_analysis_status
 from opening_fenix.core.services.profile_service import update_repertoire_name_globally
 from opening_fenix.core.logger import logger

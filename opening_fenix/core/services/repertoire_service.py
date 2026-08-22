@@ -9,8 +9,8 @@ from typing import List, Dict, Tuple, Any, Optional, Set
 from sqlalchemy import or_, text
 from sqlalchemy.orm import joinedload
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, Base, TrainingData
-from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.data_tools import get_user_dir, get_meta, set_meta, delete_repertoire_db
+from opening_fenix.core.utils import get_user_dir
+from opening_fenix.core.db.meta_utils import get_meta, set_meta, delete_repertoire_db
 from opening_fenix.core.logger import logger
 
 from opening_fenix.core.services.repertoire_core_service import RepertoireService

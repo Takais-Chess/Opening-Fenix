@@ -159,3 +159,89 @@ def test_common_moves_proportional_resizing(creator_window, qapp):
     assert header.sectionResizeMode(2) == QHeaderView.ResizeMode.Stretch
     assert header.sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch
     assert header.sectionResizeMode(4) == QHeaderView.ResizeMode.Stretch
+
+
+def test_multilingual_comment_save_and_switch(creator_window, qapp):
+    """Test typing comments in English, saving, and switching between languages."""
+    creator_window.switch_comment_lang("en")
+    assert creator_window.active_comment_lang == "en"
+    
+    # Enter English comment
+    creator_window.txt_c.setPlainText("English commentary text")
+    creator_window.save_current_details_now()
+    
+    # Check that in-memory and database have English comment
+    assert creator_window.current_position_comments.get("en") == "English commentary text"
+    
+    # Switch to German
+    creator_window.switch_comment_lang("de")
+    assert creator_window.txt_c.toPlainText() == ""
+    
+    # Enter German comment
+    creator_window.txt_c.setPlainText("Deutscher Kommentar Text")
+    creator_window.save_current_details_now()
+    
+    # Check both comments exist
+    assert creator_window.current_position_comments.get("en") == "English commentary text"
+    assert creator_window.current_position_comments.get("de") == "Deutscher Kommentar Text"
+    
+    # Switch back to English
+    creator_window.switch_comment_lang("en")
+    assert creator_window.txt_c.toPlainText() == "English commentary text"
+
+
+def test_delete_comment_and_switch_lang(creator_window, qapp):
+    """Test deleting a comment in one language and switching languages immediately."""
+    # 1. Start on German with a German comment
+    creator_window.switch_comment_lang("de")
+    creator_window.txt_c.setPlainText("Deutscher Test Kommentar")
+    creator_window.save_current_details_now()
+    assert creator_window.txt_c.toPlainText() == "Deutscher Test Kommentar"
+    
+    # 2. Delete the German comment in the UI (simulate user clearing the text edit)
+    creator_window.txt_c.setPlainText("")
+    assert creator_window.details_changed is True
+    
+    # 3. Immediately switch to English before the debounce timer finishes
+    creator_window.switch_comment_lang("en")
+    
+    # Verify English field is empty and no warning indicates German comment exists
+    assert creator_window.active_comment_lang == "en"
+    assert creator_window.txt_c.toPlainText() == ""
+    assert "DE" not in creator_window.btn_lang_comment.toolTip()
+    
+    # 4. Switch back to German
+    creator_window.switch_comment_lang("de")
+    assert creator_window.txt_c.toPlainText() == ""
+    
+    # 5. Reload position from database to confirm it was persisted as deleted
+    creator_window.update_ui_from_fen(force_details=True)
+    qapp.processEvents()
+    assert creator_window.txt_c.toPlainText() == ""
+    assert creator_window.current_position_comments == {}
+
+
+def test_delete_one_language_when_multilingual_exists(creator_window, qapp):
+    """Test deleting only one language comment when comments exist in multiple languages."""
+    # Setup German and English comments
+    creator_window.switch_comment_lang("en")
+    creator_window.txt_c.setPlainText("Keep English text")
+    creator_window.save_current_details_now()
+    
+    creator_window.switch_comment_lang("de")
+    creator_window.txt_c.setPlainText("Delete German text")
+    creator_window.save_current_details_now()
+    
+    # Delete German text and immediately switch to English
+    creator_window.txt_c.setPlainText("")
+    creator_window.switch_comment_lang("en")
+    
+    # English text should still be present
+    assert creator_window.txt_c.toPlainText() == "Keep English text"
+    
+    # Switch back to German - should be empty and highlight that English comment exists
+    creator_window.switch_comment_lang("de")
+    assert creator_window.txt_c.toPlainText() == ""
+    assert "EN" in creator_window.btn_lang_comment.toolTip()
+
+

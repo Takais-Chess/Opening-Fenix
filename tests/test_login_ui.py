@@ -199,3 +199,64 @@ def test_deleted_profile_does_not_reseed_on_startup(mock_user_dir, monkeypatch):
     # Should NOT copy bundled profiles back into empty user profiles dir
     assert len(os.listdir(profiles_dir)) == 0
 
+
+def test_create_new_profile_without_circular_import(qapp, mock_user_dir, monkeypatch):
+    """Test create_new_profile creates DB and settings files without circular import errors."""
+    from opening_fenix.gui.dialogs.login_dialog import RepertoireSelectionDialog
+    from PyQt6.QtWidgets import QDialog
+
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+    monkeypatch.setattr("opening_fenix.core.utils.get_user_dir", lambda: mock_user_dir)
+
+    login = LoginDialog()
+    monkeypatch.setattr(login, "_ask_profile_name", lambda: ("NewPlayer", True))
+
+    class MockSelDialog:
+        def __init__(self, parent=None):
+            self.selected_repos = ["Caro-Kann"]
+            self.selected_language = "de"
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.RepertoireSelectionDialog", MockSelDialog)
+
+    login.create_new_profile()
+
+    db_path = os.path.join(mock_user_dir, "profiles", "NewPlayer.db")
+    settings_path = os.path.join(mock_user_dir, "profiles", "NewPlayer_settings.json")
+    assert os.path.exists(db_path)
+    assert os.path.exists(settings_path)
+    assert login.selected_profile == "NewPlayer"
+
+
+def test_ask_profile_name_button_styling(qapp, mock_user_dir, monkeypatch):
+    """Test that _ask_profile_name sets proper button padding and dimensions."""
+    from PyQt6.QtWidgets import QDialog, QPushButton, QLineEdit
+    from PyQt6.QtCore import QTimer
+
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+    login = LoginDialog()
+
+    # Intercept exec on dialog to inspect buttons
+    buttons_inspected = {}
+    original_exec = QDialog.exec
+
+    def mock_exec(self):
+        if isinstance(self, QDialog) and self.windowTitle() == "Neues Profil":
+            for btn in self.findChildren(QPushButton):
+                buttons_inspected[btn.text()] = {
+                    "styleSheet": btn.styleSheet(),
+                    "height": btn.height() or btn.maximumHeight(),
+                }
+            return QDialog.DialogCode.Rejected
+        return original_exec(self)
+
+    monkeypatch.setattr(QDialog, "exec", mock_exec)
+
+    name, ok = login._ask_profile_name()
+    assert not ok
+    assert len(buttons_inspected) == 2
+    for btn_text, data in buttons_inspected.items():
+        assert "padding: 0" in data["styleSheet"]
+
+

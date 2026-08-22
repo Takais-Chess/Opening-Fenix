@@ -522,11 +522,8 @@ def is_example_repertoire(name: str) -> bool:
 def filter_repertoires_by_build_type(repo_names: list[str]) -> list[str]:
     """
     Filters repertoires based on the build type.
-    In public mode, restricts the initial visible list to example/sample repertoires.
-    In private mode, returns all repertoires.
+    All user-created and seeded repertoires in the user directory remain visible.
     """
-    if is_public_version():
-        return [r for r in repo_names if is_example_repertoire(r)]
     return list(repo_names)
 
 

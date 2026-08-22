@@ -863,7 +863,7 @@ def get_login_dialog_style():
         background-color: rgba(255, 255, 255, 0.4);
         border: 1px solid {COLORS['glass_border']};
         border-radius: {scale(20)}px;
-        padding: {scale(15)}px;
+        padding: {scale(8)}px {scale(16)}px;
         color: {COLORS['brown_text']};
         font-size: {scale(15)}px;
         font-weight: bold;

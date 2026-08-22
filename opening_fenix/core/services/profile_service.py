@@ -1,6 +1,6 @@
 import os
 import sqlite3
-from opening_fenix.core.data_tools import get_user_dir
+from opening_fenix.core.utils import get_user_dir
 from opening_fenix.core.logger import logger
 
 def update_repertoire_name_globally(old_name: str, new_name: str):

@@ -18,17 +18,20 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
     """Compile the PRIVATE installer (all profiles & repertoires included)."""
     print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires)...")
 
-    pub_marker = os.path.join(dist_dir, 'PUBLIC_VERSION')
-    if os.path.exists(pub_marker):
-        os.remove(pub_marker)
+    for marker_dir in [dist_dir, os.path.join(dist_dir, '_internal')]:
+        pub_marker = os.path.join(marker_dir, 'PUBLIC_VERSION')
+        if os.path.exists(pub_marker):
+            os.remove(pub_marker)
 
     for folder in ['profiles', 'repertoires']:
         if os.path.exists(folder):
-            dst = os.path.join(dist_dir, folder)
-            if os.path.exists(dst):
-                shutil.rmtree(dst)
-            shutil.copytree(folder, dst)
-            print(f" -> Synced {folder} to {dst}")
+            for target_base in [dist_dir, os.path.join(dist_dir, '_internal')]:
+                if os.path.exists(target_base):
+                    dst = os.path.join(target_base, folder)
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(folder, dst)
+                    print(f" -> Synced {folder} to {dst}")
 
     res = subprocess.run(
         [iscc_exe, f'/DMyAppVersion={app_version}', '/DAppBuildType=Private', iss_file],
@@ -44,9 +47,12 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
     print("\n3b. Compiling PUBLIC Installer (clean build with example repertoires only)...")
 
     # Place the PUBLIC_VERSION marker so the app knows it's a public build
-    pub_marker = os.path.join(dist_dir, 'PUBLIC_VERSION')
-    with open(pub_marker, 'w', encoding='utf-8') as f:
-        f.write('1')
+    for marker_dir in [dist_dir, os.path.join(dist_dir, '_internal')]:
+        if os.path.exists(marker_dir):
+            pub_marker = os.path.join(marker_dir, 'PUBLIC_VERSION')
+            with open(pub_marker, 'w', encoding='utf-8') as f:
+                f.write('1')
+            print(f" -> Placed PUBLIC_VERSION marker at {pub_marker}")
 
     # Remove all profiles from the bundle
     for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
@@ -56,19 +62,18 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                 shutil.rmtree(p_dir, ignore_errors=True)
                 print(f" -> Removed profile directory '{p_dir}' from public bundle")
 
-    # Sync repertoires, keeping ONLY example/sample folders
-    if os.path.exists('repertoires'):
-        dst_repos = os.path.join(dist_dir, 'repertoires')
-        if os.path.exists(dst_repos):
-            shutil.rmtree(dst_repos)
-        shutil.copytree('repertoires', dst_repos)
-        for item in os.listdir(dst_repos):
-            item_path = os.path.join(dst_repos, item)
-            item_lower = item.lower()
-            if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
-                shutil.rmtree(item_path, ignore_errors=True)
-                print(f" -> Removed non-example repertoire '{item}' from public bundle")
-        print(" -> Synced example repertoires to public bundle")
+    # Clean repertoires across the entire bundle, keeping ONLY example/sample folders
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'repertoires':
+                repo_dir = os.path.join(root_dir_path, d)
+                for item in os.listdir(repo_dir):
+                    item_path = os.path.join(repo_dir, item)
+                    item_lower = item.lower()
+                    if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
+                        shutil.rmtree(item_path, ignore_errors=True)
+                        print(f" -> Removed non-example repertoire '{item}' from '{repo_dir}'")
+    print(" -> Synced example repertoires to public bundle")
 
     res = subprocess.run(
         [iscc_exe, f'/DMyAppVersion={app_version}', '/DAppBuildType=Public', iss_file],

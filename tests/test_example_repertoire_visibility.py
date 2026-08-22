@@ -22,17 +22,17 @@ def test_filter_repertoires_in_private_mode(monkeypatch):
     assert len(filtered) == 4
 
 def test_filter_repertoires_in_public_mode(monkeypatch):
-    """In Public mode, filter_repertoires_by_build_type should return ONLY example repertoires."""
+    """In Public mode, all user-created and seeded repertoires in user directory remain visible."""
     monkeypatch.setattr("opening_fenix.core.utils.is_public_version", lambda: True)
     
     input_repos = ["My Custom Sicilian", "Tarrasch Example Course", "French Defense", "Sicilian Dragon Example Course"]
     filtered = filter_repertoires_by_build_type(input_repos)
     
-    assert "My Custom Sicilian" not in filtered
-    assert "French Defense" not in filtered
+    assert "My Custom Sicilian" in filtered
+    assert "French Defense" in filtered
     assert "Tarrasch Example Course" in filtered
     assert "Sicilian Dragon Example Course" in filtered
-    assert len(filtered) == 2
+    assert len(filtered) == 4
 
 def test_faq_dialog_donation_hidden_in_private_mode(monkeypatch):
     """Ensure donation FAQ item (buymeacoffee) is omitted in Private mode."""

@@ -714,11 +714,46 @@ class LoginDialog(QDialog):
         layout.addWidget(line_edit)
 
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(scale(10))
+
+        btn_cancel = QPushButton(tr_ui("common.cancel", "Abbrechen"))
+        btn_cancel.setFixedHeight(scale(40))
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.4);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(16)}px;
+                color: {COLORS['brown_text']};
+                font-size: {scale(14)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.8);
+                border-color: {COLORS['burnt_orange']};
+            }}
+        """)
+
         btn_ok = QPushButton(tr_ui("login.create", "Erstellen"))
         btn_ok.setObjectName("PrimaryAction")
         btn_ok.setFixedHeight(scale(40))
-        btn_cancel = QPushButton(tr_ui("common.cancel", "Abbrechen"))
-        btn_cancel.setFixedHeight(scale(40))
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                border: none;
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(16)}px;
+                color: white;
+                font-size: {scale(14)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #e67e22;
+            }}
+        """)
+
         btn_row.addWidget(btn_cancel)
         btn_row.addWidget(btn_ok)
         layout.addLayout(btn_row)

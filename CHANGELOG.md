@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.4] - 2026-08-22
+
+### Fixed
+- **Multilingual Comment Autosave**: Fixed an issue where comments edited in English or other non-German languages defaulted to German during autosave due to missing `target_lang` propagation.
+- **Immediate Language Switch Persistence**: Resolved a bug where deleting a comment and immediately switching languages restored stale database state or raised false missing-translation warnings.
+- **Comment State Synchronization**: Consolidated redundant `on_details_changed` handlers in Creator Window to synchronize multilingual in-memory structures with UI changes in real-time.
+
+### Tested & Quality
+- **Automated UI Coverage**: Added comprehensive test cases in `test_creator_ui.py` covering multilingual comment saving, language switching, and comment deletion.
+
 ## [0.9.3] - 2026-08-20
 
 ### Fixed

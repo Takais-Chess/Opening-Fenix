@@ -2,7 +2,7 @@ import os
 import json
 import datetime
 from opening_fenix.core.models import DatabaseManager, UserBase, TrainingData, UserRepertoireSettings
-from opening_fenix.core.data_tools import get_user_dir
+from opening_fenix.core.utils import get_user_dir
 from opening_fenix.core.logger import logger
 
 def migrate_legacy_profiles():

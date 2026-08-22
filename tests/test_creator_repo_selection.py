@@ -71,3 +71,19 @@ def test_dialog_create_new_repertoire(qtbot, repo_selection_dialog):
     assert repo_selection_dialog.is_new_repo is True
     assert repo_selection_dialog.new_color == "b"
 
+
+def test_new_repertoire_dialog_button_styling(qtbot):
+    from opening_fenix.creator.repo_selection_dialog import NewRepertoireDialog
+    from opening_fenix.gui.styles import scale
+    from PyQt6.QtWidgets import QPushButton
+
+    dialog = NewRepertoireDialog()
+    qtbot.addWidget(dialog)
+
+    buttons = dialog.findChildren(QPushButton)
+    assert len(buttons) >= 2
+    for btn in buttons:
+        assert "padding: 0" in btn.styleSheet()
+        assert btn.height() == scale(40) or btn.maximumHeight() == scale(40)
+
+
