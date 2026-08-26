@@ -1,15 +1,44 @@
 import os
 import sys
+import stat
 import shutil
 import subprocess
 import PyInstaller.__main__
+
+
+def safe_rmtree(path):
+    """Safely delete directory trees, clearing read-only attributes on Windows."""
+    if not os.path.exists(path):
+        return
+
+    def _handle_remove_readonly(func, p, excinfo):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=_handle_remove_readonly)
+        else:
+            shutil.rmtree(path, onerror=_handle_remove_readonly)
+    except Exception:
+        pass
+
+    if os.path.exists(path):
+        try:
+            subprocess.run(['attrib', '-r', '-s', '-h', '/s', '/d', os.path.join(path, '*')], capture_output=True)
+            subprocess.run(['cmd', '/c', 'rmdir', '/s', '/q', path], capture_output=True)
+        except Exception:
+            pass
 
 
 def _sync_engines(dist_dir):
     if os.path.exists('engines'):
         dst = os.path.join(dist_dir, 'engines')
         if os.path.exists(dst):
-            shutil.rmtree(dst)
+            safe_rmtree(dst)
         shutil.copytree('engines', dst)
         print(f" -> Synced engines to {dst}")
 
@@ -29,7 +58,7 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                 if os.path.exists(target_base):
                     dst = os.path.join(target_base, folder)
                     if os.path.exists(dst):
-                        shutil.rmtree(dst)
+                        safe_rmtree(dst)
                     shutil.copytree(folder, dst)
                     print(f" -> Synced {folder} to {dst}")
 
@@ -59,7 +88,7 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
         for d in dirs:
             if d.lower() == 'profiles':
                 p_dir = os.path.join(root_dir_path, d)
-                shutil.rmtree(p_dir, ignore_errors=True)
+                safe_rmtree(p_dir)
                 print(f" -> Removed profile directory '{p_dir}' from public bundle")
 
     # Clean repertoires across the entire bundle, keeping ONLY example/sample folders
@@ -71,7 +100,7 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                     item_path = os.path.join(repo_dir, item)
                     item_lower = item.lower()
                     if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
-                        shutil.rmtree(item_path, ignore_errors=True)
+                        safe_rmtree(item_path)
                         print(f" -> Removed non-example repertoire '{item}' from '{repo_dir}'")
     print(" -> Synced example repertoires to public bundle")
 
@@ -116,7 +145,7 @@ def main():
             subprocess.run(['taskkill', '/F', '/IM', 'Opening Fenix.exe'], capture_output=True)
             import time
             time.sleep(0.5)
-            shutil.rmtree(dist_dir, ignore_errors=True)
+            safe_rmtree(dist_dir)
         except Exception:
             pass
 

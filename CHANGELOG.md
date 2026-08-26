@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.5] - 2026-08-26
+
+### Added
+- **High-FPS Animation Pipeline**: Implemented static board snapshot caching (`_board_snapshot`) during piece slides, reducing per-frame draw calls from ~120 to 2 for ultra-smooth 60–144Hz animations.
+- **Hardware Refresh Rate Auto-Detection**: Board animation timer automatically queries monitor capabilities to run animations natively at high refresh rates (120Hz/144Hz/240Hz).
+- **Animation Performance Telemetry**: Added frame timing calculations, debug HUD mode, and automatic low-FPS warning heuristic logging.
+
+### Fixed & Improved
+- **Creator Toolbar Alignment**: Fixed vertical centering and padding for the active repertoire glass pill button across high-DPI scaling factors.
+- **Notation Reveal Synchronization**: Synchronized move notation revealing in training mode to prevent premature move spoilers before the piece slide animation finishes.
+- **Installer Build Script Robustness**: Added safe recursive directory cleanup (`safe_rmtree`) with Windows read-only attribute handling.
+
+### Tested & Quality
+- **Animation & UI Test Suites**: Added new automated unit tests in `test_animation_fps.py` and `test_creator_toolbar_repo_btn.py` with 100% pass rate.
+
 ## [0.9.4] - 2026-08-22
 
 ### Fixed

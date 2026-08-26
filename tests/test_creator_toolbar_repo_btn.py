@@ -65,3 +65,14 @@ def test_active_repo_button_dynamic_width(qtbot):
     
     assert long_width > short_width + 100
     assert btn.sizeHint().width() >= long_width
+
+def test_active_repo_button_vertical_alignment(qtbot):
+    btn = ActiveRepoButton()
+    qtbot.addWidget(btn)
+    
+    assert btn.layout_h.alignment() & Qt.AlignmentFlag.AlignVCenter
+    assert btn.lbl_name.alignment() & Qt.AlignmentFlag.AlignVCenter
+    assert btn.lbl_sep.alignment() & Qt.AlignmentFlag.AlignVCenter
+    assert btn.lbl_load.alignment() & Qt.AlignmentFlag.AlignVCenter
+    assert btn.objectName() == "ActiveRepoButton"
+

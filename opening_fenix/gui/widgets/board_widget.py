@@ -17,6 +17,7 @@ from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixma
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QVariantAnimation, QEasingCurve
 from PyQt6.QtSvg import QSvgRenderer
 from opening_fenix.core.data_tools import get_base_path
+from opening_fenix.core.logger import logger
 from opening_fenix.gui.scaling import scale
 
 
@@ -407,26 +408,15 @@ class ChessBoardWidget(QWidget):
         is_drag = self.dragging_piece is not None
         is_anim = self.is_animating and self.animating_piece_data
         
-        skip_square = None
         if is_anim:
-            skip_square = self.animating_piece_data['from_square']
-        elif is_drag:
-            skip_square = self.drag_start_square
-
-        # Unified coordinate origin for all states (idle, drag, animation)
-        painter.translate(x_offset, y_offset)
-        
-        # 1. Base board (squares, coordinates, last move)
-        self._paint_board_base(painter, square_size)
-        
-        # 2. Static pieces (skipping the moving or dragging piece)
-        self._paint_pieces(painter, square_size, skip_square=skip_square)
-        
-        # 3. Arrows (hint, solution, explorer)
-        self._paint_arrows(painter, square_size)
-        
-        # 4. Draw animating piece
-        if is_anim:
+            # High-performance 2-draw-call pipeline:
+            # 1. Draw pre-rendered static board snapshot (squares + coords + static pieces + arrows)
+            if self._board_snapshot is None or self._snapshot_flipped != self.flipped:
+                self._board_snapshot = self._build_board_snapshot()
+            painter.drawPixmap(0, 0, self._board_snapshot)
+            
+            # 2. Draw moving piece at interpolated position
+            painter.translate(x_offset, y_offset)
             self._anim_frame_times.append(time.perf_counter())
             d = self.animating_piece_data
             p = d['progress']
@@ -435,14 +425,20 @@ class ChessBoardWidget(QWidget):
             lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
             scale_factor = 1.0 + (0.15 * lift)
             self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
-        
-        # 5. Draw dragging piece on top
-        if is_drag:
-            mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
-            target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
-            key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
-            if key in self.piece_pixmaps: 
-                painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
+        else:
+            skip_square = self.drag_start_square if is_drag else None
+            # Standard paint when idle or dragging
+            painter.translate(x_offset, y_offset)
+            self._paint_board_base(painter, square_size)
+            self._paint_pieces(painter, square_size, skip_square=skip_square)
+            self._paint_arrows(painter, square_size)
+            
+            if is_drag:
+                mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
+                target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
+                key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
+                if key in self.piece_pixmaps: 
+                    painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
 
         if self.debug_anim:
             painter.resetTransform()
@@ -577,6 +573,14 @@ class ChessBoardWidget(QWidget):
         }
         if self.debug_anim:
             print(f"[ANIM DEBUG] Move completed in {duration_ms:.1f}ms | Frames: {frame_count} | FPS: {avg_fps:.1f}")
+
+        # Warn if FPS drops below threshold (e.g. < 100 FPS on high refresh displays or < 50 FPS on 60Hz displays)
+        fps_threshold = min(100.0, self.target_fps * 0.8)
+        if avg_fps < fps_threshold and duration_ms > 50:
+            logger.warning(
+                f"[ANIM PERF] Low animation FPS detected: {avg_fps:.1f} FPS "
+                f"(Target: {self.target_fps}Hz, Frames: {frame_count}, Duration: {duration_ms:.1f}ms)"
+            )
 
         d = self.animating_piece_data
         self.is_animating = False

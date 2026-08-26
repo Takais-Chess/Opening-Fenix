@@ -564,6 +564,9 @@ def get_creator_toolbar_style():
         min-height: {scale(40)}px;
         max-height: {scale(40)}px;
     }}
+    QToolBar QPushButton#ActiveRepoButton {{
+        padding: 0px;
+    }}
     QToolBar QPushButton:hover, QToolBar QComboBox:hover {{ 
         background-color: rgba(255, 255, 255, 0.7); 
     }}

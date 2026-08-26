@@ -2352,6 +2352,7 @@ class ActiveRepoButton(QPushButton):
     """
     def __init__(self, parent=None):
         super().__init__("", parent)
+        self.setObjectName("ActiveRepoButton")
         self.setProperty("class", "GlassPill")
         self.setFixedHeight(scale(40))
         self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
@@ -2359,8 +2360,9 @@ class ActiveRepoButton(QPushButton):
         self.setToolTip(tr_ui("creator.toolbar_load_tooltip", "Ein anderes Repertoire laden"))
         
         self.layout_h = QHBoxLayout(self)
-        self.layout_h.setContentsMargins(scale(6), scale(4), scale(12), scale(4))
+        self.layout_h.setContentsMargins(scale(6), 0, scale(12), 0)
         self.layout_h.setSpacing(scale(5))
+        self.layout_h.setAlignment(Qt.AlignmentFlag.AlignVCenter)
         self.layout_h.setSizeConstraint(QHBoxLayout.SizeConstraint.SetMinimumSize)
         
         # Cover thumbnail
@@ -2368,31 +2370,34 @@ class ActiveRepoButton(QPushButton):
         self.lbl_cover.setFixedSize(scale(28), scale(28))
         self.lbl_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.layout_h.addWidget(self.lbl_cover)
+        self.layout_h.addWidget(self.lbl_cover, 0, Qt.AlignmentFlag.AlignVCenter)
         
         # Repertoire name
         self.lbl_name = QLabel()
+        self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.lbl_name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         f_name = QFont("Segoe UI", 10)
         f_name.setBold(True)
         self.lbl_name.setFont(f_name)
         self.lbl_name.setStyleSheet(f"font-weight: bold; font-size: {scale(13)}px; color: {COLORS['brown_text']}; border: none; background: transparent; padding: 0px;")
-        self.layout_h.addWidget(self.lbl_name)
+        self.layout_h.addWidget(self.lbl_name, 0, Qt.AlignmentFlag.AlignVCenter)
         
         # Separator
         self.lbl_sep = QLabel("│")
+        self.lbl_sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_sep.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.lbl_sep.setStyleSheet("color: rgba(62, 39, 35, 0.25); font-size: 14px; font-weight: normal; border: none; background: transparent; padding: 0px;")
-        self.layout_h.addWidget(self.lbl_sep)
+        self.lbl_sep.setStyleSheet(f"color: rgba(62, 39, 35, 0.25); font-size: {scale(14)}px; font-weight: normal; border: none; background: transparent; padding: 0px;")
+        self.layout_h.addWidget(self.lbl_sep, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Load action text
         self.lbl_load = QLabel(tr_ui("creator.toolbar_load", "📂 Laden"))
+        self.lbl_load.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.lbl_load.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         f_load = QFont("Segoe UI", 10)
         f_load.setBold(True)
         self.lbl_load.setFont(f_load)
         self.lbl_load.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(13)}px; font-weight: bold; border: none; background: transparent; padding: 0px;")
-        self.layout_h.addWidget(self.lbl_load)
+        self.layout_h.addWidget(self.lbl_load, 0, Qt.AlignmentFlag.AlignVCenter)
         
         self.update_repo(None)
 
@@ -2435,7 +2440,7 @@ class ActiveRepoButton(QPushButton):
                 try:
                     pix = QPixmap(cover_path)
                     if not pix.isNull():
-                        target_size = self.lbl_cover.size() if (self.lbl_cover.width() > 0 and self.lbl_cover.height() > 0) else QSize(scale(28), scale(28))
+                        target_size = QSize(scale(28), scale(28))
                         rounded = get_rounded_pixmap(pix, target_size, scale(6))
                         self.lbl_cover.setText("")
                         self.lbl_cover.setPixmap(rounded)
@@ -2448,11 +2453,8 @@ class ActiveRepoButton(QPushButton):
                 self._set_default_cover()
                 
         # Dynamically adjust minimum width to fit the content perfectly
-        self.lbl_name.adjustSize()
-        self.lbl_load.adjustSize()
         req_width = self._calc_required_width()
         self.setMinimumWidth(req_width)
-        self.adjustSize()
         self.updateGeometry()
 
     def _set_default_cover(self):

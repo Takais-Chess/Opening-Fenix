@@ -890,8 +890,9 @@ class MainWindow(QMainWindow):
 
         if self.current_move_obj:
             self.start_animation(path_to_animate or [])
-            reveal = (self.training_mode == 'new')
-            self.update_notation_display(reveal_move=reveal)
+            if not self.board_widget.is_animating:
+                reveal = (self.training_mode == 'new')
+                self.update_notation_display(reveal_move=reveal)
         else:
             self.btn_smart.setText(tr_ui("main_window.btn_done", "🎉 FERTIG!"))
             self.btn_smart.setEnabled(False)
@@ -994,12 +995,11 @@ class MainWindow(QMainWindow):
             current_move = self.current_move_obj
             self.set_button_state('correct')
             
-            # Defer expensive database writes, notation updates, and next challenge calculation
+            # Defer expensive database writes and next challenge calculation
             def process_after_move():
                 if was_waiting:
                     self.training_manager.register_success(current_move.id, True)
                     self.update_stats_display()
-                self.update_notation_display(reveal_move=True)
                 self.load_next_challenge(True, current_move)
                 
             QTimer.singleShot(0, process_after_move)
@@ -1303,6 +1303,7 @@ class MainWindow(QMainWindow):
             self.board_widget.solution_arrow = None
             
         self.board_widget.update()
+        self.update_notation_display(reveal_move=(self.training_mode == 'new'))
         
         # Preload the next challenge in the background while user is thinking
         self._preloaded_challenge = None
