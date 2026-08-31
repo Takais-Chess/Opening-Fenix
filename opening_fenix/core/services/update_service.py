@@ -46,12 +46,53 @@ def get_config_dict() -> Dict[str, Any]:
     return {}
 
 def save_config_dict(cfg: Dict[str, Any]) -> None:
-    config_path = os.path.join(get_user_dir(), "config.json")
+    config_dir = get_user_dir()
+    os.makedirs(config_dir, exist_ok=True)
+    config_path = os.path.join(config_dir, "config.json")
     try:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Could not write config.json: {e}")
+
+class _UpdateSignals(QObject):
+    check_completed = pyqtSignal(str)
+
+class _UpdateSignalDispatcher:
+    _instance = None
+
+    def _get_obj(self):
+        from PyQt6 import sip
+        if self._instance is None or sip.isdeleted(self._instance):
+            self._instance = _UpdateSignals()
+        return self._instance
+
+    @property
+    def check_completed(self):
+        return self._get_obj().check_completed
+
+update_signals = _UpdateSignalDispatcher()
+
+def record_update_check_time() -> str:
+    """
+    Saves the current timestamp into config.json as last_update_check, emits signal, and returns the formatted string.
+    """
+    cfg = get_config_dict()
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cfg["last_update_check"] = now_str
+    save_config_dict(cfg)
+    try:
+        update_signals.check_completed.emit(now_str)
+    except Exception:
+        pass
+    return now_str
+
+def get_last_update_check_time() -> Optional[str]:
+    """
+    Returns the last update check timestamp string from config.json, or None.
+    """
+    cfg = get_config_dict()
+    return cfg.get("last_update_check")
 
 def should_check_for_updates(manual: bool = False, current_version: str = APP_VERSION) -> bool:
     """
@@ -127,6 +168,7 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
+            logger.info(f"UpdateCheckWorker: Checking GitHub releases for updates (manual={self.manual})...")
             req = urllib.request.Request(
                 GITHUB_RELEASES_API,
                 headers={"User-Agent": "OpeningFenix-App"}
@@ -153,8 +195,12 @@ class UpdateCheckWorker(QThread):
                     asset_name = name
                     break
 
+            check_time = record_update_check_time()
+            logger.info(f"UpdateCheckWorker: Check completed at {check_time}. Remote tag: {tag_name}, Local version: {APP_VERSION}")
+
             if is_newer_version(tag_name, APP_VERSION):
                 if not self.manual and is_version_ignored(tag_name):
+                    logger.info(f"UpdateCheckWorker: Version {tag_name} is ignored by user.")
                     self.no_update_found.emit()
                     return
 
@@ -171,12 +217,13 @@ class UpdateCheckWorker(QThread):
                 self.no_update_found.emit()
 
         except urllib.error.HTTPError as e:
+            record_update_check_time()
             if e.code == 404:
                 self.no_update_found.emit()
             else:
                 self.check_error.emit(f"HTTP Fehler: {e.code}")
         except Exception as e:
-            logger.debug(f"Update check error: {e}")
+            logger.warning(f"Update check error: {e}")
             self.check_error.emit(str(e))
 
 class DownloaderWorker(QThread):

@@ -1,5 +1,6 @@
 import os
 import json
+from typing import Optional
 from PyQt6 import sip
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QWidget, QFormLayout, QComboBox, 
@@ -19,10 +20,9 @@ from opening_fenix.core.utils import (
 )
 from opening_fenix.gui.widgets.board_widget import THEMES
 
-# Import centralized styles
 from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon
 from opening_fenix.gui.scaling import scale
-from opening_fenix.core.translation import tr_ui
+from opening_fenix.core.translation import tr_ui, tr_widget
 from opening_fenix.gui.widgets.common import AutoAdjustButton
 
 
@@ -201,6 +201,7 @@ class SettingsDialog(QDialog):
         sidebar_items = [
             tr_ui("settings.tab_display", "🎨 Darstellung & Audio"),
             tr_ui("settings.tab_repo", "📚 Repertoire-Konfiguration"),
+            tr_ui("settings.tab_updates", "💾 Software & Daten"),
             tr_ui("settings.tab_faq", "❓ Hilfe & FAQ"),
         ]
         for text in sidebar_items:
@@ -214,25 +215,32 @@ class SettingsDialog(QDialog):
 
         self.page_display = QWidget(); self.init_page_display(self.page_display)
         self.page_repo = QWidget(); self.init_page_repo(self.page_repo)
+        self.page_updates = QWidget(); self.init_page_updates(self.page_updates)
         self.page_faq = QWidget(); self.init_page_faq(self.page_faq)
 
         self.pages.addWidget(self.page_display)
         self.pages.addWidget(self.page_repo)
+        self.pages.addWidget(self.page_updates)
         self.pages.addWidget(self.page_faq)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        scroll.setWidget(self.pages)
-        layout.addWidget(scroll, 1)
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.main_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.main_scroll.setWidget(self.pages)
+        layout.addWidget(self.main_scroll, 1)
 
         self.sidebar.setCurrentRow(0)
 
     def display_page(self, index):
         self.pages.setCurrentIndex(index)
+        if hasattr(self, 'main_scroll') and self.main_scroll is not None:
+            self.main_scroll.verticalScrollBar().setValue(0)
+            QTimer.singleShot(0, lambda: self.main_scroll.verticalScrollBar().setValue(0) if hasattr(self, 'main_scroll') and not sip.isdeleted(self.main_scroll) else None)
         if index == 1:
             QTimer.singleShot(0, self.rearrange_cards_grid)
+        elif index == 2:
+            self.refresh_update_info()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -289,7 +297,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(g_design)
 
         # Audio
-        g_audio = QGroupBox(tr_ui("settings.audio_title", "🔊 Klang && Lautstärke"))
+        g_audio = QGroupBox(tr_widget("settings.audio_title", "🔊 Klang & Lautstärke"))
         f_audio = QFormLayout(g_audio)
         f_audio.setSpacing(scale(15))
 
@@ -330,22 +338,63 @@ class SettingsDialog(QDialog):
         f_behavior.addRow(tr_ui("settings.auto_delay", "Verzögerung bei Variantenwechsel (Auto-Weiter):"), self.spin_delay)
 
         layout.addWidget(g_behavior)
+        layout.addStretch()
 
-        # Software-Updates
+    # ─── Seite 3: Software-Updates ──────────────────────────────────────────────
+
+    def init_page_updates(self, page):
         from PyQt6.QtWidgets import QCheckBox, QMessageBox
         from opening_fenix.core.services.update_service import UpdateCheckWorker, get_config_dict, save_config_dict
-        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+        from opening_fenix.core.version import APP_VERSION
+
+        layout = QVBoxLayout(page)
+        layout.setSpacing(scale(20))
+        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         g_updates = QGroupBox(tr_ui("settings.update_title", "🔄 Software-Updates"))
         v_updates = QVBoxLayout(g_updates)
-        v_updates.setSpacing(scale(10))
+        v_updates.setSpacing(scale(16))
+        v_updates.setContentsMargins(scale(20), scale(24), scale(20), scale(20))
 
+        # Version & Status Section (Free-floating on the left, no borders, compact spacing)
+        v_info = QVBoxLayout()
+        v_info.setSpacing(scale(8))
+        v_info.setContentsMargins(0, 0, 0, scale(4))
+
+        # Version Row
+        h_ver = QHBoxLayout()
+        h_ver.setSpacing(scale(8))
+        lbl_v_hdr = QLabel(tr_ui("settings.current_version_label", "Installierte Version:"))
+        lbl_v_hdr.setStyleSheet("font-weight: bold; color: #444; background: transparent; border: none;")
+        self.lbl_current_version = QLabel(f"v{APP_VERSION}")
+        self.lbl_current_version.setStyleSheet(f"font-weight: bold; font-size: {scale(14)}px; color: {COLORS['burnt_orange']}; background: transparent; border: none;")
+        h_ver.addWidget(lbl_v_hdr)
+        h_ver.addWidget(self.lbl_current_version)
+        h_ver.addStretch()
+        v_info.addLayout(h_ver)
+
+        # Last Check Row
+        h_chk = QHBoxLayout()
+        h_chk.setSpacing(scale(8))
+        lbl_chk_hdr = QLabel(tr_ui("settings.last_check_label", "Letzte Prüfung:"))
+        lbl_chk_hdr.setStyleSheet("font-weight: bold; color: #444; background: transparent; border: none;")
+        self.lbl_last_check = QLabel("-")
+        self.lbl_last_check.setStyleSheet("font-weight: bold; font-size: 13px; color: #333333; background: transparent; border: none;")
+        h_chk.addWidget(lbl_chk_hdr)
+        h_chk.addWidget(self.lbl_last_check)
+        h_chk.addStretch()
+        v_info.addLayout(h_chk)
+
+        v_updates.addLayout(v_info)
+
+        # Auto check option
         cfg = get_config_dict()
-        chk_auto = QCheckBox(tr_ui("settings.auto_check_updates", "Automatisch nach Updates suchen"))
+        chk_auto = QCheckBox(tr_ui("settings.auto_check_updates", "Bei Start nach Update suchen"))
         chk_auto.setChecked(cfg.get("auto_check_updates", True))
         chk_auto.toggled.connect(self.on_auto_check_updates_toggled)
         v_updates.addWidget(chk_auto)
 
+        # Action button
         h_check = QHBoxLayout()
         self.btn_manual_update = QPushButton(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
         self.btn_manual_update.clicked.connect(self.run_manual_update_check)
@@ -354,7 +403,61 @@ class SettingsDialog(QDialog):
         v_updates.addLayout(h_check)
 
         layout.addWidget(g_updates)
+
+        # Speicherort & Cloud-Synchronisation
+        g_storage = QGroupBox(tr_widget("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation"))
+        v_storage = QVBoxLayout(g_storage)
+        v_storage.setSpacing(scale(8))
+
+        lbl_storage_desc = QLabel(tr_ui("settings.storage_desc", "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation)."))
+        lbl_storage_desc.setWordWrap(True)
+        lbl_storage_desc.setStyleSheet("color: #666; font-size: 12px;")
+        v_storage.addWidget(lbl_storage_desc)
+
+        h_path = QHBoxLayout()
+        self.txt_storage_path = QLineEdit(get_user_dir())
+        self.txt_storage_path.setReadOnly(True)
+        self.txt_storage_path.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; padding: 6px 10px; font-weight: 500; color: #222;")
+        h_path.addWidget(self.txt_storage_path, 1)
+
+        self.btn_change_storage = AutoAdjustButton(tr_ui("settings.storage_btn_change", "📁 Ordner ändern..."))
+        self.btn_change_storage.clicked.connect(self.change_storage_directory)
+        h_path.addWidget(self.btn_change_storage)
+
+        self.btn_reset_storage = AutoAdjustButton(tr_ui("settings.storage_btn_reset", "Standard wiederherstellen"))
+        self.btn_reset_storage.clicked.connect(self.reset_storage_directory)
+        h_path.addWidget(self.btn_reset_storage)
+        v_storage.addLayout(h_path)
+
+        h_open = QHBoxLayout()
+        btn_open_repos = AutoAdjustButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
+        btn_open_repos.clicked.connect(self.open_repertoires_folder)
+        btn_open_profs = AutoAdjustButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs.clicked.connect(self.open_profiles_folder)
+        h_open.addWidget(btn_open_repos)
+        h_open.addWidget(btn_open_profs)
+        v_storage.addLayout(h_open)
+
+        layout.addWidget(g_storage)
         layout.addStretch()
+
+        from opening_fenix.core.services.update_service import update_signals
+        try:
+            update_signals.check_completed.connect(self.refresh_update_info)
+        except Exception:
+            pass
+
+        self.refresh_update_info()
+
+    def refresh_update_info(self, timestamp: Optional[str] = None):
+        if not timestamp or not isinstance(timestamp, str):
+            from opening_fenix.core.services.update_service import get_last_update_check_time
+            timestamp = get_last_update_check_time()
+        if hasattr(self, 'lbl_last_check') and self.lbl_last_check:
+            if timestamp:
+                self.lbl_last_check.setText(str(timestamp))
+            else:
+                self.lbl_last_check.setText(tr_ui("settings.update_never", "Noch nie"))
 
     def on_auto_check_updates_toggled(self, checked: bool):
         from opening_fenix.core.services.update_service import get_config_dict, save_config_dict
@@ -374,6 +477,7 @@ class SettingsDialog(QDialog):
         self.update_worker.start()
 
     def on_manual_update_found(self, release_info: dict):
+        self.refresh_update_info()
         self.btn_manual_update.setEnabled(True)
         self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
         from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
@@ -382,6 +486,7 @@ class SettingsDialog(QDialog):
     def on_manual_no_update(self):
         from PyQt6.QtWidgets import QMessageBox
         from opening_fenix.core.version import APP_VERSION
+        self.refresh_update_info()
         self.btn_manual_update.setEnabled(True)
         self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
         QMessageBox.information(
@@ -392,6 +497,7 @@ class SettingsDialog(QDialog):
 
     def on_manual_update_error(self, err_msg: str):
         from PyQt6.QtWidgets import QMessageBox
+        self.refresh_update_info()
         self.btn_manual_update.setEnabled(True)
         self.btn_manual_update.setText(tr_ui("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
         QMessageBox.warning(
@@ -467,7 +573,7 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
 
         # Repertoire-Cards Bereich
-        g_sel = QGroupBox(tr_ui("settings.repo_selection_title", "📂 Repertoire Auswahl && Status"))
+        g_sel = QGroupBox(tr_widget("settings.repo_selection_title", "📂 Repertoire Auswahl & Status"))
         v_sel = QVBoxLayout(g_sel)
         v_sel.setContentsMargins(scale(6), scale(6), scale(6), scale(6))
         v_sel.setSpacing(0)
@@ -494,8 +600,25 @@ class SettingsDialog(QDialog):
 
         # Informationen (read-only)
         self.grp_info = QGroupBox(tr_ui("settings.repo_info_title", "ℹ️ Repertoire Informationen"))
-        info_main_layout = QHBoxLayout(self.grp_info)
-        info_main_layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        info_outer_layout = QVBoxLayout(self.grp_info)
+        info_outer_layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        info_outer_layout.setSpacing(0)
+
+        # Empty State Placeholder (compact when no repertoire is selected)
+        self.info_empty_widget = QWidget()
+        empty_layout = QVBoxLayout(self.info_empty_widget)
+        empty_layout.setContentsMargins(scale(10), scale(20), scale(10), scale(20))
+        empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_info_empty = QLabel(tr_ui("settings.select_repo_to_show_data", "Wähle ein Repertoire aus, um Daten anzuzeigen"))
+        self.lbl_info_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_info_empty.setStyleSheet("color: #7f8c8d; font-size: 13px; font-weight: bold; font-style: italic; background: transparent;")
+        empty_layout.addWidget(self.lbl_info_empty)
+        info_outer_layout.addWidget(self.info_empty_widget)
+
+        # Full Content Widget (shown when a repertoire is selected)
+        self.info_content_widget = QWidget()
+        info_main_layout = QHBoxLayout(self.info_content_widget)
+        info_main_layout.setContentsMargins(0, 0, 0, 0)
         info_main_layout.setSpacing(scale(25))
 
         # Left Column Widget to enforce fixed width based on cover image size
@@ -567,43 +690,12 @@ class SettingsDialog(QDialog):
         self.txt_description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         info_main_layout.addWidget(self.txt_description, 1)
 
+        info_outer_layout.addWidget(self.info_content_widget)
         layout.addWidget(self.grp_info)
 
-        # Speicherort & Cloud-Synchronisation
-        g_storage = QGroupBox(tr_ui("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation"))
-        v_storage = QVBoxLayout(g_storage)
-        v_storage.setSpacing(scale(8))
-
-        lbl_storage_desc = QLabel(tr_ui("settings.storage_desc", "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation)."))
-        lbl_storage_desc.setWordWrap(True)
-        lbl_storage_desc.setStyleSheet("color: #666; font-size: 12px;")
-        v_storage.addWidget(lbl_storage_desc)
-
-        h_path = QHBoxLayout()
-        self.txt_storage_path = QLineEdit(get_user_dir())
-        self.txt_storage_path.setReadOnly(True)
-        self.txt_storage_path.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; padding: 6px 10px; font-weight: 500; color: #222;")
-        h_path.addWidget(self.txt_storage_path, 1)
-
-        self.btn_change_storage = AutoAdjustButton(tr_ui("settings.storage_btn_change", "📁 Ordner ändern..."))
-        self.btn_change_storage.clicked.connect(self.change_storage_directory)
-        h_path.addWidget(self.btn_change_storage)
-
-        self.btn_reset_storage = AutoAdjustButton(tr_ui("settings.storage_btn_reset", "Standard wiederherstellen"))
-        self.btn_reset_storage.clicked.connect(self.reset_storage_directory)
-        h_path.addWidget(self.btn_reset_storage)
-        v_storage.addLayout(h_path)
-
-        h_open = QHBoxLayout()
-        btn_open_repos = AutoAdjustButton(tr_ui("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
-        btn_open_repos.clicked.connect(self.open_repertoires_folder)
-        btn_open_profs = AutoAdjustButton(tr_ui("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
-        btn_open_profs.clicked.connect(self.open_profiles_folder)
-        h_open.addWidget(btn_open_repos)
-        h_open.addWidget(btn_open_profs)
-        v_storage.addLayout(h_open)
-
-        layout.addWidget(g_storage)
+        # Default state: empty placeholder visible, full content hidden
+        self.info_empty_widget.show()
+        self.info_content_widget.hide()
 
         # Gefahrenzone
         g_danger = QGroupBox(tr_ui("settings.danger_title", "⚠️ Gefahrenzone"))
@@ -701,6 +793,11 @@ class SettingsDialog(QDialog):
         active_repo = self.main_window.repertoire_manager.active_repertoire_name
         if active_repo:
             self.on_repo_selected(active_repo)
+        else:
+            self.selected_repo = None
+            if hasattr(self, 'info_empty_widget'): self.info_empty_widget.show()
+            if hasattr(self, 'info_content_widget'): self.info_content_widget.hide()
+            if hasattr(self, 'btn_reset'): self.btn_reset.setEnabled(False)
 
     def closeEvent(self, event):
         if hasattr(self, "stats_loader") and self.stats_loader and self.stats_loader.isRunning():
@@ -739,8 +836,18 @@ class SettingsDialog(QDialog):
 
 
     def on_repo_selected(self, repo_name):
-        if not repo_name: return
+        if not repo_name:
+            self.selected_repo = None
+            if hasattr(self, 'info_empty_widget'): self.info_empty_widget.show()
+            if hasattr(self, 'info_content_widget'): self.info_content_widget.hide()
+            if hasattr(self, 'btn_reset'): self.btn_reset.setEnabled(False)
+            return
+
         self.selected_repo = repo_name
+        if hasattr(self, 'info_empty_widget'): self.info_empty_widget.hide()
+        if hasattr(self, 'info_content_widget'): self.info_content_widget.show()
+        if hasattr(self, 'btn_reset'): self.btn_reset.setEnabled(True)
+        self.update_card_selection_highlights()
 
         # Stop existing loader if any
         if hasattr(self, "stats_loader") and self.stats_loader and self.stats_loader.isRunning():
@@ -1058,14 +1165,16 @@ class RepertoireConfigCard(QFrame):
         self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(16)}px;")
         self.info_layout.addWidget(self.lbl_name)
         
+        self.levels_elo_map = {}
+
         # Elo Row (Horizontal container for Elo Rating label + Toggle Switch Button next to it)
         self.elo_row = QWidget()
         self.elo_layout = QHBoxLayout(self.elo_row)
         self.elo_layout.setContentsMargins(0, 0, 0, 0)
         self.elo_layout.setSpacing(scale(8))
         
-        # User Elo Rating
-        self.lbl_elo = QLabel(f"🎓 {self.fetch_user_elo()} Elo")
+        # Target Elo Rating for the selected level
+        self.lbl_elo = QLabel("🎓 1500 Elo")
         self.lbl_elo.setObjectName("RepoElo")
         self.lbl_elo.setStyleSheet(f"font-size: {scale(13)}px;")
         self.elo_layout.addWidget(self.lbl_elo)
@@ -1086,6 +1195,7 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setMinimumWidth(scale(120))
         self.combo_level.setFixedHeight(scale(35))
         self.populate_levels()
+        self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
         self.info_layout.addWidget(self.combo_level)
         
@@ -1102,46 +1212,20 @@ class RepertoireConfigCard(QFrame):
             self.setMinimumHeight(scale(64))
             self.setMaximumHeight(scale(75))
 
-    def fetch_user_elo(self):
-        try:
-            from opening_fenix.core.db.models import UserRepertoireSettings, TrainingData
-            from opening_fenix.core.db.database import DatabaseManager
-            from opening_fenix.core.utils import get_repertoire_db_path
-            from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
-            
-            session = self.main_window.training_manager.user_session
-            settings = session.query(UserRepertoireSettings).filter_by(repertoire_name=self.repo_name).first()
-            rating = settings.rating if settings else 800.0
-            
-            # Calculate seen factor (progress factor)
-            db_path = get_repertoire_db_path(self.repo_name)
-            db_manager = DatabaseManager(db_path)
-            rep_session = db_manager.get_session()
-            try:
-                from opening_fenix.core.db.repertoire import Move
-                levels = fetch_repertoire_levels(rep_session)
-                active_lvl = self.main_window.training_manager.get_active_level(self.repo_name)
-                
-                # Get total moves in active levels
-                total_moves_in_level = rep_session.query(Move).filter(Move.level <= active_lvl).count()
-                if total_moves_in_level == 0:
-                    return int(rating)
-                    
-                seen_moves = session.query(TrainingData).filter_by(repertoire_name=self.repo_name).count()
-                progress_factor = min(1.0, seen_moves / total_moves_in_level)
-                return int(800 + (rating - 800) * progress_factor)
-            finally:
-                rep_session.close()
-                db_manager.close()
-        except Exception:
-            pass
-        return 800
+    def get_selected_level_elo(self):
+        level = self.combo_level.currentData() if hasattr(self, 'combo_level') else None
+        if level is None:
+            level = self.main_window.training_manager.get_active_level(self.repo_name)
+        if hasattr(self, 'levels_elo_map') and level in self.levels_elo_map:
+            return self.levels_elo_map[level]
+        return 1500
 
     def populate_levels(self):
         from opening_fenix.core.db.database import DatabaseManager
         from opening_fenix.core.utils import get_repertoire_db_path
         from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
         
+        self.levels_elo_map = {}
         db_path = get_repertoire_db_path(self.repo_name)
         db_manager = DatabaseManager(db_path)
         session = db_manager.get_session()
@@ -1152,7 +1236,9 @@ class RepertoireConfigCard(QFrame):
             self.combo_level.blockSignals(True)
             self.combo_level.clear()
             for lvl in levels:
-                self.combo_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+                lvl_order = lvl['order']
+                self.levels_elo_map[lvl_order] = int(lvl.get('target_elo') or 1500)
+                self.combo_level.addItem(f"Lvl {lvl_order}: {lvl['name']}", lvl_order)
             
             idx = self.combo_level.findData(active_lvl)
             if idx != -1: self.combo_level.setCurrentIndex(idx)
@@ -1191,8 +1277,8 @@ class RepertoireConfigCard(QFrame):
         level = self.combo_level.currentData()
         if level is not None:
             self.main_window.training_manager.set_active_level(level, self.repo_name)
-            # Update Elo label with the user's current Elo
-            self.lbl_elo.setText(f"🎓 {self.fetch_user_elo()} Elo")
+            # Update Elo label with the selected level's target Elo
+            self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
 
     def update_style(self):
         is_selected = (hasattr(self.parent_dlg, "selected_repo") and self.parent_dlg.selected_repo == self.repo_name)
@@ -1204,6 +1290,8 @@ class RepertoireConfigCard(QFrame):
             bg = "rgba(0,0,0,0.03)"
             border = "2px dashed #3e2723" if is_selected else "1px solid rgba(0, 0, 0, 0.08)"
             
+        chevron_path = os.path.join(get_base_path(), "assets", "Icons", "chevron_down.svg").replace("\\", "/")
+
         self.setStyleSheet(f"""
             RepertoireConfigCard {{
                 background-color: {bg};
@@ -1216,6 +1304,57 @@ class RepertoireConfigCard(QFrame):
             }}
             QLabel#RepoElo {{ 
                 color: #555555;
+            }}
+            QComboBox {{
+                background-color: #fbfbfb;
+                color: #111111;
+                border: 1px solid rgba(0, 0, 0, 0.14);
+                border-radius: {scale(8)}px;
+                padding-left: {scale(10)}px;
+                padding-right: {scale(26)}px;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+                font-weight: 500;
+            }}
+            QComboBox:hover {{
+                background-color: #f3f3f5;
+                border-color: rgba(0, 0, 0, 0.25);
+            }}
+            QComboBox:focus {{
+                border-color: #3e2723;
+                background-color: #ffffff;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: {scale(22)}px;
+                border: none;
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{chevron_path}");
+                width: {scale(11)}px;
+                height: {scale(11)}px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: white;
+                color: #111111;
+                selection-background-color: rgba(0, 0, 0, 0.08);
+                selection-color: #111111;
+                border: 1px solid rgba(0, 0, 0, 0.15);
+                border-radius: {scale(8)}px;
+                padding: {scale(4)}px;
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: {scale(6)}px {scale(10)}px;
+                min-height: {scale(22)}px;
+                color: #111111;
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: rgba(0, 0, 0, 0.08);
+                color: #111111;
+                border-radius: {scale(4)}px;
             }}
         """)
 

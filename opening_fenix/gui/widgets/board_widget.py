@@ -74,12 +74,6 @@ class ChessBoardWidget(QWidget):
         self.move_anim.finished.connect(self._on_animation_finished)
         self.move_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         
-        # Animation snapshot: cached pixmap of the static board (everything except the moving piece).
-        # Built once per slide, reused on every animation frame for ~10x faster rendering.
-        # At 4K+1.5x DPR this pixmap is ~30MB, allocated once per slide and freed when the slide ends.
-        self._board_snapshot = None
-        self._snapshot_flipped = None  # Track orientation for staleness check
-
         # High-Precision 120 FPS Animation Driver
         self.target_fps = 120  # Matches 120Hz high-refresh displays
         self.precise_anim_timer = QTimer(self)
@@ -115,7 +109,6 @@ class ChessBoardWidget(QWidget):
             self.light_color, self.dark_color = THEMES[THEME_FALLBACKS[theme_name]]
         else:
             self.light_color, self.dark_color = THEMES["Blau (Turnier)"]
-        self._board_snapshot = None  # Theme changed, invalidate snapshot
         self.update()
 
     def load_pieces(self):
@@ -136,7 +129,6 @@ class ChessBoardWidget(QWidget):
         scaled_size = int(square_size * dpr)
         if scaled_size == self._last_scaled_size: return
         self._last_scaled_size = scaled_size
-        self._board_snapshot = None  # Size changed, invalidate animation snapshot
         self.piece_pixmaps = {}
         for key, renderer in self.pieces.items():
             pixmap = QPixmap(scaled_size, scaled_size)
@@ -354,49 +346,6 @@ class ChessBoardWidget(QWidget):
         for move, color in self.explorer_arrows:
             self._draw_arrow(painter, move.from_square, move.to_square, color, square_size)
 
-    def _build_board_snapshot(self):
-        """
-        Renders the entire static board (squares, coords, pieces, arrows) to an off-screen
-        QPixmap, EXCLUDING the piece(s) being animated or dragged. This snapshot is reused 
-        for every frame, reducing per-frame cost from ~120 draw calls to just 2.
-        """
-        dpr = self.devicePixelRatioF()
-        snapshot = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
-        snapshot.setDevicePixelRatio(dpr)
-        snapshot.fill(Qt.GlobalColor.transparent)
-        
-        painter = QPainter(snapshot)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-        
-        side, square_size, x_offset, y_offset = self.get_metrics()
-        painter.translate(x_offset, y_offset)
-        
-        # Determine which squares to skip (don't draw pieces on them)
-        skip_squares = []
-        if self.animating_piece_data:
-            skip_squares.append(self.animating_piece_data['from_square'])
-        if self.dragging_piece and self.drag_start_square is not None:
-            skip_squares.append(self.drag_start_square)
-
-        # Draw all static elements
-        self._paint_board_base(painter, square_size)
-        
-        # Draw all pieces except the skipped ones
-        for row in range(8):
-            for col in range(8):
-                rank, file = (row if self.flipped else 7 - row), (7 - col if self.flipped else col)
-                sq = chess.square(file, rank)
-                if sq in skip_squares: continue
-                piece = self.board.piece_at(sq)
-                if piece: self.draw_piece(painter, piece, col, row, square_size)
-                
-        self._paint_arrows(painter, square_size)
-        
-        painter.end()
-        self._snapshot_flipped = self.flipped  # Track orientation
-        return snapshot
-
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -408,15 +357,19 @@ class ChessBoardWidget(QWidget):
         is_drag = self.dragging_piece is not None
         is_anim = self.is_animating and self.animating_piece_data
         
+        skip_square = None
         if is_anim:
-            # High-performance 2-draw-call pipeline:
-            # 1. Draw pre-rendered static board snapshot (squares + coords + static pieces + arrows)
-            if self._board_snapshot is None or self._snapshot_flipped != self.flipped:
-                self._board_snapshot = self._build_board_snapshot()
-            painter.drawPixmap(0, 0, self._board_snapshot)
-            
-            # 2. Draw moving piece at interpolated position
-            painter.translate(x_offset, y_offset)
+            skip_square = self.animating_piece_data['from_square']
+        elif is_drag:
+            skip_square = self.drag_start_square
+
+        # Unified coordinate origin for all states (idle, dragging, animating)
+        painter.translate(x_offset, y_offset)
+        self._paint_board_base(painter, square_size)
+        self._paint_pieces(painter, square_size, skip_square=skip_square)
+        self._paint_arrows(painter, square_size)
+
+        if is_anim:
             self._anim_frame_times.append(time.perf_counter())
             d = self.animating_piece_data
             p = d['progress']
@@ -425,20 +378,13 @@ class ChessBoardWidget(QWidget):
             lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
             scale_factor = 1.0 + (0.15 * lift)
             self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
-        else:
-            skip_square = self.drag_start_square if is_drag else None
-            # Standard paint when idle or dragging
-            painter.translate(x_offset, y_offset)
-            self._paint_board_base(painter, square_size)
-            self._paint_pieces(painter, square_size, skip_square=skip_square)
-            self._paint_arrows(painter, square_size)
-            
-            if is_drag:
-                mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
-                target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
-                key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
-                if key in self.piece_pixmaps: 
-                    painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
+
+        if is_drag:
+            mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
+            target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
+            key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
+            if key in self.piece_pixmaps: 
+                painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
 
         if self.debug_anim:
             painter.resetTransform()
@@ -510,7 +456,6 @@ class ChessBoardWidget(QWidget):
         self.anim_duration = float(anim_speed)
         self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
         self.is_animating = True
-        self._board_snapshot = None  # Force rebuild of snapshot for this new slide
 
         # Reset Debug Timing
         self._anim_start_time = time.perf_counter()
@@ -530,7 +475,6 @@ class ChessBoardWidget(QWidget):
             self.move_anim.stop()
             self.is_animating = False
             self.animating_piece_data = None
-            self._board_snapshot = None  # Invalidate snapshot
             self.update()
 
     def _on_animation_frame(self, value=None):
@@ -590,7 +534,6 @@ class ChessBoardWidget(QWidget):
         self.last_move = move
         self.last_move_was_capture = is_cap
         self.animating_piece_data = None
-        self._board_snapshot = None  # Slide ended, invalidate
         self.piece_slide_finished.emit()
         self.update()
 

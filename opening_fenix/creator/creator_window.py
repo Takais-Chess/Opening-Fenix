@@ -26,7 +26,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QApplication, QToolBar, QStyle, QListWidgetItem, QStackedWidget, QPlainTextEdit,
     QGraphicsDropShadowEffect, QAbstractItemView, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QUrl, QRectF, QSize, QEvent
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QUrl, QRectF, QSize, QEvent, QThread
 from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont, QPainterPath, QPixmap
 from PyQt6.QtMultimedia import QSoundEffect
 from sqlalchemy import or_, func, desc, text
@@ -43,10 +43,12 @@ from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
 from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
+from opening_fenix.core.logger import logger
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
@@ -2583,6 +2585,30 @@ class CreatorWindow(QMainWindow):
             self.setWindowTitle(tr_ui("creator.window_title_no_repo", "Creator - Kein Repertoire"))
             # We can automatically prompt to select or create a repertoire if none is found
             QTimer.singleShot(100, self.load_repertoire_dialog)
+
+        # Trigger background update check 2 seconds after startup
+        QTimer.singleShot(2000, self.check_for_updates)
+
+    def check_for_updates(self):
+        from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
+        if not should_check_for_updates(manual=False):
+            return
+
+        self.update_checker = UpdateCheckWorker(manual=False, parent=self)
+        self.update_checker.update_found.connect(self.on_update_found)
+        QTimer.singleShot(3000, self._start_background_workers)
+
+    def _start_background_workers(self):
+        try:
+            if hasattr(self, 'update_checker') and self.update_checker and not self.update_checker.isRunning():
+                logger.info("CreatorWindow: Starting background UpdateCheckWorker...")
+                self.update_checker.start(QThread.Priority.LowPriority)
+        except Exception as e:
+            logger.warning(f"CreatorWindow error starting background workers: {e}")
+
+    def on_update_found(self, release_info: dict):
+        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+        UpdateDialog(release_info, self).exec()
 
     def get_setting(self, key, default=None):
         if self.training_manager:
@@ -5735,6 +5761,7 @@ class CreatorWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    setup_light_palette(app)
     window = CreatorWindow()
     window.show()
     sys.exit(app.exec())

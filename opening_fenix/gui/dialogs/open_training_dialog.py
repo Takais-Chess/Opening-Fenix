@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QFont
 
 from opening_fenix.gui.scaling import scale
-from opening_fenix.gui.styles import COLORS
+from opening_fenix.gui.styles import COLORS, get_chevron_icon_path
 from opening_fenix.core.translation import tr_ui
 from opening_fenix.core.utils import get_repertoire_db_path
 from opening_fenix.core.db.database import DatabaseManager
@@ -60,19 +60,50 @@ class OpenTrainingSetupDialog(QDialog):
             QComboBox {{
                 background-color: white;
                 color: {COLORS['brown_text']};
-                border: 1px solid #ccc;
-                border-radius: {scale(6)}px;
-                padding: {scale(8)}px;
+                border: 1px solid rgba(0, 0, 0, 0.18);
+                border-radius: {scale(8)}px;
+                padding-left: {scale(10)}px;
+                padding-right: {scale(28)}px;
+                padding-top: {scale(6)}px;
+                padding-bottom: {scale(6)}px;
                 font-size: {scale(14)}px;
+                font-weight: 500;
+            }}
+            QComboBox:hover {{
+                background-color: #fafafa;
+                border-color: rgba(0, 0, 0, 0.3);
             }}
             QComboBox::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: {scale(24)}px;
                 border: none;
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(11)}px;
+                height: {scale(11)}px;
             }}
             QComboBox QAbstractItemView {{
                 background-color: white;
                 color: {COLORS['brown_text']};
-                selection-background-color: {COLORS['burnt_orange']};
-                selection-color: white;
+                selection-background-color: rgba(211, 84, 0, 0.15);
+                selection-color: {COLORS['burnt_orange']};
+                border: 1px solid rgba(0, 0, 0, 0.15);
+                border-radius: {scale(8)}px;
+                padding: {scale(4)}px;
+                outline: none;
+            }}
+            QComboBox QAbstractItemView::item {{
+                padding: {scale(6)}px {scale(10)}px;
+                min-height: {scale(24)}px;
+                color: {COLORS['brown_text']};
+            }}
+            QComboBox QAbstractItemView::item:selected {{
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['burnt_orange']};
+                border-radius: {scale(4)}px;
             }}
         """)
 

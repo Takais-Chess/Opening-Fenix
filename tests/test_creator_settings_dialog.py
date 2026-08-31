@@ -86,9 +86,9 @@ class TestRepoSettingsDialogStructure:
         assert "Einstellungen" in settings_dialog.windowTitle()
         assert "Repertoire" in settings_dialog.windowTitle()
 
-    def test_sidebar_has_six_pages(self, settings_dialog):
-        """Sidebar hat genau sechs Seiten."""
-        assert settings_dialog.sidebar.count() == 6
+    def test_sidebar_has_seven_pages(self, settings_dialog):
+        """Sidebar hat genau sieben Seiten."""
+        assert settings_dialog.sidebar.count() == 7
 
     def test_sidebar_items_have_emojis(self, settings_dialog):
         """Alle Sidebar-Einträge haben Emoji-Icons."""
@@ -98,9 +98,17 @@ class TestRepoSettingsDialogStructure:
 
     def test_page_switching_via_sidebar(self, settings_dialog):
         """Navigation über Sidebar wechselt Seiten korrekt."""
-        for i in range(6):
+        for i in range(7):
             settings_dialog.sidebar.setCurrentRow(i)
             assert settings_dialog.pages.currentIndex() == i
+
+    def test_scroll_resets_to_top_on_page_switch(self, settings_dialog):
+        """Scroll position resets to top (0) when switching between sidebar tabs."""
+        settings_dialog.main_scroll.verticalScrollBar().setValue(250)
+        assert settings_dialog.main_scroll.verticalScrollBar().value() == 250
+        
+        settings_dialog.sidebar.setCurrentRow(2)
+        assert settings_dialog.main_scroll.verticalScrollBar().value() == 0
 
     def test_stylesheet_applied(self, settings_dialog):
         """BW_GLASS Stylesheet ist gesetzt."""
@@ -416,6 +424,28 @@ class TestRepoSettingsMaintenancePage:
         """'Alle auswählen' im Maintenance-Bereich stürzt nicht ab."""
         settings_dialog._select_all_maintenance_repos(True)
         settings_dialog._select_all_maintenance_repos(False)
+
+
+# ─── Seite 7: Software-Updates ──────────────────────────────────────────────────
+
+class TestRepoSettingsUpdatesPage:
+
+    def test_updates_page_elements_exist(self, settings_dialog):
+        """Software-Updates Seite enthält Versionslabel, Letzte Prüfung und Button."""
+        settings_dialog.sidebar.setCurrentRow(6)
+        assert hasattr(settings_dialog, "lbl_current_version")
+        assert hasattr(settings_dialog, "lbl_last_check")
+        assert hasattr(settings_dialog, "btn_manual_update")
+        from opening_fenix.core.version import APP_VERSION
+        assert APP_VERSION in settings_dialog.lbl_current_version.text()
+
+    def test_auto_check_toggle(self, settings_dialog):
+        """Auto-Check Checkbox ändert Konfiguration."""
+        settings_dialog.on_auto_check_updates_toggled(False)
+        from opening_fenix.core.services.update_service import get_config_dict
+        assert get_config_dict().get("auto_check_updates") is False
+        settings_dialog.on_auto_check_updates_toggled(True)
+        assert get_config_dict().get("auto_check_updates") is True
 
 
 # ─── DiagnosticDialog ──────────────────────────────────────────────────────────

@@ -51,9 +51,9 @@ class TestSettingsDialogStructure:
         assert "Trainer" in settings_dialog.windowTitle()
         assert "Einstellungen" in settings_dialog.windowTitle()
 
-    def test_sidebar_has_three_items(self, settings_dialog):
-        """Sidebar hat genau drei Einträge."""
-        assert settings_dialog.sidebar.count() == 3
+    def test_sidebar_has_four_items(self, settings_dialog):
+        """Sidebar hat genau vier Einträge."""
+        assert settings_dialog.sidebar.count() == 4
 
     def test_sidebar_items_have_emoji_icons(self, settings_dialog):
         """Sidebar-Einträge enthalten Emoji-Icons."""
@@ -72,6 +72,19 @@ class TestSettingsDialogStructure:
 
         settings_dialog.sidebar.setCurrentRow(2)
         assert settings_dialog.pages.currentIndex() == 2
+
+        settings_dialog.sidebar.setCurrentRow(3)
+        assert settings_dialog.pages.currentIndex() == 3
+
+    def test_scroll_resets_to_top_on_page_switch(self, settings_dialog):
+        """Scroll position resets to top (0) when switching between sidebar tabs."""
+        # Scroll down intentionally
+        settings_dialog.main_scroll.verticalScrollBar().setValue(250)
+        assert settings_dialog.main_scroll.verticalScrollBar().value() == 250
+        
+        # Switch tab
+        settings_dialog.sidebar.setCurrentRow(1)
+        assert settings_dialog.main_scroll.verticalScrollBar().value() == 0
 
     def test_default_tab_is_display(self, settings_dialog):
         """Standardmäßig ist die erste Seite (Darstellung) aktiv."""
@@ -224,7 +237,7 @@ class TestSettingsDialogRepoPage:
         monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
         monkeypatch.setattr(QMessageBox, "information", lambda *args, **kwargs: None)
 
-        settings_dialog.sidebar.setCurrentRow(2)
+        settings_dialog.sidebar.setCurrentRow(1)
         settings_dialog.on_repo_selected(sample_repertoire)
         settings_dialog.reset_repo_progress()
         # Kein Crash = Erfolg
@@ -233,6 +246,52 @@ class TestSettingsDialogRepoPage:
         """Reset ohne ausgewähltes Repertoire löst keinen Fehler aus."""
         settings_dialog.selected_repo = None
         settings_dialog.reset_repo_progress()  # Soll ohne Fehler durchlaufen
+
+    def test_repertoire_info_empty_state_toggle(self, settings_dialog, sample_repertoire):
+        """Prüft Umschaltung zwischen Leer-Zustand und Detail-Zustand."""
+        settings_dialog.sidebar.setCurrentRow(1)
+
+        # Unselect / clear
+        settings_dialog.on_repo_selected(None)
+        assert not settings_dialog.info_empty_widget.isHidden()
+        assert settings_dialog.info_content_widget.isHidden()
+        assert not settings_dialog.btn_reset.isEnabled()
+
+        # Select repo
+        settings_dialog.on_repo_selected(sample_repertoire)
+        assert settings_dialog.info_empty_widget.isHidden()
+        assert not settings_dialog.info_content_widget.isHidden()
+        assert settings_dialog.btn_reset.isEnabled()
+
+
+# ─── Seite 3: Software-Updates ──────────────────────────────────────────────────
+
+class TestSettingsDialogUpdatesPage:
+
+    def test_updates_page_elements_exist(self, settings_dialog):
+        """Software-Updates Seite enthält Versionslabel, Letzte Prüfung und Button."""
+        settings_dialog.sidebar.setCurrentRow(2)
+        assert hasattr(settings_dialog, "lbl_current_version")
+        assert hasattr(settings_dialog, "lbl_last_check")
+        assert hasattr(settings_dialog, "btn_manual_update")
+        from opening_fenix.core.version import APP_VERSION
+        assert APP_VERSION in settings_dialog.lbl_current_version.text()
+
+    def test_auto_check_toggle(self, settings_dialog):
+        """Auto-Check Checkbox ändert Konfiguration."""
+        settings_dialog.on_auto_check_updates_toggled(False)
+        from opening_fenix.core.services.update_service import get_config_dict
+        assert get_config_dict().get("auto_check_updates") is False
+        settings_dialog.on_auto_check_updates_toggled(True)
+        assert get_config_dict().get("auto_check_updates") is True
+
+    def test_storage_settings_exist_on_software_and_data_page(self, settings_dialog):
+        """Speicherort-Einstellungen befinden sich auf der Seite 'Software & Daten'."""
+        settings_dialog.sidebar.setCurrentRow(2)
+        assert hasattr(settings_dialog, "txt_storage_path")
+        assert hasattr(settings_dialog, "btn_change_storage")
+        assert hasattr(settings_dialog, "btn_reset_storage")
+        assert len(settings_dialog.txt_storage_path.text()) > 0
 
 
 # ─── BW_GLASS Styling ──────────────────────────────────────────────────────────

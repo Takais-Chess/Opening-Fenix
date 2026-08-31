@@ -89,3 +89,17 @@ translator = TranslationManager()
 def tr_ui(key: str, default: str = "", **kwargs) -> str:
     """Translates a string, with safety fallback to a default value."""
     return translator.translate(key, default, **kwargs)
+
+def escape_mnemonic(text: str) -> str:
+    """Escapes ampersands for Qt widgets that interpret '&' as mnemonics (QGroupBox, QPushButton, QCheckBox, QAction, etc.).
+    
+    Single '&' is replaced with '&&'. Already escaped '&&' is preserved.
+    """
+    if not text or "&" not in text:
+        return text
+    import re
+    return re.sub(r'(?<!&)&(?!&)', '&&', text)
+
+def tr_widget(key: str, default: str = "", **kwargs) -> str:
+    """Translates a string and safely escapes mnemonics for Qt widgets (QGroupBox, QPushButton, QCheckBox, etc.)."""
+    return escape_mnemonic(tr_ui(key, default, **kwargs))

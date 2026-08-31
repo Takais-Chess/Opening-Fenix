@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFontMetrics, QAction, QTextCursor
 )
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QUrl, QPointF, QEvent, QSize
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QUrl, QPointF, QEvent, QSize, QThread
 from PyQt6.QtSvg import QSvgRenderer
 from PyQt6.QtMultimedia import QSoundEffect
 
@@ -139,11 +139,13 @@ class MainWindow(QMainWindow):
     def _start_background_workers(self):
         try:
             if hasattr(self, 'update_checker') and self.update_checker and not self.update_checker.isRunning():
+                logger.info("MainWindow: Starting background UpdateCheckWorker...")
                 self.update_checker.start(QThread.Priority.LowPriority)
             if hasattr(self, 'backup_worker') and self.backup_worker and not self.backup_worker.isRunning():
+                logger.info("MainWindow: Starting background AutoBackupThread...")
                 self.backup_worker.start(QThread.Priority.IdlePriority)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"MainWindow error starting background workers: {e}")
 
     def on_update_found(self, release_info: dict):
         from opening_fenix.gui.dialogs.update_dialog import UpdateDialog

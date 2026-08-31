@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.6] - 2026-08-31
+
+### Added & Improved
+- **Modern Level Selector UI**: Replaced native platform combo box controls with a modern chevron SVG indicator, refined padding, and subtle focus/hover states across dialogs and cards.
+- **Dynamic Level Target Elo Display**: Repertoire configuration cards in Settings now display the target rating (Ziel-Elo) for the currently selected level, updating dynamically upon selection change.
+- **Dialog Styling Polish**: Standardized drop-down arrow appearance across all application dialogs (Free Training, Settings, Repo Configuration).
+
 ## [0.9.5] - 2026-08-26
 
 ### Added

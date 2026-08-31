@@ -49,7 +49,7 @@ from opening_fenix.gui.styles import (
     get_bw_glass_style, COLORS, set_consistent_icon
 )
 from opening_fenix.gui.scaling import scale
-from opening_fenix.core.translation import tr_ui
+from opening_fenix.core.translation import tr_ui, tr_widget
 
 class AutoShrinkWrapLabel(QLabel):
     def __init__(self, text="", parent=None):
@@ -471,7 +471,8 @@ class RepoSettingsDialog(QDialog):
             (tr_ui("repo_settings.sidebar_imex", "📥 Import & Export"), tr_ui("repo_settings.sidebar_imex_sub", "Datentransfer")),
             (tr_ui("repo_settings.sidebar_backups", "⏮️ Backups & Restore"), tr_ui("repo_settings.sidebar_backups_sub", "Wiederherstellung")),
             (tr_ui("repo_settings.sidebar_tools", "🛠️ Repertoire-Werkzeuge"), tr_ui("repo_settings.sidebar_tools_sub", "Wartung & Analyse")),
-            (tr_ui("repo_settings.sidebar_maintenance", "🚜 Wartung Center"), tr_ui("repo_settings.sidebar_maintenance_sub", "Stapelverarbeitung"))
+            (tr_ui("repo_settings.sidebar_maintenance", "🚜 Wartung Center"), tr_ui("repo_settings.sidebar_maintenance_sub", "Stapelverarbeitung")),
+            (tr_ui("repo_settings.sidebar_updates", "🔄 Software-Updates"), tr_ui("repo_settings.sidebar_updates_sub", "Version und Aktualisierungen"))
         ]
         
         for title, sub in sidebar_items:
@@ -491,8 +492,9 @@ class RepoSettingsDialog(QDialog):
         self.page_backups = QWidget(); self.init_page_backups(self.page_backups)
         self.page_tools = QWidget(); self.init_page_tools(self.page_tools)
         self.page_maintenance = QWidget(); self.init_page_maintenance(self.page_maintenance)
+        self.page_updates = QWidget(); self.init_page_updates(self.page_updates)
         
-        for p in [self.page_gen, self.page_design, self.page_imex, self.page_backups, self.page_tools, self.page_maintenance]:
+        for p in [self.page_gen, self.page_design, self.page_imex, self.page_backups, self.page_tools, self.page_maintenance, self.page_updates]:
             p.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
         self.pages.addWidget(self.page_gen)
@@ -501,23 +503,29 @@ class RepoSettingsDialog(QDialog):
         self.pages.addWidget(self.page_backups)
         self.pages.addWidget(self.page_tools)
         self.pages.addWidget(self.page_maintenance)
+        self.pages.addWidget(self.page_updates)
         
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        scroll.setWidget(self.pages)
-        main_layout.addWidget(scroll, 1)
+        self.main_scroll = QScrollArea()
+        self.main_scroll.setWidgetResizable(True)
+        self.main_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.main_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.main_scroll.setWidget(self.pages)
+        main_layout.addWidget(self.main_scroll, 1)
         
         self.sidebar.setCurrentRow(0)
 
     def display_page(self, index): 
         self.pages.setCurrentIndex(index)
+        if hasattr(self, 'main_scroll') and self.main_scroll is not None:
+            self.main_scroll.verticalScrollBar().setValue(0)
+            QTimer.singleShot(0, lambda: self.main_scroll.verticalScrollBar().setValue(0) if hasattr(self, 'main_scroll') and not sip.isdeleted(self.main_scroll) else None)
         if index == 3:
             self.refresh_backups_list()
         elif index == 5 and not self.maintenance_loaded:
             self._refresh_maintenance_repo_list()
             self.maintenance_loaded = True
+        elif index == 6:
+            self.refresh_update_info()
 
     def init_page_general(self, page):
         layout = QVBoxLayout(page)
@@ -881,7 +889,7 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_ui)
 
         # 🔊 Sound & Sprache
-        g_sound = QGroupBox(tr_ui("repo_settings.sound_language_title", "🔊 Sound && Sprache"))
+        g_sound = QGroupBox(tr_widget("repo_settings.sound_language_title", "🔊 Sound & Sprache"))
         f_sound = QFormLayout(g_sound)
         
         self.slider_vol = NoWheelSlider(Qt.Orientation.Horizontal)
@@ -915,7 +923,7 @@ class RepoSettingsDialog(QDialog):
         
         active_tabs = self.main_window.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
         self.chk_details = QCheckBox(tr_ui("repo_settings.tab_details", "📋 Details (Position-Infos)"))
-        self.chk_analysis = QCheckBox(tr_ui("repo_settings.tab_analysis", "🧠 Analyse (Engine && Lichess)"))
+        self.chk_analysis = QCheckBox(tr_widget("repo_settings.tab_analysis", "🧠 Analyse (Engine & Lichess)"))
         self.chk_transpositions = QCheckBox(tr_ui("repo_settings.tab_transpositions", "🔄 Transpositionen (Varianten-Überschneidungen)"))
         self.chk_holes = QCheckBox(tr_ui("repo_settings.tab_search_mode", "🕳️ Such Modus (Repertoire-Lücken)"))
         self.chk_kontrolle = QCheckBox(tr_ui("repo_settings.tab_control", "✅ Kontrolle (Variation Filtering)"))
@@ -955,8 +963,8 @@ class RepoSettingsDialog(QDialog):
         v_import.addLayout(h_pgn)
         layout.addWidget(g_import)
 
-        # 📤 Export && Management
-        g_export = QGroupBox(tr_ui("repo_settings.export_management_title", "📤 Export && Management"))
+        # 📤 Export & Management
+        g_export = QGroupBox(tr_widget("repo_settings.export_management_title", "📤 Export & Management"))
         v_export = QVBoxLayout(g_export)
         
         h_manage = QHBoxLayout()
@@ -989,9 +997,9 @@ class RepoSettingsDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         # 1. 🔍 Diagnose & Instandhaltung
-        g_diag = QGroupBox(tr_ui("repo_settings.tools_title", "🔍 Diagnose && Instandhaltung"))
+        g_diag = QGroupBox(tr_widget("repo_settings.tools_title", "🔍 Diagnose & Instandhaltung"))
         v_diag = QVBoxLayout(g_diag)
-        btn_diag = QPushButton(tr_ui("repo_settings.btn_diag", "🔎 Datenbank-Diagnose && Reparatur"))
+        btn_diag = QPushButton(tr_widget("repo_settings.btn_diag", "🔎 Datenbank-Diagnose & Reparatur"))
         btn_diag.clicked.connect(self.run_structure_repair)
         btn_names = QPushButton(tr_ui("repo_settings.btn_names", "🏷️ Variantennamen neu berechnen"))
         btn_names.clicked.connect(self.run_variation_name_repair)
@@ -1073,7 +1081,7 @@ class RepoSettingsDialog(QDialog):
         layout.addWidget(g_engine)
 
         # 4. 🌐 Lichess Datenbank
-        g_lichess = QGroupBox(tr_ui("repo_settings.lichess_scan_title", "🌐 Lichess-Datenbank && Prio Scores"))
+        g_lichess = QGroupBox(tr_widget("repo_settings.lichess_scan_title", "🌐 Lichess-Datenbank & Prio Scores"))
         v_lich = QVBoxLayout(g_lichess)
         lbl_lich_desc = QLabel(tr_ui("repo_settings.lichess_scan_desc", "Lichess-Datenbank-Daten herunterladen und Prio-Scores berechnen lassen."))
         lbl_lich_desc.setWordWrap(True)
@@ -1105,7 +1113,7 @@ class RepoSettingsDialog(QDialog):
         v_lich.addLayout(f_token)
         
         h_fetch = QHBoxLayout()
-        self.btn_fetch = QPushButton(tr_ui("repo_settings.btn_fetch", "📡 Daten laden && Scores berechnen"))
+        self.btn_fetch = QPushButton(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
         self.btn_fetch.clicked.connect(self.start_fetch)
         btn_delete_l = QPushButton(tr_ui("repo_settings.btn_delete_lichess", "🗑️ Daten für diese Elo löschen"))
         btn_delete_l.clicked.connect(self.delete_lichess_action)
@@ -1284,7 +1292,7 @@ class RepoSettingsDialog(QDialog):
         self.chk_m_lichess.setChecked(True)
         self.chk_m_cleanup_lichess = QCheckBox(tr_ui("repo_settings.task_cleanup_lichess", "Verwaiste Lichess-Daten bereinigen"))
         self.chk_m_cleanup_lichess.setChecked(True)
-        self.chk_m_stats = QCheckBox(tr_ui("repo_settings.task_stats", "Statistiken && Prioritäten berechnen"))
+        self.chk_m_stats = QCheckBox(tr_widget("repo_settings.task_stats", "Statistiken & Prioritäten berechnen"))
         self.chk_m_stats.setChecked(True)
         
         v_tasks = QVBoxLayout()
@@ -2282,7 +2290,7 @@ class RepoSettingsDialog(QDialog):
                 if not sip.isdeleted(self):
                     if hasattr(self, 'btn_fetch') and self.btn_fetch is not None:
                         self.btn_fetch.setEnabled(True)
-                        self.btn_fetch.setText(tr_ui("repo_settings.btn_fetch", "📡 Daten laden && Scores berechnen"))
+                        self.btn_fetch.setText(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
                         self.btn_fetch.setStyleSheet("")
                     self.l_lich_status.setText(message)
                     if success:
@@ -2595,6 +2603,136 @@ class RepoSettingsDialog(QDialog):
         v.addLayout(h_btns)
         dlg.exec()
 
+    # ─── Seite 7: Software-Updates ──────────────────────────────────────────────
+
+    def init_page_updates(self, page):
+        from PyQt6.QtWidgets import QCheckBox, QMessageBox
+        from opening_fenix.core.services.update_service import UpdateCheckWorker, get_config_dict, save_config_dict
+        from opening_fenix.core.version import APP_VERSION
+
+        layout = QVBoxLayout(page)
+        layout.setSpacing(scale(20))
+        layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
+
+        g_updates = QGroupBox(tr_ui("repo_settings.update_title", "🔄 Software-Updates"))
+        v_updates = QVBoxLayout(g_updates)
+        v_updates.setSpacing(scale(16))
+        v_updates.setContentsMargins(scale(20), scale(24), scale(20), scale(20))
+
+        # Version & Status Section (Free-floating on the left, no borders, compact spacing)
+        v_info = QVBoxLayout()
+        v_info.setSpacing(scale(8))
+        v_info.setContentsMargins(0, 0, 0, scale(4))
+
+        # Version Row
+        h_ver = QHBoxLayout()
+        h_ver.setSpacing(scale(8))
+        lbl_v_hdr = QLabel(tr_ui("repo_settings.current_version_label", "Installierte Version:"))
+        lbl_v_hdr.setStyleSheet(f"font-weight: bold; color: {COLORS['brown_text']}; background: transparent; border: none;")
+        self.lbl_current_version = QLabel(f"v{APP_VERSION}")
+        self.lbl_current_version.setStyleSheet(f"font-weight: bold; font-size: {scale(14)}px; color: {COLORS['burnt_orange']}; background: transparent; border: none;")
+        h_ver.addWidget(lbl_v_hdr)
+        h_ver.addWidget(self.lbl_current_version)
+        h_ver.addStretch()
+        v_info.addLayout(h_ver)
+
+        # Last Check Row
+        h_chk = QHBoxLayout()
+        h_chk.setSpacing(scale(8))
+        lbl_chk_hdr = QLabel(tr_ui("repo_settings.last_check_label", "Letzte Prüfung:"))
+        lbl_chk_hdr.setStyleSheet(f"font-weight: bold; color: {COLORS['brown_text']}; background: transparent; border: none;")
+        self.lbl_last_check = QLabel("-")
+        self.lbl_last_check.setStyleSheet(f"font-weight: bold; font-size: 13px; color: {COLORS['brown_text']}; background: transparent; border: none;")
+        h_chk.addWidget(lbl_chk_hdr)
+        h_chk.addWidget(self.lbl_last_check)
+        h_chk.addStretch()
+        v_info.addLayout(h_chk)
+
+        v_updates.addLayout(v_info)
+
+        # Auto check option
+        cfg = get_config_dict()
+        chk_auto = QCheckBox(tr_ui("repo_settings.auto_check_updates", "Bei Start nach Update suchen"))
+        chk_auto.setChecked(cfg.get("auto_check_updates", True))
+        chk_auto.toggled.connect(self.on_auto_check_updates_toggled)
+        v_updates.addWidget(chk_auto)
+
+        # Action button
+        h_check = QHBoxLayout()
+        self.btn_manual_update = QPushButton(tr_ui("repo_settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        self.btn_manual_update.clicked.connect(self.run_manual_update_check)
+        h_check.addWidget(self.btn_manual_update)
+        h_check.addStretch()
+        v_updates.addLayout(h_check)
+
+        layout.addWidget(g_updates)
+        layout.addStretch()
+
+        from opening_fenix.core.services.update_service import update_signals
+        try:
+            update_signals.check_completed.connect(self.refresh_update_info)
+        except Exception:
+            pass
+
+        self.refresh_update_info()
+
+    def refresh_update_info(self, timestamp=None):
+        if not timestamp or not isinstance(timestamp, str):
+            from opening_fenix.core.services.update_service import get_last_update_check_time
+            timestamp = get_last_update_check_time()
+        if hasattr(self, 'lbl_last_check') and self.lbl_last_check:
+            if timestamp:
+                self.lbl_last_check.setText(str(timestamp))
+            else:
+                self.lbl_last_check.setText(tr_ui("repo_settings.update_never", "Noch nie"))
+
+    def on_auto_check_updates_toggled(self, checked: bool):
+        from opening_fenix.core.services.update_service import get_config_dict, save_config_dict
+        cfg = get_config_dict()
+        cfg["auto_check_updates"] = checked
+        save_config_dict(cfg)
+
+    def run_manual_update_check(self):
+        from opening_fenix.core.services.update_service import UpdateCheckWorker
+        self.btn_manual_update.setEnabled(False)
+        self.btn_manual_update.setText(tr_ui("repo_settings.checking_updates", "Suche läuft..."))
+
+        self.update_worker = UpdateCheckWorker(manual=True, parent=self)
+        self.update_worker.update_found.connect(self.on_manual_update_found)
+        self.update_worker.no_update_found.connect(self.on_manual_no_update)
+        self.update_worker.check_error.connect(self.on_manual_update_error)
+        self.update_worker.start()
+
+    def on_manual_update_found(self, release_info: dict):
+        self.refresh_update_info()
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("repo_settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
+        UpdateDialog(release_info, self).exec()
+
+    def on_manual_no_update(self):
+        from PyQt6.QtWidgets import QMessageBox
+        from opening_fenix.core.version import APP_VERSION
+        self.refresh_update_info()
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("repo_settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        QMessageBox.information(
+            self,
+            tr_ui("repo_settings.no_update_title", "Auf dem neuesten Stand"),
+            tr_ui("repo_settings.no_update_msg", "Du nutzt bereits die aktuellste Version ({version}).", version=APP_VERSION)
+        )
+
+    def on_manual_update_error(self, err_msg: str):
+        from PyQt6.QtWidgets import QMessageBox
+        self.refresh_update_info()
+        self.btn_manual_update.setEnabled(True)
+        self.btn_manual_update.setText(tr_ui("repo_settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
+        QMessageBox.warning(
+            self,
+            tr_ui("repo_settings.update_error_title", "Fehler bei Update-Prüfung"),
+            tr_ui("repo_settings.update_error_msg", "Konnte GitHub nicht nach Updates prüfen:\n{err}", err=err_msg)
+        )
+
     def closeEvent(self, event):
         """Clean up background threads and timers before closing."""
         if hasattr(self, 'loading_timer') and self.loading_timer:
@@ -2606,7 +2744,8 @@ class RepoSettingsDialog(QDialog):
             getattr(self, 'w_eng', None),
             getattr(self, 'w_lich', None),
             getattr(self, 'm_thread', None),
-            getattr(self, 'stats_loader', None)
+            getattr(self, 'stats_loader', None),
+            getattr(self, 'update_worker', None)
         ]
         
         for w in workers:

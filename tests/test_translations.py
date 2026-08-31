@@ -87,3 +87,63 @@ def test_translation_formatting():
 
     # Reset back to German default for other test suites
     translator.load_language("de")
+
+def test_no_double_ampersands_in_translations():
+    """Verify that no translation file stores raw double ampersands (&&).
+    
+    Translation strings should always contain natural human language (single '&').
+    Escaping for Qt widgets (QGroupBox, QPushButton, etc.) is handled at the UI layer via tr_widget().
+    """
+    base_path = get_base_path()
+    for lang in ["de", "en"]:
+        path = os.path.join(base_path, "assets", "translations", f"{lang}.json")
+        if not os.path.exists(path):
+            path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "translations", f"{lang}.json")
+        
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        def check_no_double_amp(d, prefix=""):
+            violations = []
+            for k, v in d.items():
+                full_key = f"{prefix}.{k}" if prefix else k
+                if isinstance(v, dict):
+                    violations.extend(check_no_double_amp(v, full_key))
+                elif isinstance(v, str) and "&&" in v:
+                    violations.append((full_key, v))
+            return violations
+
+        violations = check_no_double_amp(data)
+        assert not violations, f"Found double ampersands in {lang}.json: {violations}"
+
+def test_escape_mnemonic_helper():
+    """Test escape_mnemonic helper for Qt widgets."""
+    from opening_fenix.core.translation import escape_mnemonic
+    
+    # Single & should be escaped to &&
+    assert escape_mnemonic("Speicherort & Cloud") == "Speicherort && Cloud"
+    assert escape_mnemonic("Sound & Sprache") == "Sound && Sprache"
+    assert escape_mnemonic("&File") == "&&File"
+    assert escape_mnemonic("A & B & C") == "A && B && C"
+    
+    # Already escaped && should not be double escaped
+    assert escape_mnemonic("Speicherort && Cloud") == "Speicherort && Cloud"
+    
+    # Strings without & or empty
+    assert escape_mnemonic("No ampersands") == "No ampersands"
+    assert escape_mnemonic("") == ""
+    assert escape_mnemonic(None) is None
+
+def test_tr_widget_helper():
+    """Test tr_widget helper which translates and escapes mnemonics automatically."""
+    from opening_fenix.core.translation import tr_widget
+    
+    translator.load_language("de")
+    # settings.storage_title in de.json is "📁 Speicherort & Cloud-Synchronisation"
+    res = tr_widget("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation")
+    assert res == "📁 Speicherort && Cloud-Synchronisation"
+    
+    # Fallback default should also be escaped
+    fallback_res = tr_widget("non_existent_key", "Custom & Fallback")
+    assert fallback_res == "Custom && Fallback"
+

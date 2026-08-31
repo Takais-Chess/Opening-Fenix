@@ -10,7 +10,7 @@ from PyQt6.QtGui import QDesktopServices, QAction, QColor
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon
-from opening_fenix.core.translation import tr_ui
+from opening_fenix.core.translation import tr_ui, tr_widget
 from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.services.update_service import (
     DownloaderWorker, set_snooze_period
@@ -132,7 +132,7 @@ class UpdateDialog(QDialog):
         btn_layout.addStretch()
 
         # Primary download button
-        self.btn_download = QPushButton(tr_ui("update.btn_download", "⬇️ Jetzt herunterladen & installieren"))
+        self.btn_download = QPushButton(tr_widget("update.btn_download", "⬇️ Jetzt herunterladen & installieren"))
         self.btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_download.setStyleSheet(f"""
             QPushButton {{
@@ -252,7 +252,7 @@ class UpdateDialog(QDialog):
         self.lbl_progress_status.setText(tr_ui("update.download_success", "Download erfolgreich abgeschlossen!"))
         self.progress_bar.setValue(100)
         self.btn_download.setEnabled(True)
-        self.btn_download.setText(tr_ui("update.btn_install_now", "🚀 Jetzt installieren & neu starten"))
+        self.btn_download.setText(tr_widget("update.btn_install_now", "🚀 Jetzt installieren & neu starten"))
         self.btn_download.setStyleSheet(f"""
             QPushButton {{
                 background-color: #27ae60;

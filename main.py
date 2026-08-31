@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QIcon
 
 from opening_fenix.core.utils import get_base_path, get_user_dir
-from opening_fenix.gui.styles import set_consistent_icon
+from opening_fenix.gui.styles import set_consistent_icon, setup_light_palette
 from opening_fenix.gui.window_manager import WindowManager
 from opening_fenix.core.logger import logger
 
@@ -112,6 +112,7 @@ if __name__ == "__main__":
         
         QApplication.setStyle("Fusion")
         app = QApplication(sys.argv)
+        setup_light_palette(app)
         
         # Explicitly set application identity for Windows taskbar grouping
         app.setApplicationName("OpeningFenix")

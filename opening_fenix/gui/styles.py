@@ -1,5 +1,5 @@
 import os
-from PyQt6.QtGui import QIcon
+from PyQt6.QtGui import QIcon, QPalette, QColor
 from opening_fenix.core.utils import get_base_path
 from opening_fenix.gui.scaling import scale
 
@@ -7,6 +7,40 @@ from opening_fenix.gui.scaling import scale
 from opening_fenix.core.logger import logger
 
 _cached_icon = None
+
+def setup_light_palette(app):
+    """Enforces standard Qt Light Mode palette across the entire application to prevent OS dark mode bleed."""
+    palette = QPalette()
+    
+    # Standard Light Theme Palette (matching authentic Windows Light Mode)
+    window_color = QColor(240, 240, 240)
+    window_text = QColor(0, 0, 0)
+    base_color = QColor(255, 255, 255)
+    text_color = QColor(0, 0, 0)
+    button_color = QColor(240, 240, 240)
+    button_text = QColor(0, 0, 0)
+    
+    palette.setColor(QPalette.ColorRole.Window, window_color)
+    palette.setColor(QPalette.ColorRole.WindowText, window_text)
+    palette.setColor(QPalette.ColorRole.Base, base_color)
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(247, 247, 247))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.Text, text_color)
+    palette.setColor(QPalette.ColorRole.Button, button_color)
+    palette.setColor(QPalette.ColorRole.ButtonText, button_text)
+    palette.setColor(QPalette.ColorRole.BrightText, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(48, 140, 198))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor(255, 255, 255))
+    
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, QColor(120, 120, 120))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(120, 120, 120))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(120, 120, 120))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(200, 200, 200))
+    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, QColor(120, 120, 120))
+    
+    app.setPalette(palette)
+
 
 def set_consistent_icon(window):
     """Sets the application icon for a window or app instance from centralized assets."""
@@ -107,6 +141,10 @@ COLORS = {
     "bw_sub_text": "#555555",
     "bw_accent": "#000000",
 }
+
+def get_chevron_icon_path():
+    """Returns the forward-slash path to the chevron dropdown icon for stylesheets."""
+    return os.path.join(get_base_path(), "assets", "Icons", "chevron_down.svg").replace("\\", "/")
 
 def get_scrollbar_style():
     """Returns a modern, slim scrollbar style string."""
@@ -271,6 +309,27 @@ def get_main_window_style():
         height: 1px;
         background-color: {COLORS['glass_border']};
         margin: {scale(4)}px {scale(10)}px;
+    }}
+
+    QComboBox QAbstractItemView {{
+        background-color: {COLORS['beige']};
+        color: {COLORS['brown_text']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(6)}px;
+        selection-background-color: rgba(211, 84, 0, 0.15);
+        selection-color: {COLORS['burnt_orange']};
+        padding: {scale(4)}px;
+        outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: {scale(6)}px {scale(10)}px;
+        min-height: {scale(24)}px;
+        color: {COLORS['brown_text']};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
     }}
     
     QToolTip {{ 
@@ -438,8 +497,8 @@ def get_creator_window_style():
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
         border-radius: {scale(15)}px;
-        padding-left: {scale(10)}px;
-        padding-right: {scale(10)}px;
+        padding-left: {scale(12)}px;
+        padding-right: {scale(26)}px;
         min-height: {scale(32)}px;
     }}
     *[class="SmallCombo"] {{
@@ -457,25 +516,38 @@ def get_creator_window_style():
         border: none;
         width: {scale(20)}px;
         subcontrol-origin: padding;
-        subcontrol-position: top right;
+        subcontrol-position: center right;
     }}
     *[class="SmallCombo"]::drop-down {{
         width: 0px;
     }}
     QComboBox::down-arrow {{
-        /* Remove image: none to allow default arrow */
-        width: {scale(12)}px;
-        height: {scale(12)}px;
+        image: url("{get_chevron_icon_path()}");
+        width: {scale(11)}px;
+        height: {scale(11)}px;
     }}
     *[class="SmallCombo"]::down-arrow {{
         image: none;
     }}
     QComboBox QAbstractItemView {{
         background-color: {COLORS['beige']};
+        color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
-        selection-background-color: rgba(0, 0, 0, 0.1);
-        selection-color: {COLORS['brown_text']};
+        border-radius: {scale(8)}px;
+        selection-background-color: rgba(211, 84, 0, 0.15);
+        selection-color: {COLORS['burnt_orange']};
+        padding: {scale(4)}px;
         outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: {scale(6)}px {scale(12)}px;
+        min-height: {scale(24)}px;
+        color: {COLORS['brown_text']};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
     }}
 
     QLineEdit, QSpinBox {{
@@ -565,7 +637,10 @@ def get_creator_toolbar_style():
         max-height: {scale(40)}px;
     }}
     QToolBar QPushButton#ActiveRepoButton {{
-        padding: 0px;
+        padding-top: {scale(4)}px;
+        padding-bottom: {scale(4)}px;
+        padding-left: 0px;
+        padding-right: 0px;
     }}
     QToolBar QPushButton:hover, QToolBar QComboBox:hover {{ 
         background-color: rgba(255, 255, 255, 0.7); 
@@ -578,11 +653,12 @@ def get_creator_toolbar_style():
         border: none;
         width: {scale(22)}px;
         subcontrol-origin: padding;
-        subcontrol-position: top right;
+        subcontrol-position: center right;
     }}
     QToolBar QComboBox::down-arrow {{
-        width: {scale(12)}px;
-        height: {scale(12)}px;
+        image: url("{get_chevron_icon_path()}");
+        width: {scale(11)}px;
+        height: {scale(11)}px;
     }}
     QToolButton {{ 
         background-color: {COLORS['glass_bg']}; 
@@ -606,7 +682,9 @@ def get_creator_toolbar_style():
 # Stylesheet for RepoSettingsDialog
 def get_repo_settings_style():
     return f"""
-    QDialog {{ background-color: {COLORS['beige']}; }}
+    QDialog {{ 
+        background-color: {COLORS['beige']}; 
+    }}
     QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     QListWidget#Sidebar {{ 
@@ -648,6 +726,28 @@ def get_repo_settings_style():
         border: 1px solid {COLORS['glass_border']}; 
         border-radius: {scale(15)}px; 
         padding: {scale(5)}px; 
+        color: {COLORS['brown_text']};
+    }}
+
+    QComboBox QAbstractItemView {{
+        background-color: {COLORS['beige']};
+        color: {COLORS['brown_text']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(6)}px;
+        selection-background-color: rgba(211, 84, 0, 0.15);
+        selection-color: {COLORS['burnt_orange']};
+        padding: {scale(4)}px;
+        outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: {scale(6)}px {scale(10)}px;
+        min-height: {scale(24)}px;
+        color: {COLORS['brown_text']};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
     }}
     
     QSplitter::handle {{ background-color: transparent; }}
@@ -657,7 +757,9 @@ def get_repo_settings_style():
 # Stylesheet for ExportDialog
 def get_export_dialog_style():
     return f"""
-    QDialog {{ background-color: {COLORS['beige']}; }}
+    QDialog {{ 
+        background-color: {COLORS['beige']}; 
+    }}
     QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
     QGroupBox {{ 
@@ -696,6 +798,17 @@ def get_export_dialog_style():
         border: 1px solid {COLORS['glass_border']}; 
         border-radius: {scale(15)}px; 
         padding: {scale(5)}px; 
+    }}
+
+    QComboBox QAbstractItemView {{
+        background-color: {COLORS['beige']};
+        color: {COLORS['brown_text']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(6)}px;
+        selection-background-color: rgba(211, 84, 0, 0.15);
+        selection-color: {COLORS['burnt_orange']};
+        padding: {scale(4)}px;
+        outline: none;
     }}
 """
 
@@ -754,6 +867,7 @@ def get_bw_glass_style():
         border-radius: {scale(8)}px; 
         padding: {scale(8)}px {scale(16)}px; 
         font-weight: 500; 
+        color: {COLORS['bw_text']};
     }}
     QPushButton:hover {{ 
         background-color: #f8f8f8; 
@@ -775,15 +889,79 @@ def get_bw_glass_style():
         background-color: rgba(231, 76, 60, 0.05);
     }}
     
-    QLineEdit, QSpinBox, QComboBox, QPlainTextEdit {{ 
+    QLineEdit, QSpinBox, QPlainTextEdit {{ 
         background-color: white; 
         border: 1px solid rgba(0, 0, 0, 0.1); 
         border-radius: {scale(8)}px; 
         padding: {scale(6)}px {scale(10)}px; 
         color: {COLORS['bw_text']};
     }}
+    QComboBox {{
+        background-color: white;
+        border: 1px solid rgba(0, 0, 0, 0.1);
+        border-radius: {scale(8)}px;
+        padding-left: {scale(10)}px;
+        padding-right: {scale(28)}px;
+        padding-top: {scale(6)}px;
+        padding-bottom: {scale(6)}px;
+        color: {COLORS['bw_text']};
+    }}
+    QComboBox:hover {{
+        background-color: #f8f8f8;
+        border-color: rgba(0, 0, 0, 0.22);
+    }}
     QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
         border-color: {COLORS['bw_accent']};
+    }}
+    QComboBox::drop-down {{
+        subcontrol-origin: padding;
+        subcontrol-position: center right;
+        width: {scale(24)}px;
+        border: none;
+        background: transparent;
+    }}
+    QComboBox::down-arrow {{
+        image: url("{get_chevron_icon_path()}");
+        width: {scale(11)}px;
+        height: {scale(11)}px;
+    }}
+
+    QComboBox QAbstractItemView {{
+        background-color: white;
+        color: {COLORS['bw_text']};
+        selection-background-color: rgba(0, 0, 0, 0.08);
+        selection-color: {COLORS['bw_text']};
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        border-radius: {scale(6)}px;
+        padding: {scale(4)}px;
+        outline: none;
+    }}
+    QComboBox QAbstractItemView::item {{
+        padding: {scale(6)}px {scale(12)}px;
+        min-height: {scale(24)}px;
+        color: {COLORS['bw_text']};
+    }}
+    QComboBox QAbstractItemView::item:selected {{
+        background-color: rgba(0, 0, 0, 0.08);
+        color: {COLORS['bw_text']};
+    }}
+
+    QMenu {{
+        background-color: white;
+        color: {COLORS['bw_text']};
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        border-radius: {scale(8)}px;
+        padding: {scale(4)}px 0px;
+    }}
+    QMenu::item {{
+        padding: {scale(8)}px {scale(20)}px;
+        color: {COLORS['bw_text']};
+    }}
+    QMenu::item:selected {{
+        background-color: rgba(0, 0, 0, 0.08);
+        color: {COLORS['bw_text']};
+        border-radius: {scale(4)}px;
+        margin: 0px {scale(4)}px;
     }}
 
     QTableWidget {{
@@ -923,6 +1101,25 @@ def get_login_dialog_style():
     QScrollArea {{
         border: none;
         background: transparent;
+    }}
+    
+    QMenu {{
+        background-color: {COLORS['beige']};
+        color: {COLORS['brown_text']};
+        border: 1px solid {COLORS['glass_border']};
+        border-radius: {scale(8)}px;
+        padding: {scale(4)}px 0px;
+    }}
+    QMenu::item {{
+        padding: {scale(8)}px {scale(20)}px;
+        color: {COLORS['brown_text']};
+        font-size: {scale(14)}px;
+    }}
+    QMenu::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['burnt_orange']};
+        border-radius: {scale(4)}px;
+        margin: 0px {scale(4)}px;
     }}
     
     {get_scrollbar_style()}

@@ -21,36 +21,33 @@ def board_widget(qapp):
     yield widget
     widget.close()
 
-def test_board_snapshot_caching_during_animation(board_widget):
-    """Verify that _board_snapshot is built and reused during animation to reduce draw calls."""
+def test_unified_rendering_during_animation(board_widget):
+    """Verify that the unified rendering pipeline paints correctly during animation and transitions smoothly to idle."""
     move = chess.Move.from_uci('e2e4')
     piece = board_widget.board.piece_at(chess.E2)
-    
-    assert board_widget._board_snapshot is None
     
     # Start animation
     board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
     assert board_widget.is_animating is True
+    assert board_widget.animating_piece_data is not None
+    assert board_widget.animating_piece_data['from_square'] == chess.E2
+    assert board_widget.animating_piece_data['to_square'] == chess.E4
     
-    # Trigger first paint event while animating
+    # Trigger paint event while animating
     pixmap = QPixmap(board_widget.size())
     painter = QPainter(pixmap)
     board_widget.paintEvent(None)
     painter.end()
     
-    # Snapshot must now be built and cached
-    assert board_widget._board_snapshot is not None
-    cached_snapshot = board_widget._board_snapshot
-    
-    # Trigger second tick/frame - snapshot should be reused
+    # Advance animation tick
     board_widget._on_precise_anim_tick()
-    board_widget.paintEvent(None)
-    assert board_widget._board_snapshot is cached_snapshot
+    assert board_widget.animating_piece_data['progress'] > 0.0
     
-    # Finish animation - snapshot must be invalidated and freed
+    # Finish animation - transitions cleanly back to idle state
     board_widget._on_animation_finished()
     assert board_widget.is_animating is False
-    assert board_widget._board_snapshot is None
+    assert board_widget.animating_piece_data is None
+    assert board_widget.board.piece_at(chess.E4) == piece
 
 def test_animation_fps_stats_calculated(board_widget):
     """Verify that frame times and average FPS stats are tracked and calculated upon finish."""

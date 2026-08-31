@@ -79,3 +79,16 @@ def test_config_preservation_on_update(tmp_path, monkeypatch):
     assert updated_cfg.get("master_volume") == 45
     assert updated_cfg.get("update_snooze_until") is not None
 
+def test_record_update_check_emits_signal(tmp_path, monkeypatch):
+    monkeypatch.setattr("opening_fenix.core.services.update_service.get_user_dir", lambda: str(tmp_path))
+    from opening_fenix.core.services.update_service import record_update_check_time, update_signals
+
+    received = []
+    update_signals.check_completed.connect(lambda ts: received.append(ts))
+
+    ts = record_update_check_time()
+    assert len(received) == 1
+    assert received[0] == ts
+    assert get_config_dict().get("last_update_check") == ts
+
+
