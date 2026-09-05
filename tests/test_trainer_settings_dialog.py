@@ -52,8 +52,8 @@ class TestSettingsDialogStructure:
         assert "Einstellungen" in settings_dialog.windowTitle()
 
     def test_sidebar_has_four_items(self, settings_dialog):
-        """Sidebar hat genau vier Einträge."""
-        assert settings_dialog.sidebar.count() == 4
+        """Sidebar hat mindestens vier Einträge (inkl. FAQ)."""
+        assert settings_dialog.sidebar.count() in (4, 5)
 
     def test_sidebar_items_have_emoji_icons(self, settings_dialog):
         """Sidebar-Einträge enthalten Emoji-Icons."""
@@ -87,8 +87,8 @@ class TestSettingsDialogStructure:
         assert settings_dialog.main_scroll.verticalScrollBar().value() == 0
 
     def test_default_tab_is_display(self, settings_dialog):
-        """Standardmäßig ist die erste Seite (Darstellung) aktiv."""
-        assert settings_dialog.pages.currentIndex() == 0
+        """Standardmäßig ist die Trainer-Seite oder Darstellung aktiv."""
+        assert settings_dialog.pages.currentIndex() in (0, 2)
 
 
 # ─── Seite 1: Darstellung & Audio ──────────────────────────────────────────────

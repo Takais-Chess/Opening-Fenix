@@ -11,6 +11,27 @@ from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.utils import is_free_training_profile, get_user_dir
 from opening_fenix.core.services.navigator_service import RepertoireNavigator
 
+DEFAULT_BOX_INTERVALS = {
+    "standard": {
+        1: (5, "minutes"),
+        2: (1, "days"),
+        3: (3, "days"),
+        4: (9, "days"),
+        5: (21, "days"),
+        6: (63, "days"),
+        7: (180, "days")
+    },
+    "relaxed": {
+        1: (10, "minutes"),
+        2: (2, "days"),
+        3: (7, "days"),
+        4: (20, "days"),
+        5: (60, "days"),
+        6: (180, "days"),
+        7: (365, "days")
+    }
+}
+
 BOX_INTERVALS = {
     1: datetime.timedelta(minutes=5),
     2: datetime.timedelta(days=1),
@@ -20,6 +41,18 @@ BOX_INTERVALS = {
     6: datetime.timedelta(days=63),
     7: datetime.timedelta(days=180)
 }
+
+def parse_interval_delta(val: int, unit: str) -> datetime.timedelta:
+    val = max(1, int(val))
+    if unit == "minutes":
+        return datetime.timedelta(minutes=val)
+    elif unit == "hours":
+        return datetime.timedelta(hours=val)
+    elif unit == "days":
+        return datetime.timedelta(days=val)
+    elif unit == "months":
+        return datetime.timedelta(days=val * 30)
+    return datetime.timedelta(days=val)
 
 class TrainingManager:
     def __init__(self, profile_name: str, repertoire_manager: Any) -> None:
@@ -33,7 +66,22 @@ class TrainingManager:
             "anim_speed": 300, 
             "stop_at_variation_end": True,
             "notation_language": "en",
-            "ui_language": "de"
+            "ui_language": "de",
+            "interval_preset": "standard",
+            "custom_intervals": {
+                "1": {"value": 5, "unit": "minutes"},
+                "2": {"value": 1, "unit": "days"},
+                "3": {"value": 3, "unit": "days"},
+                "4": {"value": 9, "unit": "days"},
+                "5": {"value": 21, "unit": "days"},
+                "6": {"value": 63, "unit": "days"},
+                "7": {"value": 180, "unit": "days"}
+            },
+            "alternate_move_policy": "no_penalty",
+            "queue_priority_order": "box_first",
+            "max_new_cards_per_day": 0,
+            "max_reviews_per_session": 0,
+            "enforce_limit_after_variation": True
         }
         
         # Optimization Caches
@@ -94,6 +142,38 @@ class TrainingManager:
     def set_setting(self, key: str, value: Any) -> None:
         self.settings[key] = value
         self.save_settings()
+
+    def get_box_interval(self, box: int) -> datetime.timedelta:
+        preset = self.get_setting("interval_preset") or "standard"
+        if preset == "relaxed":
+            val, unit = DEFAULT_BOX_INTERVALS["relaxed"].get(box, (1, "days"))
+            return parse_interval_delta(val, unit)
+        elif preset == "custom":
+            custom = self.get_setting("custom_intervals")
+            if isinstance(custom, dict):
+                entry = custom.get(str(box)) or custom.get(box)
+                if isinstance(entry, dict):
+                    return parse_interval_delta(int(entry.get("value", 1)), entry.get("unit", "days"))
+                elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+                    return parse_interval_delta(int(entry[0]), entry[1])
+        # Default standard
+        val, unit = DEFAULT_BOX_INTERVALS["standard"].get(box, (1, "days"))
+        return parse_interval_delta(val, unit)
+
+    def record_new_card_trained(self) -> None:
+        today_str = datetime.date.today().isoformat()
+        daily_data = self.settings.setdefault("daily_new_cards", {})
+        if len(daily_data) > 14:
+            cutoff = (datetime.date.today() - datetime.timedelta(days=14)).isoformat()
+            self.settings["daily_new_cards"] = {k: v for k, v in daily_data.items() if k >= cutoff}
+            daily_data = self.settings["daily_new_cards"]
+        daily_data[today_str] = daily_data.get(today_str, 0) + 1
+        self.save_settings()
+
+    def get_today_new_cards_count(self) -> int:
+        today_str = datetime.date.today().isoformat()
+        daily_data = self.settings.get("daily_new_cards", {})
+        return daily_data.get(today_str, 0)
 
     def get_visible_repos(self) -> List[str]:
         if is_free_training_profile(self.profile_name):
@@ -446,8 +526,12 @@ class TrainingManager:
             due_items = list(self._td_cache.values())
             due_items = [td for td in due_items if td.next_due <= lookahead]
             
-            # IMPROVEMENT: Use the actual priority from the cache to sort due items.
-            due_items.sort(key=lambda x: (x.box, -(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0)))
+            # Sort based on queue_priority_order setting
+            sort_order = self.get_setting("queue_priority_order") or "box_first"
+            if sort_order == "priority_first":
+                due_items.sort(key=lambda x: (-(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0), x.box))
+            else:
+                due_items.sort(key=lambda x: (x.box, -(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0)))
             
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
             reachable_keys = set(reachable_repo_moves)
@@ -729,7 +813,7 @@ class TrainingManager:
             # Final Elo: starting 800 + (rating - 800) * progress_factor
             return int(800 + (settings.rating - 800) * progress_factor)
 
-    def register_success(self, move_id, success):
+    def register_success(self, move_id, success, had_alternate_attempt=False, was_new=False):
         # In free training, if move is correct, mark it as learned for the session.
         # If move is wrong, don't create/update entry so it remains in the queue.
         if is_free_training_profile(self.profile_name):
@@ -773,12 +857,29 @@ class TrainingManager:
         
         entry = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci).first()
         now = datetime.datetime.now()
+        is_first_time = (entry is None or entry.box == 0)
         if not entry:
             entry = TrainingData(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci, box=0, streak=0, next_due=now)
             self.user_session.add(entry)
-        if success: entry.box = min(7, entry.box + 1); entry.streak += 1
-        else: entry.box = 1; entry.streak = 0
-        entry.next_due = now + BOX_INTERVALS.get(entry.box, datetime.timedelta(days=1)); entry.last_review = now
+            
+        alt_policy = self.get_setting("alternate_move_policy") or "no_penalty"
+        if success:
+            if had_alternate_attempt and alt_policy == "keep_box":
+                # Keep box the same (at least box 1 if it was 0)
+                entry.box = max(1, entry.box)
+                entry.streak += 1
+            else:
+                entry.box = min(7, entry.box + 1)
+                entry.streak += 1
+                
+            if was_new or is_first_time:
+                self.record_new_card_trained()
+        else:
+            entry.box = 1
+            entry.streak = 0
+            
+        entry.next_due = now + self.get_box_interval(entry.box)
+        entry.last_review = now
         self.user_session.commit()
         
         # Update Rating

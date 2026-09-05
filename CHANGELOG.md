@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.7] - 2026-09-05
+
+### Added & Improved
+- **Unified Settings Architecture**: Consolidated disparate settings dialogs into a single, modern modal with an expandable/collapsible 4-tier navigation sidebar (Global Settings, Help & FAQ, Trainer Settings, Creator Settings).
+- **Lichess Fair Play Lockout**: Integrated live game detection with a non-intrusive notification system and overlay that temporarily disables the course creator during active rated Lichess games.
+- **Contextual Navigation & Header Bars**: Modal automatically opens to the relevant section (Trainer vs. Creator) based on launch context, and smartly hides course selectors on batch maintenance.
+- **Dynamic Repertoire Statistics**: Added asynchronous loading of Lichess priority score coverage counts (`Positionen mit Prio-Score`) and engine evaluation depth ranges in Repertoire Identity.
+- **Level Structure Table Dynamic Sizing**: Ensured all level rows and headers are fully visible without vertical cutoff across DPI scaling factors.
+- **Card Styling Polish**: Cleaned up white box background artifacts on inactive repertoire cards for a smooth, uniform grey overlay.
+- **Full German Localization Parity**: Complete German translations across all settings tabs, navigation items, tooltips, and action buttons with English fallbacks.
+
 ## [0.9.6] - 2026-08-31
 
 ### Added & Improved

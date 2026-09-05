@@ -18,10 +18,6 @@ Analyze your own recent Lichess games against your active repertoire. The system
 3. Automatically recommend whether the opponent's sideline is common enough that you should add it to your repertoire.
 *(Note: Extends feature #20)*
 
-### 🔒 25. Lichess Game Blocking (Focus Mode / Anti-Cheat)
-**Concept:**
-Add a feature that detects when the user is currently playing a live game on Lichess and blocks access to the Trainer and Repertoire Creator during the game to prevent accidental assistance and maintain fair play.
-
 ### ♟️ 27. High-Quality Chess-Aware Comment Re-Translation
 **Concept:**
 Re-translate all course comments marked with `(translated)` or `(übersetzt)` using a move-masked chess translation pipeline:
@@ -76,6 +72,7 @@ Re-translate all course comments marked with `(translated)` or `(übersetzt)` us
 | **17** | **Directory-Based Repertoire Storage (`repertoires/{name}/`)** | 2026-04-03 |
 | **26** | **Multilingual Repertoire Comments** | 2026-07-27 |
 | **28** | **Custom Storage Directory & Cloud Sync (Google Drive / Multi-PC)** | 2026-08-19 |
+| **25** | **Lichess Game Blocking (Fair Play Lockout for Creator)** | 2026-09-03 |
 
 ---
 *Roadmap updated for Opening Fenix V2.*

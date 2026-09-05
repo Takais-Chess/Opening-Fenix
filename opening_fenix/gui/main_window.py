@@ -83,6 +83,8 @@ class MainWindow(QMainWindow):
         
         self.current_move_obj = None
         self._preloaded_challenge = None
+        self._had_alternate_attempt = False
+        self.session_review_count = 0
         self.waiting_for_next = False
         self.show_comments = True
         self.mode = "TRAINER"
@@ -820,9 +822,39 @@ class MainWindow(QMainWindow):
             logger.error(f"Error in preload_next_challenge: {e}")
             self._preloaded_challenge = None
 
+    def _is_training_limit_reached(self) -> bool:
+        if is_free_training_profile(self.profile_name):
+            return False
+            
+        if self.training_mode == 'new':
+            max_new = self.training_manager.get_setting("max_new_cards_per_day") or 0
+            if max_new > 0:
+                today_count = self.training_manager.get_today_new_cards_count()
+                if today_count >= max_new:
+                    return True
+        else: # 'due' mode
+            max_reviews = self.training_manager.get_setting("max_reviews_per_session") or 0
+            if max_reviews > 0:
+                curr_reviews = getattr(self, 'session_review_count', 0)
+                if curr_reviews >= max_reviews:
+                    return True
+        return False
+
     def load_next_challenge(self, last_success=False, last_move=None):
         self.waiting_for_next = False
         if not self.repertoire_manager.active_repertoire_name: return
+
+        limit_reached = self._is_training_limit_reached()
+        enforce_after_var = self.training_manager.get_setting("enforce_limit_after_variation")
+        if enforce_after_var is None:
+            enforce_after_var = True
+
+        # If limit reached and not in a continuation or not waiting for variation end, stop!
+        if limit_reached and not (enforce_after_var and last_success and last_move):
+            self.current_move_obj = None
+            self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
+            self.btn_smart.setEnabled(False)
+            return
 
         # Try to use preloaded challenge
         if last_success and last_move and self._preloaded_challenge:
@@ -837,6 +869,14 @@ class MainWindow(QMainWindow):
                     self._load_new_challenge_sequence(pre['path'])
                     return
                 elif pre['type'] in ('stop_at_end', 'auto_continue'):
+                    if limit_reached:
+                        self.current_move_obj = last_move
+                        self.update_notation_display(reveal_move=True)
+                        self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
+                        self.btn_smart.setEnabled(False)
+                        self.current_move_obj = None
+                        return
+
                     if self.training_manager.get_setting("stop_at_variation_end"):
                         self.current_move_obj = last_move
                         self.update_notation_display(reveal_move=True)
@@ -869,25 +909,45 @@ class MainWindow(QMainWindow):
             if next_move:
                 self.current_move_obj = next_move
                 path_to_animate = path
-            elif self.training_manager.get_setting("stop_at_variation_end"):
-                # Variation ended, stay on the current notation
-                self.current_move_obj = last_move
-                self.update_notation_display(reveal_move=True)
-                self.set_button_state('start')
-                self.current_move_obj = None # Reset so next start loads a new challenge
-                return
             else:
-                # Auto-Weiter: Jump to next variation with delay
-                self.current_move_obj = None
-                delay = self.training_manager.get_setting("auto_delay") or 0
-                if delay > 0:
-                    QTimer.singleShot(delay, self._load_new_challenge_sequence)
+                if limit_reached:
+                    self.current_move_obj = last_move
+                    self.update_notation_display(reveal_move=True)
+                    self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
+                    self.btn_smart.setEnabled(False)
+                    self.current_move_obj = None
                     return
+
+                if self.training_manager.get_setting("stop_at_variation_end"):
+                    # Variation ended, stay on the current notation
+                    self.current_move_obj = last_move
+                    self.update_notation_display(reveal_move=True)
+                    self.set_button_state('start')
+                    self.current_move_obj = None # Reset so next start loads a new challenge
+                    return
+                else:
+                    # Auto-Weiter: Jump to next variation with delay
+                    self.current_move_obj = None
+                    delay = self.training_manager.get_setting("auto_delay") or 0
+                    if delay > 0:
+                        QTimer.singleShot(delay, self._load_new_challenge_sequence)
+                        return
+
+        if limit_reached:
+            self.current_move_obj = None
+            self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
+            self.btn_smart.setEnabled(False)
+            return
 
         self._load_new_challenge_sequence(path_to_animate)
 
     def _load_new_challenge_sequence(self, path_to_animate=None):
+        self._had_alternate_attempt = False
         if not self.current_move_obj:
+            if self._is_training_limit_reached():
+                self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
+                self.btn_smart.setEnabled(False)
+                return
             self.current_move_obj, _ = self.training_manager.get_next_move(mode=self.training_mode, variation_filter=self.active_variation_filter)
 
         if self.current_move_obj:
@@ -995,12 +1055,17 @@ class MainWindow(QMainWindow):
 
             was_waiting = (self.button_state == 'waiting_for_move')
             current_move = self.current_move_obj
+            had_alt = getattr(self, '_had_alternate_attempt', False)
+            self._had_alternate_attempt = False
             self.set_button_state('correct')
             
             # Defer expensive database writes and next challenge calculation
             def process_after_move():
                 if was_waiting:
-                    self.training_manager.register_success(current_move.id, True)
+                    was_new = self.training_manager.is_move_new(current_move.id)
+                    self.training_manager.register_success(current_move.id, True, had_alternate_attempt=had_alt, was_new=was_new)
+                    if self.training_mode == 'due':
+                        self.session_review_count = getattr(self, 'session_review_count', 0) + 1
                     self.update_stats_display()
                 self.load_next_challenge(True, current_move)
                 
@@ -1008,12 +1073,29 @@ class MainWindow(QMainWindow):
         else:
             alt_type = self.repertoire_manager.get_alternative_move_type(self.current_move_obj, move.uci())
             if alt_type:
+                alt_policy = self.training_manager.get_setting("alternate_move_policy") or "no_penalty"
+                if alt_policy == "mistake":
+                    self.play_sound("error")
+                    self.board_widget.repaint()
+                    if self.button_state == 'waiting_for_move':
+                        current_move = self.current_move_obj
+                        self.set_button_state('show_solution_prompt')
+                        def process_after_fail():
+                            self.training_manager.register_success(current_move.id, False)
+                            self.update_stats_display()
+                        QTimer.singleShot(0, process_after_fail)
+                    return
+
                 is_cap = self.board_widget.board.is_capture(move)
                 self.play_sound("capture" if is_cap else "move")
                 if alt_type == 'repertoire':
                     self.btn_smart.setText(tr_ui("main_window.btn_alt_repertoire", "GUTER ZUG (ANDERER REPERTOIRE-WEG)"))
                 else:
                     self.btn_smart.setText(tr_ui("main_window.btn_alt_not_repertoire", "GUTER ZUG (NICHT IM REPERTOIRE)"))
+                
+                if alt_policy == "keep_box":
+                    self._had_alternate_attempt = True
+
                 # Force immediate visual snap-back of incorrect piece
                 self.board_widget.repaint()
                 QTimer.singleShot(1500, lambda: self.set_button_state(self.button_state))

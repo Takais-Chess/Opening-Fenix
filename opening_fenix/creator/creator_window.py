@@ -43,9 +43,10 @@ from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
 from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+from opening_fenix.gui.widgets.lichess_lockout_overlay import LichessLockoutOverlay
+from opening_fenix.core.services.lichess_lockout_service import LichessLockoutWorker
 from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
-from opening_fenix.core.logger import logger
 
 # Import centralized styles
 from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette
@@ -2589,6 +2590,15 @@ class CreatorWindow(QMainWindow):
         # Trigger background update check 2 seconds after startup
         QTimer.singleShot(2000, self.check_for_updates)
 
+        # Initialize Fair Play / Lichess Lockout Overlay
+        self.lockout_overlay = LichessLockoutOverlay(self)
+        self.lockout_overlay.recheck_requested.connect(lambda: self.trigger_lichess_lockout_check(manual=True))
+        self.lockout_overlay.open_settings_requested.connect(self.open_settings_from_lockout)
+        self.lockout_worker = None
+
+        # Delayed Fair Play check on Creator startup (2.5 seconds delay)
+        QTimer.singleShot(2500, self.trigger_lichess_lockout_check)
+
     def check_for_updates(self):
         from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
         if not should_check_for_updates(manual=False):
@@ -4225,17 +4235,78 @@ class CreatorWindow(QMainWindow):
         self.backend.update_position_analysis(f, d, e)
 
     def open_repo_settings(self):
-        if self.backend.active_repo_name:
-            if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog:
-                self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
-                self.repo_settings_dialog.finished.connect(self._on_settings_closed)
-            
-            self.repo_settings_dialog.show()
-            self.repo_settings_dialog.raise_()
-            self.repo_settings_dialog.activateWindow()
+        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog:
+            self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
+            self.repo_settings_dialog.finished.connect(self._on_settings_closed)
+        
+        self.repo_settings_dialog.show()
+        self.repo_settings_dialog.raise_()
+        self.repo_settings_dialog.activateWindow()
 
     def _on_settings_closed(self):
         self.repo_settings_dialog = None
+        # Re-check lockout status after closing settings in case settings were changed
+        QTimer.singleShot(500, self.trigger_lichess_lockout_check)
+
+    def open_settings_from_lockout(self):
+        """Emergency bypass: hides the overlay and opens settings for the user to disable."""
+        if hasattr(self, 'lockout_overlay') and self.lockout_overlay:
+            self.lockout_overlay.unlock()
+        self.open_repo_settings()
+        if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog:
+            self.repo_settings_dialog.sidebar.setCurrentRow(0)
+
+    def trigger_lichess_lockout_check(self, manual=False):
+        """Asynchronously checks if any monitored Lichess user is currently playing."""
+        if hasattr(self, 'lockout_worker') and self.lockout_worker and self.lockout_worker.isRunning():
+            return
+
+        # Reload latest config from disk
+        cp = os.path.join(get_user_dir(), "config.json")
+        if os.path.exists(cp):
+            try:
+                with open(cp, "r") as f:
+                    self.config = json.load(f)
+            except Exception:
+                pass
+
+        if not self.config.get("lichess_lockout_enabled", False):
+            if hasattr(self, 'lockout_overlay') and self.lockout_overlay:
+                self.lockout_overlay.unlock()
+                if manual:
+                    self.lockout_overlay.set_checking_state(False)
+            return
+
+        self.lockout_worker = LichessLockoutWorker(self.config, parent=self)
+        self.lockout_worker.check_completed.connect(
+            lambda is_playing, users, gids, msg: self._on_lockout_check_completed(is_playing, users, gids, msg, manual)
+        )
+        self.lockout_worker.check_failed.connect(
+            lambda err: self._on_lockout_check_failed(err, manual)
+        )
+        self.lockout_worker.start()
+
+    def _on_lockout_check_completed(self, is_playing: bool, playing_users: list, game_ids: dict, msg: str, manual: bool):
+        if hasattr(self, 'lockout_overlay') and self.lockout_overlay:
+            self.lockout_overlay.set_checking_state(False)
+            if is_playing:
+                self.lockout_overlay.show_lockout(playing_users, game_ids)
+                if manual:
+                    self.lockout_overlay.show_feedback(
+                        tr_ui("lockout.still_playing", "⚠️ Partie läuft noch! Creator bleibt gesperrt."), 
+                        is_error=True
+                    )
+            else:
+                self.lockout_overlay.unlock()
+
+    def _on_lockout_check_failed(self, error_message: str, manual: bool):
+        if hasattr(self, 'lockout_overlay') and self.lockout_overlay:
+            self.lockout_overlay.set_checking_state(False)
+            if manual:
+                self.lockout_overlay.show_feedback(
+                    tr_ui("lockout.network_error", "Fehler bei Lichess-Verbindung: {err}", err=error_message),
+                    is_error=True
+                )
 
     def delete_repertoire_action(self):
         """Actual deletion of the active repertoire files and closing the window."""
@@ -4504,6 +4575,9 @@ class CreatorWindow(QMainWindow):
         # singleShot(0) = "as soon as current call stack finishes" — no blocking, no arbitrary wait
         self.backend._fen_index = None   # invalidate old index immediately
         QTimer.singleShot(0, self._build_fen_index)
+
+        # Trigger delayed Fair Play check (2.5 seconds after repertoire load)
+        QTimer.singleShot(2500, self.trigger_lichess_lockout_check)
 
     def new_repertoire_dialog(self):
         d = NewRepertoireDialog(self)

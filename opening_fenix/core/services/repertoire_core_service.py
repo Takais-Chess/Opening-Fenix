@@ -66,9 +66,14 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
     cached_count = get_meta(session, "cov_cache_count", "-1")
     cached_pct = get_meta(session, "cov_cache_pct", "")
     cached_elo = get_meta(session, "cov_cache_elo", "")
+    cached_covered = get_meta(session, "cov_cache_covered", "")
     
-    if str(total_pos) == str(cached_count) and cached_elo == elo_cat and cached_pct:
+    if str(total_pos) == str(cached_count) and cached_elo == elo_cat and cached_pct and cached_covered:
         coverage_pct = float(cached_pct)
+        try:
+            covered_pos = int(cached_covered)
+        except (ValueError, TypeError):
+            covered_pos = 0
     else:
         covered_pos = session.query(func.count(func.distinct(Position.id)))\
             .join(LichessData, Position.fen == LichessData.fen)\
@@ -81,6 +86,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         set_meta(session, "cov_cache_count", total_pos)
         set_meta(session, "cov_cache_pct", coverage_pct)
         set_meta(session, "cov_cache_elo", elo_cat)
+        set_meta(session, "cov_cache_covered", covered_pos)
         session.commit()
     
 
@@ -91,6 +97,8 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         "depth": get_repertoire_analysis_status(repo_name, session),
         "elo": elo_cat,
         "coverage_pct": coverage_pct,
+        "covered_pos": covered_pos,
+        "total_pos": total_pos,
         "moves": total_moves,
         "description": get_meta(session, "description", "")
     }
