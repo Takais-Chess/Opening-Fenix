@@ -103,6 +103,7 @@ class MainWindow(QMainWindow):
         self.stats_update_timer = QTimer()
         self.stats_update_timer.setSingleShot(True)
         self.stats_update_timer.timeout.connect(self._do_update_stats_display)
+        self._pending_stats_task = None
 
         self.init_ui()
         # Lazy load sounds to ensure audio system is initialized within the event loop
@@ -542,6 +543,7 @@ class MainWindow(QMainWindow):
         self.change_repertoire(button.property("repo_name"))
 
     def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
+        self._flush_pending_stats()
         # Cancel any ongoing animations before switching
         self.animation_moves = []
         self._preloaded_challenge = None
@@ -1042,16 +1044,24 @@ class MainWindow(QMainWindow):
             self.board_widget.update()
             self.btn_smart.setEnabled(False)
 
+    def _flush_pending_stats(self):
+        if getattr(self, '_pending_stats_task', None):
+            task = self._pending_stats_task
+            self._pending_stats_task = None
+            try:
+                task()
+            except Exception as e:
+                logger.error(f"Error flushing pending training stats: {e}")
+
     def check_user_move(self, move):
         if self.button_state not in ['waiting_for_move', 'show_solution_prompt'] or not self.current_move_obj: return
         if move.uci() == self.current_move_obj.uci:
             is_cap = self.board_widget.board.is_capture(move)
             self.play_sound("capture" if is_cap else "move")
             self.board_widget.board.push(move)
+            self.board_widget.last_move = move
             self.board_widget.solution_arrow = None
-            
-            # Force immediate visual snap of the correct piece
-            self.board_widget.repaint()
+            self.board_widget.update()
 
             was_waiting = (self.button_state == 'waiting_for_move')
             current_move = self.current_move_obj
@@ -1059,24 +1069,30 @@ class MainWindow(QMainWindow):
             self._had_alternate_attempt = False
             self.set_button_state('correct')
             
-            # Defer expensive database writes and next challenge calculation
-            def process_after_move():
+            # Prepare deferred stats task to run once animation finishes (zero thread blocking during piece slide)
+            def record_stats():
                 if was_waiting:
                     was_new = self.training_manager.is_move_new(current_move.id)
                     self.training_manager.register_success(current_move.id, True, had_alternate_attempt=had_alt, was_new=was_new)
                     if self.training_mode == 'due':
                         self.session_review_count = getattr(self, 'session_review_count', 0) + 1
                     self.update_stats_display()
-                self.load_next_challenge(True, current_move)
                 
-            QTimer.singleShot(0, process_after_move)
+            self._pending_stats_task = record_stats
+
+            # 1. Launch next challenge / opponent animation immediately
+            self.load_next_challenge(True, current_move)
+
+            # 2. If no animation is running (e.g. static board or line end), flush stats right away
+            if not self.board_widget.is_animating:
+                self._flush_pending_stats()
         else:
             alt_type = self.repertoire_manager.get_alternative_move_type(self.current_move_obj, move.uci())
             if alt_type:
                 alt_policy = self.training_manager.get_setting("alternate_move_policy") or "no_penalty"
                 if alt_policy == "mistake":
                     self.play_sound("error")
-                    self.board_widget.repaint()
+                    self.board_widget.update()
                     if self.button_state == 'waiting_for_move':
                         current_move = self.current_move_obj
                         self.set_button_state('show_solution_prompt')
@@ -1096,14 +1112,14 @@ class MainWindow(QMainWindow):
                 if alt_policy == "keep_box":
                     self._had_alternate_attempt = True
 
-                # Force immediate visual snap-back of incorrect piece
-                self.board_widget.repaint()
+                # Visual snap-back of incorrect piece
+                self.board_widget.update()
                 QTimer.singleShot(1500, lambda: self.set_button_state(self.button_state))
                 return
 
             self.play_sound("error")
-            # Force immediate visual snap-back of incorrect piece
-            self.board_widget.repaint()
+            # Visual snap-back of incorrect piece
+            self.board_widget.update()
             
             if self.button_state == 'waiting_for_move':
                 current_move = self.current_move_obj
@@ -1178,7 +1194,15 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, lambda: self.txt_notation.moveCursor(QTextCursor.MoveOperation.End))
 
     def open_settings(self):
-        SettingsDialog(self).exec()
+        if not hasattr(self, 'settings_dialog') or not self.settings_dialog:
+            self.settings_dialog = SettingsDialog(self)
+            self.settings_dialog.finished.connect(self._on_settings_closed)
+        self.settings_dialog.show()
+        self.settings_dialog.raise_()
+        self.settings_dialog.activateWindow()
+
+    def _on_settings_closed(self):
+        self.settings_dialog = None
         self.refresh_repertoire_buttons()
         self.update_settings_from_manager()
 
@@ -1187,8 +1211,10 @@ class MainWindow(QMainWindow):
         self.btn_auto_continue.setChecked(not self.training_manager.get_setting("stop_at_variation_end"))
 
     def apply_theme(self):
-        t_name = self.training_manager.get_setting("theme") or "Blau (Turnier)"
+        t_name = self.training_manager.get_setting("theme") or "Braun (Klassisch)"
         self.board_widget.set_theme(t_name)
+        hl_color = self.training_manager.get_setting("highlight_color") or "Gelb (Standard)"
+        self.board_widget.set_highlight_color(hl_color)
 
     def set_master_volume(self, volume):
         if hasattr(self, 'sounds'):
@@ -1378,6 +1404,7 @@ class MainWindow(QMainWindow):
         self.finalize_animation_state()
 
     def finalize_animation_state(self):
+        self._flush_pending_stats()
         self.set_button_state('waiting_for_move')
         
         # FIX: If we are in "new" learning mode, immediately show the solution arrow
@@ -1428,6 +1455,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
+        self._flush_pending_stats()
         from PyQt6.QtWidgets import QDialog, QApplication
         for w in list(QApplication.topLevelWidgets()):
             if isinstance(w, QDialog) and w != self:

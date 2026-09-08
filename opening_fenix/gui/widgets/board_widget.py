@@ -14,7 +14,7 @@ if sys.platform == "win32":
 
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFont
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QVariantAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QSize, QVariantAnimation, QEasingCurve
 from PyQt6.QtSvg import QSvgRenderer
 from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.core.logger import logger
@@ -23,7 +23,7 @@ from opening_fenix.gui.scaling import scale
 
 THEMES = {
     "Dunkel (Modern)": (QColor("#71717a"), QColor("#3f3f46")),
-    "Grün (Lichess)": (QColor(240, 217, 181), QColor(118, 150, 86)),
+    "Grün": (QColor(240, 217, 181), QColor(118, 150, 86)),
     "Braun (Klassisch)": (QColor(240, 217, 181), QColor(181, 136, 99)),
     "Blau (Turnier)": (QColor(232, 235, 239), QColor(125, 135, 150)),
     "Grau (Neutral)": (QColor(240, 240, 240), QColor(160, 160, 160)),
@@ -32,10 +32,39 @@ THEMES = {
 
 THEME_FALLBACKS = {
     "Dark (Modern)": "Dunkel (Modern)",
-    "Green (Lichess)": "Grün (Lichess)",
+    "Grün (Lichess)": "Grün",
+    "Green (Lichess)": "Grün",
+    "Green": "Grün",
     "Brown (Classic)": "Braun (Klassisch)",
     "Blue (Tournament)": "Blau (Turnier)",
     "Grey (Neutral)": "Grau (Neutral)",
+}
+
+HIGHLIGHT_COLORS = {
+    "Gelb (Standard)": QColor(255, 255, 0, 100),
+    "Grün": QColor(34, 197, 94, 110),
+    "Blau": QColor(59, 130, 246, 110),
+    "Orange": QColor(249, 115, 22, 110),
+    "Burnt Orange": QColor(245, 158, 11, 110),
+    "Rot": QColor(239, 68, 68, 110),
+    "Lila": QColor(168, 85, 247, 110),
+    "Türkis": QColor(6, 182, 212, 110),
+}
+
+HIGHLIGHT_COLOR_FALLBACKS = {
+    "Yellow (Default)": "Gelb (Standard)",
+    "Yellow": "Gelb (Standard)",
+    "Green": "Grün",
+    "Blue": "Blau",
+    "Orange": "Orange",
+    "Burnt Orange": "Burnt Orange",
+    "Amber": "Burnt Orange",
+    "Bernstein": "Burnt Orange",
+    "Rostorange": "Burnt Orange",
+    "Red": "Rot",
+    "Purple": "Lila",
+    "Turquoise": "Türkis",
+    "Cyan": "Türkis",
 }
 
 
@@ -54,13 +83,14 @@ class ChessBoardWidget(QWidget):
         self.piece_pixmaps = {} 
         self._last_scaled_size = 0
         self.load_pieces()
-        self.light_color, self.dark_color = THEMES["Blau (Turnier)"]
+        self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
+        self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
         self.setMinimumSize(scale(400), scale(400))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self.dragging_piece = None
         self.drag_start_square = None
-        self.mouse_pos = QPoint()
+        self.mouse_pos = QPointF()
         self.is_animating = False
         self.last_move = None
         self.hint_arrow = None
@@ -74,8 +104,8 @@ class ChessBoardWidget(QWidget):
         self.move_anim.finished.connect(self._on_animation_finished)
         self.move_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         
-        # High-Precision 120 FPS Animation Driver
-        self.target_fps = 120  # Matches 120Hz high-refresh displays
+        # High-Precision Animation Driver matching monitor refresh rate
+        self.target_fps = self.get_screen_refresh_rate()
         self.precise_anim_timer = QTimer(self)
         self.precise_anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.precise_anim_timer.timeout.connect(self._on_precise_anim_tick)
@@ -108,7 +138,20 @@ class ChessBoardWidget(QWidget):
         elif theme_name in THEME_FALLBACKS:
             self.light_color, self.dark_color = THEMES[THEME_FALLBACKS[theme_name]]
         else:
-            self.light_color, self.dark_color = THEMES["Blau (Turnier)"]
+            self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
+        self.update()
+
+    def set_highlight_color(self, color_name_or_color):
+        if isinstance(color_name_or_color, QColor):
+            self.highlight_color = color_name_or_color
+        elif color_name_or_color in HIGHLIGHT_COLORS:
+            self.highlight_color = HIGHLIGHT_COLORS[color_name_or_color]
+        elif color_name_or_color in HIGHLIGHT_COLOR_FALLBACKS:
+            self.highlight_color = HIGHLIGHT_COLORS[HIGHLIGHT_COLOR_FALLBACKS[color_name_or_color]]
+        elif isinstance(color_name_or_color, str) and color_name_or_color.startswith("#"):
+            self.highlight_color = QColor(color_name_or_color)
+        else:
+            self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
         self.update()
 
     def load_pieces(self):
@@ -147,7 +190,6 @@ class ChessBoardWidget(QWidget):
         self.hint_arrow = None
         self.solution_arrow = None
         self.explorer_arrows = []
-        self._board_snapshot = None  # Board state changed
         self.update() 
 
     def get_square_from_pos(self, pos):
@@ -172,7 +214,6 @@ class ChessBoardWidget(QWidget):
                     self.last_move = move
                     self.animating_piece_data = None
                     self.is_animating = False
-                    self._board_snapshot = None
                     self.piece_slide_finished.emit()
                     self.update()
             # Allow the click to proceed to pick up a piece
@@ -184,13 +225,12 @@ class ChessBoardWidget(QWidget):
                 if piece and piece.color == self.board.turn:
                     self.dragging_piece = piece
                     self.drag_start_square = square
-                    self.mouse_pos = event.position().toPoint()
-                    self._board_snapshot = None  # Clear snapshot to rebuild it without the dragging piece
+                    self.mouse_pos = event.position()
                     self.update()
 
     def mouseMoveEvent(self, event):
         if self.dragging_piece:
-            self.mouse_pos = event.position().toPoint()
+            self.mouse_pos = event.position()
             self.update()
 
     def mouseReleaseEvent(self, event):
@@ -202,7 +242,6 @@ class ChessBoardWidget(QWidget):
             # Clear dragging state immediately so any repaint inside the signal handler knows the drag is done
             self.dragging_piece = None
             self.drag_start_square = None
-            self._board_snapshot = None  # Clear snapshot
             
             if end_square is not None and drag_start is not None:
                 move = None
@@ -320,7 +359,7 @@ class ChessBoardWidget(QWidget):
         
         # 3. Last move highlight
         if self.last_move:
-            painter.setBrush(QBrush(QColor(255, 255, 0, 100)))
+            painter.setBrush(QBrush(self.highlight_color))
             for sq in [self.last_move.from_square, self.last_move.to_square]:
                 f, r = chess.square_file(sq), chess.square_rank(sq)
                 rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
@@ -364,6 +403,7 @@ class ChessBoardWidget(QWidget):
             skip_square = self.drag_start_square
 
         # Unified coordinate origin for all states (idle, dragging, animating)
+        # Guarantees zero pixel/sub-pixel shifting when picking up, dragging, or dropping pieces
         painter.translate(x_offset, y_offset)
         self._paint_board_base(painter, square_size)
         self._paint_pieces(painter, square_size, skip_square=skip_square)
@@ -380,11 +420,12 @@ class ChessBoardWidget(QWidget):
             self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
 
         if is_drag:
-            mx, my = self.mouse_pos.x() - x_offset, self.mouse_pos.y() - y_offset
-            target_rect = QRectF(mx - square_size/2, my - square_size/2, square_size, square_size)
+            # Draw dragged piece centered exactly on mouse cursor with sub-pixel float precision
+            mx = (self.mouse_pos.x() - x_offset) - square_size / 2.0
+            my = (self.mouse_pos.y() - y_offset) - square_size / 2.0
             key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
             if key in self.piece_pixmaps: 
-                painter.drawPixmap(target_rect.toRect(), self.piece_pixmaps[key])
+                painter.drawPixmap(QPointF(mx, my), self.piece_pixmaps[key])
 
         if self.debug_anim:
             painter.resetTransform()
@@ -452,9 +493,11 @@ class ChessBoardWidget(QWidget):
         if self.main_window and hasattr(self.main_window, 'training_manager'): 
             anim_speed = self.main_window.training_manager.get_setting("anim_speed") or 200
             
-        self.target_fps = self.get_screen_refresh_rate()  # Auto-detects 60Hz vs 120Hz vs 144Hz monitor
+        if not getattr(self, 'target_fps', None):
+            self.target_fps = self.get_screen_refresh_rate()
         self.anim_duration = float(anim_speed)
         self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
+        self.last_move = move
         self.is_animating = True
 
         # Reset Debug Timing

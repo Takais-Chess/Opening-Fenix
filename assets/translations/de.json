@@ -33,10 +33,13 @@
   "settings": {
     "lang_change_title": "Sprachwechsel",
     "lang_change_msg": "Die Benutzeroberfläche wird nach einem Neustart der Anwendung vollständig übersetzt.",
+    "lang_change_restart_prompt": "Das Ändern der Sprache erfordert einen Neustart des Programms. Möchtest du die Sprache jetzt ändern und das Programm neu starten?",
+    "ui_lang_hint": "⚠️ Änderung erfordert einen Neustart des Programms.",
     "notation_lang_label": "Notation-Sprache:",
     "ui_lang_label": "Sprache der Benutzeroberfläche:",
     "optics_title": "🎨 Optik",
     "board_design": "Schachbrett-Design:",
+    "highlight_color": "Farbe Zug-Hervorhebung:",
     "anim_speed": "Animations-Tempo:",
     "anim_speed_tooltip": "Wie schnell Figuren über das Brett gleiten (Millisekunden).",
     "audio_title": "🔊 Klang & Lautstärke",
@@ -179,11 +182,21 @@
   },
   "themes": {
     "Dunkel (Modern)": "Dunkel (Modern)",
-    "Grün (Lichess)": "Grün (Lichess)",
+    "Grün": "Grün",
     "Braun (Klassisch)": "Braun (Klassisch)",
     "Blau (Turnier)": "Blau (Turnier)",
     "Grau (Neutral)": "Grau (Neutral)",
     "Icy Sea": "Icy Sea"
+  },
+  "highlight_colors": {
+    "Gelb (Standard)": "Gelb (Standard)",
+    "Grün": "Grün",
+    "Blau": "Blau",
+    "Orange": "Orange",
+    "Burnt Orange": "Burnt Orange",
+    "Rot": "Rot",
+    "Lila": "Lila",
+    "Türkis": "Türkis"
   },
   "elo": {
     "low": "Hobby Spieler (unter 1300)",

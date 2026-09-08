@@ -264,13 +264,26 @@ class TestRepoSettingsDesignPage:
         from opening_fenix.gui.widgets.board_widget import THEMES
         assert settings_dialog.combo_theme.count() == len(THEMES)
 
+    def test_highlight_combo_populated(self, settings_dialog):
+        """Highlight-Farben-Dropdown enthält alle Optionen."""
+        settings_dialog.sidebar.setCurrentRow(1)
+        from opening_fenix.gui.widgets.board_widget import HIGHLIGHT_COLORS
+        assert settings_dialog.combo_highlight.count() == len(HIGHLIGHT_COLORS)
+
     def test_theme_change_calls_main_window(self, settings_dialog, mock_main_window):
         """Theme-Änderung wird an MainWindow config gespeichert."""
         settings_dialog.sidebar.setCurrentRow(1)
-        settings_dialog.change_board_theme("Gr\u00fcn (Lichess)")
-        assert mock_main_window.config.get("theme") == "Gr\u00fcn (Lichess)"
+        settings_dialog.change_board_theme("Grün (Lichess)")
+        assert mock_main_window.config.get("theme") == "Grün (Lichess)"
         # board_widget.set_theme wurde aufgerufen
         assert mock_main_window.board_widget.set_theme.called
+
+    def test_highlight_change_calls_main_window(self, settings_dialog, mock_main_window):
+        """Highlight-Farben-Änderung wird an MainWindow config gespeichert."""
+        settings_dialog.sidebar.setCurrentRow(1)
+        settings_dialog.change_highlight_color("Blau")
+        assert mock_main_window.config.get("highlight_color") == "Blau"
+        assert mock_main_window.board_widget.set_highlight_color.called
 
     def test_volume_change_no_crash(self, settings_dialog):
         """Lautstärkeänderung wirft keinen Fehler (sounds dict ist leer)."""

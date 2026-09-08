@@ -7,7 +7,7 @@ def test_theme_translation_strings():
     """Verify that theme translation keys exist for both DE and EN."""
     translator.load_language("de")
     assert tr_ui("themes.Dunkel (Modern)") == "Dunkel (Modern)"
-    assert tr_ui("themes.Grün (Lichess)") == "Grün (Lichess)"
+    assert tr_ui("themes.Grün") == "Grün"
     assert tr_ui("themes.Braun (Klassisch)") == "Braun (Klassisch)"
     assert tr_ui("themes.Blau (Turnier)") == "Blau (Turnier)"
     assert tr_ui("themes.Grau (Neutral)") == "Grau (Neutral)"
@@ -15,7 +15,7 @@ def test_theme_translation_strings():
 
     translator.load_language("en")
     assert tr_ui("themes.Dunkel (Modern)") == "Dark (Modern)"
-    assert tr_ui("themes.Grün (Lichess)") == "Green (Lichess)"
+    assert tr_ui("themes.Grün") == "Green"
     assert tr_ui("themes.Braun (Klassisch)") == "Brown (Classic)"
     assert tr_ui("themes.Blau (Turnier)") == "Blue (Tournament)"
     assert tr_ui("themes.Grau (Neutral)") == "Grey (Neutral)"
@@ -29,12 +29,19 @@ def test_board_widget_theme_fallbacks(qapp):
     board = ChessBoardWidget()
     
     # German internal key
-    board.set_theme("Grün (Lichess)")
-    assert board.light_color == THEMES["Grün (Lichess)"][0]
+    board.set_theme("Grün")
+    assert board.light_color == THEMES["Grün"][0]
     
-    # English fallback name
+    # English translated name
+    board.set_theme("Green")
+    assert board.light_color == THEMES["Grün"][0]
+
+    # Legacy fallback names
     board.set_theme("Green (Lichess)")
-    assert board.light_color == THEMES["Grün (Lichess)"][0]
+    assert board.light_color == THEMES["Grün"][0]
+
+    board.set_theme("Grün (Lichess)")
+    assert board.light_color == THEMES["Grün"][0]
 
     board.set_theme("Dark (Modern)")
     assert board.light_color == THEMES["Dunkel (Modern)"][0]
@@ -66,7 +73,7 @@ def test_settings_dialog_theme_combo_translation(main_window, qapp):
         items = [dlg.combo_theme.itemText(i) for i in range(dlg.combo_theme.count())]
         assert "Dark (Modern)" in items
         assert "Blue (Tournament)" in items
-        assert "Green (Lichess)" in items
+        assert "Green" in items
 
         # Change index to 'Dark (Modern)'
         dark_idx = items.index("Dark (Modern)")

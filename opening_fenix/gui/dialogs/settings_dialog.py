@@ -107,4 +107,7 @@ class SettingsDialog(UnifiedSettingsDialog):
     """
     def __init__(self, main_window):
         super().__init__(parent=main_window, initial_section="trainer")
-        self.setWindowTitle(f"Trainer-Einstellungen – Opening Fenix ({self.profile_name})")
+        from opening_fenix.core.utils import is_free_training_profile
+        from opening_fenix.core.translation import tr_ui
+        display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))

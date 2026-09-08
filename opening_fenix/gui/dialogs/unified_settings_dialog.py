@@ -27,7 +27,8 @@ from opening_fenix.core.data_tools import (
 )
 from opening_fenix.core.utils import (
     get_repertoire_db_path, get_repertoire_dir, get_elo_display, get_elo_internal,
-    get_repertoire_comment_stats, ELO_DISPLAY_MAP
+    get_repertoire_comment_stats, ELO_DISPLAY_MAP,
+    get_last_active_profile_name, is_free_training_profile
 )
 from opening_fenix.core.translation import tr_ui, tr_widget, translator, escape_mnemonic
 from opening_fenix.core.services.repertoire_core_service import (
@@ -44,7 +45,7 @@ from opening_fenix.core.services.update_service import (
 from opening_fenix.core.threads import (
     AnalysisThread, LichessImportThread, MaintenanceThread, RepertoireStatsWorker
 )
-from opening_fenix.gui.widgets.board_widget import THEMES
+from opening_fenix.gui.widgets.board_widget import THEMES, HIGHLIGHT_COLORS
 from opening_fenix.gui.widgets.common import AutoAdjustButton
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
@@ -590,6 +591,18 @@ class _SidebarCompat(QWidget):
 
 # ─── Unified Settings Dialog ────────────────────────────────────────────────
 
+TRAINER_SETTINGS_KEYS = {
+    "interval_preset",
+    "custom_intervals",
+    "alternate_move_policy",
+    "queue_priority_order",
+    "max_new_cards_per_day",
+    "max_reviews_per_session",
+    "enforce_limit_after_variation",
+    "auto_delay"
+}
+
+
 class UnifiedSettingsDialog(QDialog):
     """
     Central, consolidated settings dialog with a hierarchical, collapsible sidebar navigation.
@@ -607,14 +620,24 @@ class UnifiedSettingsDialog(QDialog):
         
         # Determine active profile name
         self.profile_name = "Default"
-        if self.main_window and hasattr(self.main_window, 'profile_name'):
-            self.profile_name = self.main_window.profile_name or "Default"
+        if self.main_window:
+            if getattr(self.main_window, 'profile_name', None):
+                self.profile_name = self.main_window.profile_name
+            elif getattr(self.main_window, 'training_manager', None) and getattr(self.main_window.training_manager, 'profile_name', None):
+                self.profile_name = self.main_window.training_manager.profile_name
+        
+        if not self.profile_name or self.profile_name == "Default":
+            self.profile_name = get_last_active_profile_name()
 
+        # Load standalone profile settings dictionary if no active training manager is attached
+        self.profile_settings = self._load_profile_settings(self.profile_name)
+
+        display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
         if self.initial_section == "creator":
             repo_name = getattr(self.backend, 'active_repo_name', None) if self.backend else None
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
         else:
-            self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=self.profile_name))
+            self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
         self.setMinimumSize(scale(1180), scale(760))
         self.resize(scale(1260), scale(820))
         self.setStyleSheet(get_bw_glass_style())
@@ -714,6 +737,13 @@ class UnifiedSettingsDialog(QDialog):
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_theme'):
             self.main_window.board_widget.set_theme(theme_name)
 
+    def change_highlight_color(self, color_name):
+        if hasattr(self, 'combo_highlight'):
+            self.combo_highlight.setCurrentText(color_name)
+        self.set_setting("highlight_color", color_name)
+        if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_highlight_color'):
+            self.main_window.board_widget.set_highlight_color(color_name)
+
     def change_volume(self, val):
         if hasattr(self, 'volume_slider'):
             self.volume_slider.setValue(val)
@@ -746,6 +776,31 @@ class UnifiedSettingsDialog(QDialog):
     def _select_all_maintenance_repos(self, checked):
         self._select_all_maintenance(checked)
 
+    def _load_profile_settings(self, profile_name: str) -> dict:
+        if not profile_name:
+            return {}
+        profiles_dir = os.path.join(get_user_dir(), "profiles")
+        settings_path = os.path.join(profiles_dir, f"{profile_name}_settings.json")
+        if os.path.exists(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_profile_settings(self, profile_name: str, settings_dict: dict):
+        if not profile_name:
+            return
+        profiles_dir = os.path.join(get_user_dir(), "profiles")
+        os.makedirs(profiles_dir, exist_ok=True)
+        settings_path = os.path.join(profiles_dir, f"{profile_name}_settings.json")
+        try:
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings_dict, f, indent=4)
+        except Exception:
+            pass
+
     def get_config(self) -> Dict[str, Any]:
         """Helper to get global config dict."""
         if self.main_window and hasattr(self.main_window, 'config') and isinstance(self.main_window.config, dict):
@@ -761,16 +816,22 @@ class UnifiedSettingsDialog(QDialog):
 
     def get_setting(self, key, default=None):
         """Helper to retrieve profile or config setting."""
-        if self.main_window and hasattr(self.main_window, 'training_manager'):
+        if self.main_window and getattr(self.main_window, 'training_manager', None):
             val = self.main_window.training_manager.get_setting(key)
             if val is not None:
                 return val
             if self.initial_section == "trainer":
                 return default
+        elif hasattr(self, 'profile_settings') and isinstance(self.profile_settings, dict):
+            if key in TRAINER_SETTINGS_KEYS:
+                if key in self.profile_settings and self.profile_settings[key] is not None:
+                    return self.profile_settings[key]
+                if self.initial_section == "trainer":
+                    return default
         return self.get_config().get(key, default)
 
     def set_setting(self, key, value):
-        """Helper to save setting both globally and in current profile."""
+        """Helper to save setting both globally and in current/last active profile."""
         cfg = self.get_config()
         cfg[key] = value
         save_config_dict(cfg)
@@ -779,8 +840,15 @@ class UnifiedSettingsDialog(QDialog):
         if self.main_window and hasattr(self.main_window, 'save_config'):
             try: self.main_window.save_config()
             except: pass
-        if self.main_window and hasattr(self.main_window, 'training_manager'):
+        if self.main_window and getattr(self.main_window, 'training_manager', None):
             self.main_window.training_manager.set_setting(key, value)
+        elif getattr(self, 'profile_name', None):
+            if not hasattr(self, 'profile_settings') or self.profile_settings is None:
+                self.profile_settings = {}
+            if key in TRAINER_SETTINGS_KEYS or not self.main_window or not hasattr(self.main_window, 'config'):
+                self.profile_settings[key] = value
+                self._save_profile_settings(self.profile_name, self.profile_settings)
+
         if self.main_window and hasattr(self.main_window, 'set_setting'):
             try: self.main_window.set_setting(key, value)
             except: pass
@@ -974,7 +1042,8 @@ class UnifiedSettingsDialog(QDialog):
         self.add_nav_item(self.sec_help, tr_ui("settings.nav_about", "ℹ️ Über Opening-Fenix"), self.page_about)
 
         # 3. TRAINER SETTINGS ("Profile: Felix")
-        self.sec_trainer = self.add_section_header(tr_ui("settings.sec_trainer", "🎯 TRAINER-EINSTELLUNGEN ({profile})", profile=self.profile_name))
+        display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        self.sec_trainer = self.add_section_header(tr_ui("settings.sec_trainer", "🎯 TRAINER-EINSTELLUNGEN ({profile})", profile=display_profile))
         self.item_trainer_repos = self.add_nav_item(self.sec_trainer, tr_ui("settings.nav_trainer_repos", "📚 Repertoire-Konfiguration"), self.page_trainer_repos)
         self.add_nav_item(self.sec_trainer, tr_ui("settings.nav_trainer_behavior", "🎯 Trainingsverhalten"), self.page_trainer_behavior)
 
@@ -1056,13 +1125,24 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_theme = NoWheelComboBox()
         for t_key in THEMES.keys():
             self.combo_theme.addItem(tr_ui(f"themes.{t_key}", t_key), t_key)
-        current_theme = self.get_setting("theme", "Blau (Turnier)")
+        current_theme = self.get_setting("theme", "Braun (Klassisch)")
         idx = self.combo_theme.findData(current_theme)
         if idx < 0: idx = self.combo_theme.findText(current_theme)
         if idx >= 0: self.combo_theme.setCurrentIndex(idx)
         self.combo_theme.currentIndexChanged.connect(self.on_theme_changed)
         self.combo_theme.currentTextChanged.connect(self.on_theme_changed)
         f_design.addRow(tr_ui("settings.board_design", "Schachbrett-Design:"), self.combo_theme)
+
+        self.combo_highlight = NoWheelComboBox()
+        for hl_key in HIGHLIGHT_COLORS.keys():
+            self.combo_highlight.addItem(tr_ui(f"highlight_colors.{hl_key}", hl_key), hl_key)
+        current_hl = self.get_setting("highlight_color", "Gelb (Standard)")
+        idx_hl = self.combo_highlight.findData(current_hl)
+        if idx_hl < 0: idx_hl = self.combo_highlight.findText(current_hl)
+        if idx_hl >= 0: self.combo_highlight.setCurrentIndex(idx_hl)
+        self.combo_highlight.currentIndexChanged.connect(self.on_highlight_color_changed)
+        self.combo_highlight.currentTextChanged.connect(self.on_highlight_color_changed)
+        f_design.addRow(tr_ui("settings.highlight_color", "Farbe Zug-Hervorhebung:"), self.combo_highlight)
 
         self.spin_anim = NoWheelSpinBox()
         self.spin_anim.setRange(50, 1000)
@@ -1087,8 +1167,15 @@ class UnifiedSettingsDialog(QDialog):
         curr_ui_l = self.get_setting("ui_language", "de")
         idx_ui_l = self.combo_ui_lang.findData(curr_ui_l)
         if idx_ui_l >= 0: self.combo_ui_lang.setCurrentIndex(idx_ui_l)
-        self.combo_ui_lang.currentIndexChanged.connect(lambda: self.set_setting("ui_language", self.combo_ui_lang.currentData()))
-        f_design.addRow(tr_ui("settings.ui_lang_label", "Anwendungs-Sprache:"), self.combo_ui_lang)
+        self.combo_ui_lang.currentIndexChanged.connect(self.on_ui_language_changed)
+
+        v_lang = QVBoxLayout()
+        v_lang.setSpacing(scale(4))
+        v_lang.addWidget(self.combo_ui_lang)
+        self.lbl_lang_hint = QLabel(tr_ui("settings.ui_lang_hint", "⚠️ Änderung erfordert einen Neustart des Programms."))
+        self.lbl_lang_hint.setStyleSheet(f"color: {COLORS.get('text_muted', '#666666')}; font-size: {scale(11)}px;")
+        v_lang.addWidget(self.lbl_lang_hint)
+        f_design.addRow(tr_ui("settings.ui_lang_label", "Anwendungs-Sprache:"), v_lang)
 
         layout.addWidget(g_design)
 
@@ -1143,6 +1230,14 @@ class UnifiedSettingsDialog(QDialog):
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_theme'):
             self.main_window.board_widget.set_theme(theme_name)
 
+    def on_highlight_color_changed(self, *args):
+        color_name = self.combo_highlight.currentData() or self.combo_highlight.currentText()
+        self.set_setting("highlight_color", color_name)
+        if self.main_window and hasattr(self.main_window, 'apply_theme'):
+            self.main_window.apply_theme()
+        if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_highlight_color'):
+            self.main_window.board_widget.set_highlight_color(color_name)
+
     def on_volume_changed(self, value):
         self.lbl_volume.setText(f"{value}%")
         self.set_setting("master_volume", value)
@@ -1161,6 +1256,65 @@ class UnifiedSettingsDialog(QDialog):
                 if hasattr(w, "update_ui_from_fen") and not sip.isdeleted(w):
                     w.update_ui_from_fen()
             except: pass
+
+    def on_ui_language_changed(self, *args):
+        new_lang = self.combo_ui_lang.currentData()
+        curr_lang = self.get_setting("ui_language", "de")
+        if not new_lang or new_lang == curr_lang:
+            return
+
+        title = tr_ui("settings.lang_change_title", "Sprachwechsel")
+        msg = tr_ui("settings.lang_change_restart_prompt", "Das Ändern der Sprache erfordert einen Neustart des Programms. Möchtest du die Sprache jetzt ändern und das Programm neu starten?")
+
+        reply = QMessageBox.question(
+            self,
+            title,
+            msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.set_setting("ui_language", new_lang)
+            try:
+                import os
+                import json
+                from opening_fenix.core.data_tools import get_user_dir
+                config_path = os.path.join(get_user_dir(), "config.json")
+                config = {}
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                config["ui_language"] = new_lang
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=4)
+            except Exception as e:
+                logger.error(f"Failed to update ui_language in config.json: {e}")
+
+            self.restart_application()
+        else:
+            self.combo_ui_lang.blockSignals(True)
+            idx = self.combo_ui_lang.findData(curr_lang)
+            if idx >= 0:
+                self.combo_ui_lang.setCurrentIndex(idx)
+            self.combo_ui_lang.blockSignals(False)
+
+    def restart_application(self):
+        """Restarts the application cleanly."""
+        import sys
+        import subprocess
+        try:
+            if getattr(sys, 'frozen', False):
+                args = [sys.executable] + sys.argv[1:]
+            else:
+                args = [sys.executable] + sys.argv
+            subprocess.Popen(args)
+        except Exception as e:
+            logger.error(f"Failed to restart application: {e}")
+
+        app = QApplication.instance()
+        if app:
+            app.quit()
 
     def save_creator_tab_settings(self):
         active = []

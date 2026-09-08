@@ -51,9 +51,9 @@ def test_piece_dragging_successful_move(board_widget):
     side, sq_size, x_off, y_off = board_widget.get_metrics()
     
     # Start square e2
-    e2_pos = QPointF(x_off + 4.5 * sq_size, y_off + 6.5 * sq_size).toPoint()
+    e2_pos = QPointF(x_off + 4.5 * sq_size, y_off + 6.5 * sq_size)
     # End square e4
-    e4_pos = QPointF(x_off + 4.5 * sq_size, y_off + 4.5 * sq_size).toPoint()
+    e4_pos = QPointF(x_off + 4.5 * sq_size, y_off + 4.5 * sq_size)
     
     # Mock signals
     moves = []
@@ -80,9 +80,9 @@ def test_piece_dragging_invalid_move(board_widget):
     side, sq_size, x_off, y_off = board_widget.get_metrics()
     
     # Start square e2
-    e2_pos = QPointF(x_off + 4.5 * sq_size, y_off + 6.5 * sq_size).toPoint()
+    e2_pos = QPointF(x_off + 4.5 * sq_size, y_off + 6.5 * sq_size)
     # End square e5 (illegal move for e2 pawn in first turn)
-    e5_pos = QPointF(x_off + 4.5 * sq_size, y_off + 3.5 * sq_size).toPoint()
+    e5_pos = QPointF(x_off + 4.5 * sq_size, y_off + 3.5 * sq_size)
     
     moves = []
     board_widget.move_executed.connect(lambda m: moves.append(m))
@@ -105,6 +105,7 @@ def test_animation_lifecycle(board_widget, qapp):
     board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
     assert board_widget.is_animating is True
     assert board_widget.animating_piece_data['move'] == move
+    assert board_widget.last_move == move  # Last move highlighted immediately at animation start
     
     # Fast-forward animation (or stop it)
     board_widget.move_anim.stop()
@@ -128,8 +129,8 @@ def test_abort_animation(board_widget):
 
 def test_theme_and_fen(board_widget):
     """Test setting theme and FEN."""
-    board_widget.set_theme("Grün (Lichess)")
-    assert board_widget.light_color.name() == THEMES["Grün (Lichess)"][0].name()
+    board_widget.set_theme("Grün")
+    assert board_widget.light_color.name() == THEMES["Grün"][0].name()
     
     new_fen = "rnbqkbnr/pppppp1p/8/6p1/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
     board_widget.set_fen(new_fen)
@@ -157,6 +158,7 @@ def test_arrows_properties(board_widget):
 
 class TestEvent:
     """Helper to mock QMouseEvent for PyQt6."""
+    __test__ = False
     def __init__(self, pos, button):
         self._pos = pos
         self._button = button

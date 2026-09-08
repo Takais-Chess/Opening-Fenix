@@ -33,10 +33,13 @@
   "settings": {
     "lang_change_title": "Language Change",
     "lang_change_msg": "The interface will be fully translated after restarting the application.",
+    "lang_change_restart_prompt": "Changing the language requires restarting the application. Would you like to change the language and restart now?",
+    "ui_lang_hint": "⚠️ Changing language requires restarting the application.",
     "notation_lang_label": "Notation Language:",
     "ui_lang_label": "User Interface Language:",
     "optics_title": "🎨 Appearance",
     "board_design": "Chessboard Design:",
+    "highlight_color": "Move Highlight Color:",
     "anim_speed": "Animation Speed:",
     "anim_speed_tooltip": "How fast pieces glide across the board (milliseconds).",
     "audio_title": "🔊 Sound & Volume",
@@ -179,11 +182,21 @@
   },
   "themes": {
     "Dunkel (Modern)": "Dark (Modern)",
-    "Grün (Lichess)": "Green (Lichess)",
+    "Grün": "Green",
     "Braun (Klassisch)": "Brown (Classic)",
     "Blau (Turnier)": "Blue (Tournament)",
     "Grau (Neutral)": "Grey (Neutral)",
     "Icy Sea": "Icy Sea"
+  },
+  "highlight_colors": {
+    "Gelb (Standard)": "Yellow (Default)",
+    "Grün": "Green",
+    "Blau": "Blue",
+    "Orange": "Orange",
+    "Burnt Orange": "Burnt Orange",
+    "Rot": "Red",
+    "Lila": "Purple",
+    "Türkis": "Turquoise"
   },
   "elo": {
     "low": "Hobby Player (below 1300)",

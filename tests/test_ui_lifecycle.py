@@ -70,17 +70,16 @@ def test_trainer_to_creator_launch(main_window, qapp):
 
 def test_trainer_settings_launch(main_window, monkeypatch):
     """Test that clicking the settings button opens the SettingsDialog."""
-    # Mock exec_ to avoid blocking the test
-    executed = False
-    def mock_exec(self):
-        nonlocal executed
-        executed = True
-        return QDialog.DialogCode.Accepted
+    shown = False
+    def mock_show(self):
+        nonlocal shown
+        shown = True
 
-    monkeypatch.setattr(SettingsDialog, "exec", mock_exec)
+    monkeypatch.setattr(SettingsDialog, "show", mock_show)
     
     main_window.btn_settings.click()
-    assert executed is True
+    assert shown is True
+    assert main_window.settings_dialog is not None
 
 def test_trainer_profile_switch(main_window):
     """Test that clicking the profile name sets switch_requested and closes window."""

@@ -66,6 +66,6 @@ def test_board_drag_state(board_widget):
 def test_board_theme(board_widget):
     """Test theme switching."""
     from opening_fenix.gui.widgets.board_widget import THEMES
-    board_widget.set_theme("Grün (Lichess)")
-    assert board_widget.light_color == THEMES["Grün (Lichess)"][0]
-    assert board_widget.dark_color == THEMES["Grün (Lichess)"][1]
+    board_widget.set_theme("Grün")
+    assert board_widget.light_color == THEMES["Grün"][0]
+    assert board_widget.dark_color == THEMES["Grün"][1]

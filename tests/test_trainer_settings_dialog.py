@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 from PyQt6.QtCore import Qt
 from opening_fenix.gui.main_window import MainWindow
 from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
-from opening_fenix.gui.widgets.board_widget import THEMES
+from opening_fenix.gui.widgets.board_widget import THEMES, HIGHLIGHT_COLORS
 
 
 # ─── Fixtures ──────────────────────────────────────────────────────────────────
@@ -101,15 +101,31 @@ class TestSettingsDialogDisplayPage:
 
     def test_theme_change_updates_setting(self, settings_dialog, main_window):
         """Theme-Änderung wird direkt in TrainingManager gespeichert."""
-        target = "Grün (Lichess)"
+        target = "Grün"
         settings_dialog.combo_theme.setCurrentText(target)
         assert main_window.training_manager.get_setting("theme") == target
 
     def test_theme_change_updates_board(self, settings_dialog, main_window):
         """Theme-Änderung aktualisiert das Schachbrett."""
-        target = "Grün (Lichess)"
+        target = "Grün"
         settings_dialog.combo_theme.setCurrentText(target)
         assert main_window.board_widget.light_color.name() == THEMES[target][0].name()
+
+    def test_highlight_combo_populated(self, settings_dialog):
+        """Highlight-Farbe-Dropdown enthält alle verfügbaren Highlight-Farben."""
+        assert settings_dialog.combo_highlight.count() == len(HIGHLIGHT_COLORS)
+
+    def test_highlight_change_updates_setting(self, settings_dialog, main_window):
+        """Highlight-Farben-Änderung wird direkt in TrainingManager gespeichert."""
+        target = "Rot"
+        settings_dialog.combo_highlight.setCurrentText(target)
+        assert main_window.training_manager.get_setting("highlight_color") == target
+
+    def test_highlight_change_updates_board(self, settings_dialog, main_window):
+        """Highlight-Farben-Änderung aktualisiert die board_widget.highlight_color."""
+        target = "Rot"
+        settings_dialog.combo_highlight.setCurrentText(target)
+        assert main_window.board_widget.highlight_color == HIGHLIGHT_COLORS[target]
 
     def test_animation_speed_range(self, settings_dialog):
         """Animations-Tempo-Spinbox hat den korrekten Bereich."""
@@ -139,6 +155,57 @@ class TestSettingsDialogDisplayPage:
         idx_de = settings_dialog.combo_notation.findData("de")
         settings_dialog.combo_notation.setCurrentIndex(idx_de)
         assert main_window.training_manager.get_setting("notation_language") == "de"
+
+    def test_ui_language_combo_and_hint_exist(self, settings_dialog):
+        """UI-Sprach-Dropdown und Info-Hinweislabel existieren."""
+        assert settings_dialog.combo_ui_lang.count() == 2
+        assert hasattr(settings_dialog, "lbl_lang_hint")
+        assert "Neustart" in settings_dialog.lbl_lang_hint.text() or "restart" in settings_dialog.lbl_lang_hint.text().lower()
+
+    def test_ui_language_change_confirmed_restarts(self, settings_dialog, main_window, monkeypatch):
+        """Wenn der Benutzer den Neustart bestätigt, wird die Sprache gespeichert und restart aufgerufen."""
+        from PyQt6.QtWidgets import QMessageBox
+        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Yes)
+        
+        restart_called = False
+        def mock_restart():
+            nonlocal restart_called
+            restart_called = True
+        
+        monkeypatch.setattr(settings_dialog, "restart_application", mock_restart)
+
+        # Change language to English
+        idx_en = settings_dialog.combo_ui_lang.findData("en")
+        settings_dialog.combo_ui_lang.setCurrentIndex(idx_en)
+
+        assert main_window.training_manager.get_setting("ui_language") == "en"
+        assert restart_called is True
+
+    def test_ui_language_change_cancelled_reverts(self, settings_dialog, main_window, monkeypatch):
+        """Wenn der Benutzer den Neustart abbricht, wird die Auswahl zurückgesetzt."""
+        from PyQt6.QtWidgets import QMessageBox
+        # Ensure initial is de
+        settings_dialog.set_setting("ui_language", "de")
+        settings_dialog.combo_ui_lang.blockSignals(True)
+        settings_dialog.combo_ui_lang.setCurrentIndex(settings_dialog.combo_ui_lang.findData("de"))
+        settings_dialog.combo_ui_lang.blockSignals(False)
+
+        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.No)
+        
+        restart_called = False
+        def mock_restart():
+            nonlocal restart_called
+            restart_called = True
+        
+        monkeypatch.setattr(settings_dialog, "restart_application", mock_restart)
+
+        # Attempt to change language to English
+        idx_en = settings_dialog.combo_ui_lang.findData("en")
+        settings_dialog.combo_ui_lang.setCurrentIndex(idx_en)
+
+        assert main_window.training_manager.get_setting("ui_language") == "de"
+        assert settings_dialog.combo_ui_lang.currentData() == "de"
+        assert restart_called is False
 
     def test_volume_slider_range(self, settings_dialog):
         """Lautstärke-Regler hat Bereich 0-100."""

@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 from PyQt6.QtCore import Qt
 from opening_fenix.gui.main_window import MainWindow
 from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
-from opening_fenix.gui.widgets.board_widget import THEMES
+from opening_fenix.gui.widgets.board_widget import THEMES, HIGHLIGHT_COLORS
 
 @pytest.fixture
 def qapp():
@@ -35,12 +35,25 @@ def test_theme_propagation(main_window):
     dialog = SettingsDialog(main_window)
     
     # Target theme
-    target_theme = "Grün (Lichess)"
+    target_theme = "Grün"
     dialog.combo_theme.setCurrentText(target_theme)
     
     # Verify MainWindow and BoardWidget updated
     assert main_window.training_manager.get_setting("theme") == target_theme
     assert main_window.board_widget.light_color.name() == THEMES[target_theme][0].name()
+    dialog.close()
+
+def test_highlight_color_propagation(main_window):
+    """Test that changing the highlight color in SettingsDialog updates the board."""
+    dialog = SettingsDialog(main_window)
+    
+    # Target highlight color
+    target_color = "Blau"
+    dialog.combo_highlight.setCurrentText(target_color)
+    
+    # Verify MainWindow and BoardWidget updated
+    assert main_window.training_manager.get_setting("highlight_color") == target_color
+    assert main_window.board_widget.highlight_color == HIGHLIGHT_COLORS[target_color]
     dialog.close()
 
 def test_animation_speed_propagation(main_window):

@@ -2498,6 +2498,7 @@ class CreatorWindow(QMainWindow):
 
         self.backend = CreatorBackend(is_test=is_test)
         self.training_manager = training_manager
+        self.profile_name = getattr(training_manager, 'profile_name', None) if training_manager else None
         self.is_test = is_test
         self._processing_event = False  # Re-entrancy guard for eventFilter
         self.engine_thread = None
@@ -2555,6 +2556,8 @@ class CreatorWindow(QMainWindow):
 
         st = self.get_setting("theme")
         if st: self.board_widget.set_theme(st)
+        shl = self.get_setting("highlight_color")
+        if shl: self.board_widget.set_highlight_color(shl)
         QApplication.instance().installEventFilter(self)
 
         rtl = repertoire_name or self.config.get("last_active_repertoire")
@@ -3189,9 +3192,13 @@ class CreatorWindow(QMainWindow):
 
     def open_tab_settings(self):
         from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog
-        dialog = RepoSettingsDialog(self, self.backend)
-        dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
-        dialog.exec()
+        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog:
+            self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
+            self.repo_settings_dialog.finished.connect(self._on_settings_closed)
+        self.repo_settings_dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
+        self.repo_settings_dialog.show()
+        self.repo_settings_dialog.raise_()
+        self.repo_settings_dialog.activateWindow()
 
 
 

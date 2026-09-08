@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.8] - 2026-09-08
+
+### Added & Improved
+- **Profile-Specific Trainer Settings Routing**: Trainer settings adjusted from the Creator mode or standalone settings dialog now automatically resolve and route to the most recently active user profile instead of only persisting to global configuration.
+- **Active Profile Resolution**: Added intelligent profile resolution hierarchy inspecting active sessions, `last_profile`, `auto_login_profile`, and recent profile activity timestamps.
+- **Dynamic Profile Headers**: Settings dialog titles and sidebar navigation headers now display the resolved user profile name (e.g. `🎯 TRAINER-EINSTELLUNGEN (Felix)` or translated `Freies Training`) instead of `(Default)`.
+- **Automated Profile Routing Tests**: Added comprehensive test coverage verifying profile resolution fallbacks and persistence routing.
+
 ## [0.9.7] - 2026-09-05
 
 ### Added & Improved

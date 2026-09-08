@@ -42,6 +42,64 @@ def is_free_training_profile(name: str) -> bool:
     except Exception:
         return name in ("Freies Training", "Open Training")
 
+def get_last_active_profile_name() -> str:
+    """
+    Resolves the most recently active profile name from config.json or existing profile databases.
+    Returns the profile name string, or 'Default' if no profiles exist.
+    """
+    user_dir = get_user_dir()
+    config_path = os.path.join(user_dir, "config.json")
+    profiles_dir = os.path.join(user_dir, "profiles")
+    
+    # 1. Try reading config.json
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            
+            # Check last_profile
+            last_prof = cfg.get("last_profile")
+            if last_prof:
+                if (is_free_training_profile(last_prof) or 
+                        os.path.exists(os.path.join(profiles_dir, f"{last_prof}.db")) or 
+                        os.path.exists(os.path.join(profiles_dir, f"{last_prof}_settings.json"))):
+                    return last_prof
+
+            # Check auto_login_profile
+            auto_prof = cfg.get("auto_login_profile")
+            if auto_prof:
+                if (is_free_training_profile(auto_prof) or 
+                        os.path.exists(os.path.join(profiles_dir, f"{auto_prof}.db")) or 
+                        os.path.exists(os.path.join(profiles_dir, f"{auto_prof}_settings.json"))):
+                    return auto_prof
+
+            # Check profile_last_used dict (sorted by timestamp descending)
+            last_used = cfg.get("profile_last_used", {})
+            if isinstance(last_used, dict) and last_used:
+                sorted_profs = sorted(last_used.items(), key=lambda x: str(x[1]), reverse=True)
+                for p_name, _ in sorted_profs:
+                    if (is_free_training_profile(p_name) or 
+                            os.path.exists(os.path.join(profiles_dir, f"{p_name}.db")) or 
+                            os.path.exists(os.path.join(profiles_dir, f"{p_name}_settings.json"))):
+                        return p_name
+        except Exception:
+            pass
+
+    # 2. Check profiles directory for any existing profiles
+    if os.path.exists(profiles_dir):
+        try:
+            db_files = [f[:-3] for f in os.listdir(profiles_dir) if f.endswith(".db")]
+            if db_files:
+                return sorted(db_files)[0]
+            json_settings = [f[:-14] for f in os.listdir(profiles_dir) if f.endswith("_settings.json")]
+            if json_settings:
+                return sorted(json_settings)[0]
+        except Exception:
+            pass
+
+    return "Default"
+
+
 def get_base_path():
     """Gibt den Basispfad der Anwendung zurück, um Probleme mit dem Arbeitsverzeichnis zu vermeiden."""
     if getattr(sys, 'frozen', False):
