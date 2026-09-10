@@ -102,10 +102,9 @@ class ChessBoardWidget(QWidget):
         self.move_anim = QVariantAnimation(self)
         self.move_anim.valueChanged.connect(self._on_animation_frame)
         self.move_anim.finished.connect(self._on_animation_finished)
-        self.move_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.move_anim.setEasingCurve(QEasingCurve.Type.OutSine)
         
         # High-Precision Animation Driver matching monitor refresh rate
-        self.target_fps = self.get_screen_refresh_rate()
         self.precise_anim_timer = QTimer(self)
         self.precise_anim_timer.setTimerType(Qt.TimerType.PreciseTimer)
         self.precise_anim_timer.timeout.connect(self._on_precise_anim_tick)
@@ -116,20 +115,55 @@ class ChessBoardWidget(QWidget):
         self._anim_start_time = 0.0
         self._anim_frame_times = []
         self._last_anim_stats = None
+        self._last_configured_anim_speed = None
+        self._duration_lut = {}
+        self.update_animation_metrics()
+
+    def update_animation_metrics(self, anim_speed=None):
+        """
+        Pre-calculates frame-quantized animation durations and high-precision timer interval.
+        Couples animation duration to integer monitor VSync refresh cycles with square-root distance scaling.
+        """
+        if anim_speed is None:
+            tm = getattr(self.main_window, 'training_manager', None) if self.main_window else None
+            if tm and hasattr(tm, 'get_setting'):
+                anim_speed = tm.get_setting("anim_speed") or 200
+            else:
+                anim_speed = 200
+                
+        self.target_fps = self.get_screen_refresh_rate()
+        frame_interval_ms = 1000.0 / float(self.target_fps)
+        self.timer_interval = max(1, int(frame_interval_ms))
+        self._last_configured_anim_speed = anim_speed
+
+        # Precompute quantized durations for all possible (dx, dy) distances (0..7) on an 8x8 chess board
+        self._duration_lut = {}
+        for dx in range(8):
+            for dy in range(8):
+                dist = math.hypot(dx, dy)
+                if dist <= 0:
+                    dist = 1.0
+                # Square-root distance scaling centered on 2-square pawn push (d = 2.0)
+                # scale = 0.70 + 0.30 * sqrt(d / 2.0)
+                scale_factor = 0.70 + 0.30 * math.sqrt(dist / 2.0)
+                raw_dur = float(anim_speed) * scale_factor
+                target_frames = max(1, int(round(raw_dur / frame_interval_ms)))
+                self._duration_lut[(dx, dy)] = float(target_frames * frame_interval_ms)
+
+        target_frames_base = max(1, int(round(float(anim_speed) / frame_interval_ms)))
+        self.anim_duration = float(target_frames_base * frame_interval_ms)
 
     def get_metrics(self):
+        """
+        Calculates board dimensions and symmetrically centered coordinates.
+        Guarantees equal padding and zero horizontal/vertical bias on all aspect ratios.
+        """
         w = self.width()
         h = self.height()
-        if h >= w:
-            side = max(0, w - self.padding * 2)
-            square_size = side / 8.0
-            x_offset = float(self.padding)
-            y_offset = float(self.padding)
-        else:
-            side = max(0, h - self.padding * 2)
-            square_size = side / 8.0
-            x_offset = float(w - self.padding - side)
-            y_offset = float(self.padding)
+        side = max(0, min(w, h) - self.padding * 2)
+        square_size = side / 8.0
+        x_offset = float((w - side) / 2.0)
+        y_offset = float((h - side) / 2.0)
         return side, square_size, x_offset, y_offset
 
     def set_theme(self, theme_name):
@@ -433,17 +467,33 @@ class ChessBoardWidget(QWidget):
 
     def get_screen_refresh_rate(self):
         """
-        Detects the highest hardware refresh rate (Hz) among all connected monitors.
-        Ensures high-refresh rate displays (e.g. 144Hz/120Hz/240Hz) are prioritized even in multi-monitor setups.
+        Detects the exact hardware refresh rate (Hz) of the specific screen 
+        where the chessboard widget / window is currently displayed.
+        Falls back to primary screen or 60Hz if screen information is unavailable.
         """
         try:
-            from PyQt6.QtWidgets import QApplication
-            screens = QApplication.screens()
-            if screens:
-                rates = [s.refreshRate() for s in screens if s.refreshRate() > 0]
-                if rates:
-                    max_rate = max(rates)
-                    return min(240, max(30, int(round(max_rate))))
+            target_screen = None
+            # 1. Check the widget's direct screen
+            if hasattr(self, 'screen') and self.screen():
+                target_screen = self.screen()
+            
+            # 2. Check window screen / window handle screen
+            if not target_screen:
+                win = self.window()
+                if win:
+                    if hasattr(win, 'screen') and win.screen():
+                        target_screen = win.screen()
+                    elif hasattr(win, 'windowHandle') and win.windowHandle() and win.windowHandle().screen():
+                        target_screen = win.windowHandle().screen()
+
+            # 3. Fallback to primary application screen
+            if not target_screen:
+                from PyQt6.QtWidgets import QApplication
+                target_screen = QApplication.primaryScreen()
+
+            if target_screen and target_screen.refreshRate() > 0:
+                rate = target_screen.refreshRate()
+                return min(240, max(30, int(round(rate))))
         except Exception:
             pass
         return 60
@@ -489,13 +539,14 @@ class ChessBoardWidget(QWidget):
         if self.flipped: sc, sr, ec, er = 7 - ff, fr, 7 - tf, tr
         else: sc, sr, ec, er = ff, 7 - fr, tf, 7 - tr
         
-        anim_speed = 200  # Default 200ms (matching Lichess snappiness)
-        if self.main_window and hasattr(self.main_window, 'training_manager'): 
-            anim_speed = self.main_window.training_manager.get_setting("anim_speed") or 200
+        if not hasattr(self, 'anim_duration') or not hasattr(self, 'timer_interval') or not hasattr(self, '_duration_lut'):
+            self.update_animation_metrics()
+
+        # O(1) instant precomputed distance duration lookup
+        dx = abs(sc - ec)
+        dy = abs(sr - er)
+        self.anim_duration = self._duration_lut.get((dx, dy), self.anim_duration)
             
-        if not getattr(self, 'target_fps', None):
-            self.target_fps = self.get_screen_refresh_rate()
-        self.anim_duration = float(anim_speed)
         self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
         self.last_move = move
         self.is_animating = True
@@ -507,8 +558,7 @@ class ChessBoardWidget(QWidget):
         # Configure and start High-Precision Timer matching monitor refresh rate
         self.precise_anim_timer.stop()
         self.move_anim.stop()
-        interval_ms = max(1, int(1000.0 / self.target_fps))
-        self.precise_anim_timer.start(interval_ms)
+        self.precise_anim_timer.start(self.timer_interval)
         self.update() 
 
     def abort_piece_slide(self):
@@ -536,8 +586,8 @@ class ChessBoardWidget(QWidget):
         elapsed_ms = (now - self._anim_start_time) * 1000.0
         raw_progress = min(1.0, elapsed_ms / self.anim_duration) if self.anim_duration > 0 else 1.0
         
-        # OutCubic Easing Curve: f(t) = 1 - (1 - t)^3
-        eased_progress = 1.0 - math.pow(1.0 - raw_progress, 3)
+        # OutSine Easing Curve: f(t) = sin(t * pi / 2)
+        eased_progress = math.sin(raw_progress * (math.pi / 2.0))
         
         self.animating_piece_data['progress'] = eased_progress
         self.update()

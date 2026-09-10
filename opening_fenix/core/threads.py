@@ -179,6 +179,7 @@ class RepertoireStatsWorker(QThread):
         for item in self.repo_data_list:
             if self._is_stopped:
                 break
+            self.msleep(15)  # Yield GIL between repertoire stats queries
             try:
                 service.set_active_repertoire(item['name'])
                 info = service.get_repertoire_info()
@@ -733,6 +734,7 @@ class AutoBackupThread(QThread):
                     continue
                 if self.isInterruptionRequested():
                     break
+                self.msleep(20)  # Yield GIL before CPU/DB hashing
                 try:
                     create_repertoire_backup(repo_name, trigger_type="auto")
                 except Exception as e:

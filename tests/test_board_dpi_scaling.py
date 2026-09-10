@@ -98,12 +98,10 @@ def test_board_metrics_aspect_ratios(qtbot, width, height):
     
     actual_w = board.width()
     actual_h = board.height()
-    if actual_h >= actual_w:
-        assert side == actual_w - board.padding * 2
-        assert x_off == float(board.padding)
-    else:
-        assert side == actual_h - board.padding * 2
-        assert x_off == float(actual_w - board.padding - side)
+    expected_side = max(0, min(actual_w, actual_h) - board.padding * 2)
+    assert side == expected_side
+    assert x_off == (actual_w - side) / 2.0
+    assert y_off == (actual_h - side) / 2.0
 
 
 def test_board_animation_idle_coordinate_invariance(qtbot):

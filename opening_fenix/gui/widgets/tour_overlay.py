@@ -65,10 +65,31 @@ class GuidedTourOverlay(QWidget):
         
         # Footer with Buttons
         footer = QHBoxLayout()
+        footer.setSpacing(scale(8))
         
         self.lbl_step = QLabel("1 / 5")
         self.lbl_step.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(12)}px;")
         
+        self.btn_skip = QPushButton(tr_ui("tour.btn_skip", "Überspringen"))
+        self.btn_skip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_skip.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {COLORS['light_text']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(15)}px;
+                font-size: {scale(12)}px;
+                font-weight: bold;
+                padding: {scale(7)}px {scale(12)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(0, 0, 0, 0.05);
+                color: {COLORS['burnt_orange']};
+                border-color: {COLORS['burnt_orange']};
+            }}
+        """)
+        self.btn_skip.clicked.connect(self.skip)
+
         self.btn_next = QPushButton(tr_ui("tour.btn_next", "WEITER →"))
         self.btn_next.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_next.setStyleSheet(f"""
@@ -86,6 +107,7 @@ class GuidedTourOverlay(QWidget):
         
         footer.addWidget(self.lbl_step)
         footer.addStretch()
+        footer.addWidget(self.btn_skip)
         footer.addWidget(self.btn_next)
         
         layout.addWidget(self.lbl_title)
@@ -111,10 +133,13 @@ class GuidedTourOverlay(QWidget):
         self.lbl_text.setText(step['text'])
         self.lbl_step.setText(f"{self.current_step + 1} / {len(self.steps)}")
         
+        self.btn_skip.setText(tr_ui("tour.btn_skip", "Überspringen"))
         if self.current_step == len(self.steps) - 1:
             self.btn_next.setText(tr_ui("tour.btn_finish", "FERTIG ✓"))
+            self.btn_skip.setVisible(False)
         else:
             self.btn_next.setText(tr_ui("tour.btn_next", "WEITER →"))
+            self.btn_skip.setVisible(True)
             
         # Force layout update and resize to fit content before positioning
         self.lbl_title.setFixedWidth(self.desc_card.width() - scale(40)) # Account for margins
@@ -170,6 +195,11 @@ class GuidedTourOverlay(QWidget):
             self.finished.emit()
             return
         self.update_step()
+
+    def skip(self):
+        """Immediately finishes the tour without viewing remaining steps."""
+        self.hide()
+        self.finished.emit()
 
     def paintEvent(self, event):
         painter = QPainter(self)

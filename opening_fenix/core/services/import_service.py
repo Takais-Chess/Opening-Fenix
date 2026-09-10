@@ -62,87 +62,83 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         new_rep_moves_to_insert = []
         comments_to_append = {}
 
-        # 3. FAST PGN PARSING
+        # 3. FAST STREAMING PGN PARSING
+        total_file_size = os.path.getsize(pgn_path) if os.path.exists(pgn_path) else 0
         with open(pgn_path, "r", encoding="utf-8", errors="ignore") as f_pgn:
-            pgn_content = f_pgn.read()
-
-        pgn_io = io.StringIO(pgn_content)
-        processed_bytes = 0
-
-        while True:
-            game = chess.pgn.read_game(pgn_io)
-            if game is None:
-                break
+            while True:
+                game = chess.pgn.read_game(f_pgn)
+                if game is None:
+                    break
+                
+                # Simple progress estimation based on file pointer
+                if progress_callback and total_file_size > 0:
+                    processed_bytes = f_pgn.tell()
+                    progress_callback(min(100, int((processed_bytes / total_file_size) * 100)))
             
-            # Simple progress estimation based on file pointer
-            if progress_callback:
-                processed_bytes = pgn_io.tell()
-                progress_callback(int((processed_bytes / len(pgn_content)) * 100))
-            
-            node_stack = []
-            initial_board = game.board()
-            for node in reversed(game.variations):
-                node_stack.append((node, initial_board.copy()))
+                node_stack = []
+                initial_board = game.board()
+                for node in reversed(game.variations):
+                    node_stack.append((node, initial_board.copy()))
 
-            while node_stack:
-                current_node, board = node_stack.pop()
-                move = current_node.move
-                from_fen = " ".join(board.fen().split(" ")[:4])
+                while node_stack:
+                    current_node, board = node_stack.pop()
+                    move = current_node.move
+                    from_fen = " ".join(board.fen().split(" ")[:4])
 
-                try:
-                    board.push(move)
-                except Exception as e:
-                    continue
+                    try:
+                        board.push(move)
+                    except Exception as e:
+                        continue
 
-                to_fen = " ".join(board.fen().split(" ")[:4])
-                
-                from_pos_id = pos_cache.get(from_fen)
-                if not from_pos_id:
-                    max_pos_id += 1
-                    from_pos_id = max_pos_id
-                    pos_cache[from_fen] = from_pos_id
-                    new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+                    to_fen = " ".join(board.fen().split(" ")[:4])
+                    
+                    from_pos_id = pos_cache.get(from_fen)
+                    if not from_pos_id:
+                        max_pos_id += 1
+                        from_pos_id = max_pos_id
+                        pos_cache[from_fen] = from_pos_id
+                        new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
 
-                to_pos_id = pos_cache.get(to_fen)
-                if not to_pos_id:
-                    max_pos_id += 1
-                    to_pos_id = max_pos_id
-                    pos_cache[to_fen] = to_pos_id
-                    new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
-                
-                if current_node.comment:
-                    lang = target_lang if target_lang and target_lang != "auto" else "de"
-                    if to_fen in comments_to_append:
-                        comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=lang)
-                    else:
-                        comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=lang)
+                    to_pos_id = pos_cache.get(to_fen)
+                    if not to_pos_id:
+                        max_pos_id += 1
+                        to_pos_id = max_pos_id
+                        pos_cache[to_fen] = to_pos_id
+                        new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
+                    
+                    if current_node.comment:
+                        lang = target_lang if target_lang and target_lang != "auto" else "de"
+                        if to_fen in comments_to_append:
+                            comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=lang)
+                        else:
+                            comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=lang)
 
-                uci_str = move.uci()
-                move_id = move_cache.get((from_pos_id, uci_str))
-                
-                if not move_id:
-                    max_move_id += 1
-                    move_id = max_move_id
-                    move_cache[(from_pos_id, uci_str)] = move_id
-                    new_moves_to_insert.append(
-                        Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=next(iter(current_node.nags), 0))
-                    )
-                
-                # REPERTOIRE MOVE LOGIC
-                if move_id not in rep_move_cache:
-                    rep_move_cache[move_id] = level_order
-                    new_rep_moves_to_insert.append(
-                        RepertoireMove(move_id=move_id, level=level_order)
-                    )
-                    new_moves_count += 1
-                elif level_order < rep_move_cache[move_id]:
-                    rep_move_cache[move_id] = level_order
-                    existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                    if existing_rm:
-                        existing_rm.level = level_order
-                
-                for var in reversed(current_node.variations):
-                    node_stack.append((var, board.copy()))
+                    uci_str = move.uci()
+                    move_id = move_cache.get((from_pos_id, uci_str))
+                    
+                    if not move_id:
+                        max_move_id += 1
+                        move_id = max_move_id
+                        move_cache[(from_pos_id, uci_str)] = move_id
+                        new_moves_to_insert.append(
+                            Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=next(iter(current_node.nags), 0))
+                        )
+                    
+                    # REPERTOIRE MOVE LOGIC
+                    if move_id not in rep_move_cache:
+                        rep_move_cache[move_id] = level_order
+                        new_rep_moves_to_insert.append(
+                            RepertoireMove(move_id=move_id, level=level_order)
+                        )
+                        new_moves_count += 1
+                    elif level_order < rep_move_cache[move_id]:
+                        rep_move_cache[move_id] = level_order
+                        existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
+                        if existing_rm:
+                            existing_rm.level = level_order
+                    
+                    for var in reversed(current_node.variations):
+                        node_stack.append((var, board.copy()))
         
         # 4. BULK DB EXECUTION
         if new_positions_to_insert:

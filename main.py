@@ -1,10 +1,14 @@
 import sys
 import os
+import gc
 import json
 import sqlite3
 import traceback
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 from PyQt6.QtCore import Qt
+
+# Tune Python garbage collector thresholds to eliminate Gen-2 stop-the-world pauses during chess operations
+gc.set_threshold(50000, 50, 50)
 
 from PyQt6.QtGui import QIcon
 

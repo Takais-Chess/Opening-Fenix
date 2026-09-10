@@ -3761,118 +3761,127 @@ class CreatorWindow(QMainWindow):
         f = self.board_widget.board.fen()
         if not f: return
         
-        self.tree_widget.clear()
-        
-        cs = self.backend.get_candidate_moves(f)
-        
-        repo_color = self.backend.get_repertoire_color()
-        is_my_turn = True if repo_color not in ['w', 'b'] else (self.board_widget.board.turn == (repo_color == 'w'))
-        if is_my_turn and len(cs) > 1:
-            self.tree_widget.showColumn(4)
-        else:
-            self.tree_widget.hideColumn(4)
-        
-        lvls = self.backend.get_repertoire_levels()
-        l_map = {l['order']: l['name'] for l in lvls}
-        large_font = QFont()
-        large_font.setPointSize(16)
-        board = self.board_widget.board
-        move_num = board.fullmove_number
-        prefix = f"{move_num}. " if board.turn == chess.WHITE else f"{move_num}... "
-        
-        for c in cs:
-            nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
-            nag_s = f" {nag_map[c['nag']]}" if c['nag'] in nag_map else ""
+        self.tree_widget.setUpdatesEnabled(False)
+        try:
+            self.tree_widget.clear()
             
-            lang = self.get_notation_lang()
-            san_text = f"{prefix}{localize_san(c['san'], lang)}{nag_s}"
+            cs = self.backend.get_candidate_moves(f)
             
-            if self.overhaul_active and not self.overhaul_paused:
-                to_pos_id = c.get('to_pos_id')
-                if to_pos_id and self.backend.is_branch_fully_reviewed(to_pos_id, self.overhaul_start):
-                    san_text += "  ✅"
-            
-            cdict = get_multilingual_comment_dict(c['comment'])
-            if self.active_comment_lang == "all":
-                if len(cdict) > 1:
-                    comment_disp = " ".join([f"[:{k}] {v}" for k, v in cdict.items()])
-                else:
-                    comment_disp = cdict.get("de", list(cdict.values())[0]) if cdict else ""
+            repo_color = self.backend.get_repertoire_color()
+            is_my_turn = True if repo_color not in ['w', 'b'] else (self.board_widget.board.turn == (repo_color == 'w'))
+            if is_my_turn and len(cs) > 1:
+                self.tree_widget.showColumn(4)
             else:
-                comment_disp = cdict.get(self.active_comment_lang, "")
+                self.tree_widget.hideColumn(4)
+            
+            lvls = self.backend.get_repertoire_levels()
+            l_map = {l['order']: l['name'] for l in lvls}
+            large_font = QFont()
+            large_font.setPointSize(16)
+            board = self.board_widget.board
+            move_num = board.fullmove_number
+            prefix = f"{move_num}. " if board.turn == chess.WHITE else f"{move_num}... "
+            
+            for c in cs:
+                nag_map = {1: "!", 2: "?", 3: "!!", 4: "??", 5: "!?", 6: "?!"}
+                nag_s = f" {nag_map[c['nag']]}" if c['nag'] in nag_map else ""
+                
+                lang = self.get_notation_lang()
+                san_text = f"{prefix}{localize_san(c['san'], lang)}{nag_s}"
+                
+                if self.overhaul_active and not self.overhaul_paused:
+                    to_pos_id = c.get('to_pos_id')
+                    if to_pos_id and self.backend.is_branch_fully_reviewed(to_pos_id, self.overhaul_start):
+                        san_text += "  ✅"
+                
+                cdict = get_multilingual_comment_dict(c['comment'])
+                if self.active_comment_lang == "all":
+                    if len(cdict) > 1:
+                        comment_disp = " ".join([f"[:{k}] {v}" for k, v in cdict.items()])
+                    else:
+                        comment_disp = cdict.get("de", list(cdict.values())[0]) if cdict else ""
+                else:
+                    comment_disp = cdict.get(self.active_comment_lang, "")
 
-            it = SortableTreeWidgetItem([
-                san_text, 
-                f"{c['priority']*100:.2f}%", 
-                comment_disp, 
-                l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
-                "" 
-            ])
-            it.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
-            it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-            it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
-            it.setData(0, Qt.ItemDataRole.UserRole, c['uci'])
-            it.setData(1, Qt.ItemDataRole.UserRole, c['priority'])
-            it.setData(0, Qt.ItemDataRole.UserRole + 1, c['id'])
-            
-            if c['is_repo']:
-                it.setCheckState(4, Qt.CheckState.Checked if c['is_active'] else Qt.CheckState.Unchecked)
-                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            
-            it.setFont(0, large_font)
-            it.setFont(1, large_font)
-            it.setFont(3, large_font)
-            it.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-            
-            if c['is_repo']:
-                for i in range(5):
-                    fnt = it.font(i)
-                    fnt.setBold(True)
-                    it.setFont(i, fnt)
-            
-            if not c['is_active']:
-                for i in range(5):
-                    it.setForeground(i, QBrush(QColor("gray")))
-                    
-            self.tree_widget.addTopLevelItem(it)
-        self.tree_widget.sortItems(1, Qt.SortOrder.DescendingOrder)
+                it = SortableTreeWidgetItem([
+                    san_text, 
+                    f"{c['priority']*100:.2f}%", 
+                    comment_disp, 
+                    l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
+                    "" 
+                ])
+                it.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+                it.setData(0, Qt.ItemDataRole.UserRole, c['uci'])
+                it.setData(1, Qt.ItemDataRole.UserRole, c['priority'])
+                it.setData(0, Qt.ItemDataRole.UserRole + 1, c['id'])
+                
+                if c['is_repo']:
+                    it.setCheckState(4, Qt.CheckState.Checked if c['is_active'] else Qt.CheckState.Unchecked)
+                    it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                
+                it.setFont(0, large_font)
+                it.setFont(1, large_font)
+                it.setFont(3, large_font)
+                it.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                
+                if c['is_repo']:
+                    for i in range(5):
+                        fnt = it.font(i)
+                        fnt.setBold(True)
+                        it.setFont(i, fnt)
+                
+                if not c['is_active']:
+                    for i in range(5):
+                        it.setForeground(i, QBrush(QColor("gray")))
+                        
+                self.tree_widget.addTopLevelItem(it)
+            self.tree_widget.sortItems(1, Qt.SortOrder.DescendingOrder)
+        finally:
+            self.tree_widget.setUpdatesEnabled(True)
         
         # Update Common Moves Table
         cat = self.combo_lichess_cat.currentText()
         common_moves = self.backend.get_lichess_common_moves(f, cat)
-        self.table_common_moves.setRowCount(len(common_moves))
-        for r, mv in enumerate(common_moves):
-            lang = self.get_notation_lang()
-            item_san = QTableWidgetItem(localize_san(mv['san'], lang))
-            item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
-            item_san.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_common_moves.setItem(r, 0, item_san)
-            
-            # Format number of games (e.g. 841k or 1.2M) to save space
-            games_count = mv['total']
-            if games_count >= 1_000_000:
-                games_str = f"{games_count / 1_000_000:.1f}M"
-            elif games_count >= 1000:
-                games_str = f"{games_count / 1000:.1f}k" if games_count < 100_000 else f"{games_count / 1000:.0f}k"
-            else:
-                games_str = str(games_count)
-            item_games = QTableWidgetItem(games_str)
-            item_games.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_common_moves.setItem(r, 1, item_games)
-            
-            item_white = QTableWidgetItem(f"{mv['white_pct']:.1f}%")
-            item_white.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_common_moves.setItem(r, 2, item_white)
-            
-            item_black = QTableWidgetItem(f"{mv['black_pct']:.1f}%")
-            item_black.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_common_moves.setItem(r, 3, item_black)
-            
-            item_draw = QTableWidgetItem(f"{mv['draw_pct']:.1f}%")
-            item_draw.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_common_moves.setItem(r, 4, item_draw)
+        self.table_common_moves.setUpdatesEnabled(False)
+        try:
+            self.table_common_moves.setRowCount(len(common_moves))
+            for r, mv in enumerate(common_moves):
+                lang = self.get_notation_lang()
+                item_san = QTableWidgetItem(localize_san(mv['san'], lang))
+                item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
+                item_san.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_common_moves.setItem(r, 0, item_san)
+                
+                # Format number of games (e.g. 841k or 1.2M) to save space
+                games_count = mv['total']
+                if games_count >= 1_000_000:
+                    games_str = f"{games_count / 1_000_000:.1f}M"
+                elif games_count >= 1000:
+                    games_str = f"{games_count / 1000:.1f}k" if games_count < 100_000 else f"{games_count / 1000:.0f}k"
+                else:
+                    games_str = str(games_count)
+                item_games = QTableWidgetItem(games_str)
+                item_games.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_common_moves.setItem(r, 1, item_games)
+                
+                item_white = QTableWidgetItem(f"{mv['white_pct']:.1f}%")
+                item_white.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_common_moves.setItem(r, 2, item_white)
+                
+                item_black = QTableWidgetItem(f"{mv['black_pct']:.1f}%")
+                item_black.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_common_moves.setItem(r, 3, item_black)
+                
+                item_draw = QTableWidgetItem(f"{mv['draw_pct']:.1f}%")
+                item_draw.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_common_moves.setItem(r, 4, item_draw)
 
-        self.resize_common_moves_columns()
+            self.resize_common_moves_columns()
+        finally:
+            self.table_common_moves.setUpdatesEnabled(True)
+
         self.update_board_arrows()
         
         # --- TRANSPOSITION DETECTION (badge update) ---
@@ -4224,19 +4233,23 @@ class CreatorWindow(QMainWindow):
 
     def update_engine_output(self, d):
         if not d or isinstance(d[0], str): return
-        self.table_engine.setRowCount(len(d))
-        for r, l in enumerate(d):
-            it_score = QTableWidgetItem(l['score'])
-            it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_engine.setItem(r, 0, it_score)
-            
-            it_depth = QTableWidgetItem(str(l['depth']))
-            it_depth.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_engine.setItem(r, 1, it_depth)
-            
-            it_pv = QTableWidgetItem(l['pv'])
-            it_pv.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_engine.setItem(r, 2, it_pv)
+        self.table_engine.setUpdatesEnabled(False)
+        try:
+            self.table_engine.setRowCount(len(d))
+            for r, l in enumerate(d):
+                it_score = QTableWidgetItem(l['score'])
+                it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_engine.setItem(r, 0, it_score)
+                
+                it_depth = QTableWidgetItem(str(l['depth']))
+                it_depth.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_engine.setItem(r, 1, it_depth)
+                
+                it_pv = QTableWidgetItem(l['pv'])
+                it_pv.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_engine.setItem(r, 2, it_pv)
+        finally:
+            self.table_engine.setUpdatesEnabled(True)
 
     def on_db_update(self, f, d, e):
         self.backend.update_position_analysis(f, d, e)
@@ -5116,40 +5129,44 @@ class CreatorWindow(QMainWindow):
         self._update_deep_button_state()
 
     def _populate_outgoing_table(self, items):
-        self.table_transpositions.setRowCount(0)
-        
-        if not items:
-            self.table_transpositions.setRowCount(1)
-            item = QTableWidgetItem(tr_ui("creator.transpositions_no_moves", "Kein unbekannter Zug führt direkt in eine bekannte Stellung"))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item.setForeground(QColor(COLORS['light_text']))
-            self.table_transpositions.setItem(0, 0, item)
-            self.table_transpositions.setSpan(0, 0, 1, 3)
-            return
+        self.table_transpositions.setUpdatesEnabled(False)
+        try:
+            self.table_transpositions.setRowCount(0)
+            
+            if not items:
+                self.table_transpositions.setRowCount(1)
+                item = QTableWidgetItem(tr_ui("creator.transpositions_no_moves", "Kein unbekannter Zug führt direkt in eine bekannte Stellung"))
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setForeground(QColor(COLORS['light_text']))
+                self.table_transpositions.setItem(0, 0, item)
+                self.table_transpositions.setSpan(0, 0, 1, 3)
+                return
 
-        for i, it in enumerate(items):
-            self.table_transpositions.insertRow(i)
-            
-            # Col 0: Zug / Zugfolge
-            move_item = QTableWidgetItem(it['move_san'])
-            move_item.setData(Qt.ItemDataRole.UserRole, {
-                "type": "direct",
-                "target_fen": it['target_fen'],
-                "move_uci": it['move_uci'],
-                "move_san": it['move_san']
-            })
-            move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpositions.setItem(i, 0, move_item)
-            
-            # Col 1: Tiefe (Always 1 for direct)
-            depth_item = QTableWidgetItem("1")
-            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpositions.setItem(i, 1, depth_item)
-            
-            # Col 2: Ranking / Qualität
-            rank_item = QTableWidgetItem(tr_ui("creator.evaluating", "Bewerte..."))
-            rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpositions.setItem(i, 2, rank_item)
+            for i, it in enumerate(items):
+                self.table_transpositions.insertRow(i)
+                
+                # Col 0: Zug / Zugfolge
+                move_item = QTableWidgetItem(it['move_san'])
+                move_item.setData(Qt.ItemDataRole.UserRole, {
+                    "type": "direct",
+                    "target_fen": it['target_fen'],
+                    "move_uci": it['move_uci'],
+                    "move_san": it['move_san']
+                })
+                move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_transpositions.setItem(i, 0, move_item)
+                
+                # Col 1: Tiefe (Always 1 for direct)
+                depth_item = QTableWidgetItem("1")
+                depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_transpositions.setItem(i, 1, depth_item)
+                
+                # Col 2: Ranking / Qualität
+                rank_item = QTableWidgetItem(tr_ui("creator.evaluating", "Bewerte..."))
+                rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_transpositions.setItem(i, 2, rank_item)
+        finally:
+            self.table_transpositions.setUpdatesEnabled(True)
 
     def _populate_deep_table(self, classified_paths):
         """Fill the deep results table with classified BFS paths."""
@@ -5658,51 +5675,55 @@ class CreatorWindow(QMainWindow):
             self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
             self.btn_hole_exempt.setVisible(False)
 
-        self.table_holes.setRowCount(len(holes))
-        for i, h in enumerate(holes):
-            pop_val = h.get('popularity', 0)
-            item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
-            item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
-            if 'move_san' in h:
-                item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
-            
-            item_type = QTableWidgetItem(h['type'].upper())
-            if h['type'] == 'user':
-                item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
-            elif h['type'] == 'opponent':
-                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
-            elif h['type'] == 'priority_check':
-                if mode == "level_down":
+        self.table_holes.setUpdatesEnabled(False)
+        try:
+            self.table_holes.setRowCount(len(holes))
+            for i, h in enumerate(holes):
+                pop_val = h.get('popularity', 0)
+                item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
+                item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+                if 'move_san' in h:
+                    item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+                
+                item_type = QTableWidgetItem(h['type'].upper())
+                if h['type'] == 'user':
+                    item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
+                    item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
+                elif h['type'] == 'opponent':
                     item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
-                else:
-                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                    item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
-            elif h['type'] == 'level_mismatch':
-                item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
-                item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
-            elif h['type'] == 'orphaned_move':
-                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
-                item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
-                # Add diagnostic level info to the move text
-                if 'from_level' in h and 'to_level' in h:
-                    move_text = h.get('move_san', '—')
-                    h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
-            elif h['type'] == 'repertoire_gap':
-                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
-                item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
+                    item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
+                elif h['type'] == 'priority_check':
+                    if mode == "level_down":
+                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                        item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
+                    else:
+                        item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                        item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
+                elif h['type'] == 'level_mismatch':
+                    item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
+                    item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
+                elif h['type'] == 'orphaned_move':
+                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                    item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
+                    item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
+                    # Add diagnostic level info to the move text
+                    if 'from_level' in h and 'to_level' in h:
+                        move_text = h.get('move_san', '—')
+                        h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
+                elif h['type'] == 'repertoire_gap':
+                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                    item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
+                    item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
 
-            item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_move = QTableWidgetItem(h.get('move_san', '—'))
-            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_holes.setItem(i, 0, item_pop)
-            self.table_holes.setItem(i, 1, item_type)
-            self.table_holes.setItem(i, 2, it_move)
+                item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_move = QTableWidgetItem(h.get('move_san', '—'))
+                it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_holes.setItem(i, 0, item_pop)
+                self.table_holes.setItem(i, 1, item_type)
+                self.table_holes.setItem(i, 2, it_move)
+        finally:
+            self.table_holes.setUpdatesEnabled(True)
 
 
     def on_hole_double_click(self, item):

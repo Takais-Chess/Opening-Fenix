@@ -221,6 +221,7 @@
   "tour": {
     "btn_next": "WEITER →",
     "btn_finish": "FERTIG ✓",
+    "btn_skip": "Überspringen",
     "step1_title": "Willkommen bei Opening Fenix!",
     "step1_text": "Lass uns kurz die wichtigsten Funktionen durchgehen, damit du direkt mit deinem Training starten kannst.",
     "step2_title": "Der Trainer",

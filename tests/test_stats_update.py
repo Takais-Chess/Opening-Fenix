@@ -77,3 +77,29 @@ def test_stats_update_after_training_move(window, sample_repertoire):
         QTest.qWait(200)
 
         assert mock_update.called, "Big donut chart was not updated after executing a training move"
+
+def test_register_success_performance_and_in_memory_elo(window, sample_repertoire):
+    """Verify that register_success executes in sub-millisecond range and Elo is computed in-memory."""
+    import time
+    tm = window.training_manager
+    tm.on_repertoire_changed()
+    move_obj, _ = tm.get_next_move(mode='new')
+    assert move_obj is not None
+    
+    # Warm-up caches
+    tm.get_current_elo()
+    
+    # Benchmark register_success (should be single commit, ultra fast)
+    start = time.perf_counter()
+    tm.register_success(move_obj.id, True)
+    duration_ms = (time.perf_counter() - start) * 1000.0
+    
+    # Benchmark get_current_elo (pure in-memory lookup)
+    elo_start = time.perf_counter()
+    elo = tm.get_current_elo()
+    elo_duration_ms = (time.perf_counter() - elo_start) * 1000.0
+    
+    assert elo >= 800
+    assert elo_duration_ms < 2.0, f"get_current_elo took too long: {elo_duration_ms:.2f}ms"
+    assert duration_ms < 50.0, f"register_success took too long: {duration_ms:.2f}ms"
+

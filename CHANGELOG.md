@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.9] - 2026-09-10
+
+### Added & Improved
+- **Smooth Piece Slide Animations with OutSine Easing**: Replaced linear interpolation with high-fidelity OutSine easing curves for natural deceleration and fluid piece motion.
+- **Dynamic Square-Root Distance Scaling**: Implemented adaptive move animation durations based on Euclidean distance ($\text{scale} = 0.70 + 0.30 \cdot \sqrt{d / 2.0}$), scaling seamlessly between short 1-square pawn taps and long queen or rook slides.
+- **VSync Refresh Rate Quantization**: Synchronized animation step durations directly to integer monitor refresh cycles (60Hz, 120Hz, 144Hz, 240Hz) to prevent sub-frame jitter and micro-stuttering.
+- **Square Chessboard Layout & Symmetric Centering**: Auto-fitted the board container into a clean, symmetrical square layout with pixel-perfect coordinate centering.
+- **N+1 Bulk SQL Optimization in Maintenance**: Replaced per-gap database queries with bulk group-by statements during repertoire gap repair, reducing database roundtrips from $O(N)$ to $O(1)$.
+- **Background Worker GIL Yielding**: Added strategic thread sleeping in stats and backup workers to prevent GIL contention and ensure butter-smooth GUI responsiveness.
+- **Streaming PGN File Imports**: Replaced full-file memory buffering with chunked file-handle streaming, keeping memory usage flat during large database imports.
+- **Batched Qt UI Repaints**: Added `setUpdatesEnabled` batching across candidate move trees and analysis tables in the Creator interface for instantaneous position navigation.
+
 ## [0.9.8] - 2026-09-08
 
 ### Added & Improved

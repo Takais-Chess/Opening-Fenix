@@ -71,5 +71,25 @@ def test_tour_positioning_widget(qtbot, tour_overlay):
     # Card should be above target if target is at bottom
     assert card_rect.bottom() < target_rect.top()
 
+def test_tour_skip_button(qtbot, tour_overlay):
+    w1 = QPushButton("Btn1", tour_overlay.parent())
+    w1.show()
+    
+    tour_overlay.add_step(None, "Step 1", "Description 1")
+    tour_overlay.add_step(w1, "Step 2", "Description 2")
+    tour_overlay.add_step(None, "Step 3", "Description 3")
+    
+    tour_overlay.start_tour()
+    assert tour_overlay.isVisible()
+    assert tour_overlay.current_step == 0
+    assert tour_overlay.btn_skip.isVisible()
+    
+    # Click Skip button
+    with qtbot.waitSignal(tour_overlay.finished, timeout=1000):
+        qtbot.mouseClick(tour_overlay.btn_skip, Qt.MouseButton.LeftButton)
+        
+    assert not tour_overlay.isVisible()
+
+
 
 

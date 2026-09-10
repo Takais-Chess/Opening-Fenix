@@ -79,6 +79,7 @@ class TestSettingsDialogStructure:
     def test_scroll_resets_to_top_on_page_switch(self, settings_dialog):
         """Scroll position resets to top (0) when switching between sidebar tabs."""
         # Scroll down intentionally
+        settings_dialog.main_scroll.verticalScrollBar().setRange(0, 500)
         settings_dialog.main_scroll.verticalScrollBar().setValue(250)
         assert settings_dialog.main_scroll.verticalScrollBar().value() == 250
         

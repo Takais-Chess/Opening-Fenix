@@ -107,3 +107,37 @@ def test_high_fps_no_warning(board_widget):
     with patch('opening_fenix.gui.widgets.board_widget.logger.warning') as mock_warn:
         board_widget._on_animation_finished()
         mock_warn.assert_not_called()
+
+def test_outsine_easing_and_distance_scaling(board_widget):
+    """Verify that square-root distance scaling scales durations accurately and OutSine easing is computed."""
+    board_widget.target_fps = 60
+    board_widget.update_animation_metrics(200)
+    
+    # 1. Short move: e2e3 (dist = 1) -> should be shorter duration (~183.3ms = 11 frames at 60Hz)
+    move_short = chess.Move.from_uci('e2e3')
+    piece = board_widget.board.piece_at(chess.E2)
+    board_widget.start_piece_slide(piece, chess.E2, chess.E3, move_short)
+    dur_short = board_widget.anim_duration
+    board_widget.abort_piece_slide()
+    
+    # 2. Medium move: e2e4 (dist = 2) -> matches baseline (~200ms = 12 frames at 60Hz)
+    move_med = chess.Move.from_uci('e2e4')
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move_med)
+    dur_med = board_widget.anim_duration
+    board_widget.abort_piece_slide()
+    
+    # 3. Long move: a1a8 (dist = 7) -> longer duration (~250ms = 15 frames at 60Hz)
+    move_long = chess.Move.from_uci('a1a8')
+    rook = board_widget.board.piece_at(chess.A1)
+    board_widget.start_piece_slide(rook, chess.A1, chess.A8, move_long)
+    dur_long = board_widget.anim_duration
+    
+    assert dur_short < dur_med < dur_long
+    assert dur_med == 200.0
+    
+    # Check OutSine easing calculation at 50% elapsed time
+    board_widget._anim_start_time = time.perf_counter() - (dur_long / 2000.0) # 50% elapsed
+    board_widget._on_precise_anim_tick()
+    # OutSine at t=0.5 is sin(pi/4) = sqrt(2)/2 ~= 0.7071
+    assert 0.69 < board_widget.animating_piece_data['progress'] < 0.72
+    board_widget.abort_piece_slide()

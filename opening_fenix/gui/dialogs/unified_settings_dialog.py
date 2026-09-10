@@ -853,6 +853,10 @@ class UnifiedSettingsDialog(QDialog):
             try: self.main_window.set_setting(key, value)
             except: pass
 
+        if key == "anim_speed" and self.main_window and hasattr(self.main_window, 'board_widget') and self.main_window.board_widget:
+            try: self.main_window.board_widget.update_animation_metrics(value)
+            except: pass
+
     # ─── UI Architecture ────────────────────────────────────────────────────
 
     def init_ui(self):
@@ -2833,6 +2837,22 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_backups.verticalHeader().setVisible(False)
         layout.addWidget(self.tbl_backups)
 
+    def ensure_backend_for_active_repo(self):
+        if self.backend and getattr(self.backend, 'active_repo_name', None):
+            return self.backend
+        if self.main_window and getattr(self.main_window, 'backend', None):
+            return self.main_window.backend
+        repo_name = getattr(self, 'selected_trainer_repo', None) or getattr(self, 'cr_active_repo_name', None)
+        if not repo_name and self.backend:
+            repo_name = getattr(self.backend, 'active_repo_name', None)
+        if repo_name:
+            if not self._owned_backend or getattr(self._owned_backend, 'active_repo_name', None) != repo_name:
+                from opening_fenix.creator.creator_window import CreatorBackend
+                self._owned_backend = CreatorBackend()
+                self._owned_backend.load_repertoire(repo_name)
+            return self._owned_backend
+        return None
+
     def refresh_backups_list(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name or not hasattr(self, 'tbl_backups'): return
@@ -2855,6 +2875,8 @@ class UnifiedSettingsDialog(QDialog):
         create_repertoire_backup(backend.active_repo_name, trigger_type="manual")
         self.refresh_backups_list()
         QMessageBox.information(self, "Backup", "Manuelles Backup erfolgreich gespeichert!")
+
+    create_manual_backup_now = create_manual_backup
 
     def restore_backup(self, path, dt_str):
         backend = self.ensure_backend_for_active_repo()

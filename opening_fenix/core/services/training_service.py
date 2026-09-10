@@ -99,6 +99,7 @@ class TrainingManager:
         # New: Stat Caching
         self._reachable_moves_cache = None # List of (fen, uci) reachable for current repo/level
         self._last_stats_cache = None # (new, due, dist)
+        self._user_settings_cache = None # Cached UserRepertoireSettings for active repertoire
         
         self.navigator = RepertoireNavigator(repertoire_manager)
         
@@ -201,10 +202,13 @@ class TrainingManager:
         return self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).count() > 0
 
     def get_active_level(self, repo_name: Optional[str] = None) -> int:
-        if not repo_name:
-            repo_name = self.repertoire_manager.active_repertoire_name
-            
-        if not self.user_session or not repo_name: 
+        if not self.user_session: 
+            return 999 if is_free_training_profile(self.profile_name) else 1
+
+        if not repo_name or repo_name == self.repertoire_manager.active_repertoire_name:
+            settings = self._get_rating_settings()
+            if settings:
+                return settings.active_level
             return 999 if is_free_training_profile(self.profile_name) else 1
             
         with self.user_session.no_autoflush:
@@ -231,6 +235,7 @@ class TrainingManager:
             self._variation_move_ids = set()
             self._rep_move_cache = None
             self._last_stats_cache = None
+            self._user_settings_cache = settings
         self._td_cache = None
         
     def close(self) -> None:
@@ -253,6 +258,17 @@ class TrainingManager:
         self._move_by_fen_uci_cache = None
         self._reachable_moves_cache = None
         self._last_stats_cache = None
+        self._user_settings_cache = None
+        if self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
+            try:
+                settings = self.user_session.query(UserRepertoireSettings).filter_by(
+                    repertoire_name=self.repertoire_manager.active_repertoire_name
+                ).first()
+                if settings:
+                    settings.stats_updated_at = None
+                    self.user_session.commit()
+            except Exception:
+                pass
 
     def invalidate_caches(self):
         """Invalidates all internal caches when priority scores or repertoire data change."""
@@ -441,7 +457,7 @@ class TrainingManager:
                 logger.error(f"Error in fast-path stats catch-up: {e}")
         return 0, 0, {}
 
-    def get_stats(self, variation_filter=None, use_cache=True):
+    def get_stats(self, variation_filter=None, use_cache=True, auto_commit=True):
         if not self.repertoire_manager.repo_session: return 0, 0, {}
         
         # 1. Check persistent DB cache first if no variation filter and use_cache is True
@@ -482,11 +498,11 @@ class TrainingManager:
         
         # 3. Update persistent cache if no filter
         if not variation_filter:
-            self._update_persistent_stats_cache(new_c, due_c, done_dist)
+            self._update_persistent_stats_cache(new_c, due_c, done_dist, auto_commit=auto_commit)
             
         return new_c, due_c, done_dist
 
-    def _update_persistent_stats_cache(self, new_c, due_c, dist):
+    def _update_persistent_stats_cache(self, new_c, due_c, dist, auto_commit=True):
         """Saves stats to the UserRepertoireSettings table."""
         if not self.user_session or not self.repertoire_manager.active_repertoire_name: return
         try:
@@ -498,10 +514,12 @@ class TrainingManager:
                 settings.last_due_count = due_c
                 settings.last_dist_json = json.dumps(dist)
                 settings.stats_updated_at = datetime.datetime.now()
-                self.user_session.commit()
+                if auto_commit:
+                    self.user_session.commit()
         except Exception as e:
             logger.error(f"Error updating stats cache: {e}")
-            self.user_session.rollback()
+            if auto_commit:
+                self.user_session.rollback()
 
     def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None, exclude_move_ids=None):
         if not self.repertoire_manager.repo_session: return None, []
@@ -722,12 +740,18 @@ class TrainingManager:
 
 
     def _get_rating_settings(self):
+        if self._user_settings_cache is not None:
+            return self._user_settings_cache
         repo_name = self.repertoire_manager.active_repertoire_name
+        if not repo_name or not self.user_session:
+            return None
         settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
         if not settings:
-            settings = UserRepertoireSettings(repertoire_name=repo_name, rating=800.0, last_rating_update=datetime.datetime.now())
+            default_lvl = 999 if is_free_training_profile(self.profile_name) else 1
+            settings = UserRepertoireSettings(repertoire_name=repo_name, rating=800.0, active_level=default_lvl, last_rating_update=datetime.datetime.now())
             self.user_session.add(settings)
             self.user_session.commit()
+        self._user_settings_cache = settings
         return settings
 
     def _apply_rating_decay(self, settings):
@@ -756,7 +780,7 @@ class TrainingManager:
         settings.rating = max(800.0, settings.rating - total_decay)
         settings.last_rating_update = now
 
-    def update_rating(self, move_id, success):
+    def update_rating(self, move_id, success, auto_commit=True):
         self._ensure_forward_cache()
         settings = self._get_rating_settings()
         self._apply_rating_decay(settings)
@@ -789,11 +813,13 @@ class TrainingManager:
         settings.rating += change
         if settings.rating < 800: settings.rating = 800.0
         settings.last_rating_update = datetime.datetime.now()
-        self.user_session.commit()
+        if auto_commit:
+            self.user_session.commit()
 
     def get_current_elo(self):
         with self.user_session.no_autoflush:
             self._ensure_forward_cache()
+            self._ensure_td_cache()
             settings = self._get_rating_settings()
             self._apply_rating_decay(settings)
             
@@ -803,10 +829,8 @@ class TrainingManager:
             total_moves_in_level = sum(1 for m in self._rep_move_cache.values() if m.level <= max_lvl)
             if total_moves_in_level == 0: return 800
             
-            # Count training data entries for these moves
-            seen_moves = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).count()
-            # Note: this counts all seen moves in the repo, not just in this level.
-            # But usually we train by level so it's a good approximation.
+            # Count training data entries directly from in-memory cache (<0.01ms)
+            seen_moves = len(self._td_cache) if self._td_cache is not None else 0
             
             progress_factor = min(1.0, seen_moves / total_moves_in_level)
             
@@ -880,17 +904,19 @@ class TrainingManager:
             
         entry.next_due = now + self.get_box_interval(entry.box)
         entry.last_review = now
-        self.user_session.commit()
         
-        # Update Rating
-        self.update_rating(move_id, success)
+        # Update Rating in-memory (no standalone commit)
+        self.update_rating(move_id, success, auto_commit=False)
 
-        # Update cache in-place instead of full invalidation
+        # Update cache in-place
         if self._td_cache is not None:
             self._td_cache[(fen, move.uci)] = entry
 
-        # New: Trigger immediate (smart) cache update for the current repertoire
-        self.get_stats(use_cache=False) 
+        # Update persistent stats cache in-memory (no standalone commit)
+        self.get_stats(use_cache=False, auto_commit=False)
+
+        # Single batched atomic commit for TrainingData + Rating + StatsCache
+        self.user_session.commit() 
 
     def is_move_new(self, move_id):
         self._ensure_forward_cache()
@@ -908,6 +934,13 @@ class TrainingManager:
     
     def get_box_distribution(self):
         dist = {i: 0 for i in range(8)}
+        self._ensure_td_cache()
+        if self._td_cache is not None:
+            for td in self._td_cache.values():
+                if td.box in dist:
+                    dist[td.box] += 1
+            return dist
+
         with self.user_session.no_autoflush:
             from sqlalchemy import func
             results = self.user_session.query(TrainingData.box, func.count(TrainingData.id))\
@@ -921,6 +954,14 @@ class TrainingManager:
     def get_future_reviews(self):
         timeline, now = {}, datetime.datetime.now()
         for i in range(8): timeline[(now + datetime.timedelta(days=i)).date()] = 0
+        self._ensure_td_cache()
+        if self._td_cache is not None:
+            for d in self._td_cache.values():
+                date = d.next_due.date()
+                if date < now.date(): date = now.date()
+                if date in timeline: timeline[date] += 1
+            return timeline
+
         with self.user_session.no_autoflush:
             for d in self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).all():
                 date = d.next_due.date()

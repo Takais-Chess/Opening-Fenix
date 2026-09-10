@@ -515,9 +515,8 @@ class MainWindow(QMainWindow):
         self.side_container.setMinimumWidth(scale(250))
         self.main_splitter.addWidget(self.side_container)
         
-        # Initial proportions: 3:2
-        self.main_splitter.setStretchFactor(0, 3)
-        self.main_splitter.setStretchFactor(1, 2)
+        # Initial proportions: Auto-fit square board container
+        self._auto_size_board = True
         self.main_splitter.splitterMoved.connect(lambda: setattr(self, '_auto_size_board', False))
         
         main_layout.addWidget(content_wrapper, 1)
@@ -1452,6 +1451,45 @@ class MainWindow(QMainWindow):
         if widget:
             widget.style().unpolish(widget)
             widget.style().polish(widget)
+
+    def _fit_board_splitter(self):
+        if not getattr(self, '_auto_size_board', True):
+            return
+        if not hasattr(self, 'main_splitter') or not hasattr(self, 'board_widget'):
+            return
+        h = self.main_splitter.height()
+        total_w = self.main_splitter.width()
+        if h > 100 and total_w > h:
+            desired_board_w = h
+            desired_side_w = max(scale(280), total_w - desired_board_w)
+            self.main_splitter.setSizes([desired_board_w, desired_side_w])
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if hasattr(self, 'board_widget') and self.board_widget:
+            self.board_widget.update_animation_metrics()
+        self._fit_board_splitter()
+        # Connect screenChanged if window handle is available
+        if hasattr(self, 'windowHandle') and self.windowHandle():
+            try:
+                self.windowHandle().screenChanged.connect(self._on_screen_changed)
+            except Exception:
+                pass
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_board_splitter()
+
+    def _on_screen_changed(self, screen):
+        if hasattr(self, 'board_widget') and self.board_widget:
+            self.board_widget.update_animation_metrics()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, 'board_widget') and self.board_widget:
+                self.board_widget.update_animation_metrics()
+            self._fit_board_splitter()
 
     def closeEvent(self, event):
         """Clean up resources before closing."""

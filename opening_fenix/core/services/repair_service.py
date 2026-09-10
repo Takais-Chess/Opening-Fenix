@@ -26,17 +26,23 @@ def repair_repertoire_health(session, fast=False):
         if not gaps:
             break
             
+        # Pre-fetch min levels for outgoing and incoming moves in bulk (eliminates N+1 query loop)
+        outgoing_min = dict(
+            session.query(Move.from_position_id, func.min(RepertoireMove.level))
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .group_by(Move.from_position_id).all()
+        )
+        incoming_min = dict(
+            session.query(Move.to_position_id, func.min(RepertoireMove.level))
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .group_by(Move.to_position_id).all()
+        )
+
         for g in gaps:
-            # Find the minimum level among parents AND children of this move
-            min_related_level = session.query(func.min(RepertoireMove.level))\
-                .filter(Move.id == RepertoireMove.move_id)\
-                .filter(
-                    (Move.from_position_id == g.to_position_id) | 
-                    # If g.from_position_id is missing, default to no parent check. Safeline.
-                    (Move.to_position_id == g.from_position_id)
-                ).scalar()
-            
-            lvl = min_related_level if min_related_level is not None else 1
+            lvl_out = outgoing_min.get(g.to_position_id)
+            lvl_in = incoming_min.get(g.from_position_id)
+            candidates = [l for l in (lvl_out, lvl_in) if l is not None]
+            lvl = min(candidates) if candidates else 1
             session.add(RepertoireMove(move_id=g.id, level=lvl))
             gaps_fixed += 1
         

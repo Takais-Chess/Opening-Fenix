@@ -64,16 +64,19 @@ class DatabaseManager:
                 @event.listens_for(self.engine, "connect")
                 def _set_sqlite_pragmas(dbapi_connection, connection_record):
                     try:
-                        cursor = dbapi_connection.cursor()
-                        cursor.execute("PRAGMA journal_mode=WAL")
-                        cursor.execute("PRAGMA busy_timeout=60000")
-                        cursor.execute("PRAGMA synchronous=NORMAL")
-                        cursor.close()
+                        dbapi_connection.execute("PRAGMA busy_timeout=60000")
+                        dbapi_connection.execute("PRAGMA synchronous=NORMAL")
                     except Exception:
                         pass
 
             try:
                 base.metadata.create_all(self.engine)
+                if db_filename != ":memory:":
+                    try:
+                        with self.engine.begin() as conn:
+                            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                    except Exception:
+                        pass
                 self._check_integrity()
                 self._migrate_schema(base)
             except DatabaseError as e:
@@ -183,7 +186,7 @@ class DatabaseManager:
         Returns:
             A new SQLAlchemy Session instance.
         """
-        return sessionmaker(bind=self.engine, autoflush=False)()
+        return sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)()
 
     def close(self) -> None:
         """Disposes the underlying SQLAlchemy engine and connection pool."""
