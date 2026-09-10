@@ -3,6 +3,7 @@ import sys
 import math
 import time
 import ctypes
+import gc
 import chess
 
 # Force Windows Kernel scheduler to 1ms high-precision timer resolution (enables true 120Hz/144Hz/160Hz QTimer ticks)
@@ -19,6 +20,13 @@ from PyQt6.QtSvg import QSvgRenderer
 from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.core.logger import logger
 from opening_fenix.gui.scaling import scale
+
+# Fast O(1) lookup table for piece pixmap keys (avoids string allocations in 144Hz animation paint loop)
+PIECE_KEY_MAP = {}
+for _pt in range(1, 7):
+    _sym = chess.PIECE_SYMBOLS[_pt].upper()
+    PIECE_KEY_MAP[(_pt, True)] = f"w{_sym}"
+    PIECE_KEY_MAP[(_pt, False)] = f"b{_sym}"
 
 
 THEMES = {
@@ -85,6 +93,9 @@ class ChessBoardWidget(QWidget):
         self.load_pieces()
         self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
         self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
+        self._light_brush = QBrush(self.light_color)
+        self._dark_brush = QBrush(self.dark_color)
+        self._highlight_brush = QBrush(self.highlight_color)
         self.setMinimumSize(scale(400), scale(400))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -117,6 +128,8 @@ class ChessBoardWidget(QWidget):
         self._last_anim_stats = None
         self._last_configured_anim_speed = None
         self._duration_lut = {}
+        self._gc_disabled_for_anim = False
+        self._coord_color = QColor("#4b4b4b")
         self.update_animation_metrics()
 
     def update_animation_metrics(self, anim_speed=None):
@@ -173,6 +186,8 @@ class ChessBoardWidget(QWidget):
             self.light_color, self.dark_color = THEMES[THEME_FALLBACKS[theme_name]]
         else:
             self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
+        self._light_brush = QBrush(self.light_color)
+        self._dark_brush = QBrush(self.dark_color)
         self.update()
 
     def set_highlight_color(self, color_name_or_color):
@@ -186,6 +201,7 @@ class ChessBoardWidget(QWidget):
             self.highlight_color = QColor(color_name_or_color)
         else:
             self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
+        self._highlight_brush = QBrush(self.highlight_color)
         self.update()
 
     def load_pieces(self):
@@ -248,6 +264,9 @@ class ChessBoardWidget(QWidget):
                     self.last_move = move
                     self.animating_piece_data = None
                     self.is_animating = False
+                    if getattr(self, '_gc_disabled_for_anim', False):
+                        gc.enable()
+                        self._gc_disabled_for_anim = False
                     self.piece_slide_finished.emit()
                     self.update()
             # Allow the click to proceed to pick up a piece
@@ -366,14 +385,15 @@ class ChessBoardWidget(QWidget):
     def _paint_board_base(self, painter, square_size):
         """Draws squares, coordinates, and last-move highlight."""
         # 1. Squares
+        painter.setPen(Qt.PenStyle.NoPen)
         for row in range(8):
             for col in range(8):
-                color = self.light_color if (row + col) % 2 == 0 else self.dark_color
-                painter.setBrush(QBrush(color)); painter.setPen(Qt.PenStyle.NoPen)
+                brush = self._light_brush if (row + col) % 2 == 0 else self._dark_brush
+                painter.setBrush(brush)
                 painter.drawRect(QRectF(col * square_size, row * square_size, square_size, square_size))
         
         # 2. Coordinates
-        painter.setPen(QColor("#4b4b4b"))
+        painter.setPen(self._coord_color)
         font = painter.font()
         font.setBold(True)
         font.setPointSize(max(9, int(square_size / 6.0)))
@@ -393,7 +413,7 @@ class ChessBoardWidget(QWidget):
         
         # 3. Last move highlight
         if self.last_move:
-            painter.setBrush(QBrush(self.highlight_color))
+            painter.setBrush(self._highlight_brush)
             for sq in [self.last_move.from_square, self.last_move.to_square]:
                 f, r = chess.square_file(sq), chess.square_rank(sq)
                 rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
@@ -457,8 +477,8 @@ class ChessBoardWidget(QWidget):
             # Draw dragged piece centered exactly on mouse cursor with sub-pixel float precision
             mx = (self.mouse_pos.x() - x_offset) - square_size / 2.0
             my = (self.mouse_pos.y() - y_offset) - square_size / 2.0
-            key = f"{'w' if self.dragging_piece.color == chess.WHITE else 'b'}{self.dragging_piece.symbol().upper()}"
-            if key in self.piece_pixmaps: 
+            key = PIECE_KEY_MAP.get((self.dragging_piece.piece_type, self.dragging_piece.color))
+            if key and key in self.piece_pixmaps: 
                 painter.drawPixmap(QPointF(mx, my), self.piece_pixmaps[key])
 
         if self.debug_anim:
@@ -551,6 +571,11 @@ class ChessBoardWidget(QWidget):
         self.last_move = move
         self.is_animating = True
 
+        # Suspend Python cyclic GC during active piece slide to prevent 30-50ms main-thread freeze
+        if not getattr(self, '_gc_disabled_for_anim', False):
+            gc.disable()
+            self._gc_disabled_for_anim = True
+
         # Reset Debug Timing
         self._anim_start_time = time.perf_counter()
         self._anim_frame_times = [self._anim_start_time]
@@ -568,6 +593,9 @@ class ChessBoardWidget(QWidget):
             self.move_anim.stop()
             self.is_animating = False
             self.animating_piece_data = None
+            if getattr(self, '_gc_disabled_for_anim', False):
+                gc.enable()
+                self._gc_disabled_for_anim = False
             self.update()
 
     def _on_animation_frame(self, value=None):
@@ -619,6 +647,11 @@ class ChessBoardWidget(QWidget):
                 f"(Target: {self.target_fps}Hz, Frames: {frame_count}, Duration: {duration_ms:.1f}ms)"
             )
 
+        # Restore Python cyclic GC
+        if getattr(self, '_gc_disabled_for_anim', False):
+            gc.enable()
+            self._gc_disabled_for_anim = False
+
         d = self.animating_piece_data
         self.is_animating = False
         move = d['move']
@@ -631,8 +664,8 @@ class ChessBoardWidget(QWidget):
         self.update()
 
     def draw_piece(self, painter, piece, col, row, size, scale_factor=1.0):
-        key = f"{ 'w' if piece.color == chess.WHITE else 'b' }{piece.symbol().upper()}"
-        if key in self.piece_pixmaps:
+        key = PIECE_KEY_MAP.get((piece.piece_type, piece.color))
+        if key and key in self.piece_pixmaps:
             if scale_factor == 1.0:
                 painter.drawPixmap(QPointF(col * size, row * size), self.piece_pixmaps[key])
             else:

@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 - **Smooth Piece Slide Animations with OutSine Easing**: Replaced linear interpolation with high-fidelity OutSine easing curves for natural deceleration and fluid piece motion.
 - **Dynamic Square-Root Distance Scaling**: Implemented adaptive move animation durations based on Euclidean distance ($\text{scale} = 0.70 + 0.30 \cdot \sqrt{d / 2.0}$), scaling seamlessly between short 1-square pawn taps and long queen or rook slides.
 - **VSync Refresh Rate Quantization**: Synchronized animation step durations directly to integer monitor refresh cycles (60Hz, 120Hz, 144Hz, 240Hz) to prevent sub-frame jitter and micro-stuttering.
+- **Garbage Collection Suspension & Zero-Allocation Paint**: Suspended Python cyclic GC during active piece slides and pre-cached brushes/piece keys to eliminate 4-frame freezes and stutter.
 - **Square Chessboard Layout & Symmetric Centering**: Auto-fitted the board container into a clean, symmetrical square layout with pixel-perfect coordinate centering.
 - **N+1 Bulk SQL Optimization in Maintenance**: Replaced per-gap database queries with bulk group-by statements during repertoire gap repair, reducing database roundtrips from $O(N)$ to $O(1)$.
 - **Background Worker GIL Yielding**: Added strategic thread sleeping in stats and backup workers to prevent GIL contention and ensure butter-smooth GUI responsiveness.

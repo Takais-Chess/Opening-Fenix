@@ -141,3 +141,32 @@ def test_outsine_easing_and_distance_scaling(board_widget):
     # OutSine at t=0.5 is sin(pi/4) = sqrt(2)/2 ~= 0.7071
     assert 0.69 < board_widget.animating_piece_data['progress'] < 0.72
     board_widget.abort_piece_slide()
+
+def test_gc_suspension_lifecycle(board_widget):
+    """Verify that Python cyclic GC is suspended during piece slide and restored upon completion/abort."""
+    import gc
+    gc.enable()
+    assert gc.isenabled() is True
+
+    move = chess.Move.from_uci('e2e4')
+    piece = board_widget.board.piece_at(chess.E2)
+
+    # 1. Start slide -> GC should be disabled
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
+    assert board_widget.is_animating is True
+    assert board_widget._gc_disabled_for_anim is True
+    assert gc.isenabled() is False
+
+    # 2. Finish slide -> GC should be re-enabled
+    board_widget._on_animation_finished()
+    assert board_widget.is_animating is False
+    assert board_widget._gc_disabled_for_anim is False
+    assert gc.isenabled() is True
+
+    # 3. Abort slide -> GC should be re-enabled
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
+    assert gc.isenabled() is False
+    board_widget.abort_piece_slide()
+    assert board_widget.is_animating is False
+    assert board_widget._gc_disabled_for_anim is False
+    assert gc.isenabled() is True
