@@ -11,6 +11,7 @@ import shutil
 import multiprocessing
 import re
 import collections
+import heapq
 import webbrowser
 import time
 import stat
@@ -780,6 +781,71 @@ class CreatorBackend:
     def get_repertoire_levels(self):
         if not self.session: return []
         return [{"name": lvl.name, "order": lvl.order, "target_elo": lvl.target_elo} for lvl in self.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()]
+
+    def get_position_min_reachable_level(self, fen: str) -> int:
+        """
+        Returns the minimum repertoire level required to reach the given FEN from the starting position.
+        If the position is the root starting position, returns 1.
+        If unreachable from root or disconnected, returns the minimum incoming move level or 1.
+        """
+        if not self.session or not fen:
+            return 1
+
+        clean_target = " ".join(fen.strip().split()[:4])
+        clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+        if clean_target == clean_root:
+            return 1
+
+        target_pos = self.session.query(Position).filter_by(fen=clean_target).first()
+        if not target_pos:
+            return 1
+
+        root_pos = self.session.query(Position).filter_by(fen=clean_root).first()
+        if not root_pos or root_pos.id == target_pos.id:
+            return 1
+
+        # Query all active repertoire moves
+        rep_edges = (
+            self.session.query(Move.from_position_id, Move.to_position_id, RepertoireMove.level)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(RepertoireMove.is_active == True)
+            .all()
+        )
+
+        adj = collections.defaultdict(list)
+        for f_id, t_id, lvl in rep_edges:
+            adj[f_id].append((t_id, lvl if lvl is not None else 1))
+
+        # Dijkstra on bottleneck level from root
+        dist = {root_pos.id: 1}
+        pq = [(1, root_pos.id)]
+
+        while pq:
+            curr_lvl, u = heapq.heappop(pq)
+            if u == target_pos.id:
+                return curr_lvl
+            if curr_lvl > dist.get(u, float('inf')):
+                continue
+
+            for v, edge_lvl in adj.get(u, []):
+                path_lvl = max(curr_lvl, edge_lvl)
+                if path_lvl < dist.get(v, float('inf')):
+                    dist[v] = path_lvl
+                    heapq.heappush(pq, (path_lvl, v))
+
+        # Fallback to incoming moves to target_pos if not connected to root
+        incoming_rep = (
+            self.session.query(RepertoireMove.level)
+            .join(Move, RepertoireMove.move_id == Move.id)
+            .filter(Move.to_position_id == target_pos.id, RepertoireMove.is_active == True)
+            .all()
+        )
+        if incoming_rep:
+            valid_lvls = [rm[0] for rm in incoming_rep if rm[0] is not None]
+            if valid_lvls:
+                return min(valid_lvls)
+
+        return 1
 
     def update_level_elo(self, level_order, target_elo):
         if not self.session: return
@@ -3650,10 +3716,16 @@ class CreatorWindow(QMainWindow):
             rf, ms = None, []
         
         from opening_fenix.core.logger import logger
+        def _safe_full_fen(f_str):
+            parts = f_str.strip().split()
+            if len(parts) == 4:
+                return f"{f_str.strip()} 0 1"
+            return f_str
+
         if not rf:
             logger.info(f"Creator: Could not find path to FEN {fen}. Attempting direct set.")
             try:
-                self.board_widget.board.set_fen(fen)
+                self.board_widget.board.set_fen(_safe_full_fen(fen))
             except Exception as e:
                 logger.error(f"Creator: Direct FEN set failed: {e}")
         else:
@@ -3669,7 +3741,7 @@ class CreatorWindow(QMainWindow):
             if root_fen_4 == start_fen_4:
                 self.board_widget.board = chess.Board()  # guarantees fullmove_number=1
             else:
-                self.board_widget.board = chess.Board(rf)
+                self.board_widget.board = chess.Board(_safe_full_fen(rf))
             
             push_ok = True
             for u in ms:
@@ -3694,7 +3766,7 @@ class CreatorWindow(QMainWindow):
                         f"({reached_fen_4} != {target_fen_4}). Falling back to direct FEN."
                     )
                     try:
-                        self.board_widget.board.set_fen(fen)
+                        self.board_widget.board.set_fen(_safe_full_fen(fen))
                     except Exception as e:
                         logger.error(f"Creator: Direct FEN fallback failed: {e}")
         
@@ -3813,6 +3885,7 @@ class CreatorWindow(QMainWindow):
                 it.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
                 it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
                 it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
                 it.setData(0, Qt.ItemDataRole.UserRole, c['uci'])
                 it.setData(1, Qt.ItemDataRole.UserRole, c['priority'])
                 it.setData(0, Qt.ItemDataRole.UserRole + 1, c['id'])
@@ -4009,7 +4082,7 @@ class CreatorWindow(QMainWindow):
         
         if mid:
             act_active = QAction(tr_ui("creator.act_toggle_active", "Aktiv / Inaktiv umschalten"), self)
-            act_active.triggered.connect(lambda: self.on_tree_click(it, 1))
+            act_active.triggered.connect(lambda: self.on_tree_click(it, 4))
             menu.addAction(act_active)
 
         menu.addSeparator()
@@ -4570,6 +4643,7 @@ class CreatorWindow(QMainWindow):
             self.training_manager = training_manager
         
         self.is_test = is_test
+        self.clear_search_tab()
         
         if not repo_name:
             self.backend.close()
@@ -4799,21 +4873,26 @@ class CreatorWindow(QMainWindow):
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_priority", "Level Aufstieg prüfen"), "priority")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_down", "Level Abstieg prüfen"), "level_down")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_check", "Level Gesundheits Check"), "level_check")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_transpositions", "Transpositionen finden (1- & 2-zügig)"), "transpositions")
         
         self.combo_hole_mode.setItemData(0, tr_ui("creator.hole_mode_unanalyzed_tooltip", "Sucht nach Zügen, die noch nicht im Repertoire sind."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(1, tr_ui("creator.hole_mode_priority_tooltip", "Prüft, ob Züge im Repertoire das richtige Level haben."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(2, tr_ui("creator.hole_mode_level_down_tooltip", "Findet Züge, die abstellen sollten, weil sie selten vorkommen."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(3, tr_ui("creator.hole_mode_level_check_tooltip", "Findet Repertoire-Lücken zwischen Leveln."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(4, tr_ui("creator.hole_mode_transpositions_tooltip", "Findet ungenutzte Überleitungen im gesamten Repertoire (1- und 2-zügig)."), Qt.ItemDataRole.ToolTipRole)
         
         combo_layout.addWidget(self.combo_hole_mode)
         combo_layout.addStretch()
-        combo_layout.addWidget(self.lbl_hole_scan_res)
         combo_layout.addWidget(self.btn_hole_scan)
         mode_layout.addLayout(combo_layout)
         
+        status_row = QHBoxLayout()
         self.lbl_mode_desc = QLabel(tr_ui("creator.hole_mode_desc", "Findet Züge, die in Master/Lichess Partien oft gespielt werden, aber im Repertoire fehlen."))
         self.lbl_mode_desc.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; margin-left: 10px;")
-        mode_layout.addWidget(self.lbl_mode_desc)
+        self.lbl_mode_desc.setWordWrap(True)
+        status_row.addWidget(self.lbl_mode_desc, 1)
+        status_row.addWidget(self.lbl_hole_scan_res, 0)
+        mode_layout.addLayout(status_row)
         main_layout.addLayout(mode_layout)
         
         # --- PARAMETERS ---
@@ -4884,6 +4963,7 @@ class CreatorWindow(QMainWindow):
         self.table_holes.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_holes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table_holes.itemDoubleClicked.connect(self.on_hole_double_click)
+        self.table_holes.itemClicked.connect(self.on_hole_click)
         main_layout.addWidget(self.table_holes)
         
         # --- BOTTOM ROW ---
@@ -4897,6 +4977,8 @@ class CreatorWindow(QMainWindow):
         layout.addWidget(self.card_hole_main)
  
     def on_hole_mode_change(self):
+        if hasattr(self, "table_holes") and self.table_holes:
+            self.table_holes.setColumnHidden(0, False)
         mode = self.combo_hole_mode.currentData()
         
         if mode == "holes":
@@ -4905,24 +4987,62 @@ class CreatorWindow(QMainWindow):
             self.lbl_hole_level.setVisible(False)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
+            self.chk_prio_rare.setVisible(False)
         elif mode == "priority":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_priority_desc", "Findet Züge in einem Level, die häufiger als die angegebene Popularität gespielt werden."))
             self.combo_hole_level.setVisible(True)
             self.lbl_hole_level.setVisible(True)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
+            self.chk_prio_rare.setVisible(True)
         elif mode == "level_down":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_down_desc", "Findet Züge in einem Level, die seltener als die angegebene Popularität gespielt werden."))
             self.combo_hole_level.setVisible(True)
             self.lbl_hole_level.setVisible(True)
             self.lbl_hole_threshold.setVisible(True)
             self.combo_hole_threshold.setVisible(True)
+            self.chk_prio_rare.setVisible(False)
         elif mode == "level_check":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_check_desc", "Findet Probleme mit der Level einstufung"))
             self.combo_hole_level.setVisible(False)
             self.lbl_hole_level.setVisible(False)
             self.lbl_hole_threshold.setVisible(False)
             self.combo_hole_threshold.setVisible(False)
+            self.chk_prio_rare.setVisible(False)
+        elif mode == "transpositions":
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_transpositions_desc", "Findet 1- und 2-zügige Überleitungen im gesamten Repertoire, die noch nicht verknüpft sind."))
+            self.combo_hole_level.setVisible(False)
+            self.lbl_hole_level.setVisible(False)
+            self.lbl_hole_threshold.setVisible(False)
+            self.combo_hole_threshold.setVisible(False)
+            self.chk_prio_rare.setVisible(False)
+
+    def clear_search_tab(self):
+        """Clears search results, stops active scan threads, and resets search tab UI state."""
+        if hasattr(self, 'hole_thread') and self.hole_thread and self.hole_thread.isRunning():
+            try:
+                self.hole_thread.finished_signal.disconnect()
+            except Exception:
+                pass
+            self.hole_thread.requestInterruption()
+            self.hole_thread.wait(500)
+            self.hole_thread = None
+
+        if hasattr(self, 'hole_anim_timer') and self.hole_anim_timer.isActive():
+            self.hole_anim_timer.stop()
+
+        if hasattr(self, 'btn_hole_scan') and self.btn_hole_scan:
+            self.btn_hole_scan.setEnabled(True)
+            self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
+
+        if hasattr(self, 'lbl_hole_scan_res') and self.lbl_hole_scan_res:
+            self.lbl_hole_scan_res.setText("")
+
+        if hasattr(self, 'table_holes') and self.table_holes:
+            self.table_holes.setRowCount(0)
+            self.table_holes.setColumnHidden(0, False)
+
+        self._preset_transposition = None
 
     def init_kontrolle_tab(self):
         layout = QVBoxLayout(self.tab_kontrolle)
@@ -5045,34 +5165,53 @@ class CreatorWindow(QMainWindow):
         inner.setSpacing(scale(15))
 
         # Combined table for Direct and Deep search
-        self.table_transpositions = QTableWidget(0, 3)
+        self.table_transpositions = QTableWidget(0, 4)
         self.table_transpositions.setHorizontalHeaderLabels([
             tr_ui("creator.transpositions_header_move", "Zug / Zugfolge"),
             tr_ui("creator.transpositions_header_depth", "Tiefe"),
-            tr_ui("creator.transpositions_header_quality", "Ranking / Qualität")
+            tr_ui("creator.transpositions_header_quality", "Ranking / Qualität"),
+            tr_ui("creator.transpositions_header_add_level", "Zu Level hinzufügen")
         ])
         self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_transpositions.verticalHeader().setVisible(False)
+        self.table_transpositions.verticalHeader().setDefaultSectionSize(scale(34))
+        self.table_transpositions.verticalHeader().setMinimumSectionSize(scale(32))
         self.table_transpositions.setAlternatingRowColors(True)
         self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
+        self.table_transpositions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table_transpositions.customContextMenuRequested.connect(self.on_transposition_context_menu)
+        self.table_transpositions.itemSelectionChanged.connect(self._update_bottom_level_buttons)
         
         hdr = self.table_transpositions.horizontalHeader()
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         self.table_transpositions.setShowGrid(False)
         self.table_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         inner.addWidget(self.table_transpositions)
 
-        # Bottom layout for deep search button
-        h_deep_bottom = QHBoxLayout()
-        
+        # Status row
         self.lbl_transpos_status = QLabel("") 
         self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: 12px;")
-        h_deep_bottom.addWidget(self.lbl_transpos_status)
+        inner.addWidget(self.lbl_transpos_status)
+
+        # Bottom layout for level actions and deep search button
+        h_deep_bottom = QHBoxLayout()
+        h_deep_bottom.setSpacing(scale(10))
+
+        self.lbl_transpos_add = QLabel(tr_ui("creator.transpositions_lbl_add_selected", "Auswahl zu:"))
+        self.lbl_transpos_add.setStyleSheet(f"color: {COLORS['light_text']}; font-size: 12px; font-weight: bold;")
+        self.lbl_transpos_add.setVisible(False)
+        h_deep_bottom.addWidget(self.lbl_transpos_add)
+
+        self.h_bottom_levels_layout = QHBoxLayout()
+        self.h_bottom_levels_layout.setSpacing(scale(6))
+        h_deep_bottom.addLayout(self.h_bottom_levels_layout)
+
         h_deep_bottom.addStretch()
         
         self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
@@ -5105,6 +5244,125 @@ class CreatorWindow(QMainWindow):
         # ── Outgoing immediate transpositions (1-move) ───────────────────────────
         outgoing = self.backend.find_outgoing_transpositions(fen)
         self._populate_outgoing_table(outgoing)
+
+        # Check for preset transposition from Hole Finder / Move Finder
+        preset = getattr(self, "_preset_transposition", None)
+        if preset and isinstance(preset, dict):
+            p_fen = " ".join(preset.get('fen', '').strip().split()[:4])
+            curr_fen = " ".join(fen.strip().split()[:4])
+            if p_fen == curr_fen:
+                p_depth = preset.get('depth', 1)
+                p_sans = preset.get('path_sans', [])
+                p_ucis = preset.get('path_ucis', [])
+                p_move_san = preset.get('move_san', ' '.join(p_sans))
+                p_target = preset.get('target_fen', '')
+                p_qual = preset.get('quality', '')
+                p_qual_label = preset.get('quality_label', '')
+
+                if p_depth == 1:
+                    u1 = p_ucis[0] if p_ucis else None
+                    found_row = -1
+                    for r in range(self.table_transpositions.rowCount()):
+                        it0 = self.table_transpositions.item(r, 0)
+                        if it0:
+                            data = it0.data(Qt.ItemDataRole.UserRole)
+                            if data and isinstance(data, dict):
+                                if (u1 and data.get('move_uci') == u1) or data.get('move_san') == p_move_san:
+                                    found_row = r
+                                    break
+                    if found_row == -1:
+                        if self.table_transpositions.rowCount() == 1 and self.table_transpositions.rowSpan(0, 0) > 1:
+                            self.table_transpositions.clearSpans()
+                            self.table_transpositions.setRowCount(0)
+                        
+                        r = self.table_transpositions.rowCount()
+                        self.table_transpositions.insertRow(r)
+                        m_item = QTableWidgetItem(p_move_san)
+                        row_data = {
+                            "type": "direct",
+                            "target_fen": p_target,
+                            "move_uci": u1,
+                            "move_san": p_move_san,
+                            "depth": 1,
+                        }
+                        m_item.setData(Qt.ItemDataRole.UserRole, row_data)
+                        m_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table_transpositions.setItem(r, 0, m_item)
+                        
+                        d_item = QTableWidgetItem("1")
+                        d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table_transpositions.setItem(r, 1, d_item)
+                        
+                        q_item = QTableWidgetItem(p_qual_label if p_qual_label else "—")
+                        q_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        q_item.setForeground(QColor(COLORS['light_text']))
+                        self.table_transpositions.setItem(r, 2, q_item)
+
+                        lvl_cell = self._create_transposition_level_cell(row_data)
+                        self.table_transpositions.setCellWidget(r, 3, lvl_cell)
+                        found_row = r
+
+                    if found_row >= 0:
+                        self.table_transpositions.selectRow(found_row)
+
+                elif p_depth == 2:
+                    if self.table_transpositions.rowCount() == 1 and self.table_transpositions.rowSpan(0, 0) > 1:
+                        self.table_transpositions.clearSpans()
+                        self.table_transpositions.setRowCount(0)
+
+                    found_row = -1
+                    for r in range(self.table_transpositions.rowCount()):
+                        it0 = self.table_transpositions.item(r, 0)
+                        if it0:
+                            data = it0.data(Qt.ItemDataRole.UserRole)
+                            if data and isinstance(data, dict) and data.get('path_ucis') == p_ucis:
+                                found_row = r
+                                break
+
+                    if found_row == -1:
+                        r = self.table_transpositions.rowCount()
+                        self.table_transpositions.insertRow(r)
+                        
+                        seq_str = "  ".join(p_sans) if p_sans else p_move_san
+                        seq_item = QTableWidgetItem(seq_str)
+                        row_data = {
+                            "type": "bfs",
+                            "search_fen": fen,
+                            "path_ucis": p_ucis,
+                            "path_sans": p_sans,
+                            "target_fen": p_target,
+                            "depth": 2,
+                            "quality": p_qual,
+                            "quality_label": p_qual_label,
+                        }
+                        seq_item.setData(Qt.ItemDataRole.UserRole, row_data)
+                        seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table_transpositions.setItem(r, 0, seq_item)
+                        
+                        d_item = QTableWidgetItem("2")
+                        d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table_transpositions.setItem(r, 1, d_item)
+                        
+                        if not p_qual_label:
+                            p_qual_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if p_qual == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
+                        qual_item = QTableWidgetItem(p_qual_label)
+                        qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        if p_qual == "ausgezeichnet":
+                            qual_item.setForeground(QColor(COLORS['success_green']))
+                        elif p_qual == "solide":
+                            qual_item.setForeground(QColor("#f1c40f"))
+                        else:
+                            qual_item.setForeground(QColor(COLORS['light_text']))
+                        self.table_transpositions.setItem(r, 2, qual_item)
+
+                        lvl_cell = self._create_transposition_level_cell(row_data)
+                        self.table_transpositions.setCellWidget(r, 3, lvl_cell)
+                        found_row = r
+
+                    if found_row >= 0:
+                        self.table_transpositions.selectRow(found_row)
+            else:
+                self._preset_transposition = None
         
         if outgoing:
             # Launch ranking thread if engine available
@@ -5127,6 +5385,8 @@ class CreatorWindow(QMainWindow):
         self._bfs_next_depth = 3
         self._bfs_running = False
         self._update_deep_button_state()
+        self._update_bottom_level_buttons()
+        self._adjust_transposition_table_columns()
 
     def _populate_outgoing_table(self, items):
         self.table_transpositions.setUpdatesEnabled(False)
@@ -5139,7 +5399,7 @@ class CreatorWindow(QMainWindow):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setForeground(QColor(COLORS['light_text']))
                 self.table_transpositions.setItem(0, 0, item)
-                self.table_transpositions.setSpan(0, 0, 1, 3)
+                self.table_transpositions.setSpan(0, 0, 1, 4)
                 return
 
             for i, it in enumerate(items):
@@ -5147,12 +5407,14 @@ class CreatorWindow(QMainWindow):
                 
                 # Col 0: Zug / Zugfolge
                 move_item = QTableWidgetItem(it['move_san'])
-                move_item.setData(Qt.ItemDataRole.UserRole, {
+                data = {
                     "type": "direct",
                     "target_fen": it['target_fen'],
                     "move_uci": it['move_uci'],
-                    "move_san": it['move_san']
-                })
+                    "move_san": it['move_san'],
+                    "depth": 1,
+                }
+                move_item.setData(Qt.ItemDataRole.UserRole, data)
                 move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_transpositions.setItem(i, 0, move_item)
                 
@@ -5165,6 +5427,11 @@ class CreatorWindow(QMainWindow):
                 rank_item = QTableWidgetItem(tr_ui("creator.evaluating", "Bewerte..."))
                 rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_transpositions.setItem(i, 2, rank_item)
+
+                # Col 3: Level Buttons
+                lvl_cell = self._create_transposition_level_cell(data)
+                self.table_transpositions.setCellWidget(i, 3, lvl_cell)
+            self._adjust_transposition_table_columns()
         finally:
             self.table_transpositions.setUpdatesEnabled(True)
 
@@ -5185,15 +5452,19 @@ class CreatorWindow(QMainWindow):
             row = self.table_transpositions.rowCount()
             self.table_transpositions.insertRow(row)
 
-            # Col 0: Zug / Zugfolge
-            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
-            seq_item.setData(Qt.ItemDataRole.UserRole, {
+            data = {
                 "type": "bfs",
                 "search_fen": self._bfs_start_fen,
                 "path_ucis": p["path_ucis"],
                 "path_sans": p["path_sans"],
                 "target_fen": p["target_fen"],
-            })
+                "depth": p["depth"],
+                "quality": p.get("quality"),
+            }
+
+            # Col 0: Zug / Zugfolge
+            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
+            seq_item.setData(Qt.ItemDataRole.UserRole, data)
             seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_transpositions.setItem(row, 0, seq_item)
 
@@ -5221,6 +5492,13 @@ class CreatorWindow(QMainWindow):
             else:
                 qual_item.setForeground(QColor("#f1c40f"))
             self.table_transpositions.setItem(row, 2, qual_item)
+
+            # Col 3: Level Buttons
+            lvl_cell = self._create_transposition_level_cell(data)
+            self.table_transpositions.setCellWidget(row, 3, lvl_cell)
+
+        self._update_bottom_level_buttons()
+        self._adjust_transposition_table_columns()
 
     # ── BFS Deep Search helpers ─────────────────────────────────────────────────
 
@@ -5455,8 +5733,19 @@ class CreatorWindow(QMainWindow):
         if m_type == "direct" or m_type == "outgoing":
             # Play the single move and save it to the repertoire
             uci = data.get("move_uci")
+            san = data.get("move_san")
+            move = None
             if uci:
-                move = chess.Move.from_uci(uci)
+                try:
+                    move = chess.Move.from_uci(uci)
+                except Exception:
+                    pass
+            if not move and san:
+                try:
+                    move = self.board_widget.board.parse_san(san)
+                except Exception:
+                    pass
+            if move and move in self.board_widget.board.legal_moves:
                 self.on_board_move(move)
 
         elif m_type == "bfs":
@@ -5465,11 +5754,32 @@ class CreatorWindow(QMainWindow):
             ucis = data.get("path_ucis", [])
             sans = data.get("path_sans", [])
 
-            if search_fen and ucis and sans:
+            if search_fen and (ucis or sans):
                 self.save_current_details_now()
                 self.set_board_to_fen(search_fen)
 
-                for u, s in zip(ucis, sans):
+                steps = list(zip(ucis, sans)) if (ucis and sans and len(ucis) == len(sans)) else []
+                if not steps and sans:
+                    temp_b = chess.Board(search_fen)
+                    for s in sans:
+                        try:
+                            m = temp_b.parse_san(s)
+                            steps.append((m.uci(), s))
+                            temp_b.push(m)
+                        except Exception:
+                            break
+                elif not steps and ucis:
+                    temp_b = chess.Board(search_fen)
+                    for u in ucis:
+                        try:
+                            m = chess.Move.from_uci(u)
+                            s = temp_b.san(m)
+                            steps.append((u, s))
+                            temp_b.push(m)
+                        except Exception:
+                            break
+
+                for u, s in steps:
                     f_fen = self.board_widget.board.fen()
                     try:
                         m = chess.Move.from_uci(u)
@@ -5488,7 +5798,553 @@ class CreatorWindow(QMainWindow):
             elif data.get("target_fen"):
                 self.set_board_to_fen(data["target_fen"])
 
+    # ── Level Suggestion & Addition for Transpositions ─────────────────────────
 
+    def suggest_transposition_level(self, data: dict):
+        """
+        Suggests an optimal repertoire level for a transposition based on:
+        1. Reachable Level Hierarchy: filters out levels lower than the minimum level required to reach origin.
+        2. Target Continuation Alignment: X_base = max(L_origin, L_target)
+        3. Low Frequency Penalty: if opponent's move frequency < 5% from origin, suggest min(X_base + 1, L_max).
+        Returns (suggested_order, reason_string).
+        """
+        if not self.backend or not self.backend.session:
+            return 1, ""
+
+        levels = self.backend.get_repertoire_levels()
+        if not levels:
+            return 1, ""
+
+        # 1. Determine origin FEN and target FEN
+        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None)
+        target_fen = data.get("target_fen")
+
+        # Determine minimum level required to reach the origin position
+        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if origin_fen else 1
+
+        available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
+        if not available_levels:
+            available_levels = sorted(levels, key=lambda x: x.get("order", 1))
+
+        levels_sorted = sorted(available_levels, key=lambda x: x.get("order", 1))
+        min_level = levels_sorted[0]["order"]
+        max_level = levels_sorted[-1]["order"]
+
+        clean_origin = " ".join(origin_fen.strip().split()[:4]) if origin_fen else None
+        clean_target = " ".join(target_fen.strip().split()[:4]) if target_fen else None
+
+        # 2. Determine L_origin (incoming level to origin position)
+        l_origin = min_reach_level
+
+        # 3. Determine L_target (outgoing continuations from target position)
+        l_target = None
+        if clean_target:
+            target_pos = self.backend.session.query(Position).filter_by(fen=clean_target).first()
+            if target_pos:
+                # First check outgoing moves from target position
+                target_levels = [
+                    rm.level for rm in self.backend.session.query(RepertoireMove.level)
+                    .join(Move, RepertoireMove.move_id == Move.id)
+                    .filter(Move.from_position_id == target_pos.id, RepertoireMove.is_active == True)
+                    .all()
+                ]
+                if target_levels:
+                    l_target = min(target_levels)
+                else:
+                    # Fallback to incoming moves to target position
+                    target_in_levels = [
+                        rm.level for rm in self.backend.session.query(RepertoireMove.level)
+                        .join(Move, RepertoireMove.move_id == Move.id)
+                        .filter(Move.to_position_id == target_pos.id, RepertoireMove.is_active == True)
+                        .all()
+                    ]
+                    if target_in_levels:
+                        l_target = min(target_in_levels)
+
+        # 4. Compute Base Level
+        if l_target is not None and l_origin is not None:
+            x_base = max(l_origin, l_target)
+        elif l_target is not None:
+            x_base = l_target
+        elif l_origin is not None:
+            x_base = l_origin
+        else:
+            x_base = min_level
+
+        x_base = max(min_level, min(x_base, max_level))
+
+        # 5. Check Frequency of first move (< 5% check)
+        first_uci = None
+        first_san = None
+        if data.get("type") == "direct" or "move_uci" in data:
+            first_uci = data.get("move_uci")
+            first_san = data.get("move_san")
+        elif "path_ucis" in data and data["path_ucis"]:
+            first_uci = data["path_ucis"][0]
+            if "path_sans" in data and data["path_sans"]:
+                first_san = data["path_sans"][0]
+
+        castling_aliases = {
+            'e1g1': 'e1h1', 'e1h1': 'e1g1',
+            'e1c1': 'e1a1', 'e1a1': 'e1c1',
+            'e8g8': 'e8h8', 'e8h8': 'e8g8',
+            'e8c8': 'e8a8', 'e8a8': 'e8c8'
+        }
+        alt_first_uci = castling_aliases.get(first_uci) if first_uci else None
+
+        is_low_freq = False
+        if first_uci and clean_origin:
+            try:
+                ld_list = self.backend.session.query(LichessData).filter_by(fen=clean_origin).all()
+                if ld_list:
+                    total_pos_games = 0
+                    move_games = 0
+                    for ld in ld_list:
+                        if ld.moves_json:
+                            m_dict = json.loads(ld.moves_json)
+                            for u, st in m_dict.items():
+                                if isinstance(st, dict):
+                                    w = st.get('white', 0)
+                                    d = st.get('draws', 0)
+                                    b = st.get('black', 0)
+                                    tot = st.get('total', w + d + b)
+                                    total_pos_games += tot
+                                    m_san = st.get('san')
+                                    if u == first_uci or (alt_first_uci and u == alt_first_uci) or (first_san and m_san and m_san == first_san):
+                                        move_games += tot
+                    if total_pos_games >= 20:
+                        freq = move_games / total_pos_games
+                        if freq < 0.05:
+                            is_low_freq = True
+            except Exception:
+                pass
+
+        # 6. Final Suggested Level & Reason
+        if is_low_freq:
+            x_suggested = min(x_base + 1, max_level)
+            reason = tr_ui("creator.transpositions_reason_low_freq", "Schließt an Level {base_level} an, aber Häufigkeit < 5% → Level {level}", base_level=x_base, level=x_suggested)
+        else:
+            x_suggested = x_base
+            reason = tr_ui("creator.transpositions_reason_target_match", "Schließt an Level {level} Züge in der Zielstellung an", level=x_suggested)
+
+        return x_suggested, reason
+
+    def add_transposition_to_level(self, data: dict, level_order: int):
+        """Adds transposition move(s) to the given repertoire level and removes transposition markers."""
+        if not data or not self.backend:
+            return
+
+        m_type = data.get("type")
+        move_label = ""
+        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else "")
+
+        if m_type == "direct" or ("move_uci" in data and "path_ucis" not in data):
+            uci = data.get("move_uci")
+            san = data.get("move_san")
+            if not san and uci and origin_fen:
+                try:
+                    b = chess.Board(origin_fen)
+                    m = chess.Move.from_uci(uci)
+                    san = b.san(m)
+                except Exception:
+                    san = uci
+            if origin_fen and uci:
+                self.backend.add_move(origin_fen, uci, san or uci, level_order=level_order)
+                move_label = san or uci
+
+        elif m_type == "bfs" or "path_ucis" in data:
+            search_fen = data.get("search_fen") or getattr(self, "_bfs_start_fen", None) or origin_fen
+            path_ucis = data.get("path_ucis", [])
+            path_sans = data.get("path_sans", [])
+
+            if search_fen and (path_ucis or path_sans):
+                temp_b = chess.Board(search_fen)
+                steps = []
+                if path_ucis and path_sans and len(path_ucis) == len(path_sans):
+                    steps = list(zip(path_ucis, path_sans))
+                elif path_sans:
+                    for s in path_sans:
+                        try:
+                            m = temp_b.parse_san(s)
+                            steps.append((m.uci(), s))
+                            temp_b.push(m)
+                        except Exception:
+                            break
+                    temp_b = chess.Board(search_fen)
+                elif path_ucis:
+                    for u in path_ucis:
+                        try:
+                            m = chess.Move.from_uci(u)
+                            s = temp_b.san(m)
+                            steps.append((u, s))
+                            temp_b.push(m)
+                        except Exception:
+                            break
+                    temp_b = chess.Board(search_fen)
+
+                for u, s in steps:
+                    curr_fen = temp_b.fen()
+                    try:
+                        m = chess.Move.from_uci(u)
+                        if m in temp_b.legal_moves:
+                            self.backend.add_move(curr_fen, u, s, level_order=level_order)
+                            temp_b.push(m)
+                        else:
+                            break
+                    except Exception:
+                        break
+
+                move_label = " ".join(path_sans) if path_sans else " ".join(path_ucis)
+
+        # Clear preset transposition and remove marker
+        self._preset_transposition = None
+
+        # Remove matching transposition from table_holes if open / present
+        if hasattr(self, "table_holes") and self.table_holes:
+            rows_to_del = []
+            clean_orig = " ".join(origin_fen.strip().split()[:4]) if origin_fen else ""
+            for r in range(self.table_holes.rowCount()):
+                it0 = self.table_holes.item(r, 0)
+                if it0:
+                    h_fen = it0.data(Qt.ItemDataRole.UserRole)
+                    h_data = it0.data(Qt.ItemDataRole.UserRole + 10)
+                    if h_fen and clean_orig and " ".join(h_fen.strip().split()[:4]) == clean_orig:
+                        if h_data and isinstance(h_data, dict):
+                            if h_data.get("target_fen") == data.get("target_fen") or h_data.get("move_san") == move_label:
+                                rows_to_del.append(r)
+            for r in reversed(rows_to_del):
+                self.table_holes.removeRow(r)
+
+        # Feedback & UI updates
+        self.play_sound("move")
+        self.update_ui_from_fen()
+
+        # Update / clear transposition tab marker if no more outgoing transpositions
+        outgoing_rem = self.backend.find_outgoing_transpositions(origin_fen or self.board_widget.board.fen())
+        idx = self.tabs.indexOf(self.tab_transpositions)
+        if idx != -1:
+            if len(outgoing_rem) > 0:
+                self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
+                icon_path = os.path.join(get_base_path(), "assets", "Icons", "sync.png")
+                if os.path.exists(icon_path):
+                    self.tabs.setTabIcon(idx, QIcon(icon_path))
+            else:
+                self.tabs.tabBar().setTabTextColor(idx, QColor())
+                self.tabs.setTabIcon(idx, QIcon())
+
+        lvl_name = f"Level {level_order}"
+        for lvl in self.backend.get_repertoire_levels():
+            if lvl.get("order") == level_order:
+                lvl_name = lvl.get("name", lvl_name)
+                break
+
+        if hasattr(self, "lbl_transpos_status"):
+            self.lbl_transpos_status.setText(
+                tr_ui("creator.transpositions_added_success", "✓ {move} zu Level {level} hinzugefügt.", move=move_label, level=f"{level_order} ({lvl_name})")
+            )
+        self.update_transpositions_tab()
+
+    def _adjust_transposition_table_columns(self):
+        """Ensures all columns in the transpositions table have optimal sizing without clipping."""
+        # Determine if any multi-move (depth > 1) transpositions are present
+        has_deep = False
+        for r in range(self.table_transpositions.rowCount()):
+            it0 = self.table_transpositions.item(r, 0)
+            if it0:
+                d = it0.data(Qt.ItemDataRole.UserRole)
+                if d and isinstance(d, dict) and d.get("depth", 1) > 1:
+                    has_deep = True
+                    break
+            it1 = self.table_transpositions.item(r, 1)
+            if it1 and it1.text() not in ("", "1"):
+                try:
+                    if int(it1.text()) > 1:
+                        has_deep = True
+                        break
+                except ValueError:
+                    pass
+
+        self.table_transpositions.setColumnHidden(2, not has_deep)
+        self.table_transpositions.resizeColumnToContents(1)
+        if has_deep:
+            self.table_transpositions.resizeColumnToContents(2)
+
+        levels = self.backend.get_repertoire_levels() if self.backend else []
+        levels_count = max(1, len(levels))
+        
+        # Suggested button width (~72px) + (N-1) standard buttons (~50px each) + spacing + cell padding
+        needed_buttons_w = scale(72) + (levels_count - 1) * scale(50) + (levels_count - 1) * scale(4) + scale(24)
+        
+        hdr_item = self.table_transpositions.horizontalHeaderItem(3)
+        hdr_text = hdr_item.text() if hdr_item else "Zu Level hinzufügen"
+        hdr_w = self.table_transpositions.fontMetrics().horizontalAdvance(hdr_text) + scale(32)
+        
+        final_w = max(needed_buttons_w, hdr_w)
+        self.table_transpositions.setColumnWidth(3, int(final_w))
+
+    def _create_transposition_level_cell(self, data: dict) -> QWidget:
+        """Creates a compact container widget with action buttons for all available reachable levels."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(scale(2), scale(1), scale(2), scale(1))
+        layout.setSpacing(scale(4))
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None)
+        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if (self.backend and origin_fen) else 1
+
+        levels = self.backend.get_repertoire_levels() if self.backend else []
+        if not levels:
+            levels = [{"name": "Level 1", "order": 1}]
+
+        # Filter out levels lower than min_reach_level (cannot reach position in those levels)
+        available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
+        if not available_levels:
+            available_levels = levels
+
+        suggested_order, suggested_reason = self.suggest_transposition_level(data)
+
+        for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
+            order = lvl.get("order", 1)
+            name = lvl.get("name", f"Level {order}")
+            btn = QPushButton()
+            btn.setFixedHeight(scale(24))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+
+            if order == suggested_order:
+                btn.setText(f"⭐ + L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.transpositions_tooltip_suggested",
+                        "Empfohlen: Level {order} ({name}) — {reason}",
+                        order=order,
+                        name=name,
+                        reason=suggested_reason,
+                    )
+                )
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f39c12, stop:1 #e67e22);
+                        color: #111111;
+                        font-weight: bold;
+                        font-size: 11px;
+                        border-radius: {scale(12)}px;
+                        padding: 0 {scale(6)}px;
+                        border: 1px solid #f1c40f;
+                    }}
+                    QPushButton:hover {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f1c40f, stop:1 #f39c12);
+                    }}
+                    QPushButton:pressed {{
+                        background: #d35400;
+                    }}
+                    """
+                )
+                min_w = btn.fontMetrics().horizontalAdvance(btn.text()) + scale(16)
+                btn.setMinimumWidth(min_w)
+            else:
+                btn.setText(f"+ L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.transpositions_tooltip_level",
+                        "Diesen Zug zu Level {order} ({name}) hinzufügen",
+                        order=order,
+                        name=name,
+                    )
+                )
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background-color: rgba(0, 0, 0, 0.07);
+                        color: {COLORS['brown_text']};
+                        font-weight: bold;
+                        font-size: 11px;
+                        border-radius: {scale(12)}px;
+                        padding: 0 {scale(6)}px;
+                        border: 1px solid rgba(0, 0, 0, 0.18);
+                    }}
+                    QPushButton:hover {{
+                        background-color: rgba(0, 0, 0, 0.14);
+                        color: #000000;
+                        border-color: rgba(0, 0, 0, 0.35);
+                    }}
+                    QPushButton:pressed {{
+                        background-color: rgba(0, 0, 0, 0.22);
+                    }}
+                    """
+                )
+                min_w = btn.fontMetrics().horizontalAdvance(btn.text()) + scale(14)
+                btn.setMinimumWidth(min_w)
+
+            btn.clicked.connect(lambda checked, d=data, o=order: self.add_transposition_to_level(d, o))
+            layout.addWidget(btn)
+
+        return container
+
+    def _update_bottom_level_buttons(self):
+        """Updates the bottom bar level buttons based on the currently selected transposition row."""
+        if not hasattr(self, "h_bottom_levels_layout") or not hasattr(self, "lbl_transpos_add"):
+            return
+
+        # Clear existing buttons in layout
+        while self.h_bottom_levels_layout.count() > 0:
+            item = self.h_bottom_levels_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        selected_rows = self.table_transpositions.selectionModel().selectedRows() if self.table_transpositions.selectionModel() else []
+        if not selected_rows:
+            self.lbl_transpos_add.setVisible(False)
+            return
+
+        sel_row = selected_rows[0].row()
+        it0 = self.table_transpositions.item(sel_row, 0)
+        if not it0:
+            self.lbl_transpos_add.setVisible(False)
+            return
+
+        data = it0.data(Qt.ItemDataRole.UserRole)
+        if not data or not isinstance(data, dict) or data.get("type") not in ("direct", "bfs"):
+            self.lbl_transpos_add.setVisible(False)
+            return
+
+        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None)
+        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if (self.backend and origin_fen) else 1
+
+        levels = self.backend.get_repertoire_levels() if self.backend else []
+        if not levels:
+            levels = [{"name": "Level 1", "order": 1}]
+
+        available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
+        if not available_levels:
+            available_levels = levels
+
+        self.lbl_transpos_add.setVisible(True)
+        suggested_order, suggested_reason = self.suggest_transposition_level(data)
+
+        for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
+            order = lvl.get("order", 1)
+            name = lvl.get("name", f"Level {order}")
+            btn = QPushButton()
+            btn.setFixedHeight(scale(28))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+            if order == suggested_order:
+                btn.setText(f"⭐ + L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.transpositions_tooltip_suggested",
+                        "Empfohlen: Level {order} ({name}) — {reason}",
+                        order=order,
+                        name=name,
+                        reason=suggested_reason,
+                    )
+                )
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f39c12, stop:1 #e67e22);
+                        color: #111111;
+                        font-weight: bold;
+                        font-size: 12px;
+                        border-radius: {scale(14)}px;
+                        padding: 0 {scale(10)}px;
+                        border: 1px solid #f1c40f;
+                    }}
+                    QPushButton:hover {{
+                        background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f1c40f, stop:1 #f39c12);
+                    }}
+                    QPushButton:pressed {{
+                        background: #d35400;
+                    }}
+                    """
+                )
+            else:
+                btn.setText(f"+ L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.transpositions_tooltip_level",
+                        "Diesen Zug zu Level {order} ({name}) hinzufügen",
+                        order=order,
+                        name=name,
+                    )
+                )
+                btn.setStyleSheet(
+                    f"""
+                    QPushButton {{
+                        background-color: rgba(0, 0, 0, 0.07);
+                        color: {COLORS['brown_text']};
+                        font-weight: bold;
+                        font-size: 12px;
+                        border-radius: {scale(14)}px;
+                        padding: 0 {scale(10)}px;
+                        border: 1px solid rgba(0, 0, 0, 0.18);
+                    }}
+                    QPushButton:hover {{
+                        background-color: rgba(0, 0, 0, 0.14);
+                        color: #000000;
+                        border-color: rgba(0, 0, 0, 0.35);
+                    }}
+                    QPushButton:pressed {{
+                        background-color: rgba(0, 0, 0, 0.22);
+                    }}
+                    """
+                )
+
+            btn.clicked.connect(lambda checked, d=data, o=order: self.add_transposition_to_level(d, o))
+            self.h_bottom_levels_layout.addWidget(btn)
+
+    def on_transposition_context_menu(self, pos):
+        """Shows a context menu when right-clicking on a transposition row."""
+        item = self.table_transpositions.itemAt(pos)
+        if not item:
+            return
+        row = item.row()
+        it0 = self.table_transpositions.item(row, 0)
+        if not it0:
+            return
+        data = it0.data(Qt.ItemDataRole.UserRole)
+        if not data or not isinstance(data, dict) or data.get("type") not in ("direct", "bfs"):
+            return
+
+        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None)
+        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if (self.backend and origin_fen) else 1
+
+        menu = QMenu(self)
+        levels = self.backend.get_repertoire_levels() if self.backend else []
+        if not levels:
+            levels = [{"name": "Level 1", "order": 1}]
+
+        available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
+        if not available_levels:
+            available_levels = levels
+
+        suggested_order, _ = self.suggest_transposition_level(data)
+
+        for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
+            order = lvl.get("order", 1)
+            name = lvl.get("name", f"Level {order}")
+            if order == suggested_order:
+                title = tr_ui(
+                    "creator.transpositions_ctx_add_level_suggested",
+                    "⭐ Zu {name} (Level {order}) hinzufügen (Empfohlen)",
+                    name=name,
+                    order=order,
+                )
+            else:
+                title = tr_ui(
+                    "creator.transpositions_ctx_add_level",
+                    "Zu {name} (Level {order}) hinzufügen",
+                    name=name,
+                    order=order,
+                )
+            act = menu.addAction(title)
+            act.triggered.connect(lambda checked, d=data, o=order: self.add_transposition_to_level(d, o))
+
+        menu.exec(self.table_transpositions.viewport().mapToGlobal(pos))
 
     def toggle_overhaul_pause(self):
         self.overhaul_paused = not self.overhaul_paused
@@ -5658,20 +6514,36 @@ class CreatorWindow(QMainWindow):
     def _on_hole_scan_finished(self, holes, mode):
         self.hole_anim_timer.stop()
         self.btn_hole_scan.setEnabled(True)
-        
-        # Reset button text
         self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
         
         count = len(holes)
-        self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
+        if mode == "transpositions":
+            if count >= 15:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_limit_reached", "✓ 15 Transpositionen gefunden (Limit von 15 erreicht)."))
+            else:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_found_count", f"✓ {count} Transposition(en) gefunden.", count=count))
+        else:
+            self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
         
         if mode == "holes":
+            self.table_holes.setColumnHidden(0, False)
             self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
             self.btn_hole_exempt.setVisible(True)
         elif mode == "level_check":
+            self.table_holes.setColumnHidden(0, False)
             self.table_holes.setHorizontalHeaderLabels(["Info", "Analyse", "Unser Zug"])
             self.btn_hole_exempt.setVisible(False)
+        elif mode == "transpositions":
+            has_deep_transpos = any(h.get('depth', 1) > 1 for h in holes if h.get('type') in ('transposition_1', 'transposition_2'))
+            self.table_holes.setColumnHidden(0, not has_deep_transpos)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_quality", "Qualität"),
+                tr_ui("creator.hole_header_depth_type", "Tiefe / Typ"),
+                tr_ui("creator.hole_header_move", "Zug")
+            ])
+            self.btn_hole_exempt.setVisible(True)
         else:
+            self.table_holes.setColumnHidden(0, False)
             self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
             self.btn_hole_exempt.setVisible(False)
 
@@ -5679,45 +6551,80 @@ class CreatorWindow(QMainWindow):
         try:
             self.table_holes.setRowCount(len(holes))
             for i, h in enumerate(holes):
-                pop_val = h.get('popularity', 0)
-                item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
-                item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
-                if 'move_san' in h:
-                    item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
-                
-                item_type = QTableWidgetItem(h['type'].upper())
-                if h['type'] == 'user':
-                    item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                    item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
-                elif h['type'] == 'opponent':
-                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
-                elif h['type'] == 'priority_check':
-                    if mode == "level_down":
-                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                        item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
+                if h.get('type') in ('transposition_1', 'transposition_2'):
+                    d = h.get('depth', 1)
+                    q = h.get('quality', '')
+                    q_label = h.get('quality_label', '')
+
+                    if d == 1:
+                        item_pop = QTableWidgetItem("—")
+                        item_pop.setForeground(QBrush(QColor(COLORS['light_text'])))
                     else:
-                        item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                        item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
-                elif h['type'] == 'level_mismatch':
-                    item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
-                    item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
-                elif h['type'] == 'orphaned_move':
-                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
-                    item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
-                    # Add diagnostic level info to the move text
-                    if 'from_level' in h and 'to_level' in h:
-                        move_text = h.get('move_san', '—')
-                        h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
-                elif h['type'] == 'repertoire_gap':
-                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                    item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
-                    item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
+                        if not q_label:
+                            q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
+                        item_pop = QTableWidgetItem(q_label)
+                        if q == 'ausgezeichnet':
+                            item_pop.setForeground(QBrush(QColor(COLORS['success_green'])))
+                        else:
+                            item_pop.setForeground(QBrush(QColor("#f1c40f")))
+
+                    item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+                    item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
+                    if 'move_san' in h:
+                        item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+                    if 'target_fen' in h:
+                        item_pop.setData(Qt.ItemDataRole.UserRole + 2, h['target_fen'])
+
+                    t_str = tr_ui("creator.tag_transpos_1", "1-ZUG (GEGNER)") if d == 1 else tr_ui("creator.tag_transpos_2", "2-ZÜGE")
+                    item_type = QTableWidgetItem(t_str)
+                    item_type.setForeground(QBrush(QColor("#3498db" if d == 1 else "#9b59b6")))
+
+                    move_seq = h.get('move_san', '—')
+                    it_move = QTableWidgetItem(move_seq)
+                    it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+                else:
+                    pop_val = h.get('popularity', 0)
+                    item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
+                    item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+                    item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
+                    if 'move_san' in h:
+                        item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+                    
+                    item_type = QTableWidgetItem(h['type'].upper())
+                    if h['type'] == 'user':
+                        item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
+                        item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
+                    elif h['type'] == 'opponent':
+                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                        item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
+                    elif h['type'] == 'priority_check':
+                        if mode == "level_down":
+                            item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                            item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
+                        else:
+                            item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                            item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
+                    elif h['type'] == 'level_mismatch':
+                        item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
+                        item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
+                    elif h['type'] == 'orphaned_move':
+                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                        item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
+                        item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
+                        # Add diagnostic level info to the move text
+                        if 'from_level' in h and 'to_level' in h:
+                            move_text = h.get('move_san', '—')
+                            h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
+                    elif h['type'] == 'repertoire_gap':
+                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                        item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
+                        item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
+
+                    it_move = QTableWidgetItem(h.get('move_san', '—'))
+                    it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
 
                 item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_move = QTableWidgetItem(h.get('move_san', '—'))
                 it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_holes.setItem(i, 0, item_pop)
                 self.table_holes.setItem(i, 1, item_type)
@@ -5726,10 +6633,63 @@ class CreatorWindow(QMainWindow):
             self.table_holes.setUpdatesEnabled(True)
 
 
+    def on_hole_click(self, item):
+        self._handle_hole_item_activated(item)
+
     def on_hole_double_click(self, item):
+        self._handle_hole_item_activated(item)
+
+    def _handle_hole_item_activated(self, item):
         row = item.row()
-        fen = self.table_holes.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        if fen:
+        item0 = self.table_holes.item(row, 0)
+        if not item0:
+            return
+        h_data = item0.data(Qt.ItemDataRole.UserRole + 10)
+        fen = item0.data(Qt.ItemDataRole.UserRole)
+        if not fen:
+            return
+
+        mode = self.combo_hole_mode.currentData()
+        is_transpos = (
+            mode == "transpositions" or
+            (h_data and isinstance(h_data, dict) and h_data.get('type') in ('transposition_1', 'transposition_2'))
+        )
+
+        if is_transpos:
+            # 1. Ensure Transpositions Tab is visible
+            active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+            if "TRANSPOSITIONS" not in active_tabs:
+                active_tabs.append("TRANSPOSITIONS")
+                self.set_setting("creator_active_tabs", active_tabs)
+                self.apply_tab_visibility()
+
+            # 2. Store preset transposition
+            if h_data and isinstance(h_data, dict):
+                self._preset_transposition = h_data
+            else:
+                move_san = self.table_holes.item(row, 2).text() if self.table_holes.item(row, 2) else ""
+                self._preset_transposition = {
+                    "fen": fen,
+                    "move_san": move_san,
+                    "depth": 1,
+                    "type": "transposition_1",
+                    "path_sans": [move_san],
+                    "path_ucis": []
+                }
+
+            # 3. Set board to starting position
+            self.set_board_to_fen(fen)
+
+            # 4. Open Transpositions Tab
+            idx = self.tabs.indexOf(self.tab_transpositions)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+            else:
+                self.tabs.setCurrentWidget(self.tab_transpositions)
+
+            # 5. Populate and show transposition in the tab
+            self.update_transpositions_tab()
+        else:
             self.set_board_to_fen(fen)
             self.tabs.setCurrentIndex(0) # Switch to DETAILS to add the move
 

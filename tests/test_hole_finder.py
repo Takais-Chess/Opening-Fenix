@@ -3,7 +3,10 @@ import chess
 import json
 from opening_fenix.creator.creator_window import CreatorBackend
 from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
-from opening_fenix.core.services.hole_finder_service import find_repertoire_holes, find_priority_mismatches, find_level_mismatches
+from opening_fenix.core.services.hole_finder_service import (
+    find_repertoire_holes, find_priority_mismatches, find_level_mismatches,
+    find_repertoire_transpositions, run_hole_finder_task
+)
 
 
 def clean_fen(fen):
@@ -478,3 +481,300 @@ def test_find_level_mismatches_diagnostics(backend):
     mm = next(r for r in results if r['move_san'] == "Nf3")
     assert mm['from_level'] == 1
     assert mm['to_level'] == 2
+
+
+def test_find_repertoire_transpositions_1move(backend):
+    """
+    Test 1-move Opponent transposition detection:
+    Repertoire for White:
+    Branch 1: 1. e4 e5 2. Nf3
+    Branch 2: 1. e4 Nf6
+    From position after 1. e4 (Black to move), Black move 1... e5 transposes to Branch 1!
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    # Root
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    # After 1. e4 (Black to move)
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    # Branch 1: 1... e5 -> 2. Nf3
+    p_e5 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Open Game")
+    p_nf3 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="2. Nf3")
+    # Branch 2: 1... Nf6 (Alekhine)
+    p_nf6 = Position(fen=clean_fen("rnbqkb1r/pppppppp/5n2/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Alekhine")
+
+    session.add_all([p_root, p_e4, p_e5, p_nf3, p_nf6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e5 = Move(from_position_id=p_e4.id, to_position_id=p_e5.id, uci="e7e5", san="e5")
+    m_nf3 = Move(from_position_id=p_e5.id, to_position_id=p_nf3.id, uci="g1f3", san="Nf3")
+
+    m_nf6 = Move(from_position_id=p_e4.id, to_position_id=p_nf6.id, uci="g8f6", san="Nf6")
+
+    session.add_all([m_e4, m_e5, m_nf3, m_nf6])
+    session.flush()
+
+    for m in [m_e4, m_e5, m_nf3, m_nf6]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+
+    # From p_e4 (after 1. e4), opponent move 1... e5 is already covered.
+    # But if we remove m_e5 from active repertoire and leave p_e5 as a destination reachable via another path:
+    session.query(RepertoireMove).filter_by(move_id=m_e5.id).delete()
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+    match = [t for t in transpositions if t['fen'] == clean_fen(p_e4.fen) and t['move_san'] == 'e5']
+    assert len(match) == 1
+    t = match[0]
+    assert t['depth'] == 1
+    assert t['type'] == 'transposition_1'
+    assert t['target_fen'] == clean_fen(p_e5.fen)
+    assert t['quality_label'] == "—"
+
+
+def test_find_repertoire_transpositions_2moves(backend):
+    """
+    Test 2-move Opponent-then-User transposition detection:
+    Branch 1: 1. e4 c5 2. Nf3 d6 3. d4 (Open Sicilian)
+    Branch 2: 1. e4 e6 (French)
+    From 1. e4 (Black to move), Black plays 1... c5, then White plays 2. Nf3, transposing to Branch 1!
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    # Branch 1 (Sicilian)
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian", good_moves=json.dumps(["g1f3"]))
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+    # Branch 2 (French)
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="French")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3, p_fre_e6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e6 = Move(from_position_id=p_e4.id, to_position_id=p_fre_e6.id, uci="e7e6", san="e6")
+
+    # In branch 1, 1... c5 -> 2. Nf3
+    m_c5 = Move(from_position_id=p_e4.id, to_position_id=p_sic_c5.id, uci="c7c5", san="c5")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e6, m_c5, m_nf3])
+    session.flush()
+
+    # Active moves in repertoire: e4, e6, and 2. Nf3 (from c5)
+    # Notice: m_c5 is NOT linked from p_e4 (so 1... c5 is unlinked from p_e4!)
+    for m in [m_e4, m_e6, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+
+    # From p_e4 (Black to move): Opponent plays 1... c5, User plays 2. Nf3 -> transposes to p_sic_nf3!
+    match = [t for t in transpositions if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2 and 'c5' in t['move_san'] and 'Nf3' in t['move_san']]
+    assert len(match) == 1
+    t = match[0]
+    assert t['type'] == 'transposition_2'
+    assert t['target_fen'] == clean_fen(p_sic_nf3.fen)
+    assert t['quality'] == 'ausgezeichnet'
+    assert "🟢" in t['quality_label']
+
+
+def test_transposition_quality_filter(backend):
+    """
+    Test quality classification based on user move soundness.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian", good_moves=json.dumps(["g1f3"]))
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="French")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3, p_fre_e6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e6 = Move(from_position_id=p_e4.id, to_position_id=p_fre_e6.id, uci="e7e6", san="e6")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e6, m_nf3])
+    session.flush()
+
+    for m in [m_e4, m_e6, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+    match = [t for t in transpositions if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2 and 'c5' in t['move_san']]
+    assert len(match) == 1
+    assert match[0]['quality'] == 'ausgezeichnet'
+    assert "🟢" in match[0]['quality_label']
+
+
+def test_transposition_limit_cap_15(backend):
+    """
+    Verify that the search ends cleanly when reaching the 15 transpositions limit.
+    """
+    session = backend.session
+    transpositions = find_repertoire_transpositions(session)
+    assert len(transpositions) <= 15
+
+
+def test_inactive_move_not_suggested_as_transposition(backend):
+    """
+    Verify that moves marked as is_active=False are NOT proposed as new transpositions.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_e5 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="1... e5")
+
+    session.add_all([p_root, p_e4, p_e5])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e5 = Move(from_position_id=p_e4.id, to_position_id=p_e5.id, uci="e7e5", san="e5")
+
+    session.add_all([m_e4, m_e5])
+    session.flush()
+
+    # m_e4 is active, but m_e5 is INACTIVE (user deactivated it)
+    session.add(RepertoireMove(move_id=m_e4.id, level=1, is_active=True))
+    session.add(RepertoireMove(move_id=m_e5.id, level=1, is_active=False))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+    # The inactive move e7e5 should NOT be suggested as a transposition
+    e5_transpos = [t for t in transpositions if t['fen'] == clean_fen(p_e4.fen) and 'e5' in t['move_san']]
+    assert len(e5_transpos) == 0
+
+
+def test_transposition_backward_cycle_filtered(backend):
+    """
+    Verify that transpositions leading to a shallower/ancestor position are filtered out.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_e5 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="1... e5")
+    p_nf3 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="2. Nf3")
+
+    session.add_all([p_root, p_e4, p_e5, p_nf3])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e5 = Move(from_position_id=p_e4.id, to_position_id=p_e5.id, uci="e7e5", san="e5")
+    m_nf3 = Move(from_position_id=p_e5.id, to_position_id=p_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e5, m_nf3])
+    session.flush()
+
+    for m in [m_e4, m_e5, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+    # Target positions must not be shallower than the starting position
+    for t in transpositions:
+        if t['fen'] == clean_fen(p_nf3.fen):
+            assert t['target_fen'] != clean_fen(p_root.fen)
+            assert t['target_fen'] != clean_fen(p_e4.fen)
+
+
+def test_2move_transposition_off_repertoire_intermediate(backend):
+    """
+    Verify that a 2-move transposition is detected even when the intermediate
+    position (opponent's move) is not yet visited/cached in the repertoire.
+    Line 1 (Philidor): 1. e4 e5 2. Nf3 d6 3. d4 Nf6 4. Nc3
+    Line 2 (Pirc): 1. e4 d6 2. d4 Nf6 3. Nc3 g6
+    From Pirc after 3. Nc3, Black plays 3... e5, White plays 4. Nf3 -> transposes to Philidor!
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    def add_line(moves):
+        b = chess.Board()
+        prev_pos = session.query(Position).filter_by(fen=clean_fen(b.fen())).first()
+        if not prev_pos:
+            prev_pos = Position(fen=clean_fen(b.fen()))
+            session.add(prev_pos)
+            session.commit()
+        for m_san in moves:
+            m = b.parse_san(m_san)
+            b.push(m)
+            fen = clean_fen(b.fen())
+            pos = session.query(Position).filter_by(fen=fen).first()
+            if not pos:
+                pos = Position(fen=fen)
+                session.add(pos)
+                session.commit()
+            move_obj = session.query(Move).filter_by(from_position_id=prev_pos.id, uci=m.uci()).first()
+            if not move_obj:
+                move_obj = Move(from_position_id=prev_pos.id, to_position_id=pos.id, uci=m.uci(), san=m_san)
+                session.add(move_obj)
+                session.commit()
+            rm = session.query(RepertoireMove).filter_by(move_id=move_obj.id).first()
+            if not rm:
+                rm = RepertoireMove(move_id=move_obj.id, is_active=True)
+                session.add(rm)
+                session.commit()
+            prev_pos = pos
+
+    line1 = ['e4', 'e5', 'Nf3', 'd6', 'd4', 'Nf6', 'Nc3']
+    line2 = ['e4', 'd6', 'd4', 'Nf6', 'Nc3', 'g6']
+    add_line(line1)
+    add_line(line2)
+
+    transpositions = find_repertoire_transpositions(session)
+    e5_nf3_transpos = [t for t in transpositions if t['depth'] == 2 and 'e5' in t['move_san'] and 'Nf3' in t['move_san']]
+    assert len(e5_nf3_transpos) >= 1
+    t = e5_nf3_transpos[0]
+    assert t['type'] == 'transposition_2'
+    assert '🟢' in t['quality_label']
+
+
+
+

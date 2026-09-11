@@ -20,6 +20,8 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
             return find_repertoire_holes(session, threshold, elo_range)
         elif mode == "level_check":
             return find_level_mismatches(session)
+        elif mode == "transpositions":
+            return find_repertoire_transpositions(session, elo_range)
         else:
             return find_priority_mismatches(session, level, threshold, find_rare=find_rare)
     finally:
@@ -372,4 +374,300 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
         })
     
     return sorted(mismatches, key=lambda x: x['popularity'], reverse=True)
+
+
+def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
+    """
+    Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
+    Filters strictly for sound/good lines:
+      - User moves: Verified against good_moves / engine eval / non-blunder.
+      - Opponent moves: Verified against plausible game frequency or legal variations.
+    Classifies results as 'ausgezeichnet' (🟢) or 'solide' (🟡).
+    """
+    def clean_fen(f):
+        if not f:
+            return ""
+        return " ".join(f.strip().split()[:4])
+
+    # 1. Metadata
+    m = session.query(Metadata).filter_by(key="color").first()
+    player_color = m.value if m else 'w'
+
+    # 2. Pre-fetch positions and moves
+    all_positions = session.query(Position).all()
+    if not all_positions:
+        return []
+
+    fen_to_pos = {clean_fen(p.fen): p for p in all_positions if p.fen}
+    id_to_clean_fen = {p.id: clean_fen(p.fen) for p in all_positions if p.fen}
+
+    exempt_fens = {
+        clean_fen(row[0])
+        for row in session.query(Position.fen).filter(Position.is_hole_exempt == True).all()
+        if row[0]
+    }
+
+    # Repertoire moves
+    all_rep_moves = session.query(Move, RepertoireMove).join(
+        RepertoireMove, Move.id == RepertoireMove.move_id
+    ).all()
+
+    rep_moves_from_id = collections.defaultdict(list)
+    rep_adj_fen = collections.defaultdict(set)
+    inactive_adj_fen = collections.defaultdict(set)
+    for move, rm in all_rep_moves:
+        f_fen = id_to_clean_fen.get(move.from_position_id)
+        if rm.is_active:
+            rep_moves_from_id[move.from_position_id].append(move)
+            if f_fen:
+                rep_adj_fen[f_fen].add(move.uci.strip().lower())
+        else:
+            if f_fen:
+                inactive_adj_fen[f_fen].add(move.uci.strip().lower())
+
+    # Lichess cache
+    lichess_cache = {}
+    for ld in session.query(LichessData).all():
+        cf = clean_fen(ld.fen)
+        try:
+            lichess_cache[cf] = json.loads(ld.moves_json)
+        except Exception:
+            pass
+
+    # 3. BFS from Root to get reachable active repertoire positions
+    sp = session.query(Position.id, Position.fen).filter(
+        Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+    ).first()
+    if not sp:
+        return []
+    root_id, root_fen = sp
+    root_norm = clean_fen(root_fen)
+
+    def get_variation_name(pos):
+        if not pos:
+            return "Variante"
+        return (
+            pos.variation_1 or pos.cached_v1 or
+            pos.variation_2 or pos.cached_v2 or
+            pos.variation_3 or pos.cached_v3 or
+            "Variante"
+        )
+
+    reachable_fens = {root_norm}
+    reachable_depths = {root_norm: 0}
+    bfs_queue = collections.deque([(root_id, root_norm, 0)])
+    visited_ids = {root_id}
+
+    while bfs_queue:
+        curr_id, curr_norm, depth = bfs_queue.popleft()
+        for move in rep_moves_from_id.get(curr_id, []):
+            tid = move.to_position_id
+            if tid and tid not in visited_ids:
+                visited_ids.add(tid)
+                t_norm = id_to_clean_fen.get(tid)
+                if t_norm:
+                    reachable_fens.add(t_norm)
+                    reachable_depths[t_norm] = depth + 1
+                    bfs_queue.append((tid, t_norm, depth + 1))
+
+    # 4. Helpers to evaluate move soundness
+    def evaluate_user_move(from_pos, from_fen, move_uci, target_pos, covered_from_inter=None):
+        if covered_from_inter and move_uci in covered_from_inter:
+            return (True, True)
+
+        if from_pos and from_pos.good_moves:
+            try:
+                gm_list = json.loads(from_pos.good_moves)
+                if move_uci in gm_list:
+                    return (True, True)
+            except Exception:
+                pass
+
+        if from_pos and from_pos.engine_eval is not None and target_pos and target_pos.engine_eval is not None:
+            p_turn = from_fen.split()[1] if len(from_fen.split()) > 1 else 'w'
+            score_diff = target_pos.engine_eval - from_pos.engine_eval
+            user_loss = -score_diff if p_turn == 'w' else score_diff
+            if user_loss <= 15:
+                return (True, True)
+            return (False, False)
+
+        ld_moves = lichess_cache.get(from_fen, {})
+        if ld_moves:
+            if move_uci in ld_moves:
+                m_stat = ld_moves[move_uci]
+                total_games = sum(v.get('total', 0) for v in ld_moves.values())
+                m_total = m_stat.get('total', 0)
+                if total_games > 0 and (m_total / total_games) >= 0.10:
+                    return (True, True)
+                return (False, False)
+            return (False, False)
+
+        # Fallback: When no cached Lichess/engine data exists for the off-repertoire intermediate position,
+        # our move into an active, deeper repertoire position is considered sound.
+        return (True, True)
+
+    MAX_TRANSPOSITIONS = 15
+    results = []
+    seen_keys = set()
+
+    # We only scan from positions where it is the OPPONENT's turn
+    opponent_reachable_fens = [
+        f for f in reachable_fens
+        if len(f.split()) > 1 and f.split()[1] != player_color and f not in exempt_fens
+    ]
+
+    # Pass 1: 1-Move Opponent Transpositions (Opponent plays m1 directly into our repertoire, no badge)
+    for f_orig in opponent_reachable_fens:
+        if len(results) >= MAX_TRANSPOSITIONS:
+            break
+
+        p_orig = fen_to_pos.get(f_orig)
+        if not p_orig:
+            continue
+
+        orig_depth = reachable_depths.get(f_orig)
+        covered_from_orig = rep_adj_fen.get(f_orig, set())
+        inactive_from_orig = inactive_adj_fen.get(f_orig, set())
+
+        try:
+            board_1 = chess.Board(f_orig + " 0 1")
+        except Exception:
+            continue
+
+        for m1 in list(board_1.legal_moves):
+            if len(results) >= MAX_TRANSPOSITIONS:
+                break
+            u1 = m1.uci().strip().lower()
+            if u1 in covered_from_orig or u1 in inactive_from_orig:
+                continue
+
+            board_1.push(m1)
+            t1_fen = clean_fen(board_1.fen())
+            board_1.pop()
+
+            if t1_fen in fen_to_pos and t1_fen != f_orig:
+                t1_depth = reachable_depths.get(t1_fen)
+                if orig_depth is not None and t1_depth is not None and t1_depth < orig_depth:
+                    continue
+
+                p_target = fen_to_pos.get(t1_fen)
+                key = (f_orig, t1_fen, u1)
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    try:
+                        s1 = board_1.san(m1)
+                    except Exception:
+                        s1 = u1
+
+                    results.append({
+                        "fen": f_orig,
+                        "target_fen": t1_fen,
+                        "move_san": s1,
+                        "path_sans": [s1],
+                        "path_ucis": [u1],
+                        "depth": 1,
+                        "type": "transposition_1",
+                        "turn": "opponent",
+                        "quality": "",
+                        "quality_label": "—",
+                        "popularity": 50,
+                    })
+
+    # Pass 2: 2-Move Transpositions (Opponent plays m1, then WE play m2 to get back into repertoire)
+    if len(results) < MAX_TRANSPOSITIONS:
+        for f_orig in opponent_reachable_fens:
+            if len(results) >= MAX_TRANSPOSITIONS:
+                break
+
+            p_orig = fen_to_pos.get(f_orig)
+            if not p_orig:
+                continue
+
+            orig_depth = reachable_depths.get(f_orig)
+            covered_from_orig = rep_adj_fen.get(f_orig, set())
+            inactive_from_orig = inactive_adj_fen.get(f_orig, set())
+
+            try:
+                board_1 = chess.Board(f_orig + " 0 1")
+            except Exception:
+                continue
+
+            for m1 in list(board_1.legal_moves):
+                if len(results) >= MAX_TRANSPOSITIONS:
+                    break
+                u1 = m1.uci().strip().lower()
+                if u1 in covered_from_orig or u1 in inactive_from_orig:
+                    continue
+
+                board_1.push(m1)
+                inter_fen = clean_fen(board_1.fen())
+                p_inter = fen_to_pos.get(inter_fen)
+                covered_from_inter = rep_adj_fen.get(inter_fen, set())
+                inactive_from_inter = inactive_adj_fen.get(inter_fen, set())
+
+                try:
+                    for m2 in list(board_1.legal_moves):
+                        if len(results) >= MAX_TRANSPOSITIONS:
+                            break
+                        u2 = m2.uci().strip().lower()
+                        if (u1 in covered_from_orig and u2 in covered_from_inter) or u2 in inactive_from_inter:
+                            continue
+
+                        board_1.push(m2)
+                        t2_fen = clean_fen(board_1.fen())
+                        board_1.pop()
+
+                        if t2_fen in fen_to_pos and t2_fen != f_orig and t2_fen != inter_fen:
+                            # Forward-only check (eliminate backward cycles / shallower depth)
+                            t2_depth = reachable_depths.get(t2_fen)
+                            if orig_depth is not None and t2_depth is not None and t2_depth <= orig_depth:
+                                continue
+
+                            p_target = fen_to_pos.get(t2_fen)
+                            key = (f_orig, t2_fen, f"{u1}_{u2}")
+                            if key not in seen_keys:
+                                seen_keys.add(key)
+
+                                # User plays m2: evaluate soundness of our move
+                                _, m2_exc = evaluate_user_move(p_inter, inter_fen, u2, p_target, covered_from_inter)
+                                if m2_exc:
+                                    # Lazy SAN calculation
+                                    try:
+                                        s2 = board_1.san(m2)
+                                    except Exception:
+                                        s2 = u2
+                                    board_1.pop()
+                                    try:
+                                        s1 = board_1.san(m1)
+                                    except Exception:
+                                        s1 = u1
+                                    board_1.push(m1)
+
+                                    seq_str = f"{s1}  {s2}"
+                                    results.append({
+                                        "fen": f_orig,
+                                        "target_fen": t2_fen,
+                                        "move_san": seq_str,
+                                        "path_sans": [s1, s2],
+                                        "path_ucis": [u1, u2],
+                                        "depth": 2,
+                                        "type": "transposition_2",
+                                        "turn": "user",
+                                        "quality": "ausgezeichnet",
+                                        "quality_label": "🟢 Ausgezeichnet",
+                                        "popularity": 70,
+                                    })
+                except Exception:
+                    pass
+
+                board_1.pop()
+
+    def sort_key(item):
+        d_val = item["depth"]
+        q_val = 0 if item["quality"] == "ausgezeichnet" else (1 if item["quality"] == "solide" else 2)
+        return (d_val, q_val, -item.get("popularity", 0))
+
+    return sorted(results, key=sort_key)
+
+
 

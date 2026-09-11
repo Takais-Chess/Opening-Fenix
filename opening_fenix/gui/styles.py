@@ -146,6 +146,46 @@ def get_chevron_icon_path():
     """Returns the forward-slash path to the chevron dropdown icon for stylesheets."""
     return os.path.join(get_base_path(), "assets", "Icons", "chevron_down.svg").replace("\\", "/")
 
+def get_checkmark_icon_path():
+    """Returns the forward-slash path to the checkmark icon for stylesheets."""
+    return os.path.join(get_base_path(), "assets", "Icons", "checkmark.svg").replace("\\", "/")
+
+def get_indicator_style(accent_color=COLORS['burnt_orange'], border_color="rgba(62, 39, 35, 0.35)", bg_color="rgba(255, 255, 255, 0.85)"):
+    """Returns standard styling for QCheckBox and ItemView indicators across the app."""
+    hover_accent = "#e67e22" if accent_color == COLORS['burnt_orange'] else accent_color
+    return f"""
+    QCheckBox::indicator, QTreeWidget::indicator, QTreeView::indicator, QTableWidget::indicator {{
+        width: {scale(18)}px;
+        height: {scale(18)}px;
+        border: 1.5px solid {border_color};
+        border-radius: {scale(4)}px;
+        background-color: {bg_color};
+    }}
+    QCheckBox::indicator:hover, QTreeWidget::indicator:hover, QTreeView::indicator:hover, QTableWidget::indicator:hover {{
+        border: 1.5px solid {accent_color};
+        background-color: #ffffff;
+    }}
+    QCheckBox::indicator:checked, QTreeWidget::indicator:checked, QTreeView::indicator:checked, QTableWidget::indicator:checked {{
+        background-color: {accent_color};
+        border: 1.5px solid {accent_color};
+        image: url("{get_checkmark_icon_path()}");
+    }}
+    QCheckBox::indicator:checked:hover, QTreeWidget::indicator:checked:hover, QTreeView::indicator:checked:hover, QTableWidget::indicator:checked:hover {{
+        background-color: {hover_accent};
+        border: 1.5px solid {hover_accent};
+        image: url("{get_checkmark_icon_path()}");
+    }}
+    QCheckBox::indicator:disabled, QTreeWidget::indicator:disabled, QTreeView::indicator:disabled, QTableWidget::indicator:disabled {{
+        background-color: rgba(0, 0, 0, 0.05);
+        border: 1.5px solid rgba(0, 0, 0, 0.15);
+    }}
+    QCheckBox::indicator:checked:disabled, QTreeWidget::indicator:checked:disabled, QTreeView::indicator:checked:disabled, QTableWidget::indicator:checked:disabled {{
+        background-color: rgba(180, 180, 180, 0.7);
+        border: 1.5px solid rgba(180, 180, 180, 0.7);
+        image: url("{get_checkmark_icon_path()}");
+    }}
+    """
+
 def get_scrollbar_style():
     """Returns a modern, slim scrollbar style string."""
     return f"""
@@ -340,6 +380,9 @@ def get_main_window_style():
         border-radius: {scale(4)}px; 
     }}
     
+    /* Global Indicator Styling */
+    {get_indicator_style()}
+    
     /* Global Scrollbar Branding */
     {get_scrollbar_style()}
     
@@ -442,6 +485,17 @@ def get_creator_window_style():
         background-color: {COLORS['burnt_orange']};
         color: white;
         border-radius: {scale(4)}px;
+    }}
+    
+    /* Indicator Styling for Candidate Moves & Checkboxes */
+    {get_indicator_style()}
+    
+    QTreeWidget::item:selected QTreeWidget::indicator:checked, QTableWidget::item:selected QTableWidget::indicator:checked {{
+        border: 1.5px solid rgba(255, 255, 255, 0.9);
+    }}
+    QTreeWidget::item:selected QTreeWidget::indicator:unchecked, QTableWidget::item:selected QTableWidget::indicator:unchecked {{
+        border: 1.5px solid rgba(255, 255, 255, 0.9);
+        background-color: #ffffff;
     }}
 
     QTabWidget::pane {{
@@ -751,6 +805,9 @@ def get_repo_settings_style():
     }}
     
     QSplitter::handle {{ background-color: transparent; }}
+    
+    /* Indicator Styling */
+    {get_indicator_style()}
 """
 
 
@@ -810,6 +867,9 @@ def get_export_dialog_style():
         padding: {scale(4)}px;
         outline: none;
     }}
+    
+    /* Indicator Styling */
+    {get_indicator_style()}
 """
 
 
@@ -982,6 +1042,9 @@ def get_bw_glass_style():
         color: {COLORS['bw_text']};
     }}
     
+    /* Indicator Styling for Settings & Maintenance Dialogs */
+    {get_indicator_style(accent_color=COLORS['bw_accent'], border_color='rgba(0, 0, 0, 0.25)', bg_color='#ffffff')}
+    
     {get_scrollbar_style().replace('211, 84, 0', '0, 0, 0')}
     """
 
@@ -1121,6 +1184,9 @@ def get_login_dialog_style():
         border-radius: {scale(4)}px;
         margin: 0px {scale(4)}px;
     }}
+    
+    /* Indicator Styling */
+    {get_indicator_style()}
     
     {get_scrollbar_style()}
 """
