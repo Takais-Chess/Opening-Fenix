@@ -65,3 +65,47 @@ def test_backend_orphan_detection(creator_window):
     if hasattr(creator_window.backend, 'run_diagnostic'):
         results = creator_window.backend.run_diagnostic()
         assert 'orphans' in results
+
+def test_pgn_import_updates_candidate_moves_table(creator_window, tmp_path, monkeypatch):
+    """Test that candidate moves table is refreshed when a PGN file is imported."""
+    from unittest.mock import MagicMock
+    from PyQt6.QtWidgets import QMessageBox
+    from opening_fenix.core.services.import_service import import_pgn_to_db
+
+    monkeypatch.setattr(QMessageBox, "information", MagicMock())
+
+    # Populate candidate moves table and backend cache initially (empty repo initially)
+    creator_window.refresh_candidate_moves_table()
+    initial_count = creator_window.tree_widget.topLevelItemCount()
+    assert initial_count == 0
+
+    # Verify cache is populated with the empty list
+    fen = creator_window.board_widget.board.fen()
+    assert f"cand_moves_{fen}" in creator_window.backend._ui_cache
+    assert creator_window.backend._ui_cache[f"cand_moves_{fen}"] == []
+
+    # Create a PGN with a new candidate move: 1. d4
+    pgn_file = tmp_path / "new_variation.pgn"
+    pgn_file.write_text("1. d4 d5 2. c4 *", encoding="utf-8")
+
+    # Import PGN into active repo (simulating PGNImportThread background work)
+    success, msg = import_pgn_to_db(
+        str(pgn_file),
+        creator_window.backend.active_repo_name,
+        side="w",
+        level_name="Basic",
+        level_order=1
+    )
+    assert success
+
+    # Trigger completion callback
+    creator_window._on_pgn_import_finished(True, msg)
+
+    # Verify table was updated with the new candidate move d4
+    new_count = creator_window.tree_widget.topLevelItemCount()
+    assert new_count == 1
+
+    # Verify move in table
+    items_san = [creator_window.tree_widget.topLevelItem(i).text(0) for i in range(new_count)]
+    assert any("d4" in s for s in items_san)
+

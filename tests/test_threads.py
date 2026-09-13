@@ -30,11 +30,18 @@ def test_analysis_thread_success(qtbot):
 
 @pytest.mark.qt
 def test_lichess_import_thread_success(qtbot):
-    with patch("opening_fenix.core.threads.run_lichess_import_and_calculate_scores") as mock_run:
-        mock_run.return_value = (True, "Lichess OK")
-        
+    def fake_run(repo, elo, progress_callback=None, check_cancel=None):
+        if progress_callback:
+            progress_callback(25, 21, 4970)
+            progress_callback(50, 50, 100, "1h 20m")
+            progress_callback(97, "Prioritäten werden neu berechnet...")
+        return (True, "Lichess OK")
+
+    with patch("opening_fenix.core.threads.run_lichess_import_and_calculate_scores", side_effect=fake_run):
         thread = LichessImportThread("TestRepo", "high")
         spy_finished = QSignalSpy(thread.finished_signal)
+        spy_status = QSignalSpy(thread.status_signal)
+        spy_prog = QSignalSpy(thread.progress_signal)
         
         thread.start()
         qtbot.waitUntil(lambda: len(spy_finished) == 1, timeout=5000)
@@ -42,6 +49,7 @@ def test_lichess_import_thread_success(qtbot):
         assert len(spy_finished) == 1
         assert spy_finished[0][0] is True
         assert spy_finished[0][1] == "Lichess OK"
+        assert [s[0] for s in spy_status] == ["21/4970", "50/100", "Prioritäten werden neu berechnet..."]
 
 @pytest.mark.qt
 def test_maintenance_thread_success(qtbot):

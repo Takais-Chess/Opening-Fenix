@@ -261,6 +261,40 @@ class TestSettingsDialogRepoPage:
         assert settings_dialog.lbl_name.text() != "-"
         assert settings_dialog.lbl_name.text() == sample_repertoire
 
+    def test_repo_selection_populates_description_and_color(self, settings_dialog, sample_repertoire):
+        """Repertoire-Beschreibung und Farbe werden im Trainer-Info-Widget angezeigt."""
+        from opening_fenix.core.data_tools import set_meta
+        from opening_fenix.core.utils import get_repertoire_db_path
+        from opening_fenix.core.db.database import DatabaseManager
+        db_path = get_repertoire_db_path(sample_repertoire)
+        db = DatabaseManager(db_path)
+        session = db.get_session()
+        set_meta(session, "description", "Eine tolle Eröffnung für Turnierspieler.")
+        set_meta(session, "color", "b")
+        session.commit()
+        session.close()
+        db.close()
+
+        settings_dialog.sidebar.setCurrentRow(1)
+        settings_dialog.on_repo_selected(sample_repertoire)
+        assert settings_dialog.txt_trainer_description.toPlainText() == "Eine tolle Eröffnung für Turnierspieler."
+        assert "Schwarz" in settings_dialog.lbl_color.text()
+
+    def test_on_trainer_stats_loaded_updates_description_color_and_name(self, settings_dialog):
+        """Worker callback updates description, color and name when stats finish."""
+        fake_info = {
+            "name": "Super Dragon",
+            "color": "b",
+            "description": "Custom detailed description from worker.",
+            "elo": "high",
+            "comment_stats": "100 DE (100%)",
+            "level_details": []
+        }
+        settings_dialog.on_trainer_stats_loaded(fake_info)
+        assert settings_dialog.txt_trainer_description.toPlainText() == "Custom detailed description from worker."
+        assert "Schwarz" in settings_dialog.lbl_color.text()
+        assert settings_dialog.lbl_trainer_repo_name.text() == "Super Dragon"
+
     def test_repo_selection_populates_levels(self, settings_dialog, sample_repertoire):
         """Level-Dropdown in der Card ist befüllt."""
         settings_dialog.sidebar.setCurrentRow(1)

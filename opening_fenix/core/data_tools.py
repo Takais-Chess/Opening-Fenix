@@ -6,7 +6,10 @@ from opening_fenix.core.db.meta_utils import get_meta, set_meta, delete_repertoi
 from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.analysis_service import run_db_analysis, get_repertoire_analysis_status, enrich_position
 from opening_fenix.core.services.priority_service import calculate_priority_scores, calculate_local_priority_scores, detect_islands
-from opening_fenix.core.services.lichess_service import run_lichess_import, run_lichess_import_and_calculate_scores, delete_lichess_data, ELO_MAPPING
+from opening_fenix.core.services.lichess_service import (
+    run_lichess_import, run_lichess_import_and_calculate_scores, delete_lichess_data, ELO_MAPPING,
+    is_valid_token_string, clean_lichess_token, verify_lichess_token
+)
 
 from opening_fenix.core.services.repertoire_core_service import copy_repertoire_comments
 
@@ -18,6 +21,7 @@ __all__ = [
     'run_db_analysis', 'get_repertoire_analysis_status', 'enrich_position',
     'calculate_priority_scores', 'calculate_local_priority_scores', 'detect_islands',
     'run_lichess_import', 'run_lichess_import_and_calculate_scores', 'delete_lichess_data', 'ELO_MAPPING',
+    'is_valid_token_string', 'clean_lichess_token', 'verify_lichess_token',
     'copy_repertoire_comments'
 ]
 

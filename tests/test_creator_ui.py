@@ -43,13 +43,12 @@ def test_hole_finder_ui_trigger(creator_window, qapp, monkeypatch):
         creator_window.apply_tab_visibility()
         qapp.processEvents()
         
-    # Ensure Hole Finder tab is visible
-    found_idx = -1
-    for i in range(creator_window.tabs.count()):
-        # Searching for "Loch Finder" as it is named "Rep. Loch Finder" in the UI
-        if "Loch Finder" in creator_window.tabs.tabText(i):
-            found_idx = i
-            break
+    found_idx = creator_window.tabs.indexOf(creator_window.tab_holes)
+    if found_idx == -1:
+        for i in range(creator_window.tabs.count()):
+            if any(k in creator_window.tabs.tabText(i).lower() for k in ["loch", "such", "search", "hole"]):
+                found_idx = i
+                break
     
     if found_idx == -1:
         pytest.skip("Hole Finder tab not found")
@@ -82,6 +81,7 @@ def test_variant_visibility_logic(creator_window, qapp):
 
 def test_engine_toggle_ui(creator_window, qapp, monkeypatch):
     """Test toggling engine from UI."""
+    monkeypatch.setattr(creator_window, "toggle_engine", lambda active: None)
     # Toggle on
     creator_window._on_engine_toggle_toggled(True)
     qapp.processEvents()
@@ -299,9 +299,7 @@ def test_hole_finder_transposition_click_opens_tab(creator_window, qapp):
         it = creator_window.table_transpositions.item(r, 0)
         if it and "c5" in it.text() and "Nf3" in it.text():
             found_2move = True
-            depth_item = creator_window.table_transpositions.item(r, 1)
-            assert depth_item.text() == "2"
-            qual_item = creator_window.table_transpositions.item(r, 2)
+            qual_item = creator_window.table_transpositions.item(r, 1)
             assert "Ausgezeichnet" in qual_item.text() or "🟢" in qual_item.text()
             break
     assert found_2move is True
@@ -458,8 +456,8 @@ def test_suggest_transposition_level_and_buttons(creator_window, qapp):
     assert rm_nf3.level == 2
 
 
-def test_transposition_bottom_bar_update(creator_window, qapp):
-    """Test that selecting a row in table_transpositions updates the bottom action bar."""
+def test_transposition_row_level_buttons(creator_window, qapp):
+    """Test that rows in table_transpositions contain level addition buttons."""
     start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
     mock_transpos = [
         {
@@ -490,17 +488,9 @@ def test_transposition_bottom_bar_update(creator_window, qapp):
             break
     assert target_row != -1
 
-    creator_window.table_transpositions.selectRow(target_row)
-    qapp.processEvents()
-
-    assert creator_window.lbl_transpos_add.isVisible() is True
-    bottom_btns = creator_window.h_bottom_levels_layout.count()
-    assert bottom_btns >= 1
-
-    # Clear selection
-    creator_window.table_transpositions.clearSelection()
-    qapp.processEvents()
-    assert creator_window.lbl_transpos_add.isVisible() is False
+    # In col 2, there should be the cell widget containing level buttons
+    cell_widget = creator_window.table_transpositions.cellWidget(target_row, 2)
+    assert cell_widget is not None
 
 
 def test_unreachable_level_buttons_filtered(creator_window, qapp):
@@ -661,8 +651,8 @@ def test_quality_column_hidden_for_1move_transpositions(creator_window, qapp):
     creator_window._populate_outgoing_table(direct_items)
     qapp.processEvents()
 
-    # Column 2 (Quality/Ranking) should be HIDDEN in table_transpositions
-    assert creator_window.table_transpositions.isColumnHidden(2) is True
+    # Column 1 (Quality/Ranking) should be HIDDEN in table_transpositions
+    assert creator_window.table_transpositions.isColumnHidden(1) is True
 
     # 4. Transposition Tab with deep BFS transpositions (depth 2+)
     deep_paths = [
@@ -678,8 +668,8 @@ def test_quality_column_hidden_for_1move_transpositions(creator_window, qapp):
     creator_window._populate_deep_table(deep_paths)
     qapp.processEvents()
 
-    # Column 2 (Quality/Ranking) should now be VISIBLE
-    assert creator_window.table_transpositions.isColumnHidden(2) is False
+    # Column 1 (Quality/Ranking) should now be VISIBLE
+    assert creator_window.table_transpositions.isColumnHidden(1) is False
 
 
 def test_clear_search_tab_on_repertoire_switch(creator_window, qapp):
@@ -716,6 +706,258 @@ def test_clear_search_tab_on_repertoire_switch(creator_window, qapp):
     assert creator_window.lbl_hole_scan_res.text() == ""
     assert creator_window._preset_transposition is None
     assert creator_window.btn_hole_scan.isEnabled() is True
+
+
+def test_transposition_triggers_background_enrichment(creator_window, qapp, monkeypatch):
+    """Test that inputting a 2-move transposition triggers background enrichment for intermediate and target positions."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    target_fen = "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"
+
+    enriched_fens = []
+    monkeypatch.setattr(
+        creator_window,
+        "trigger_background_enrichment",
+        lambda fen: enriched_fens.append(" ".join(fen.split()[:4]))
+    )
+
+    data = {
+        "type": "bfs",
+        "search_fen": start_fen,
+        "target_fen": target_fen,
+        "path_sans": ["c5", "Nf3"],
+        "path_ucis": ["c7c5", "g1f3"],
+        "depth": 2,
+    }
+
+    # 1. Test via add_transposition_to_level
+    creator_window.add_transposition_to_level(data, level_order=1)
+    qapp.processEvents()
+
+    # Calculate expected intermediate FEN (after 1... c5)
+    b = chess.Board(start_fen)
+    b.push_san("c5")
+    intermediate_clean = " ".join(b.fen().split()[:4])
+    b.push_san("Nf3")
+    target_clean = " ".join(b.fen().split()[:4])
+
+    assert intermediate_clean in enriched_fens
+    assert target_clean in enriched_fens
+    assert len(enriched_fens) == 2
+
+
+def test_transposition_tab_split_layout(creator_window, qapp):
+    """Test that the transpositions tab uses a QSplitter with top & bottom cards, 3-column top table, and 4-column global table."""
+    from PyQt6.QtWidgets import QSplitter
+    from PyQt6.QtCore import Qt
+
+    assert hasattr(creator_window, "transpos_splitter")
+    assert isinstance(creator_window.transpos_splitter, QSplitter)
+    assert creator_window.transpos_splitter.orientation() == Qt.Orientation.Vertical
+    assert creator_window.transpos_splitter.count() == 2
+
+    # Verify elements in top card
+    assert hasattr(creator_window, "table_transpositions")
+    assert hasattr(creator_window, "btn_deep_transpos")
+    assert creator_window.table_transpositions.columnCount() == 3
+
+    # Verify elements in bottom card
+    assert hasattr(creator_window, "table_global_transpositions")
+    assert hasattr(creator_window, "btn_global_transpos_scan")
+    assert hasattr(creator_window, "combo_transpos_depth")
+    assert creator_window.table_global_transpositions.columnCount() == 4
+
+
+def test_global_transposition_quality_column_hidden_until_2m(creator_window, qapp):
+    """Test that Quality column (index 2) is hidden in global transpositions table when only 1-move items exist, and shown when 2-move items exist."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_1m_only = [
+        {
+            "fen": start_fen,
+            "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+            "move_san": "c5",
+            "path_sans": ["c5"],
+            "path_ucis": ["c7c5"],
+            "depth": 1,
+            "type": "transposition_1",
+            "turn": "opponent",
+            "quality": "",
+            "quality_label": "—",
+            "popularity": 50,
+        }
+    ]
+
+    creator_window._on_global_transpos_scan_finished(mock_1m_only, mode="transpositions")
+    qapp.processEvents()
+
+    assert creator_window.table_global_transpositions.rowCount() == 1
+    # Quality column (column 2) is hidden when there are only 1-move transpositions
+    assert creator_window.table_global_transpositions.isColumnHidden(2) is True
+
+    mock_both = mock_1m_only + [
+        {
+            "fen": start_fen,
+            "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -",
+            "move_san": "c5  Nf3",
+            "path_sans": ["c5", "Nf3"],
+            "path_ucis": ["c7c5", "g1f3"],
+            "depth": 2,
+            "type": "transposition_2",
+            "turn": "user",
+            "quality": "ausgezeichnet",
+            "quality_label": "🟢 Ausgezeichnet",
+            "popularity": 70,
+        }
+    ]
+
+    creator_window.table_global_transpositions.setRowCount(0)
+    creator_window._on_global_transpos_scan_finished(mock_both, mode="transpositions")
+    qapp.processEvents()
+
+    assert creator_window.table_global_transpositions.rowCount() == 2
+    # Quality column (column 2) is visible when there are 2-move transpositions
+    assert creator_window.table_global_transpositions.isColumnHidden(2) is False
+
+
+def test_global_transposition_activation_and_level_add(creator_window, qapp):
+    """Test clicking a global transposition row sets the board and adding to level removes the row."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    target_fen = "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"
+    mock_items = [
+        {
+            "fen": start_fen,
+            "target_fen": target_fen,
+            "move_san": "c5  Nf3",
+            "path_sans": ["c5", "Nf3"],
+            "path_ucis": ["c7c5", "g1f3"],
+            "depth": 2,
+            "type": "transposition_2",
+            "turn": "user",
+            "quality": "ausgezeichnet",
+            "quality_label": "🟢 Ausgezeichnet",
+            "popularity": 70,
+        }
+    ]
+
+    creator_window._on_global_transpos_scan_finished(mock_items, mode="transpositions")
+    qapp.processEvents()
+    assert creator_window.table_global_transpositions.rowCount() == 1
+
+    # Activate row
+    item0 = creator_window.table_global_transpositions.item(0, 0)
+    creator_window.on_global_transposition_activated(item0)
+    qapp.processEvents()
+
+    assert creator_window._preset_transposition is not None
+    assert creator_window._preset_transposition.get("move_san") == "c5  Nf3"
+
+    # Add to level
+    data = {
+        "type": "bfs",
+        "search_fen": start_fen,
+        "target_fen": target_fen,
+        "path_sans": ["c5", "Nf3"],
+        "path_ucis": ["c7c5", "g1f3"],
+        "depth": 2,
+    }
+    creator_window.add_transposition_to_level(data, level_order=1)
+    qapp.processEvents()
+
+    # The row in table_global_transpositions should now be removed
+    assert creator_window.table_global_transpositions.rowCount() == 0
+
+
+def test_search_mode_combo_does_not_contain_transpositions(creator_window):
+    """Verify that 'transpositions' was removed from combo_hole_mode in Search Mode panel."""
+    modes = [creator_window.combo_hole_mode.itemData(i) for i in range(creator_window.combo_hole_mode.count())]
+    assert "transpositions" not in modes
+    assert "holes" in modes
+    assert "priority" in modes
+    assert "level_down" in modes
+    assert "level_check" in modes
+
+
+def test_clear_search_tab_clears_global_transpositions(creator_window, qapp):
+    """Verify that clear_search_tab() clears table_global_transpositions."""
+    mock_items = [
+        {
+            "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+            "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+            "move_san": "c5",
+            "depth": 1,
+            "type": "transposition_1",
+        }
+    ]
+    creator_window._on_global_transpos_scan_finished(mock_items, mode="transpositions")
+    assert creator_window.table_global_transpositions.rowCount() == 1
+
+    creator_window.clear_search_tab()
+    assert creator_window.table_global_transpositions.rowCount() == 0
+
+
+def test_transpos_depth_selector_and_move_number_formatting(creator_window, qapp):
+    """Verify depth combo changes config, and move columns display algebraic move numbers."""
+    assert hasattr(creator_window, "combo_transpos_depth")
+    creator_window.combo_transpos_depth.setCurrentText("20")
+    qapp.processEvents()
+    assert creator_window.config.get("transposition_depth") == "20"
+
+    # 1. table_holes formatting
+    creator_window.table_holes.setRowCount(0)
+    mock_hole_white = {
+        "fen": "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+        "move_san": "e4",
+        "type": "user",
+        "popularity": 85.0,
+        "ply_depth": 0,
+    }
+    creator_window._add_hole_row(mock_hole_white, mode="holes")
+    assert creator_window.table_holes.item(0, 2).text() == "1.e4"
+
+    mock_hole_black = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "move_san": "c5",
+        "type": "opponent",
+        "popularity": 55.0,
+        "ply_depth": 1,
+    }
+    creator_window._add_hole_row(mock_hole_black, mode="holes")
+    assert creator_window.table_holes.item(1, 2).text() == "1...c5"
+
+    # 2. table_global_transpositions formatting
+    creator_window.table_global_transpositions.setRowCount(0)
+    mock_global_2m = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "move_san": "c5  Nf3",
+        "path_sans": ["c5", "Nf3"],
+        "path_ucis": ["c7c5", "g1f3"],
+        "depth": 2,
+        "type": "transposition_2",
+        "turn": "user",
+        "quality": "ausgezeichnet",
+        "quality_label": "🟢 Ausgezeichnet",
+        "ply_depth": 1,
+    }
+    creator_window._add_global_transpos_row(mock_global_2m)
+    assert creator_window.table_global_transpositions.item(0, 0).text() == "1...c5  2.Nf3"
+
+
+def test_creator_window_set_repertoire_elo(creator_window, qapp):
+    """Verify that set_repertoire_elo updates combo box, display label, and triggers UI refresh."""
+    creator_window.set_repertoire_elo("mid")
+    qapp.processEvents()
+    assert creator_window.combo_lichess_cat.currentText() == "mid"
+    lbl_text = creator_window.lbl_lichess_cat_display.text()
+    assert "1700" in lbl_text or "Vereins" in lbl_text or "Club" in lbl_text
+
+    # Change to low
+    creator_window.set_repertoire_elo("low")
+    qapp.processEvents()
+    assert creator_window.combo_lichess_cat.currentText() == "low"
+    lbl_text_low = creator_window.lbl_lichess_cat_display.text()
+    assert "Hobby" in lbl_text_low or "1400" in lbl_text_low
+
+
+
 
 
 

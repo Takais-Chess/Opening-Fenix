@@ -21,6 +21,88 @@ def fetch_repertoire_levels(session: Session) -> List[Dict[str, Any]]:
     lvls = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
     return [{"id": l.id, "name": l.name, "order": l.order, "target_elo": l.target_elo} for l in lvls]
 
+_levels_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+def invalidate_repertoire_levels_cache(repo_name: Optional[str] = None) -> None:
+    """Clears cached levels for a specific repertoire or all repertoires."""
+    if repo_name:
+        _levels_cache.pop(repo_name, None)
+    else:
+        _levels_cache.clear()
+
+def get_repertoire_meta_fast(repo_name: str) -> Dict[str, str]:
+    """
+    Fast, lightweight fetch of repertoire metadata (name, color, description, etc.).
+    Uses a direct sqlite3 query without the overhead of full SQLAlchemy engine initialization.
+    Supports read-only fallback if the database file is in a non-writable location.
+    """
+    if not repo_name:
+        return {}
+
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return {}
+
+    def _query(conn):
+        c = conn.cursor()
+        c.execute("SELECT key, value FROM metadata WHERE key IN ('name', 'color', 'description', 'lichess_elo')")
+        return dict(c.fetchall())
+
+    try:
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            return _query(conn)
+    except Exception:
+        pass
+
+    try:
+        import pathlib
+        uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
+        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+            return _query(conn)
+    except Exception as e:
+        logger.warning(f"Fast meta fetch failed for {repo_name}: {e}")
+        return {}
+
+def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
+    """
+    Fast, lightweight fetch of repertoire levels.
+    Uses an in-memory cache and falls back to a direct sqlite3 query
+    without the overhead of full SQLAlchemy engine initialization and migrations.
+    """
+    if not repo_name:
+        return []
+    if repo_name in _levels_cache:
+        return _levels_cache[repo_name]
+
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return []
+
+    def _query(conn):
+        c = conn.cursor()
+        c.execute('SELECT id, name, "order", target_elo FROM repertoire_levels ORDER BY "order"')
+        return [{"id": row[0], "name": row[1], "order": row[2], "target_elo": row[3]} for row in c.fetchall()]
+
+    rows = None
+    try:
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            rows = _query(conn)
+    except Exception:
+        try:
+            import pathlib
+            uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
+            with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+                rows = _query(conn)
+        except Exception as e:
+            logger.warning(f"Fast level fetch failed for {repo_name}: {e}")
+            return []
+
+    if rows is not None:
+        _levels_cache[repo_name] = rows
+        return rows
+    return []
+
+
 def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = False) -> Dict[str, Any]:
     """Standalone function to fetch repertoire info using a provided session. Safe for background threads."""
     if not session:
@@ -32,6 +114,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
     if fast_only:
         return {
             "name": get_meta(session, "name", repo_name),
+            "color": get_meta(session, "color", "w"),
             "levels": [lvl['name'] for lvl in levels],
             "level_details": [], # Defer counts
             "depth": tr_ui("analysis.loading", "Laden..."), 
@@ -92,6 +175,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
 
     return {
         "name": get_meta(session, "name", repo_name),
+        "color": get_meta(session, "color", "w"),
         "levels": [lvl['name'] for lvl in levels],
         "level_details": level_details,
         "depth": get_repertoire_analysis_status(repo_name, session),
@@ -204,32 +288,62 @@ class RepertoireService:
         if os.path.exists(new_dir):
             return False, "Ein Repertoire mit diesem Namen existiert bereits."
 
-        # 2. Close Active Connection (Vital for Windows)
+        # 2. Close Active Connection & Release all Application Locks (Vital for Windows)
         active_was_old = (self.active_repertoire_name == old_name)
         if active_was_old:
             self.close()
 
-        # Try to ensure files are not locked
+        from opening_fenix.core.utils import release_repertoire_locks
+        release_repertoire_locks(old_name)
+
         import gc
+        import stat
         gc.collect()
-        time.sleep(0.5)
 
         try:
-            # 3. Rename Folder
-            os.rename(old_dir, new_dir)
+            # 3. Rename Folder with retry on Windows
+            renamed = False
+            last_err = None
+            for attempt in range(8):
+                try:
+                    os.chmod(old_dir, stat.S_IWRITE)
+                    os.rename(old_dir, new_dir)
+                    renamed = True
+                    break
+                except Exception as e:
+                    last_err = e
+                    gc.collect()
+                    time.sleep(0.25 * (attempt + 1))
+
+            if not renamed:
+                raise last_err
             
             # 4. Rename Database File
             old_db = os.path.join(new_dir, f"{old_name}.db")
             new_db = os.path.join(new_dir, f"{new_name}.db")
             if os.path.exists(old_db):
-                os.rename(old_db, new_db)
+                for attempt in range(5):
+                    try:
+                        os.chmod(old_db, stat.S_IWRITE)
+                        os.rename(old_db, new_db)
+                        break
+                    except Exception:
+                        gc.collect()
+                        time.sleep(0.2)
             
             # 5. Rename Auxiliary Files
             for ext in [".db-wal", ".db-shm"]:
                 old_aux = os.path.join(new_dir, f"{old_name}{ext}")
                 new_aux = os.path.join(new_dir, f"{new_name}{ext}")
                 if os.path.exists(old_aux):
-                    os.rename(old_aux, new_aux)
+                    for attempt in range(5):
+                        try:
+                            os.chmod(old_aux, stat.S_IWRITE)
+                            os.rename(old_aux, new_aux)
+                            break
+                        except Exception:
+                            gc.collect()
+                            time.sleep(0.2)
             
             # 6. Global Profile Update (Keep learning progress)
             update_repertoire_name_globally(old_name, new_name)
@@ -269,6 +383,7 @@ class RepertoireService:
         if lvl:
             lvl.target_elo = target_elo
             self.repo_session.commit()
+            invalidate_repertoire_levels_cache(self.active_repertoire_name)
 
     def get_repertoire_info(self, fast_only=False) -> Dict[str, Any]:
         return fetch_repertoire_info(self.repo_session, self.active_repertoire_name, fast_only=fast_only)

@@ -93,8 +93,109 @@ def repair_repertoire_health(session, fast=False):
     if levels_updated > 0:
         logger.info(f"Maintenance: Updated {levels_updated} levels for consistency.")
 
+    # 3. Canonicalize Castling UCIs (Chess960 e1h1 -> Standard e1g1)
+    castling_fixed = repair_castling_ucis(session)
+
     session.commit()
     return gaps_fixed, levels_updated
+
+def repair_castling_ucis(session) -> int:
+    """
+    Finds moves where SAN represents castling (O-O, O-O-O) but UCI was stored in
+    Chess960 / FRC format (e1h1, e1a1, e8h8, e8a8), and normalizes them to standard
+    chess UCI (e1g1, e1c1, e8g8, e8c8).
+    Handles potential uniqueness collisions if standard UCI already exists.
+    """
+    from opening_fenix.core.utils import CASTLE_FRC_TO_STD, CASTLING_SANS
+    
+    frc_moves = session.query(Move).filter(
+        Move.san.in_(list(CASTLING_SANS)),
+        Move.uci.in_(list(CASTLE_FRC_TO_STD.keys()))
+    ).all()
+    
+    if not frc_moves:
+        return 0
+        
+    fixed_count = 0
+    for m in frc_moves:
+        target_uci = CASTLE_FRC_TO_STD.get(m.uci)
+        if not target_uci:
+            continue
+            
+        # Check if target_uci already exists from the same position
+        existing_std = session.query(Move).filter_by(
+            from_position_id=m.from_position_id,
+            uci=target_uci
+        ).first()
+        
+        if existing_std:
+            # Re-link or remove RepertoireMove referencing m
+            rm_frc = session.query(RepertoireMove).filter_by(move_id=m.id).first()
+            rm_std = session.query(RepertoireMove).filter_by(move_id=existing_std.id).first()
+            if rm_frc and not rm_std:
+                rm_frc.move_id = existing_std.id
+            elif rm_frc and rm_std:
+                session.delete(rm_frc)
+            session.delete(m)
+        else:
+            m.uci = target_uci
+            
+        fixed_count += 1
+        
+    if fixed_count > 0:
+        session.commit()
+        logger.info(f"Maintenance: Repaired {fixed_count} castling UCI moves to standard notation.")
+        
+    return fixed_count
+
+def repair_unassigned_moves(session) -> int:
+    """
+    Finds moves in the database that originate from a known repertoire position
+    but lack an entry in `repertoire_moves` (e.g. leaf moves of variations
+    from older PGN imports), and assigns them to the parent move's repertoire level.
+    """
+    from sqlalchemy import func
+    total_fixed = 0
+
+    start_pos = session.query(Position).filter_by(fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").first()
+    start_id = start_pos.id if start_pos else None
+
+    while True:
+        unassigned = session.query(Move).outerjoin(
+            RepertoireMove, Move.id == RepertoireMove.move_id
+        ).filter(
+            RepertoireMove.id == None
+        ).all()
+
+        if not unassigned:
+            break
+
+        incoming_min = dict(
+            session.query(Move.to_position_id, func.min(RepertoireMove.level))
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .group_by(Move.to_position_id).all()
+        )
+
+        pass_fixed = 0
+        for m in unassigned:
+            lvl = incoming_min.get(m.from_position_id)
+            if lvl is None and start_id and m.from_position_id == start_id:
+                lvl = 1
+            if lvl is not None:
+                session.add(RepertoireMove(move_id=m.id, level=lvl, is_active=True))
+                pass_fixed += 1
+
+        if pass_fixed == 0:
+            break
+
+        session.flush()
+        total_fixed += pass_fixed
+
+    if total_fixed > 0:
+        session.commit()
+        logger.info(f"Maintenance: Repaired {total_fixed} unassigned leaf moves into repertoire levels.")
+
+    return total_fixed
 
 def repair_schema_and_orphans(session):
     """Placeholder for other diagnostic repairs if needed."""

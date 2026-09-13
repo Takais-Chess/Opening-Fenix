@@ -6,6 +6,7 @@ from opening_fenix.core.services.priority_service import detect_islands
 from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
 from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
+from opening_fenix.core.services.repertoire_mistake_service import audit_repertoire_mistakes
 
 
 class AnalysisThread(QThread):
@@ -48,9 +49,9 @@ class LichessImportThread(QThread):
     def run(self):
         def on_progress(pct, *args):
             self.progress_signal.emit(pct)
-            if len(args) == 3:
-                cur, total, eta = args
-                self.status_signal.emit(f"{cur}/{total} (ca. {eta} verbleibend)")
+            if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
+                cur, total = args[0], args[1]
+                self.status_signal.emit(f"{cur}/{total}")
             elif len(args) == 1 and isinstance(args[0], str):
                 self.status_signal.emit(args[0])
 
@@ -172,30 +173,41 @@ class RepertoireStatsWorker(QThread):
 
     def stop(self):
         self._is_stopped = True
+        self.requestInterruption()
+
+    def cancel(self):
+        self.stop()
 
     def run(self):
         from opening_fenix.core.services.repertoire_core_service import RepertoireService
         service = RepertoireService()
-        for item in self.repo_data_list:
-            if self._is_stopped:
-                break
-            self.msleep(15)  # Yield GIL between repertoire stats queries
-            try:
-                service.set_active_repertoire(item['name'])
-                info = service.get_repertoire_info()
-                if self._is_stopped: break
-                self.stats_ready.emit(item['row'], info.get('depth', 'Error'), info.get('coverage_pct', 0.0), info.get('elo', 'high'))
-                service.close()
-            except Exception as e:
-                print(f"DEBUG: StatsWorker Error for {item['name']}: {e}")
-                if not self._is_stopped:
-                    self.stats_ready.emit(item['row'], "Error", 0.0, "high")
+        try:
+            for item in self.repo_data_list:
+                if self._is_stopped or self.isInterruptionRequested():
+                    break
+                self.msleep(15)  # Yield GIL between repertoire stats queries
+                try:
+                    service.set_active_repertoire(item['name'])
+                    info = service.get_repertoire_info()
+                    if self._is_stopped or self.isInterruptionRequested():
+                        break
+                    self.stats_ready.emit(item['row'], info.get('depth', 'Error'), info.get('coverage_pct', 0.0), info.get('elo', 'high'))
+                except Exception as e:
+                    print(f"DEBUG: StatsWorker Error for {item['name']}: {e}")
+                    if not self._is_stopped and not self.isInterruptionRequested():
+                        self.stats_ready.emit(item['row'], "Error", 0.0, "high")
+                finally:
+                    service.close()
+        finally:
+            service.close()
         self.finished.emit()
 
 class HoleFinderThread(QThread):
     finished_signal = pyqtSignal(list, str)
+    item_found_signal = pyqtSignal(dict, str)
     
-    def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False):
+    def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
+                 engine_path=None, threads_count=1, engine=None, depth=25):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
@@ -204,9 +216,25 @@ class HoleFinderThread(QThread):
         self.mode = mode
         self.level = level
         self.find_rare = find_rare
+        self.engine_path = engine_path
+        self.threads_count = threads_count
+        self.engine = engine
+        self.depth = depth
+        self._stop_requested = False
+
+    def stop(self):
+        self._stop_requested = True
+        self.requestInterruption()
 
     def run(self):
         try:
+            def on_item_found(item):
+                if not self.isInterruptionRequested() and not self._stop_requested:
+                    self.item_found_signal.emit(item, self.mode)
+
+            def check_cancel():
+                return self.isInterruptionRequested() or self._stop_requested
+
             results = run_hole_finder_task(
                 self.repo_name, 
                 self.is_test, 
@@ -214,12 +242,20 @@ class HoleFinderThread(QThread):
                 self.elo_range, 
                 self.mode, 
                 self.level,
-                find_rare=self.find_rare
+                find_rare=self.find_rare,
+                engine_path=self.engine_path,
+                threads_count=self.threads_count,
+                item_callback=on_item_found,
+                cancel_check=check_cancel,
+                engine=self.engine,
+                depth=self.depth,
             )
-            self.finished_signal.emit(results, self.mode)
+            if not self.isInterruptionRequested() and not self._stop_requested:
+                self.finished_signal.emit(results, self.mode)
         except Exception as e:
             print(f"DEBUG: HoleFinderThread Error: {e}")
-            self.finished_signal.emit([], self.mode)
+            if not self.isInterruptionRequested() and not self._stop_requested:
+                self.finished_signal.emit([], self.mode)
 
 
 class FenIndexBuilderThread(QThread):
@@ -742,4 +778,41 @@ class AutoBackupThread(QThread):
                 self.msleep(100)  # Yield GIL to keep GUI animation butter-smooth
         except Exception as ex:
             logger.error(f"AutoBackupThread main error: {ex}")
+
+
+class RepertoireMistakeScanThread(QThread):
+    """
+    Background worker thread to scan and audit repertoire positions for tactical/strategic mistakes
+    where the pawn loss exceeds a specified threshold compared to engine evaluations.
+    """
+    progress_signal = pyqtSignal(int, int, int)
+    mistake_found_signal = pyqtSignal(dict)
+    finished_signal = pyqtSignal(bool, str, list)
+
+    def __init__(self, repo_name: str, depth: int, threads: int, engine_path: str, hash_size: int = 256, threshold_pawns: float = 0.5, parent=None):
+        super().__init__(parent)
+        self.repo_name = repo_name
+        self.depth = depth
+        self.threads = threads
+        self.engine_path = engine_path
+        self.hash_size = hash_size
+        self.threshold_pawns = threshold_pawns
+        self._is_canceled = False
+
+    def run(self):
+        success, msg, mistakes = audit_repertoire_mistakes(
+            self.repo_name,
+            self.engine_path,
+            depth=self.depth,
+            threads=self.threads,
+            hash_size=self.hash_size,
+            threshold_pawns=self.threshold_pawns,
+            progress_callback=self.progress_signal.emit,
+            mistake_callback=self.mistake_found_signal.emit,
+            check_cancel=lambda: self._is_canceled
+        )
+        self.finished_signal.emit(success, msg, mistakes)
+
+    def cancel(self):
+        self._is_canceled = True
 

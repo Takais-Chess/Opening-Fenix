@@ -29,6 +29,29 @@ for _pt in range(1, 7):
     PIECE_KEY_MAP[(_pt, False)] = f"b{_sym}"
 
 
+def normalize_text_encoding(text: str) -> str:
+    """Repairs recursive CP1252/latin1 double/triple encoding mojibake (e.g. GrÃ¼n -> Grün)."""
+    if not isinstance(text, str):
+        return text
+    for _ in range(3):
+        try:
+            fixed = text.encode("cp1252").decode("utf-8")
+            if fixed != text:
+                text = fixed
+            else:
+                break
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            try:
+                fixed = text.encode("latin1").decode("utf-8")
+                if fixed != text:
+                    text = fixed
+                else:
+                    break
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                break
+    return text
+
+
 THEMES = {
     "Dunkel (Modern)": (QColor("#71717a"), QColor("#3f3f46")),
     "Grün": (QColor(240, 217, 181), QColor(118, 150, 86)),
@@ -46,6 +69,9 @@ THEME_FALLBACKS = {
     "Brown (Classic)": "Braun (Klassisch)",
     "Blue (Tournament)": "Blau (Turnier)",
     "Grey (Neutral)": "Grau (Neutral)",
+    "GrÃ¼n": "Grün",
+    "Gr\u00c3\u0192\u00c2\u00bcn": "Grün",
+    "Gr\u00c3\u00bcn": "Grün",
 }
 
 HIGHLIGHT_COLORS = {
@@ -73,6 +99,12 @@ HIGHLIGHT_COLOR_FALLBACKS = {
     "Purple": "Lila",
     "Turquoise": "Türkis",
     "Cyan": "Türkis",
+    "GrÃ¼n": "Grün",
+    "Gr\u00c3\u0192\u00c2\u00bcn": "Grün",
+    "Gr\u00c3\u00bcn": "Grün",
+    "TÃ¼rkis": "Türkis",
+    "T\u00c3\u0192\u00c2\u00bcrkis": "Türkis",
+    "T\u00c3\u00bcrkis": "Türkis",
 }
 
 
@@ -180,6 +212,8 @@ class ChessBoardWidget(QWidget):
         return side, square_size, x_offset, y_offset
 
     def set_theme(self, theme_name):
+        if isinstance(theme_name, str):
+            theme_name = normalize_text_encoding(theme_name)
         if theme_name in THEMES:
             self.light_color, self.dark_color = THEMES[theme_name]
         elif theme_name in THEME_FALLBACKS:
@@ -193,14 +227,17 @@ class ChessBoardWidget(QWidget):
     def set_highlight_color(self, color_name_or_color):
         if isinstance(color_name_or_color, QColor):
             self.highlight_color = color_name_or_color
-        elif color_name_or_color in HIGHLIGHT_COLORS:
-            self.highlight_color = HIGHLIGHT_COLORS[color_name_or_color]
-        elif color_name_or_color in HIGHLIGHT_COLOR_FALLBACKS:
-            self.highlight_color = HIGHLIGHT_COLORS[HIGHLIGHT_COLOR_FALLBACKS[color_name_or_color]]
-        elif isinstance(color_name_or_color, str) and color_name_or_color.startswith("#"):
-            self.highlight_color = QColor(color_name_or_color)
         else:
-            self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
+            if isinstance(color_name_or_color, str):
+                color_name_or_color = normalize_text_encoding(color_name_or_color)
+            if color_name_or_color in HIGHLIGHT_COLORS:
+                self.highlight_color = HIGHLIGHT_COLORS[color_name_or_color]
+            elif color_name_or_color in HIGHLIGHT_COLOR_FALLBACKS:
+                self.highlight_color = HIGHLIGHT_COLORS[HIGHLIGHT_COLOR_FALLBACKS[color_name_or_color]]
+            elif isinstance(color_name_or_color, str) and color_name_or_color.startswith("#"):
+                self.highlight_color = QColor(color_name_or_color)
+            else:
+                self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
         self._highlight_brush = QBrush(self.highlight_color)
         self.update()
 
@@ -413,6 +450,7 @@ class ChessBoardWidget(QWidget):
         
         # 3. Last move highlight
         if self.last_move:
+            painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(self._highlight_brush)
             for sq in [self.last_move.from_square, self.last_move.to_square]:
                 f, r = chess.square_file(sq), chess.square_rank(sq)

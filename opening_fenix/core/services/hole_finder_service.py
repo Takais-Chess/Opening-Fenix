@@ -1,12 +1,18 @@
 import collections
 import json
+import os
+import sys
+import subprocess
 import chess
+import chess.engine
 from sqlalchemy.orm import Session
 from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
 from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.utils import get_repertoire_db_path
+from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTLING_SANS
 
-def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False):
+def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
+                        engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
+                        depth=25):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -21,7 +27,16 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
         elif mode == "level_check":
             return find_level_mismatches(session)
         elif mode == "transpositions":
-            return find_repertoire_transpositions(session, elo_range)
+            return find_repertoire_transpositions(
+                session,
+                elo_range,
+                engine_path=engine_path,
+                threads_count=threads_count,
+                item_callback=item_callback,
+                cancel_check=cancel_check,
+                engine=engine,
+                depth=depth
+            )
         else:
             return find_priority_mismatches(session, level, threshold, find_rare=find_rare)
     finally:
@@ -53,7 +68,20 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
     id_to_fen = dict(session.query(Position.id, Position.fen).all())
 
     lichess_cache = {}
-    for ld in session.query(LichessData).filter_by(elo_range=elo_range).all():
+    rows = session.query(LichessData).filter_by(elo_range=elo_range).all()
+    if not rows:
+        # Fallback to the repertoire's saved lichess_elo / elo metadata, or any available elo_range in DB
+        meta_elo = session.query(Metadata).filter(Metadata.key.in_(["elo", "lichess_elo"])).all()
+        for m_e in meta_elo:
+            if m_e.value and m_e.value.strip() != elo_range:
+                rows = session.query(LichessData).filter_by(elo_range=m_e.value.strip()).all()
+                if rows: break
+        if not rows:
+            first_ld = session.query(LichessData.elo_range).first()
+            if first_ld:
+                rows = session.query(LichessData).filter_by(elo_range=first_ld[0]).all()
+
+    for ld in rows:
         clean = " ".join(ld.fen.split(" ")[:4])
         try:
             lichess_cache[clean] = json.loads(ld.moves_json)
@@ -64,18 +92,14 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
         for row in session.query(Position.fen).filter(Position.is_hole_exempt == True).all()
     }
 
-    CASTLING_ALT = {
-        'e1g1': 'e1h1', 'e1h1': 'e1g1', 'e1c1': 'e1a1', 'e1a1': 'e1c1',
-        'e8g8': 'e8h8', 'e8h8': 'e8g8', 'e8c8': 'e8a8', 'e8a8': 'e8c8',
-    }
-
     def covered_ucis_for(pid):
         ucis = set()
         for m in rep_moves_from.get(pid, []):
             u = m.uci.strip().lower()
             ucis.add(u)
-            alt = CASTLING_ALT.get(u)
-            if alt: ucis.add(alt)
+            if m.san in CASTLING_SANS:
+                alt = CASTLING_ALT.get(u)
+                if alt: ucis.add(alt)
         return ucis
 
     # 2. Root
@@ -111,7 +135,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
 
     # 4. Propagation
     holes = []
-    for depth_list in pos_by_depth:
+    for d, depth_list in enumerate(pos_by_depth):
         for pid in depth_list:
             p_reach = reach_probs.get(pid, 0.0)
             fen = id_to_fen.get(pid)
@@ -132,6 +156,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                         "move_san": "—",
                         "type": "repertoire_gap",
                         "popularity": p_reach * 100,
+                        "ply_depth": d,
                     })
                 # We skip candidate move search if it's a gap (user should decide what to play first)
                 # or we can continue if we want to show Lichess suggestions too. 
@@ -166,6 +191,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                                         "move_san": move_san,
                                         "type": "user",
                                         "popularity": p_total * 100,
+                                        "ply_depth": d,
                                     })
                 else:
                     p_next = p_reach / len(rep_moves)
@@ -216,6 +242,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                                 "move_san": move_san,
                                 "type": "opponent",
                                 "popularity": p_total * 100,
+                                "ply_depth": d,
                             })
     return sorted(holes, key=lambda x: x['popularity'], reverse=True)
 
@@ -252,10 +279,11 @@ def find_level_mismatches(session: Session):
     
     # path_lvl[fen_norm] = the minimum required level to reach this exact board state
     path_lvl = {root_norm: 0}
-    bfs_queue = collections.deque([root_id])
+    depth_map = {root_norm: 0}
+    bfs_queue = collections.deque([(root_id, 0)])
     
     while bfs_queue:
-        curr_id = bfs_queue.popleft()
+        curr_id, curr_depth = bfs_queue.popleft()
         curr_fen = id_to_fen.get(curr_id)
         if not curr_fen: continue
         curr_norm = " ".join(curr_fen.split(" ")[:4])
@@ -269,9 +297,13 @@ def find_level_mismatches(session: Session):
                 tnorm = " ".join(tfen.split(" ")[:4])
                 
                 new_lvl = max(curr_lvl, rm.level)
+                new_depth = curr_depth + 1
+                if tnorm not in depth_map or new_depth < depth_map[tnorm]:
+                    depth_map[tnorm] = new_depth
+
                 if tnorm not in path_lvl or new_lvl < path_lvl[tnorm]:
                     path_lvl[tnorm] = new_lvl
-                    bfs_queue.append(tid)
+                    bfs_queue.append((tid, new_depth))
 
     # 2. Check for mismatches
     mismatches = []
@@ -285,6 +317,7 @@ def find_level_mismatches(session: Session):
         # If position is completely unreachable from root, skip
         if curr_norm not in path_lvl: continue
         lvl = path_lvl[curr_norm]
+        pos_depth = depth_map.get(curr_norm, 0)
         
         parts = curr_fen.split(" ")
         is_user_turn = len(parts) > 1 and parts[1] == player_color
@@ -307,7 +340,8 @@ def find_level_mismatches(session: Session):
                             "type": "level_mismatch",
                             "from_level": lvl,
                             "to_level": rm.level,
-                            "popularity": 0
+                            "popularity": 0,
+                            "ply_depth": pos_depth,
                         })
         
         for move, rm in out_moves:
@@ -321,7 +355,8 @@ def find_level_mismatches(session: Session):
                         "type": "orphaned_move",
                         "from_level": lvl,
                         "to_level": rm.level,
-                        "popularity": 0
+                        "popularity": 0,
+                        "ply_depth": pos_depth,
                     })
 
     return mismatches
@@ -364,25 +399,40 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
         parent_id, san, _ = parent_info
         return get_path_to_pos(parent_id, visited) + " -> " + san
 
+    def get_depth_to_pos(pid, visited=None):
+        if visited is None: visited = set()
+        if pid in visited: return 0
+        visited.add(pid)
+        parent_info = parent_map.get(pid)
+        if not parent_info: return 0
+        return get_depth_to_pos(parent_info[0], visited) + 1
+
     for move, rm in moves_with_rm:
         mismatches.append({
             "fen": move.from_position.fen if move.from_position else None,
             "move_san": move.san,
             "type": "priority_check",
             "popularity": move.priority_score * 100,
-            "path": get_path_to_pos(move.from_position_id)
+            "path": get_path_to_pos(move.from_position_id),
+            "ply_depth": get_depth_to_pos(move.from_position_id),
         })
     
     return sorted(mismatches, key=lambda x: x['popularity'], reverse=True)
 
 
-def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
+def find_repertoire_transpositions(session: Session, elo_range: str = "high",
+                                   engine_path: str = None, threads_count: int = 1,
+                                   item_callback = None, cancel_check = None,
+                                   engine = None, max_transpositions: int = None,
+                                   cache_service = None, depth: int = 25):
     """
     Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
     Filters strictly for sound/good lines:
-      - User moves: Verified against good_moves / engine eval / non-blunder.
-      - Opponent moves: Verified against plausible game frequency or legal variations.
-    Classifies results as 'ausgezeichnet' (🟢) or 'solide' (🟡).
+      - 2-Move transpositions: User move is verified with chess engine at depth 25 to ensure
+        it is the #1 best move (PV1) punishing any opponent inaccuracy.
+      - Classified as 'ausgezeichnet' (🟢) only if it is the best move.
+      - Uses persistent global cache for depth 25 engine evaluations across scans.
+      - Results can stream incrementally via item_callback.
     """
     def clean_fen(f):
         if not f:
@@ -417,22 +467,20 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
     inactive_adj_fen = collections.defaultdict(set)
     for move, rm in all_rep_moves:
         f_fen = id_to_clean_fen.get(move.from_position_id)
+        u = move.uci.strip().lower()
+        alts = {u}
+        if move.san in CASTLING_SANS:
+            alt = CASTLING_ALT.get(u)
+            if alt:
+                alts.add(alt)
+
         if rm.is_active:
             rep_moves_from_id[move.from_position_id].append(move)
             if f_fen:
-                rep_adj_fen[f_fen].add(move.uci.strip().lower())
+                rep_adj_fen[f_fen].update(alts)
         else:
             if f_fen:
-                inactive_adj_fen[f_fen].add(move.uci.strip().lower())
-
-    # Lichess cache
-    lichess_cache = {}
-    for ld in session.query(LichessData).all():
-        cf = clean_fen(ld.fen)
-        try:
-            lichess_cache[cf] = json.loads(ld.moves_json)
-        except Exception:
-            pass
+                inactive_adj_fen[f_fen].update(alts)
 
     # 3. BFS from Root to get reachable active repertoire positions
     sp = session.query(Position.id, Position.fen).filter(
@@ -470,16 +518,16 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
                     reachable_depths[t_norm] = depth + 1
                     bfs_queue.append((tid, t_norm, depth + 1))
 
-    # 4. Helpers to evaluate move soundness
+    # 4. Helpers to evaluate move soundness when offline / without live engine
     def evaluate_user_move(from_pos, from_fen, move_uci, target_pos, covered_from_inter=None):
         if covered_from_inter and move_uci in covered_from_inter:
-            return (True, True)
+            return True
 
         if from_pos and from_pos.good_moves:
             try:
                 gm_list = json.loads(from_pos.good_moves)
                 if move_uci in gm_list:
-                    return (True, True)
+                    return True
             except Exception:
                 pass
 
@@ -488,25 +536,12 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
             score_diff = target_pos.engine_eval - from_pos.engine_eval
             user_loss = -score_diff if p_turn == 'w' else score_diff
             if user_loss <= 15:
-                return (True, True)
-            return (False, False)
+                return True
+            return False
 
-        ld_moves = lichess_cache.get(from_fen, {})
-        if ld_moves:
-            if move_uci in ld_moves:
-                m_stat = ld_moves[move_uci]
-                total_games = sum(v.get('total', 0) for v in ld_moves.values())
-                m_total = m_stat.get('total', 0)
-                if total_games > 0 and (m_total / total_games) >= 0.10:
-                    return (True, True)
-                return (False, False)
-            return (False, False)
+        # Fallback when no live engine is supplied (e.g. offline unit testing)
+        return True
 
-        # Fallback: When no cached Lichess/engine data exists for the off-repertoire intermediate position,
-        # our move into an active, deeper repertoire position is considered sound.
-        return (True, True)
-
-    MAX_TRANSPOSITIONS = 15
     results = []
     seen_keys = set()
 
@@ -515,10 +550,11 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
         f for f in reachable_fens
         if len(f.split()) > 1 and f.split()[1] != player_color and f not in exempt_fens
     ]
-
     # Pass 1: 1-Move Opponent Transpositions (Opponent plays m1 directly into our repertoire, no badge)
     for f_orig in opponent_reachable_fens:
-        if len(results) >= MAX_TRANSPOSITIONS:
+        if max_transpositions is not None and len(results) >= max_transpositions:
+            break
+        if cancel_check and cancel_check():
             break
 
         p_orig = fen_to_pos.get(f_orig)
@@ -535,7 +571,9 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
             continue
 
         for m1 in list(board_1.legal_moves):
-            if len(results) >= MAX_TRANSPOSITIONS:
+            if max_transpositions is not None and len(results) >= max_transpositions:
+                break
+            if cancel_check and cancel_check():
                 break
             u1 = m1.uci().strip().lower()
             if u1 in covered_from_orig or u1 in inactive_from_orig:
@@ -559,7 +597,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
                     except Exception:
                         s1 = u1
 
-                    results.append({
+                    res_item = {
                         "fen": f_orig,
                         "target_fen": t1_fen,
                         "move_san": s1,
@@ -571,96 +609,175 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high"):
                         "quality": "",
                         "quality_label": "—",
                         "popularity": 50,
-                    })
+                        "ply_depth": orig_depth,
+                    }
+                    results.append(res_item)
+                    if item_callback:
+                        item_callback(res_item)
 
     # Pass 2: 2-Move Transpositions (Opponent plays m1, then WE play m2 to get back into repertoire)
-    if len(results) < MAX_TRANSPOSITIONS:
-        for f_orig in opponent_reachable_fens:
-            if len(results) >= MAX_TRANSPOSITIONS:
-                break
-
-            p_orig = fen_to_pos.get(f_orig)
-            if not p_orig:
-                continue
-
-            orig_depth = reachable_depths.get(f_orig)
-            covered_from_orig = rep_adj_fen.get(f_orig, set())
-            inactive_from_orig = inactive_adj_fen.get(f_orig, set())
-
+    if max_transpositions is None or len(results) < max_transpositions:
+        own_engine = False
+        active_engine = engine
+        if active_engine is None and engine_path and os.path.exists(engine_path):
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = subprocess.CREATE_NO_WINDOW | 0x00004000
             try:
-                board_1 = chess.Board(f_orig + " 0 1")
+                active_engine = chess.engine.SimpleEngine.popen_uci(
+                    engine_path, creationflags=creationflags
+                )
+                active_engine.configure({"Threads": max(1, int(threads_count))})
+                own_engine = True
             except Exception:
-                continue
+                active_engine = None
 
-            for m1 in list(board_1.legal_moves):
-                if len(results) >= MAX_TRANSPOSITIONS:
+        if cache_service is None and engine is None:
+            from opening_fenix.core.services.engine_cache_service import EngineCacheService
+            cache_service = EngineCacheService()
+        engine_eval_cache = {}
+
+        try:
+            for f_orig in opponent_reachable_fens:
+                if max_transpositions is not None and len(results) >= max_transpositions:
                     break
-                u1 = m1.uci().strip().lower()
-                if u1 in covered_from_orig or u1 in inactive_from_orig:
+                if cancel_check and cancel_check():
+                    break
+
+                p_orig = fen_to_pos.get(f_orig)
+                if not p_orig:
                     continue
 
-                board_1.push(m1)
-                inter_fen = clean_fen(board_1.fen())
-                p_inter = fen_to_pos.get(inter_fen)
-                covered_from_inter = rep_adj_fen.get(inter_fen, set())
-                inactive_from_inter = inactive_adj_fen.get(inter_fen, set())
+                orig_depth = reachable_depths.get(f_orig)
+                covered_from_orig = rep_adj_fen.get(f_orig, set())
+                inactive_from_orig = inactive_adj_fen.get(f_orig, set())
 
                 try:
-                    for m2 in list(board_1.legal_moves):
-                        if len(results) >= MAX_TRANSPOSITIONS:
-                            break
-                        u2 = m2.uci().strip().lower()
-                        if (u1 in covered_from_orig and u2 in covered_from_inter) or u2 in inactive_from_inter:
-                            continue
+                    board_1 = chess.Board(f_orig + " 0 1")
+                except Exception:
+                    continue
 
-                        board_1.push(m2)
-                        t2_fen = clean_fen(board_1.fen())
+                for m1 in list(board_1.legal_moves):
+                    if max_transpositions is not None and len(results) >= max_transpositions:
+                        break
+                    if cancel_check and cancel_check():
+                        break
+                    u1 = m1.uci().strip().lower()
+                    if u1 in covered_from_orig or u1 in inactive_from_orig:
+                        continue
+
+                    board_1.push(m1)
+                    inter_fen = clean_fen(board_1.fen())
+
+                    # If m1 already lands on an active repertoire position, this was already
+                    # detected as a 1-move transposition in Pass 1. Suggesting m1 + m2 from here
+                    # would re-suggest our own move m2 that is already part of the repertoire.
+                    if inter_fen in reachable_fens:
                         board_1.pop()
+                        continue
 
-                        if t2_fen in fen_to_pos and t2_fen != f_orig and t2_fen != inter_fen:
-                            # Forward-only check (eliminate backward cycles / shallower depth)
-                            t2_depth = reachable_depths.get(t2_fen)
-                            if orig_depth is not None and t2_depth is not None and t2_depth <= orig_depth:
+                    p_inter = fen_to_pos.get(inter_fen)
+                    covered_from_inter = rep_adj_fen.get(inter_fen, set())
+                    inactive_from_inter = inactive_adj_fen.get(inter_fen, set())
+
+                    try:
+                        for m2 in list(board_1.legal_moves):
+                            if max_transpositions is not None and len(results) >= max_transpositions:
+                                break
+                            if cancel_check and cancel_check():
+                                break
+                            u2 = m2.uci().strip().lower()
+                            if u2 in inactive_from_inter:
                                 continue
 
-                            p_target = fen_to_pos.get(t2_fen)
-                            key = (f_orig, t2_fen, f"{u1}_{u2}")
-                            if key not in seen_keys:
-                                seen_keys.add(key)
+                            board_1.push(m2)
+                            t2_fen = clean_fen(board_1.fen())
+                            board_1.pop()
 
-                                # User plays m2: evaluate soundness of our move
-                                _, m2_exc = evaluate_user_move(p_inter, inter_fen, u2, p_target, covered_from_inter)
-                                if m2_exc:
-                                    # Lazy SAN calculation
-                                    try:
-                                        s2 = board_1.san(m2)
-                                    except Exception:
-                                        s2 = u2
-                                    board_1.pop()
-                                    try:
-                                        s1 = board_1.san(m1)
-                                    except Exception:
-                                        s1 = u1
-                                    board_1.push(m1)
+                            if t2_fen in fen_to_pos and t2_fen != f_orig and t2_fen != inter_fen:
+                                # Forward-only check (eliminate backward cycles / shallower depth)
+                                t2_depth = reachable_depths.get(t2_fen)
+                                if orig_depth is not None and t2_depth is not None and t2_depth <= orig_depth:
+                                    continue
 
-                                    seq_str = f"{s1}  {s2}"
-                                    results.append({
-                                        "fen": f_orig,
-                                        "target_fen": t2_fen,
-                                        "move_san": seq_str,
-                                        "path_sans": [s1, s2],
-                                        "path_ucis": [u1, u2],
-                                        "depth": 2,
-                                        "type": "transposition_2",
-                                        "turn": "user",
-                                        "quality": "ausgezeichnet",
-                                        "quality_label": "🟢 Ausgezeichnet",
-                                        "popularity": 70,
-                                    })
+                                p_target = fen_to_pos.get(t2_fen)
+                                key = (f_orig, t2_fen, f"{u1}_{u2}")
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+
+                                    # User plays m2: evaluate if user move is the best move
+                                    is_best = False
+                                    if inter_fen not in engine_eval_cache:
+                                        # 1. Check persistent global cache
+                                        cached_move = cache_service.get_best_move(inter_fen, min_depth=depth) if cache_service else None
+                                        if cached_move is not None:
+                                            engine_eval_cache[inter_fen] = cached_move
+                                        elif active_engine is not None:
+                                            if cancel_check and cancel_check():
+                                                break
+                                            try:
+                                                eval_board = chess.Board(inter_fen + " 0 1")
+                                                info = active_engine.analyse(
+                                                    eval_board,
+                                                    chess.engine.Limit(depth=depth)
+                                                )
+                                                pv = info.get("pv", [])
+                                                best_uci = pv[0].uci().lower() if pv else None
+                                                engine_eval_cache[inter_fen] = best_uci
+                                                if best_uci and cache_service:
+                                                    cache_service.set_best_move(inter_fen, depth, best_uci)
+                                            except Exception:
+                                                engine_eval_cache[inter_fen] = None
+
+                                    best_uci = engine_eval_cache.get(inter_fen)
+                                    if best_uci is not None:
+                                        # Strict: User move m2 must be the #1 best move at configured depth
+                                        is_best = (u2 == best_uci)
+                                    elif active_engine is None:
+                                        # Offline fallback when no live engine is configured and not in cache
+                                        is_best = evaluate_user_move(p_inter, inter_fen, u2, p_target, covered_from_inter)
+
+                                    if is_best:
+                                        # Lazy SAN calculation
+                                        try:
+                                            s2 = board_1.san(m2)
+                                        except Exception:
+                                            s2 = u2
+                                        board_1.pop()
+                                        try:
+                                            s1 = board_1.san(m1)
+                                        except Exception:
+                                            s1 = u1
+                                        board_1.push(m1)
+
+                                        seq_str = f"{s1}  {s2}"
+                                        res_item = {
+                                            "fen": f_orig,
+                                            "target_fen": t2_fen,
+                                            "move_san": seq_str,
+                                            "path_sans": [s1, s2],
+                                            "path_ucis": [u1, u2],
+                                            "depth": 2,
+                                            "type": "transposition_2",
+                                            "turn": "user",
+                                            "quality": "ausgezeichnet",
+                                            "quality_label": "🟢 Ausgezeichnet",
+                                            "popularity": 70,
+                                            "ply_depth": orig_depth,
+                                        }
+                                        results.append(res_item)
+                                        if item_callback:
+                                            item_callback(res_item)
+                    except Exception:
+                        pass
+
+                    board_1.pop()
+        finally:
+            if own_engine and active_engine:
+                try:
+                    active_engine.quit()
                 except Exception:
                     pass
-
-                board_1.pop()
 
     def sort_key(item):
         d_val = item["depth"]

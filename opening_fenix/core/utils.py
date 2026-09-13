@@ -11,6 +11,118 @@ ELO_DISPLAY_MAP = {
 
 ELO_INTERNAL_MAP = {v: k for k, v in ELO_DISPLAY_MAP.items()}
 
+# --- CASTLING NORMALIZATION CONSTANTS & HELPERS ---
+CASTLING_SANS = {'O-O', 'O-O-O', '0-0', '0-0-0'}
+
+CASTLE_FRC_TO_STD = {
+    'e1h1': 'e1g1',
+    'e1a1': 'e1c1',
+    'e8h8': 'e8g8',
+    'e8a8': 'e8c8',
+}
+
+CASTLE_STD_TO_FRC = {
+    'e1g1': 'e1h1',
+    'e1c1': 'e1a1',
+    'e8g8': 'e8h8',
+    'e8c8': 'e8a8',
+}
+
+CASTLING_ALT = {
+    'e1g1': 'e1h1', 'e1h1': 'e1g1',
+    'e1c1': 'e1a1', 'e1a1': 'e1c1',
+    'e8g8': 'e8h8', 'e8h8': 'e8g8',
+    'e8c8': 'e8a8', 'e8a8': 'e8c8',
+}
+
+def normalize_castling_uci(uci: str, san: str = None) -> str:
+    """
+    If a move is a castling move and in Chess960 format (e.g. e1h1),
+    converts it to standard chess UCI format (e.g. e1g1).
+    """
+    if not uci:
+        return uci
+    uci_clean = uci.strip().lower()
+    if san and san in CASTLING_SANS:
+        return CASTLE_FRC_TO_STD.get(uci_clean, uci_clean)
+    return uci_clean
+
+def get_canonical_castling_uci(board, move) -> str:
+    """
+    Given a python-chess Board and Move, returns standard chess UCI.
+    Guarantees that castling moves return e1g1, e1c1, e8g8, e8c8 instead of Chess960 king-captures-rook UCIs.
+    """
+    if board is not None and move is not None:
+        try:
+            if board.is_kingside_castling(move):
+                import chess
+                return "e1g1" if board.turn == chess.WHITE else "e8g8"
+            elif board.is_queenside_castling(move):
+                import chess
+                return "e1c1" if board.turn == chess.WHITE else "e8c8"
+        except Exception:
+            pass
+    return move.uci() if hasattr(move, "uci") else str(move)
+
+def format_move_notation(fen_or_board, move_str: str, ply_depth: int = None) -> str:
+    """
+    Formats a chess move or sequence of moves with algebraic move numbers.
+    Examples:
+      - White move at ply 0 (1st move): 'e4' -> '1.e4'
+      - Black move at ply 1 (1st move): 'c5' -> '1...c5'
+      - White move at ply 4 (3rd move): 'd4' -> '3.d4'
+      - 2-move sequence starting Black at ply 1: 'c5  Nf3' -> '1...c5  2.Nf3'
+      - 2-move sequence starting White at ply 4: 'd4  cxd4' -> '3.d4  3...cxd4'
+      - Diagnostic suffix: 'c5 (L1→L2)' -> '1...c5 (L1→L2)'
+    """
+    if not move_str or move_str.strip() in ("", "—", "-"):
+        return move_str or ""
+
+    import re
+    # If already formatted with move number prefix (e.g. '3.d4', '1...c5'), return as-is
+    if re.match(r'^\d+\.', move_str.strip()):
+        return move_str
+
+    import chess
+    is_white = True
+    fullmove = 1
+
+    if ply_depth is not None:
+        is_white = (ply_depth % 2 == 0)
+        fullmove = (ply_depth // 2) + 1
+    elif isinstance(fen_or_board, chess.Board):
+        is_white = (fen_or_board.turn == chess.WHITE)
+        fullmove = fen_or_board.fullmove_number
+    elif isinstance(fen_or_board, str) and fen_or_board.strip():
+        parts = fen_or_board.strip().split()
+        if len(parts) > 1:
+            is_white = (parts[1] == 'w')
+        if len(parts) >= 6 and parts[5].isdigit():
+            fullmove = int(parts[5])
+
+    tokens = [t for t in move_str.strip().split() if t]
+    res = []
+    curr_white = is_white
+    curr_move = fullmove
+
+    for t in tokens:
+        # Check if token is diagnostic tag like (L1→L2)
+        if t.startswith('(') and t.endswith(')'):
+            if res:
+                res[-1] = f"{res[-1]} {t}"
+            else:
+                res.append(t)
+            continue
+        if curr_white:
+            res.append(f"{curr_move}.{t}")
+            curr_white = False
+        else:
+            res.append(f"{curr_move}...{t}")
+            curr_white = True
+            curr_move += 1
+
+    return "  ".join(res)
+
 def get_elo_display(internal_key):
     if not internal_key:
         return "N/A"
@@ -20,18 +132,35 @@ def get_elo_display(internal_key):
     return tr_ui(f"elo.{key_lower}", default_val)
 
 def get_elo_internal(display_name):
+    if not display_name:
+        return "high"
+    cleaned = str(display_name).strip()
+    # If already an internal key
+    if cleaned.lower() in ELO_DISPLAY_MAP:
+        return cleaned.lower()
+    # Support legacy numeric ranges
+    legacy_map = {
+        "1200-1600": "low",
+        "1600-2000": "mid",
+        "2000+": "high",
+        "master": "masters",
+        "masters": "masters",
+    }
+    if cleaned.lower() in legacy_map:
+        return legacy_map[cleaned.lower()]
     # First try the static German map (fast path)
-    if display_name in ELO_INTERNAL_MAP:
-        return ELO_INTERNAL_MAP[display_name]
+    if cleaned in ELO_INTERNAL_MAP:
+        return ELO_INTERNAL_MAP[cleaned]
     # Fall back: compare against current translated display names for each key
     try:
         from opening_fenix.core.translation import tr_ui
         for key in ELO_DISPLAY_MAP:
-            if tr_ui(f"elo.{key}", ELO_DISPLAY_MAP[key]) == display_name:
+            if tr_ui(f"elo.{key}", ELO_DISPLAY_MAP[key]).lower() == cleaned.lower():
                 return key
     except Exception:
         pass
     return "high"
+
 
 def is_free_training_profile(name: str) -> bool:
     if not name:
@@ -708,10 +837,16 @@ def combine_comments(existing_comment: str, new_comment: str, default_lang: str 
 def get_repertoire_comment_stats(session) -> str:
     """
     Scans comments in a repertoire database session and returns a formatted string such as:
-    '1,548 EN (86%), 245 DE (14%)' or 'Keine Kommentare'.
+    '1,548 EN (86%), 245 DE (14%)' or translated 'Keine Kommentare' / 'No comments'.
     """
+    try:
+        from opening_fenix.core.translation import tr_ui
+        no_comments = tr_ui("repo_settings.no_comments", "Keine Kommentare")
+    except Exception:
+        no_comments = "Keine Kommentare"
+
     if not session:
-        return "Keine Kommentare"
+        return no_comments
     from opening_fenix.core.db.models import Position
     
     try:
@@ -720,10 +855,10 @@ def get_repertoire_comment_stats(session) -> str:
             Position.comment != ""
         ).all()
     except Exception:
-        return "Keine Kommentare"
+        return no_comments
         
     if not comments:
-        return "Keine Kommentare"
+        return no_comments
         
     counts = {}
     for (raw_c,) in comments:
@@ -734,7 +869,7 @@ def get_repertoire_comment_stats(session) -> str:
                 counts[lang_upper] = counts.get(lang_upper, 0) + 1
                 
     if not counts:
-        return "Keine Kommentare"
+        return no_comments
         
     total = sum(counts.values())
     parts = []
@@ -745,4 +880,148 @@ def get_repertoire_comment_stats(session) -> str:
     return ", ".join(parts)
 
 
+def release_repertoire_locks(repo_name: str) -> None:
+    """
+    Safely terminates any background threads, closes database sessions/managers,
+    checkpoints SQLite WAL files, and removes read-only file attributes for the
+    specified repertoire across the entire application.
+    Vital on Windows to avoid [WinError 5] Zugriff verweigert during rename or delete.
+    """
+    if not repo_name:
+        return
 
+    import gc
+    import stat
+    import time
+    import sqlite3
+    from opening_fenix.core.logger import logger
+
+    # 1. Stop background threads and close sessions across all active Qt widgets
+    try:
+        from PyQt6.QtWidgets import QApplication
+        app = QApplication.instance()
+        if app:
+            for w in app.topLevelWidgets():
+                try:
+                    # Check CreatorWindow enrichment threads
+                    if hasattr(w, "enrichment_threads") and isinstance(w.enrichment_threads, list):
+                        for t in list(w.enrichment_threads):
+                            try:
+                                if getattr(t, "repo_name", None) == repo_name:
+                                    t.requestInterruption()
+                                    t.wait(300)
+                                    if t in w.enrichment_threads:
+                                        w.enrichment_threads.remove(t)
+                            except Exception:
+                                pass
+
+                    # Check engine thread
+                    if hasattr(w, "engine_thread") and w.engine_thread:
+                        try:
+                            w.engine_thread.stop_engine()
+                            w.engine_thread.running = False
+                            w.engine_thread.is_active = False
+                            w.engine_thread.wait(300)
+                        except Exception:
+                            pass
+
+                    # Check other creator threads
+                    for thread_attr in [
+                        "hole_thread", "global_transpos_thread", "_fen_index_thread",
+                        "_bfs_thread", "_path_quality_thread", "_instant_multipv_thread"
+                    ]:
+                        if hasattr(w, thread_attr):
+                            th = getattr(w, thread_attr)
+                            if th:
+                                try:
+                                    if hasattr(th, "stop"):
+                                        th.stop()
+                                    elif hasattr(th, "requestInterruption"):
+                                        th.requestInterruption()
+                                    th.wait(300)
+                                except Exception:
+                                    pass
+                                try:
+                                    setattr(w, thread_attr, None)
+                                except Exception:
+                                    pass
+
+                    # Check unified settings dialog stats workers
+                    for worker_attr in ["creator_stats_loader", "stats_loader"]:
+                        if hasattr(w, worker_attr):
+                            sw = getattr(w, worker_attr)
+                            if sw:
+                                try:
+                                    sw.requestInterruption()
+                                    sw.wait(300)
+                                except Exception:
+                                    pass
+                                try:
+                                    setattr(w, worker_attr, None)
+                                except Exception:
+                                    pass
+
+                    # Check backends (CreatorBackend)
+                    for b_attr in ["backend", "_owned_backend"]:
+                        if hasattr(w, b_attr):
+                            b = getattr(w, b_attr)
+                            if b and getattr(b, "active_repo_name", None) == repo_name:
+                                try:
+                                    b.close()
+                                    b.clear_cache()
+                                except Exception:
+                                    pass
+
+                    # Check MainWindow repertoire_manager
+                    if hasattr(w, "repertoire_manager"):
+                        rm = getattr(w, "repertoire_manager")
+                        if rm and getattr(rm, "active_repertoire_name", None) == repo_name:
+                            try:
+                                rm.close()
+                            except Exception:
+                                pass
+
+                except Exception as e:
+                    logger.debug(f"Error releasing locks in widget {w}: {e}")
+    except Exception as e:
+        logger.debug(f"Error accessing Qt widgets for lock release: {e}")
+
+    # 2. Checkpoint WAL and truncate auxiliary files if DB exists
+    db_path = get_repertoire_db_path(repo_name)
+    if db_path and os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path, timeout=3)
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.close()
+        except Exception as e:
+            logger.debug(f"WAL checkpoint for {repo_name}: {e}")
+
+    # 3. Strip read-only attributes on directory and all files
+    repo_dir = get_repertoire_dir(repo_name)
+    if repo_dir and os.path.exists(repo_dir):
+        try:
+            os.chmod(repo_dir, stat.S_IWRITE)
+        except Exception:
+            pass
+        for root, dirs, files in os.walk(repo_dir):
+            for d in dirs:
+                try:
+                    os.chmod(os.path.join(root, d), stat.S_IWRITE)
+                except Exception:
+                    pass
+            for f in files:
+                try:
+                    os.chmod(os.path.join(root, f), stat.S_IWRITE)
+                except Exception:
+                    pass
+
+    # 4. Trigger garbage collection to release file descriptors held by Python objects
+    gc.collect()
+    try:
+        from PyQt6.QtWidgets import QApplication
+        if QApplication.instance():
+            QApplication.processEvents()
+    except Exception:
+        pass
+    gc.collect()
+    time.sleep(0.15)

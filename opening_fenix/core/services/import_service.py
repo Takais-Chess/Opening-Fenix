@@ -5,7 +5,7 @@ from typing import Tuple, Optional, Callable
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
-from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments, normalize_castling_uci
 from opening_fenix.core.services.repair_service import repair_repertoire_health
 from opening_fenix.core.translation import tr_ui
 
@@ -51,15 +51,16 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             
         # 2. BULK CACHE INITIALIZATION
         pos_cache = {p.fen: p.id for p in session.query(Position.fen, Position.id).all()}
-        move_cache = {(m.from_position_id, m.uci): m.id for m in session.query(Move.from_position_id, Move.uci, Move.id).all()}
+        move_cache = {(m.from_position_id, m.uci): (m.id, m.nag) for m in session.query(Move.from_position_id, Move.uci, Move.id, Move.nag).all()}
         rep_move_cache = {rm.move_id: rm.level for rm in session.query(RepertoireMove.move_id, RepertoireMove.level).all()}
 
         max_pos_id = max(pos_cache.values()) if pos_cache else 0
-        max_move_id = max(move_cache.values()) if move_cache else 0
+        max_move_id = max(m_id for m_id, _ in move_cache.values()) if move_cache else 0
 
         new_positions_to_insert = {}
         new_moves_to_insert = []
         new_rep_moves_to_insert = []
+        moves_to_update_nag = {}
         comments_to_append = {}
 
         # 3. FAST STREAMING PGN PARSING
@@ -113,16 +114,23 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                         else:
                             comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=lang)
 
-                    uci_str = move.uci()
-                    move_id = move_cache.get((from_pos_id, uci_str))
+                    incoming_nag = next(iter(current_node.nags), 0)
+                    move_san = current_node.san()
+                    uci_str = normalize_castling_uci(move.uci(), move_san)
+                    move_entry = move_cache.get((from_pos_id, uci_str))
                     
-                    if not move_id:
+                    if not move_entry:
                         max_move_id += 1
                         move_id = max_move_id
-                        move_cache[(from_pos_id, uci_str)] = move_id
+                        move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
                         new_moves_to_insert.append(
-                            Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=current_node.san(), nag=next(iter(current_node.nags), 0))
+                            Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
                         )
+                    else:
+                        move_id, existing_nag = move_entry
+                        if incoming_nag != 0 and existing_nag != incoming_nag:
+                            moves_to_update_nag[move_id] = incoming_nag
+                            move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
                     
                     # REPERTOIRE MOVE LOGIC
                     if move_id not in rep_move_cache:
@@ -147,6 +155,9 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             session.bulk_save_objects(new_moves_to_insert)
         if new_rep_moves_to_insert:
             session.bulk_save_objects(new_rep_moves_to_insert)
+        if moves_to_update_nag:
+            for m_id, n in moves_to_update_nag.items():
+                session.query(Move).filter_by(id=m_id).update({'nag': n})
         
         # 6. UPDATE COMMENTS 
         if comments_to_append:
@@ -160,7 +171,7 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                     new_c = comments_to_append[pos.fen]
                     pos.comment = combine_comments(pos.comment, new_c, default_lang=lang)
 
-        if new_moves_count > 0 or comments_to_append:
+        if new_moves_count > 0 or comments_to_append or moves_to_update_nag:
             # 7. AUTOMATED HEALTH REPAIR
             # This ensures no holes were created and levels are consistent.
             repair_repertoire_health(session, fast=True)

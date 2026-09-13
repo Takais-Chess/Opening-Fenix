@@ -1,5 +1,5 @@
-from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QApplication
+from PyQt6.QtCore import Qt, QPoint, QRect
 from PyQt6.QtGui import QIcon
 
 from opening_fenix.gui.styles import COLORS
@@ -64,25 +64,69 @@ class CustomTitleBar(QWidget):
         self.layout.addWidget(self.btn_close, alignment=Qt.AlignmentFlag.AlignTop)
         
         self.start_pos = None
+        self.press_pos = None
+        self.is_dragging = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.update_maximize_button()
+
+    def update_maximize_button(self):
+        if self.parent_window and hasattr(self, 'btn_maximize'):
+            if self.parent_window.isMaximized():
+                self.btn_maximize.setText("🗗")
+            else:
+                self.btn_maximize.setText("🗖")
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.start_pos = event.globalPosition().toPoint()
+            self.press_pos = event.position().toPoint()
+            self.is_dragging = True
 
     def mouseMoveEvent(self, event):
-        if self.start_pos is not None and self.parent_window is not None:
-            # If maximized, restore when dragging
-            if self.parent_window.isMaximized():
-                self.parent_window.showNormal()
-                # Adjust cursor position to be roughly in the middle of the new title bar
-                self.start_pos = QPoint(self.parent_window.width() // 2, event.pos().y())
-            
-            delta = event.globalPosition().toPoint() - self.start_pos
-            self.parent_window.move(self.parent_window.pos() + delta)
-            self.start_pos = event.globalPosition().toPoint()
+        if not self.is_dragging or self.start_pos is None or self.parent_window is None:
+            return
+
+        current_global = event.globalPosition().toPoint()
+
+        # If maximized, restore when dragging down
+        if self.parent_window.isMaximized():
+            # Determine screen under current cursor
+            screen = QApplication.screenAt(current_global) or self.parent_window.screen()
+            screen_avail = screen.availableGeometry() if screen else QRect(0, 0, 1920, 1080)
+
+            grab_ratio = 0.5
+            if self.width() > 0 and self.press_pos is not None:
+                grab_ratio = max(0.0, min(1.0, self.press_pos.x() / self.width()))
+
+            self.parent_window.showNormal()
+
+            target_w = min(scale(1400), max(800, screen_avail.width() - scale(100)))
+            target_h = min(scale(900), max(600, screen_avail.height() - scale(100)))
+            self.parent_window.resize(target_w, target_h)
+
+            click_y_offset = self.press_pos.y() if self.press_pos else scale(15)
+            new_x = int(current_global.x() - grab_ratio * target_w)
+            new_y = int(current_global.y() - click_y_offset)
+
+            # Clamp so title bar stays on screen
+            new_x = max(screen_avail.left(), min(new_x, screen_avail.right() - target_w))
+            new_y = max(screen_avail.top(), min(new_y, screen_avail.bottom() - target_h))
+
+            self.parent_window.move(new_x, new_y)
+            self.start_pos = current_global
+            self.update_maximize_button()
+            return
+
+        delta = current_global - self.start_pos
+        self.parent_window.move(self.parent_window.pos() + delta)
+        self.start_pos = current_global
 
     def mouseReleaseEvent(self, event):
         self.start_pos = None
+        self.press_pos = None
+        self.is_dragging = False
         
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -95,11 +139,23 @@ class CustomTitleBar(QWidget):
     def maximize_window(self):
         if self.parent_window:
             if self.parent_window.isMaximized():
+                current_screen = QApplication.screenAt(self.parent_window.geometry().center()) or self.parent_window.screen()
+                screen_avail = current_screen.availableGeometry() if current_screen else None
+
                 self.parent_window.showNormal()
-                self.btn_maximize.setText("🗖")
+
+                # Prevent multi-monitor teleporting back to primary monitor
+                if screen_avail and not screen_avail.contains(self.parent_window.geometry().center()):
+                    target_w = min(scale(1400), max(800, screen_avail.width() - scale(100)))
+                    target_h = min(scale(900), max(600, screen_avail.height() - scale(100)))
+                    new_x = screen_avail.left() + (screen_avail.width() - target_w) // 2
+                    new_y = screen_avail.top() + (screen_avail.height() - target_h) // 2
+                    self.parent_window.setGeometry(new_x, new_y, target_w, target_h)
+
+                self.update_maximize_button()
             else:
                 self.parent_window.showMaximized()
-                self.btn_maximize.setText("🗗")
+                self.update_maximize_button()
 
     def close_window(self):
         if self.parent_window:

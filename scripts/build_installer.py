@@ -104,6 +104,14 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                         print(f" -> Removed non-example repertoire '{item}' from '{repo_dir}'")
     print(" -> Synced example repertoires to public bundle")
 
+    # Remove engines from public bundle (users download Stockfish on-demand to maintain 0 GPL overhead)
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'engines':
+                e_dir = os.path.join(root_dir_path, d)
+                safe_rmtree(e_dir)
+                print(f" -> Removed engines directory '{e_dir}' from public bundle")
+
     res = subprocess.run(
         [iscc_exe, f'/DMyAppVersion={app_version}', '/DAppBuildType=Public', iss_file],
         capture_output=False
@@ -140,14 +148,27 @@ def main():
     # --------------------------------------------------------
     dist_dir = os.path.join(project_root, 'dist', 'Opening Fenix')
     if os.path.exists(dist_dir):
-        try:
-            subprocess.run(['taskkill', '/F', '/IM', 'stockfish-windows-x86-64-avx2.exe'], capture_output=True)
-            subprocess.run(['taskkill', '/F', '/IM', 'Opening Fenix.exe'], capture_output=True)
-            import time
-            time.sleep(0.5)
-            safe_rmtree(dist_dir)
-        except Exception:
-            pass
+        # Try to cleanly remove dist_dir without touching any running processes.
+        safe_rmtree(dist_dir)
+        # If files inside dist_dir are locked, only terminate processes running specifically from dist_dir.
+        if os.path.exists(dist_dir):
+            try:
+                norm_target = os.path.normcase(os.path.abspath(dist_dir))
+                ps_script = (
+                    f"$target = '{norm_target}'; "
+                    "Get-Process | Where-Object { $_.Path -and ($_.Path.ToLower().StartsWith($target.ToLower())) } | "
+                    "Select-Object -ExpandProperty Id"
+                )
+                res = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script], capture_output=True, text=True)
+                for line in res.stdout.splitlines():
+                    pid = line.strip()
+                    if pid.isdigit():
+                        subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                import time
+                time.sleep(0.5)
+                safe_rmtree(dist_dir)
+            except Exception:
+                pass
 
     print("\n1. Building PyInstaller Application Bundle...")
     PyInstaller.__main__.run(['--noconfirm', 'Opening Fenix.spec'])

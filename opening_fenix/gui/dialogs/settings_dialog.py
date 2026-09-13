@@ -105,7 +105,7 @@ class SettingsDialog(UnifiedSettingsDialog):
     """
     Backwards-compatible SettingsDialog routing to UnifiedSettingsDialog in Trainer mode.
     """
-    def __init__(self, main_window):
+    def __init__(self, main_window=None):
         super().__init__(parent=main_window, initial_section="trainer")
         from opening_fenix.core.utils import is_free_training_profile
         from opening_fenix.core.translation import tr_ui

@@ -35,12 +35,39 @@ def is_newer_version(remote_tag: str, current_version: str = APP_VERSION) -> boo
     current_parsed = parse_version(current_version)
     return remote_parsed > current_parsed
 
+def _clean_mojibake(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    for _ in range(3):
+        try:
+            fixed = text.encode("cp1252").decode("utf-8")
+            if fixed != text:
+                text = fixed
+            else:
+                break
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            try:
+                fixed = text.encode("latin1").decode("utf-8")
+                if fixed != text:
+                    text = fixed
+                else:
+                    break
+            except (UnicodeEncodeError, UnicodeDecodeError):
+                break
+    return text
+
 def get_config_dict() -> Dict[str, Any]:
     config_path = os.path.join(get_user_dir(), "config.json")
     if os.path.exists(config_path):
         try:
             with open(config_path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+                if isinstance(data, dict):
+                    if "theme" in data and isinstance(data["theme"], str):
+                        data["theme"] = _clean_mojibake(data["theme"])
+                    if "highlight_color" in data and isinstance(data["highlight_color"], str):
+                        data["highlight_color"] = _clean_mojibake(data["highlight_color"])
+                return data
         except Exception as e:
             logger.warning(f"Could not load config.json: {e}")
     return {}

@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.10] - 2026-09-13
+
+### Added & Improved
+- **Automated Stockfish Engine Downloader**: Integrated an automated engine downloader that fetches and extracts the latest official Stockfish release on-demand, reducing public installer size and maintaining clean separation.
+- **Engine Setup & Configuration Dialog**: Added a dedicated dialog for downloading, selecting, and validating chess engines, with automatic thread and hash size recommendations.
+- **Repertoire Mistake & Blunder Auditing**: Built an engine-driven audit pipeline (`audit_repertoire_mistakes` and `RepertoireMistakeScanThread`) to identify inaccuracies and blunders (centipawn loss > 50 cp) across all active repertoire moves.
+- **Dedicated Lichess API Token Interface**: Added a modern dialog for configuring and validating Lichess API tokens, complete with one-click token generation links and permission guidance.
+- **Multi-Threaded Maintenance Architecture**: Redesigned maintenance routines into parallel worker pipelines (engine analysis, Lichess synchronization, orphan cleanup, priority calculation) with responsive GUI progress reporting.
+- **Creator & Hole Finder Enhancements**: Streamlined hole finding queries, optimized transposition tracking across unvisited positions, and polished board widget alignments.
+
 ## [0.9.9] - 2026-09-10
 
 ### Added & Improved

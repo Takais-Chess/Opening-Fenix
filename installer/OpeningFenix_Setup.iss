@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "0.9.7"
+#define MyAppVersion "0.9.10"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -383,7 +383,11 @@ begin
         DeleteFile(ExpandConstant('{app}') + '\PUBLIC_VERSION');
     end;
 
-    EnginePath := ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-avx2.exe';
+    EnginePath := '';
+    if FileExists(ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-avx2.exe') then
+      EnginePath := ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-avx2.exe'
+    else if FileExists(ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-universal.exe') then
+      EnginePath := ExpandConstant('{app}') + '\engines\stockfish-windows-x86-64-universal.exe';
     EscapedEnginePath := EnginePath;
     StringChangeEx(EscapedEnginePath, '\', '\\', True);
 

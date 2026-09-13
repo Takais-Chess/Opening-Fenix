@@ -38,12 +38,40 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
         A tuple (success, message).
     """
     try:
+        from opening_fenix.core.utils import release_repertoire_locks
+        release_repertoire_locks(repo_name)
+
         repo_dir = get_repertoire_dir(repo_name)
-        if os.path.exists(repo_dir):
-            shutil.rmtree(repo_dir)
+        if not os.path.exists(repo_dir):
+            return False, "Repertoire-Verzeichnis nicht gefunden."
+
+        def remove_readonly(func, path, _):
+            import stat
+            try:
+                os.chmod(path, stat.S_IWRITE)
+            except Exception:
+                pass
+            func(path)
+
+        deleted = False
+        last_err = None
+        import time
+        import gc
+        for attempt in range(8):
+            try:
+                if os.path.exists(repo_dir):
+                    shutil.rmtree(repo_dir, onerror=remove_readonly)
+                deleted = True
+                break
+            except Exception as e:
+                last_err = e
+                gc.collect()
+                time.sleep(0.25 * (attempt + 1))
+
+        if deleted:
             return True, f"Repertoire '{repo_name}' wurde gelöscht."
         else:
-            return False, "Repertoire-Verzeichnis nicht gefunden."
+            return False, f"Fehler beim Löschen: {last_err}"
     except Exception as e:
         return False, f"Fehler beim Löschen: {e}"
 

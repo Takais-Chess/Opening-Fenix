@@ -3,7 +3,7 @@ import json
 import pytest
 import sqlite3
 from datetime import datetime, timedelta
-from PyQt6.QtWidgets import QApplication, QWidget
+from PyQt6.QtWidgets import QApplication, QWidget, QPushButton
 from opening_fenix.core.services.backup_service import (
     create_repertoire_backup,
     list_repertoire_backups,
@@ -167,4 +167,19 @@ def test_repo_settings_dialog_backup_integration(qapp, temp_repo):
 
     dialog.create_manual_backup_now()
     assert dialog.tbl_backups.rowCount() == 1
+
+    # Verify column 1 contains formatted details (comments, levels, etc.)
+    details_text = dialog.tbl_backups.item(0, 1).text()
+    assert "💬" in details_text
+    assert "🎯" in details_text
+
+    # Verify column 3 action cell widget contains Restore and Delete buttons
+    action_cell = dialog.tbl_backups.cellWidget(0, 3)
+    assert action_cell is not None
+    buttons = action_cell.findChildren(QPushButton)
+    assert len(buttons) == 2
+    button_texts = [b.text() for b in buttons]
+    assert any("Wiederherstellen" in t for t in button_texts)
+    assert any("Löschen" in t for t in button_texts)
+
     dialog.close()

@@ -121,3 +121,23 @@ def test_run_group_maintenance_wrapper():
         mock_run.return_value = (True, "Success")
         res = run_group_maintenance([], {}, None)
         assert res == (True, "Success")
+
+def test_dual_mode_cell(qapp):
+    from opening_fenix.gui.dialogs.unified_settings_dialog import DualModeCell
+    cell = DualModeCell("Initial Text")
+    assert cell.text() == "Initial Text"
+    assert not cell.label.isHidden()
+    assert cell.progress_bar.isHidden()
+
+    # Switch to progress mode
+    cell.show_progress(45, "Calculating 45%")
+    assert cell.label.isHidden()
+    assert not cell.progress_bar.isHidden()
+    assert cell.progress_bar.value() == 45
+    assert cell.progress_bar.format() == "45%"
+
+    # Switch back to text mode
+    cell.show_text("Tiefe: 18 ✓", "Finished")
+    assert not cell.label.isHidden()
+    assert cell.progress_bar.isHidden()
+    assert cell.text() == "Tiefe: 18 ✓"

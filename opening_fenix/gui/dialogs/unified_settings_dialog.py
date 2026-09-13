@@ -1,9 +1,10 @@
 import os
+import sqlite3
 import re
 import json
 import datetime
 import multiprocessing
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from PyQt6 import sip
 from PyQt6.QtWidgets import (
@@ -13,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStackedWidget, QTextEdit, QPlainTextEdit, QGridLayout, 
     QApplication, QAbstractButton, QSizePolicy, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QTableWidget, QTableWidgetItem, QProgressDialog, QRadioButton,
-    QInputDialog
+    QInputDialog, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread, QEvent
 from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QPainterPath, QColor, QBrush
@@ -32,7 +33,8 @@ from opening_fenix.core.utils import (
 )
 from opening_fenix.core.translation import tr_ui, tr_widget, translator, escape_mnemonic
 from opening_fenix.core.services.repertoire_core_service import (
-    RepertoireService, fetch_repertoire_info, fetch_repertoire_levels
+    RepertoireService, fetch_repertoire_info, fetch_repertoire_levels,
+    get_repertoire_levels_fast, get_repertoire_meta_fast, invalidate_repertoire_levels_cache
 )
 from opening_fenix.core.services.backup_service import (
     create_repertoire_backup, list_repertoire_backups, restore_repertoire_from_backup
@@ -45,7 +47,9 @@ from opening_fenix.core.services.update_service import (
 from opening_fenix.core.threads import (
     AnalysisThread, LichessImportThread, MaintenanceThread, RepertoireStatsWorker
 )
-from opening_fenix.gui.widgets.board_widget import THEMES, HIGHLIGHT_COLORS
+from opening_fenix.gui.widgets.board_widget import (
+    THEMES, THEME_FALLBACKS, HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_FALLBACKS, normalize_text_encoding
+)
 from opening_fenix.gui.widgets.common import AutoAdjustButton
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
@@ -62,6 +66,27 @@ class NoWheelComboBox(QComboBox):
 class NoWheelSpinBox(QSpinBox):
     def wheelEvent(self, event):
         event.ignore()
+
+class CenteredSpinBoxCell(QWidget):
+    """Container widget that centers a spinbox in a table cell with padding, delegating value methods."""
+    def __init__(self, spin: QSpinBox, parent=None):
+        super().__init__(parent)
+        self.spin = spin
+        self.setStyleSheet("background: transparent;")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(scale(8), scale(4), scale(8), scale(4))
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(spin)
+
+    def value(self):
+        return self.spin.value()
+
+    def setValue(self, v):
+        self.spin.setValue(v)
+
+    def __getattr__(self, name):
+        return getattr(self.spin, name)
+
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event):
@@ -99,6 +124,83 @@ class ToggleSwitch(QAbstractButton):
         painter.drawEllipse(knob_rect)
 
 
+class DualModeCell(QWidget):
+    """
+    A table cell widget that can display either a text label or a progress bar.
+    Used for the Analyse and Coverage columns during batch maintenance.
+    """
+    def __init__(self, initial_text: str = "-", parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(scale(6), scale(3), scale(6), scale(3))
+        layout.setSpacing(0)
+
+        self.label = QLabel(initial_text)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.label.setStyleSheet(f"font-size: {scale(12)}px; color: {COLORS['bw_text']}; font-weight: 500;")
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.progress_bar.setFixedHeight(scale(20))
+        self.progress_bar.hide()
+
+        layout.addWidget(self.label)
+        layout.addWidget(self.progress_bar)
+
+    def show_text(self, text: str, tooltip: Optional[str] = None):
+        self.progress_bar.hide()
+        self.label.setText(text)
+        self.label.show()
+        if tooltip is not None:
+            self.setToolTip(tooltip)
+            self.label.setToolTip(tooltip)
+
+    def show_progress(self, pct: int, tooltip: Optional[str] = None):
+        self.label.hide()
+        self.progress_bar.setValue(max(0, min(100, pct)))
+        self.progress_bar.setFormat(f"{pct}%")
+        self.progress_bar.show()
+        if tooltip is not None:
+            self.setToolTip(tooltip)
+            self.progress_bar.setToolTip(tooltip)
+
+    def text(self) -> str:
+        return self.label.text()
+
+
+_scaled_pixmap_cache: Dict[Tuple[str, int, int], QPixmap] = {}
+
+def get_cached_scaled_pixmap(path_or_default: Optional[str], width: int, height: int) -> QPixmap:
+    """Returns a cached QPixmap scaled to width x height, avoiding repeated disk reads and bilinear scaling."""
+    key = (path_or_default or "__default_logo__", width, height)
+    cached = _scaled_pixmap_cache.get(key)
+    if cached is not None and not cached.isNull():
+        return cached
+
+    if path_or_default and path_or_default != "__default_logo__" and os.path.exists(path_or_default):
+        pix = QPixmap(path_or_default).scaled(
+            width, height,
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation
+        )
+    else:
+        logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
+        if os.path.exists(logo_path):
+            pix = QPixmap(logo_path).scaled(
+                width, height,
+                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                Qt.TransformationMode.SmoothTransformation
+            )
+        else:
+            pix = QPixmap()
+
+    _scaled_pixmap_cache[key] = pix
+    return pix
+
+
 class TrainerRepoStatsWorker(QThread):
     stats_ready = pyqtSignal(dict)
 
@@ -108,7 +210,7 @@ class TrainerRepoStatsWorker(QThread):
 
     def run(self):
         from opening_fenix.core.db.database import DatabaseManager
-        from opening_fenix.core.utils import get_repertoire_db_path
+        from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_comment_stats
         from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
         
         if self.isInterruptionRequested():
@@ -122,6 +224,9 @@ class TrainerRepoStatsWorker(QThread):
             if self.isInterruptionRequested():
                 return
             info = fetch_repertoire_info(session, self.repo_name, fast_only=False)
+            if self.isInterruptionRequested():
+                return
+            info["comment_stats"] = get_repertoire_comment_stats(session)
             if self.isInterruptionRequested():
                 return
             self.stats_ready.emit(info)
@@ -161,14 +266,8 @@ class RepertoireConfigCard(QFrame):
         self.lbl_cover = QLabel()
         self.lbl_cover.setFixedSize(scale(48), scale(48))
         cover_path = get_repertoire_cover_path(self.repo_name)
-        if cover_path and os.path.exists(cover_path):
-            pix = QPixmap(cover_path).scaled(scale(48), scale(48), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-            self.lbl_cover.setPixmap(pix)
-        else:
-            logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
-            if os.path.exists(logo_path):
-                pix = QPixmap(logo_path).scaled(scale(48), scale(48), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                self.lbl_cover.setPixmap(pix)
+        pix = get_cached_scaled_pixmap(cover_path, scale(48), scale(48))
+        self.lbl_cover.setPixmap(pix)
         self.lbl_cover.setStyleSheet(f"border: 1px solid rgba(0, 0, 0, 0.1); border-radius: {scale(6)}px; background: white;")
         self.layout.addWidget(self.lbl_cover)
         
@@ -227,39 +326,31 @@ class RepertoireConfigCard(QFrame):
 
     def get_selected_level_elo(self):
         level = self.combo_level.currentData() if hasattr(self, 'combo_level') else None
-        if level is None and self.main_window and hasattr(self.main_window, 'training_manager'):
-            level = self.main_window.training_manager.get_active_level(self.repo_name)
+        tm = getattr(self.main_window, 'training_manager', None)
+        if level is None and tm and hasattr(tm, 'get_active_level'):
+            level = tm.get_active_level(self.repo_name)
         if hasattr(self, 'levels_elo_map') and level in self.levels_elo_map:
             return self.levels_elo_map[level]
         return 1500
 
     def populate_levels(self):
-        from opening_fenix.core.db.database import DatabaseManager
         self.levels_elo_map = {}
-        db_path = get_repertoire_db_path(self.repo_name)
-        if not os.path.exists(db_path):
-            return
-        db_manager = DatabaseManager(db_path)
-        session = db_manager.get_session()
-        try:
-            levels = fetch_repertoire_levels(session)
-            active_lvl = 1
-            if self.main_window and hasattr(self.main_window, 'training_manager'):
-                active_lvl = self.main_window.training_manager.get_active_level(self.repo_name)
+        levels = get_repertoire_levels_fast(self.repo_name)
+        active_lvl = 1
+        tm = getattr(self.main_window, 'training_manager', None)
+        if tm and hasattr(tm, 'get_active_level'):
+            active_lvl = tm.get_active_level(self.repo_name)
 
-            self.combo_level.blockSignals(True)
-            self.combo_level.clear()
-            for lvl in levels:
-                lvl_order = lvl['order']
-                self.levels_elo_map[lvl_order] = int(lvl.get('target_elo') or 1500)
-                self.combo_level.addItem(f"Lvl {lvl_order}: {lvl['name']}", lvl_order)
-            
-            idx = self.combo_level.findData(active_lvl)
-            if idx != -1: self.combo_level.setCurrentIndex(idx)
-            self.combo_level.blockSignals(False)
-        finally:
-            session.close()
-            db_manager.close()
+        self.combo_level.blockSignals(True)
+        self.combo_level.clear()
+        for lvl in levels:
+            lvl_order = lvl['order']
+            self.levels_elo_map[lvl_order] = int(lvl.get('target_elo') or 1500)
+            self.combo_level.addItem(f"Lvl {lvl_order}: {lvl['name']}", lvl_order)
+        
+        idx = self.combo_level.findData(active_lvl)
+        if idx != -1: self.combo_level.setCurrentIndex(idx)
+        self.combo_level.blockSignals(False)
 
     def toggle_active(self):
         self.is_active = not self.is_active
@@ -475,7 +566,7 @@ class DeleteLevelDialog(QDialog):
         for lvl in self.levels:
             self.combo_del.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
 
-        if self.default_del_order:
+        if self.default_del_order is not None:
             idx = self.combo_del.findData(self.default_del_order)
             if idx >= 0: self.combo_del.setCurrentIndex(idx)
 
@@ -599,7 +690,12 @@ TRAINER_SETTINGS_KEYS = {
     "max_new_cards_per_day",
     "max_reviews_per_session",
     "enforce_limit_after_variation",
-    "auto_delay"
+    "auto_delay",
+    "theme",
+    "highlight_color",
+    "anim_speed",
+    "master_volume",
+    "stop_at_variation_end",
 }
 
 
@@ -610,7 +706,7 @@ class UnifiedSettingsDialog(QDialog):
     """
     def __init__(self, parent=None, backend=None, initial_section: str = "trainer"):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        # Do not set WA_DeleteOnClose so dialog instance can be reused instantly
         set_consistent_icon(self)
         
         self.main_window = parent
@@ -650,6 +746,7 @@ class UnifiedSettingsDialog(QDialog):
         self.loading_dots = 0
         self.loading_timer = None
         self.selected_trainer_repo = None
+        self.selected_creator_level_order = None
 
         self.init_ui()
         self.navigate_initial_section(self.initial_section)
@@ -679,10 +776,108 @@ class UnifiedSettingsDialog(QDialog):
         self.s_d = self.spin_scan_depth
         self.c_threads = self.combo_scan_threads
         self.btn_fetch = self.btn_start_lich_fetch
+        self.btn_delete_lichess = getattr(self, 'btn_del_lich', None)
+        self.btn_delete_all_lichess = getattr(self, 'btn_del_all_lich', None)
         self.btn_start_eng = self.btn_start_eng_scan
         self.pb_eng = self.pb_scan
         self.l_eng_status = self.lbl_scan_status
         self.refresh_info = self.refresh_creator_info
+
+    def on_reopen(self):
+        """Called when dialog is re-opened from an existing retained instance.
+        Reloads all repertoire data, cards, and settings freshly from scratch."""
+        # 1. Update active profile name and reload profile settings from disk
+        if self.main_window:
+            if getattr(self.main_window, 'profile_name', None):
+                self.profile_name = self.main_window.profile_name
+            elif getattr(self.main_window, 'training_manager', None) and getattr(self.main_window.training_manager, 'profile_name', None):
+                self.profile_name = self.main_window.training_manager.profile_name
+        self.profile_settings = self._load_profile_settings(self.profile_name)
+
+        display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        # Preserve the user's current dropdown selection across reopens.
+        # populate_active_repo_dropdown() resets the combo to the backend's active repo,
+        # so we save the selection beforehand and restore it if it still exists.
+        previous_selection = self.combo_active_repo.currentData() if hasattr(self, 'combo_active_repo') else None
+        self.populate_active_repo_dropdown()
+        if previous_selection:
+            idx = self.combo_active_repo.findData(previous_selection)
+            if idx >= 0:
+                self.combo_active_repo.blockSignals(True)
+                self.combo_active_repo.setCurrentIndex(idx)
+                self.combo_active_repo.blockSignals(False)
+
+        if self.initial_section == "creator":
+            repo_name = getattr(self.backend, 'active_repo_name', None) if self.backend else None
+            self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
+            self.ensure_backend_for_active_repo()
+            self.refresh_creator_info()
+            self.refresh_backups_list()
+        else:
+            self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
+
+        # 2. Invalidate levels cache so fresh database values are read
+        invalidate_repertoire_levels_cache()
+
+        # 3. Reload all repertoire cards from scratch (detecting new, deleted, or renamed repos)
+        if hasattr(self, 'refresh_trainer_repertoire_cards'):
+            self.refresh_trainer_repertoire_cards()
+
+        # 4. Reload active repertoire details fresh from scratch
+        active_repo = None
+        if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+            active_repo = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+        target_repo = active_repo or getattr(self, 'selected_trainer_repo', None)
+        if target_repo:
+            self.on_trainer_repo_selected(target_repo)
+            self.update_trainer_card_selection_highlights()
+
+        # 5. Reset maintenance loaded flag so maintenance center queries latest data when viewed
+        self.maintenance_loaded = False
+
+        # 6. Re-synchronize live tab configuration and appearance controls without firing change signals
+        self.sync_creator_tab_checkboxes()
+        self.sync_appearance_controls()
+
+    def sync_creator_tab_checkboxes(self):
+        """Synchronizes tab checkboxes with the live creator_active_tabs config without triggering save signals."""
+        if not hasattr(self, 'chk_details'):
+            return
+        active_tabs = self.get_config().get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+        for chk, key in [(self.chk_details, "DETAILS"), (self.chk_analysis, "ANALYSIS"), 
+                         (self.chk_transpositions, "TRANSPOSITIONS"),
+                         (self.chk_holes, "HOLES"), (self.chk_kontrolle, "KONTROLLE")]:
+            chk.blockSignals(True)
+            chk.setChecked(key in active_tabs)
+            chk.blockSignals(False)
+
+    def sync_appearance_controls(self):
+        """Synchronizes theme, highlight color, volume, etc. with live settings."""
+        if hasattr(self, 'combo_theme'):
+            current_theme = self.get_setting("theme", "Braun (Klassisch)")
+            if isinstance(current_theme, str):
+                current_theme = normalize_text_encoding(current_theme)
+            idx = self.combo_theme.findData(current_theme)
+            if idx < 0: idx = self.combo_theme.findText(current_theme)
+            if idx < 0 and current_theme in THEME_FALLBACKS:
+                idx = self.combo_theme.findData(THEME_FALLBACKS[current_theme])
+            if idx >= 0:
+                self.combo_theme.blockSignals(True)
+                self.combo_theme.setCurrentIndex(idx)
+                self.combo_theme.blockSignals(False)
+
+        if hasattr(self, 'combo_highlight'):
+            current_hl = self.get_setting("highlight_color", "Gelb (Standard)")
+            if isinstance(current_hl, str):
+                current_hl = normalize_text_encoding(current_hl)
+            idx_hl = self.combo_highlight.findData(current_hl)
+            if idx_hl < 0: idx_hl = self.combo_highlight.findText(current_hl)
+            if idx_hl < 0 and current_hl in HIGHLIGHT_COLOR_FALLBACKS:
+                idx_hl = self.combo_highlight.findData(HIGHLIGHT_COLOR_FALLBACKS[current_hl])
+            if idx_hl >= 0:
+                self.combo_highlight.blockSignals(True)
+                self.combo_highlight.setCurrentIndex(idx_hl)
+                self.combo_highlight.blockSignals(False)
 
     @property
     def selected_repo(self):
@@ -705,9 +900,16 @@ class UnifiedSettingsDialog(QDialog):
         if val is None and hasattr(self, 'combo_repertoire_elo'):
             val = self.combo_repertoire_elo.currentText()
         if val:
-            backend.set_meta("elo", get_elo_internal(val))
+            internal_elo = get_elo_internal(val)
+            backend.set_meta("elo", internal_elo)
+            backend.set_meta("lichess_elo", internal_elo)
             try: backend.session.commit()
             except: pass
+            if self.main_window and hasattr(self.main_window, 'set_repertoire_elo'):
+                mw_backend = getattr(self.main_window, 'backend', None)
+                if mw_backend and getattr(mw_backend, 'active_repo_name', None) == getattr(backend, 'active_repo_name', None):
+                    self.main_window.set_repertoire_elo(internal_elo)
+
 
     def save_description(self):
         backend = getattr(self, 'backend', None)
@@ -721,6 +923,9 @@ class UnifiedSettingsDialog(QDialog):
     def add_level(self):
         self.add_creator_level()
 
+    def edit_level_elo(self, row):
+        self.edit_creator_level_elo(row)
+
     def rename_repertoire(self):
         self.rename_active_repertoire()
 
@@ -731,15 +936,29 @@ class UnifiedSettingsDialog(QDialog):
         self.remove_creator_cover()
 
     def change_board_theme(self, theme_name):
+        if isinstance(theme_name, str):
+            theme_name = normalize_text_encoding(theme_name)
         if hasattr(self, 'combo_theme'):
-            self.combo_theme.setCurrentText(theme_name)
+            idx = self.combo_theme.findData(theme_name)
+            if idx < 0: idx = self.combo_theme.findText(theme_name)
+            if idx < 0 and theme_name in THEME_FALLBACKS:
+                idx = self.combo_theme.findData(THEME_FALLBACKS[theme_name])
+            if idx >= 0:
+                self.combo_theme.setCurrentIndex(idx)
         self.set_setting("theme", theme_name)
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_theme'):
             self.main_window.board_widget.set_theme(theme_name)
 
     def change_highlight_color(self, color_name):
+        if isinstance(color_name, str):
+            color_name = normalize_text_encoding(color_name)
         if hasattr(self, 'combo_highlight'):
-            self.combo_highlight.setCurrentText(color_name)
+            idx = self.combo_highlight.findData(color_name)
+            if idx < 0: idx = self.combo_highlight.findText(color_name)
+            if idx < 0 and color_name in HIGHLIGHT_COLOR_FALLBACKS:
+                idx = self.combo_highlight.findData(HIGHLIGHT_COLOR_FALLBACKS[color_name])
+            if idx >= 0:
+                self.combo_highlight.setCurrentIndex(idx)
         self.set_setting("highlight_color", color_name)
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_highlight_color'):
             self.main_window.board_widget.set_highlight_color(color_name)
@@ -764,6 +983,45 @@ class UnifiedSettingsDialog(QDialog):
         if hasattr(self, 'txt_lichess_token'):
             self.txt_lichess_token.setText(token)
         self.set_setting("lichess_token", token)
+        self._refresh_token_status_card()
+
+    def _test_global_lichess_token(self):
+        """Test the token currently in the global settings text field."""
+        from opening_fenix.core.services.lichess_service import is_valid_token_string
+        token = self.txt_lichess_token.text().strip() if hasattr(self, 'txt_lichess_token') else ""
+        if not hasattr(self, 'lbl_global_token_status'):
+            return
+        if not is_valid_token_string(token):
+            self.lbl_global_token_status.setText("⚠️ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
+            self.lbl_global_token_status.setStyleSheet("color: #e67e22; font-size: 12px;")
+            return
+        self.lbl_global_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
+        self.lbl_global_token_status.setStyleSheet("color: #2980b9; font-size: 12px;")
+        from PyQt6.QtCore import QThread, pyqtSignal as _pySig
+
+        class _GlobalTestWorker(QThread):
+            done = _pySig(bool, str)
+            def __init__(self, tok):
+                super().__init__()
+                self._tok = tok
+            def run(self):
+                from opening_fenix.core.services.lichess_service import verify_lichess_token as _v
+                self.done.emit(*_v(self._tok))
+
+        self._global_token_worker = _GlobalTestWorker(token)
+
+        def on_result(success, msg):
+            if not hasattr(self, 'lbl_global_token_status'):
+                return
+            if success:
+                self.lbl_global_token_status.setText("✅ " + msg)
+                self.lbl_global_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+            else:
+                self.lbl_global_token_status.setText("❌ " + msg)
+                self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+
+        self._global_token_worker.done.connect(on_result)
+        self._global_token_worker.start()
 
     def run_variation_name_repair(self):
         backend = self.ensure_backend_for_active_repo()
@@ -964,29 +1222,37 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_active_repo.blockSignals(False)
 
     def ensure_backend_for_active_repo(self):
-        repo_name = self.combo_active_repo.currentData()
+        repo_name = None
+        if hasattr(self, 'combo_active_repo') and self.combo_active_repo:
+            repo_name = self.combo_active_repo.currentData() or self.combo_active_repo.currentText()
+        if not repo_name and self.backend:
+            repo_name = getattr(self.backend, 'active_repo_name', None)
+        if not repo_name and hasattr(self, 'selected_trainer_repo') and self.selected_trainer_repo:
+            repo_name = self.selected_trainer_repo
         if not repo_name:
             return None
+
         from opening_fenix.creator.creator_window import CreatorBackend
-        if self.backend and getattr(self.backend, 'active_repo_name', None) == repo_name:
-            return self.backend
-        
         if not self.backend:
             if not self._owned_backend:
                 self._owned_backend = CreatorBackend()
             self.backend = self._owned_backend
             
-        try:
-            self.backend.load_repertoire(repo_name)
-        except Exception as e:
-            from opening_fenix.core.logger import logger
-            logger.error(f"Error loading repertoire {repo_name} into backend: {e}")
+        if getattr(self.backend, 'active_repo_name', None) != repo_name:
+            try:
+                self.backend.load_repertoire(repo_name)
+            except Exception as e:
+                from opening_fenix.core.logger import logger
+                logger.error(f"Error loading repertoire {repo_name} into backend: {e}")
         return self.backend
 
     def on_creator_repo_switched(self):
         self.ensure_backend_for_active_repo()
         self.refresh_creator_info()
         self.refresh_backups_list()
+        if self.initial_section == "creator":
+            repo_name = self.combo_active_repo.currentData() or self.combo_active_repo.currentText()
+            self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
 
     # ─── Sidebar Tree & Navigation ──────────────────────────────────────────
 
@@ -1092,9 +1358,14 @@ class UnifiedSettingsDialog(QDialog):
             is_creator = item.data(0, Qt.ItemDataRole.UserRole + 1)
             is_maintenance = (idx == self.pages.indexOf(self.page_cr_maintenance))
             self.creator_header_bar.setVisible(bool(is_creator) and not is_maintenance)
-            if is_creator and not is_maintenance:
+            if is_maintenance and not self.maintenance_loaded:
+                self.maintenance_loaded = True
+                self.refresh_maintenance_table(start_stats_worker=True)
+            elif is_creator and not is_maintenance:
                 self.ensure_backend_for_active_repo()
                 self.refresh_creator_info()
+                if hasattr(self, 'page_cr_backups') and idx == self.pages.indexOf(self.page_cr_backups):
+                    self.refresh_backups_list()
             if hasattr(self, 'main_scroll') and self.main_scroll:
                 self.main_scroll.verticalScrollBar().setValue(0)
         else:
@@ -1130,22 +1401,28 @@ class UnifiedSettingsDialog(QDialog):
         for t_key in THEMES.keys():
             self.combo_theme.addItem(tr_ui(f"themes.{t_key}", t_key), t_key)
         current_theme = self.get_setting("theme", "Braun (Klassisch)")
+        if isinstance(current_theme, str):
+            current_theme = normalize_text_encoding(current_theme)
         idx = self.combo_theme.findData(current_theme)
         if idx < 0: idx = self.combo_theme.findText(current_theme)
+        if idx < 0 and current_theme in THEME_FALLBACKS:
+            idx = self.combo_theme.findData(THEME_FALLBACKS[current_theme])
         if idx >= 0: self.combo_theme.setCurrentIndex(idx)
         self.combo_theme.currentIndexChanged.connect(self.on_theme_changed)
-        self.combo_theme.currentTextChanged.connect(self.on_theme_changed)
         f_design.addRow(tr_ui("settings.board_design", "Schachbrett-Design:"), self.combo_theme)
 
         self.combo_highlight = NoWheelComboBox()
         for hl_key in HIGHLIGHT_COLORS.keys():
             self.combo_highlight.addItem(tr_ui(f"highlight_colors.{hl_key}", hl_key), hl_key)
         current_hl = self.get_setting("highlight_color", "Gelb (Standard)")
+        if isinstance(current_hl, str):
+            current_hl = normalize_text_encoding(current_hl)
         idx_hl = self.combo_highlight.findData(current_hl)
         if idx_hl < 0: idx_hl = self.combo_highlight.findText(current_hl)
+        if idx_hl < 0 and current_hl in HIGHLIGHT_COLOR_FALLBACKS:
+            idx_hl = self.combo_highlight.findData(HIGHLIGHT_COLOR_FALLBACKS[current_hl])
         if idx_hl >= 0: self.combo_highlight.setCurrentIndex(idx_hl)
         self.combo_highlight.currentIndexChanged.connect(self.on_highlight_color_changed)
-        self.combo_highlight.currentTextChanged.connect(self.on_highlight_color_changed)
         f_design.addRow(tr_ui("settings.highlight_color", "Farbe Zug-Hervorhebung:"), self.combo_highlight)
 
         self.spin_anim = NoWheelSpinBox()
@@ -1347,10 +1624,27 @@ class UnifiedSettingsDialog(QDialog):
 
         self.txt_engine_path = QLineEdit(self.get_config().get("engine_path", ""))
         self.txt_engine_path.textChanged.connect(lambda t: self.set_setting("engine_path", t))
-        btn_browse = QPushButton("...")
-        btn_browse.setFixedWidth(scale(42))
+        btn_browse = QPushButton(tr_widget("common.browse", "Durchsuchen..."))
         btn_browse.clicked.connect(self.browse_engine_path)
-        h_epath = QHBoxLayout(); h_epath.addWidget(self.txt_engine_path); h_epath.addWidget(btn_browse)
+        btn_download = QPushButton(tr_widget("settings.btn_download_engine", "⚡ Stockfish herunterladen"))
+        btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_download.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border: none;
+                border-radius: {scale(6)}px;
+                font-weight: bold;
+                padding: {scale(4)}px {scale(10)}px;
+                font-size: {scale(12)}px;
+            }}
+            QPushButton:hover {{ background-color: #e67e22; }}
+        """)
+        btn_download.clicked.connect(self.download_stockfish_engine)
+        h_epath = QHBoxLayout()
+        h_epath.addWidget(self.txt_engine_path)
+        h_epath.addWidget(btn_browse)
+        h_epath.addWidget(btn_download)
         f_engine.addRow(tr_ui("settings.engine_path", "Engine Pfad (.exe):"), h_epath)
 
         self.combo_engine_threads = NoWheelComboBox()
@@ -1383,6 +1677,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_lichess_token = QLineEdit(self.get_config().get("lichess_token", ""))
         self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_lichess_token.textChanged.connect(lambda t: self.set_setting("lichess_token", t))
+        self.txt_lichess_token.textChanged.connect(lambda _: self._refresh_token_status_card())
         btn_eye = QPushButton("👁️")
         btn_eye.setFixedWidth(scale(42))
         btn_eye.setCheckable(True)
@@ -1390,6 +1685,27 @@ class UnifiedSettingsDialog(QDialog):
         h_tok = QHBoxLayout(); h_tok.addWidget(self.txt_lichess_token); h_tok.addWidget(btn_eye)
         f_token.addRow(tr_ui("settings.lichess_token", "Lichess API-Token:"), h_tok)
         v_lich.addLayout(f_token)
+
+        # Token action row: Test + Create link
+        h_token_actions = QHBoxLayout()
+        h_token_actions.setSpacing(scale(8))
+        btn_token_test_global = QPushButton(tr_widget("lichess_token.btn_test", "🧪 Verbindung testen"))
+        btn_token_test_global.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_token_test_global.clicked.connect(self._test_global_lichess_token)
+        btn_token_create = QPushButton(tr_widget("lichess_token.btn_open_lichess", "🌐 Token auf Lichess erstellen"))
+        btn_token_create.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_token_create.clicked.connect(lambda: __import__('PyQt6.QtGui', fromlist=['QDesktopServices']).QDesktopServices.openUrl(
+            __import__('PyQt6.QtCore', fromlist=['QUrl']).QUrl("https://lichess.org/account/oauth/token")
+        ))
+        h_token_actions.addWidget(btn_token_test_global)
+        h_token_actions.addWidget(btn_token_create)
+        h_token_actions.addStretch()
+        v_lich.addLayout(h_token_actions)
+
+        self.lbl_global_token_status = QLabel("")
+        self.lbl_global_token_status.setWordWrap(True)
+        self.lbl_global_token_status.setStyleSheet("font-size: 12px; padding: 2px 0;")
+        v_lich.addWidget(self.lbl_global_token_status)
 
         # Fairplay Lockout
         lbl_fairplay = QLabel(tr_ui("settings.fairplay_desc", "<b>Lichess Fairplay Schutz:</b> Blockiert auf Wunsch den Zugriff auf Eröffnungsdaten während du ein gewertetes Spiel auf Lichess spielst, um versehentliche Account-Sperren zu verhindern."))
@@ -1422,6 +1738,13 @@ class UnifiedSettingsDialog(QDialog):
         if p:
             self.txt_engine_path.setText(p)
             self.set_setting("engine_path", p)
+
+    def download_stockfish_engine(self):
+        from opening_fenix.gui.dialogs.engine_setup_dialog import EngineDownloadProgressDialog
+        dl_dlg = EngineDownloadProgressDialog(self)
+        if dl_dlg.exec() == QDialog.DialogCode.Accepted and dl_dlg.engine_path:
+            self.txt_engine_path.setText(dl_dlg.engine_path)
+            self.set_setting("engine_path", dl_dlg.engine_path)
 
     # ─── PAGE 1.3: Storage & Data (Global) ──────────────────────────────────
 
@@ -1657,7 +1980,6 @@ class UnifiedSettingsDialog(QDialog):
         self.card_container = self.trainer_cards_container
 
         self.scroll_trainer_cards.setWidget(self.trainer_cards_container)
-        self.scroll_trainer_cards.installEventFilter(self)
         self.scroll_trainer_cards.viewport().installEventFilter(self)
         v_cards.addWidget(self.scroll_trainer_cards)
         layout.addWidget(g_cards)
@@ -1750,6 +2072,7 @@ class UnifiedSettingsDialog(QDialog):
         # Rechte Spalte (Beschreibung - lesbar und rahmenlos)
         self.txt_trainer_description = QTextEdit()
         self.txt_trainer_description.setReadOnly(True)
+        self.txt_trainer_description.setPlaceholderText(tr_ui("settings.no_description", "Keine Beschreibung vorhanden."))
         self.txt_trainer_description.setStyleSheet(
             "background: transparent; border: none; padding: 0px; font-size: 14px; color: #2c3e50; line-height: 1.4;"
         )
@@ -1793,10 +2116,11 @@ class UnifiedSettingsDialog(QDialog):
         repos = RepertoireService().get_all_repertoires()
         active_repos = []
         inactive_repos = []
+        tm = getattr(self.main_window, 'training_manager', None)
+        visibility_map = {}
         for r_name in repos:
-            is_active = True
-            if self.main_window and hasattr(self.main_window, 'training_manager'):
-                is_active = self.main_window.training_manager.is_repo_visible(r_name)
+            is_active = tm.is_repo_visible(r_name) if (tm and hasattr(tm, 'is_repo_visible')) else True
+            visibility_map[r_name] = is_active
             if is_active:
                 active_repos.append(r_name)
             else:
@@ -1805,9 +2129,7 @@ class UnifiedSettingsDialog(QDialog):
         sorted_repos = sorted(active_repos) + sorted(inactive_repos)
 
         for r_name in sorted_repos:
-            is_active = True
-            if self.main_window and hasattr(self.main_window, 'training_manager'):
-                is_active = self.main_window.training_manager.is_repo_visible(r_name)
+            is_active = visibility_map.get(r_name, True)
             card = RepertoireConfigCard(r_name, is_active, self)
             card.clicked.connect(lambda n=r_name: self.on_trainer_repo_selected(n))
             self.trainer_cards_layout.addWidget(card)
@@ -1816,12 +2138,12 @@ class UnifiedSettingsDialog(QDialog):
         self.rearrange_trainer_cards_grid()
 
     def eventFilter(self, obj, event):
-        from PyQt6.QtCore import QEvent
-        if hasattr(self, "scroll_trainer_cards") and (obj == self.scroll_trainer_cards or obj == self.scroll_trainer_cards.viewport()) and event.type() == QEvent.Type.Resize:
-            self.rearrange_trainer_cards_grid()
-        elif hasattr(self, "levels_container") and obj == self.levels_container and event.type() == QEvent.Type.Resize:
-            self.rearrange_levels_grid()
-        return super().eventFilter(obj, event)
+        if event.type() == QEvent.Type.Resize:
+            if hasattr(self, "scroll_trainer_cards") and obj == self.scroll_trainer_cards.viewport():
+                self.rearrange_trainer_cards_grid()
+            elif hasattr(self, "levels_container") and obj == self.levels_container:
+                self.rearrange_levels_grid()
+        return False
 
     def rearrange_trainer_cards_grid(self):
         if not hasattr(self, "scroll_trainer_cards") or not hasattr(self, "trainer_cards_layout"):
@@ -1905,38 +2227,19 @@ class UnifiedSettingsDialog(QDialog):
             self.stats_loader.requestInterruption()
             self.stats_loader.wait()
 
-        # Fast Load metadata
-        from opening_fenix.core.db.database import DatabaseManager
-        from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_comment_stats
-        from opening_fenix.core.data_tools import get_meta
-        from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
-        
-        db_path = get_repertoire_db_path(repo_name)
-        db_manager = DatabaseManager(db_path)
-        session = db_manager.get_session()
-        try:
-            info = fetch_repertoire_info(session, repo_name, fast_only=True)
-            color = get_meta(session, "color", "w")
-            comment_stats_str = get_repertoire_comment_stats(session)
-        except Exception:
-            info = {"name": repo_name, "description": ""}
-            color = 'w'
-            comment_stats_str = "Keine Kommentare"
-        finally:
-            session.close()
-            db_manager.close()
+        # Fast Load metadata via direct sqlite query without heavy DatabaseManager overhead
+        meta = get_repertoire_meta_fast(repo_name)
+        display_name = meta.get('name', repo_name) or repo_name
+        color = meta.get('color', 'w') or 'w'
+        description = meta.get('description', '') or ''
 
         if hasattr(self, 'lbl_trainer_repo_name'):
-            self.lbl_trainer_repo_name.setText(info.get("name", repo_name) or repo_name)
+            self.lbl_trainer_repo_name.setText(display_name)
         if hasattr(self, 'lbl_name'):
-            self.lbl_name.setText(info.get("name", repo_name) or repo_name)
+            self.lbl_name.setText(display_name)
 
         if hasattr(self, 'lbl_comment_stats'):
-            if not comment_stats_str or comment_stats_str == "Keine Kommentare":
-                stats_display = tr_ui("settings.no_comments", "Keine Kommentare")
-            else:
-                stats_display = comment_stats_str
-            self.lbl_comment_stats.setText(tr_ui("settings.comments_format", "💬 Kommentare: {stats}", stats=stats_display))
+            self.lbl_comment_stats.setText(tr_ui("settings.comments_format", "💬 Kommentare: {stats}", stats=tr_ui("settings.loading_text", "Laden...")))
         
         if hasattr(self, 'lbl_color'):
             if color == 'w':
@@ -1948,22 +2251,16 @@ class UnifiedSettingsDialog(QDialog):
             )
             
         if hasattr(self, 'txt_trainer_description'):
-            self.txt_trainer_description.setPlainText(info.get("description", "-") or "-")
+            self.txt_trainer_description.setPlainText(description)
         if hasattr(self, 'lbl_db_info'):
             self.lbl_db_info.setText(tr_ui("settings.db_loading", "📚 Datenbank: Laden..."))
 
-        # Load cover image
+        # Load cover image (cached)
         from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
         if hasattr(self, 'lbl_info_cover'):
             cover_path = get_repertoire_cover_path(repo_name)
-            if cover_path and os.path.exists(cover_path):
-                pix = QPixmap(cover_path).scaled(scale(180), scale(180), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                self.lbl_info_cover.setPixmap(pix)
-            else:
-                logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
-                if os.path.exists(logo_path):
-                    pix = QPixmap(logo_path).scaled(scale(180), scale(180), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                    self.lbl_info_cover.setPixmap(pix)
+            pix = get_cached_scaled_pixmap(cover_path, scale(180), scale(180))
+            self.lbl_info_cover.setPixmap(pix)
             self.lbl_info_cover.setStyleSheet("border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 8px; background: white;")
 
         # Clear levels and set loading
@@ -1986,11 +2283,43 @@ class UnifiedSettingsDialog(QDialog):
         if sip.isdeleted(self): return
         if hasattr(self, 'loading_timer') and self.loading_timer: self.loading_timer.stop()
         
+        # Update name if available
+        if "name" in info and hasattr(self, 'lbl_trainer_repo_name'):
+            disp_name = info.get("name") or self.selected_trainer_repo
+            self.lbl_trainer_repo_name.setText(disp_name)
+            if hasattr(self, 'lbl_name'):
+                self.lbl_name.setText(disp_name)
+
+        # Update color if available
+        if "color" in info and hasattr(self, 'lbl_color'):
+            color = info.get("color", "w") or "w"
+            if color == 'w':
+                self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♟️"))
+            else:
+                self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
+            self.lbl_color.setStyleSheet(
+                f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #111111; font-size: {scale(11)}px; font-weight: bold; border: 1px solid rgba(0,0,0,0.15);"
+            )
+
+        # Update description if loaded
+        if "description" in info and hasattr(self, 'txt_trainer_description'):
+            desc = info.get("description", "") or ""
+            self.txt_trainer_description.setPlainText(desc)
+
         # Update Database Elo rating info
         elo_cat = info.get("elo", "-")
         rating_info = get_elo_display(elo_cat)
         if hasattr(self, 'lbl_db_info'):
             self.lbl_db_info.setText(tr_ui("settings.db_info_format", "📚 Datenbank: {rating_info}", rating_info=rating_info))
+
+        # Update Comment stats if loaded
+        if "comment_stats" in info and hasattr(self, 'lbl_comment_stats'):
+            comment_stats_str = info["comment_stats"]
+            if not comment_stats_str or comment_stats_str in ("Keine Kommentare", "No comments", tr_ui("settings.no_comments", "Keine Kommentare"), tr_ui("repo_settings.no_comments", "Keine Kommentare")):
+                stats_display = tr_ui("settings.no_comments", "Keine Kommentare")
+            else:
+                stats_display = comment_stats_str
+            self.lbl_comment_stats.setText(tr_ui("settings.comments_format", "💬 Kommentare: {stats}", stats=stats_display))
         
         # Clear and build levels list as a single combined pill container
         self.level_pills = []
@@ -2247,6 +2576,7 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_cr_elo = NoWheelComboBox()
         self.combo_cr_elo.addItems([get_elo_display(k) for k in ELO_DISPLAY_MAP.keys()])
         self.combo_cr_elo.currentTextChanged.connect(self.save_creator_elo)
+        self.combo_cr_elo.currentTextChanged.connect(lambda _: self._update_delete_lichess_button_text())
 
         self.combo_cr_color = NoWheelComboBox()
         self.combo_cr_color.addItem(tr_ui("repo_settings.color_white", "♔ Weiß"), "w")
@@ -2278,7 +2608,7 @@ class UnifiedSettingsDialog(QDialog):
         # Description
         self.txt_cr_desc = QPlainTextEdit()
         self.txt_cr_desc.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
-        self.txt_cr_desc.setMaximumHeight(scale(80))
+        self.txt_cr_desc.setFixedHeight(scale(160))
         self.txt_cr_desc.textChanged.connect(self.save_creator_description)
         v_id.addWidget(QLabel(tr_ui("repo_settings.label_description", "📝 Beschreibung:")))
         v_id.addWidget(self.txt_cr_desc)
@@ -2313,11 +2643,50 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("repo_settings.header_name", "Bezeichnung"),
             tr_ui("repo_settings.header_target_elo", "Ziel-Elo (Trainer)")
         ])
-        self.tbl_cr_levels.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        header = self.tbl_cr_levels.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.tbl_cr_levels.setColumnWidth(0, scale(65))
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.tbl_cr_levels.setColumnWidth(2, scale(180))
         self.tbl_cr_levels.verticalHeader().setVisible(False)
-        self.tbl_cr_levels.verticalHeader().setDefaultSectionSize(scale(42))
+        self.tbl_cr_levels.verticalHeader().setDefaultSectionSize(scale(44))
         self.tbl_cr_levels.setMinimumHeight(scale(160))
-        self.tbl_cr_levels.itemDoubleClicked.connect(self.rename_creator_level)
+        self.tbl_cr_levels.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tbl_cr_levels.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tbl_cr_levels.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tbl_cr_levels.setShowGrid(True)
+        self.tbl_cr_levels.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: #ffffff;
+                border: 1px solid rgba(0, 0, 0, 0.1);
+                border-radius: {scale(8)}px;
+                gridline-color: rgba(0, 0, 0, 0.06);
+            }}
+            QHeaderView::section {{
+                background-color: #f7f7f9;
+                color: {COLORS['brown_text']};
+                font-weight: bold;
+                padding: {scale(6)}px;
+                border: none;
+                border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+            }}
+            QTableWidget::item {{
+                border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+                padding: {scale(4)}px;
+                color: #222222;
+            }}
+            QTableWidget::item:hover {{
+                background-color: rgba(211, 84, 0, 0.08);
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(211, 84, 0, 0.18);
+                color: #111111;
+            }}
+        """)
+        self.tbl_cr_levels.cellClicked.connect(self.on_creator_level_cell_clicked)
+        self.tbl_cr_levels.cellDoubleClicked.connect(self.on_creator_level_cell_double_clicked)
+        self.tbl_cr_levels.viewport().setCursor(Qt.CursorShape.PointingHandCursor)
         v_lvl.addWidget(self.tbl_cr_levels)
 
         h_lvl_btns = QHBoxLayout()
@@ -2372,7 +2741,12 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_cr_comment_lang.blockSignals(False)
 
         if getattr(backend, 'session', None):
-            self.lbl_cr_comment_stats.setText(get_repertoire_comment_stats(backend.session))
+            raw_stats = get_repertoire_comment_stats(backend.session)
+            if not raw_stats or raw_stats in ("Keine Kommentare", "No comments"):
+                display_stats = tr_ui("repo_settings.no_comments", "Keine Kommentare")
+            else:
+                display_stats = raw_stats
+            self.lbl_cr_comment_stats.setText(display_stats)
 
         # Levels Table
         levels = backend.get_repertoire_levels()
@@ -2388,19 +2762,24 @@ class UnifiedSettingsDialog(QDialog):
             self.tbl_cr_levels.insertRow(idx)
             it_ord = QTableWidgetItem(str(lvl['order']))
             it_ord.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_ord.setFlags(it_ord.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_ord.setToolTip(tr_ui("repo_settings.click_to_select_level", "Klicken zum Auswählen (für Löschen)"))
             self.tbl_cr_levels.setItem(idx, 0, it_ord)
 
             it_nm = QTableWidgetItem(lvl['name'])
             it_nm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_nm.setFlags(it_nm.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_nm.setToolTip(tr_ui("repo_settings.click_to_rename", "Klicken zum Umbenennen"))
             self.tbl_cr_levels.setItem(idx, 1, it_nm)
 
-            spin = NoWheelSpinBox()
-            spin.setRange(800, 4000); spin.setSingleStep(50)
-            spin.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            spin.setValue(int(lvl.get('target_elo') or 1500))
-            spin.valueChanged.connect(lambda val, lo=lvl['order']: backend.update_level_elo(lo, val))
-            self.tbl_cr_levels.setCellWidget(idx, 2, spin)
-            self.tbl_cr_levels.setRowHeight(idx, scale(42))
+            target_elo = int(lvl.get('target_elo') or 1500)
+            it_elo = QTableWidgetItem(f"{target_elo} Elo")
+            it_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_elo.setFlags(it_elo.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            it_elo.setData(Qt.ItemDataRole.UserRole, target_elo)
+            it_elo.setToolTip(tr_ui("repo_settings.click_to_edit_elo", "Klicken zum Ändern der Ziel-Elo"))
+            self.tbl_cr_levels.setItem(idx, 2, it_elo)
+            self.tbl_cr_levels.setRowHeight(idx, scale(44))
 
             if hasattr(self, 'combo_prio_target'):
                 self.combo_prio_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
@@ -2408,6 +2787,13 @@ class UnifiedSettingsDialog(QDialog):
                 self.combo_prune_target_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
 
         self._update_levels_table_height()
+
+        if hasattr(self, 'selected_creator_level_order') and self.selected_creator_level_order is not None:
+            for idx in range(self.tbl_cr_levels.rowCount()):
+                it = self.tbl_cr_levels.item(idx, 0)
+                if it and it.text() == str(self.selected_creator_level_order):
+                    self.tbl_cr_levels.selectRow(idx)
+                    break
 
         # Update extra info rows (Analyse-Status & Positionen mit Prio-Score)
         if hasattr(self, 'lbl_cr_ana_status') and hasattr(self, 'lbl_cr_db_cov') and backend.active_repo_name:
@@ -2427,10 +2813,11 @@ class UnifiedSettingsDialog(QDialog):
 
         # Cover Preview
         self.update_creator_cover_preview(r_name)
+        self._update_delete_lichess_button_text()
 
     def _update_levels_table_height(self):
         if not hasattr(self, "tbl_cr_levels"): return
-        self.tbl_cr_levels.verticalHeader().setDefaultSectionSize(scale(42))
+        self.tbl_cr_levels.verticalHeader().setDefaultSectionSize(scale(44))
         header_h = self.tbl_cr_levels.horizontalHeader().height()
         if header_h <= 0:
             header_h = scale(38)
@@ -2438,7 +2825,7 @@ class UnifiedSettingsDialog(QDialog):
         rows_h = 0
         for i in range(row_cnt):
             r_h = self.tbl_cr_levels.rowHeight(i)
-            rows_h += r_h if r_h > 0 else scale(42)
+            rows_h += r_h if r_h > 0 else scale(44)
         total_h = header_h + rows_h + scale(8)
         self.tbl_cr_levels.setFixedHeight(max(scale(160), total_h))
 
@@ -2483,22 +2870,45 @@ class UnifiedSettingsDialog(QDialog):
             if hasattr(backend, "rename_repertoire"):
                 succ, msg = backend.rename_repertoire(old_name, new_name)
                 if succ:
+                    # Update all windows in application
+                    for w in QApplication.topLevelWidgets():
+                        if hasattr(w, "backend") and getattr(w.backend, 'active_repo_name', None) == old_name:
+                            try:
+                                w.setWindowTitle(f"Creator - {new_name}")
+                                if hasattr(w, 'btn_load_repo') and w.btn_load_repo:
+                                    w.btn_load_repo.update_repo(new_name)
+                            except Exception: pass
+                        elif hasattr(w, "change_repertoire"):
+                            # MainWindow
+                            try:
+                                if getattr(getattr(w, "repertoire_manager", None), "active_repertoire_name", None) == old_name:
+                                    w.change_repertoire(new_name)
+                                w.refresh_repertoire_buttons()
+                            except Exception: pass
+
                     self.populate_active_repo_dropdown()
                     idx = self.combo_active_repo.findData(new_name)
                     if idx >= 0: self.combo_active_repo.setCurrentIndex(idx)
                     self.refresh_creator_info()
+                    QMessageBox.information(self, tr_ui("common.success", "Erfolg"), msg)
                 else: QMessageBox.warning(self, "Fehler", msg)
 
     def save_creator_elo(self, val):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not getattr(backend, 'session', None): return
-        backend.set_meta("elo", get_elo_internal(val))
-        backend.set_meta("lichess_elo", get_elo_internal(val))
+        internal_elo = get_elo_internal(val)
+        backend.set_meta("elo", internal_elo)
+        backend.set_meta("lichess_elo", internal_elo)
         try:
             backend.session.commit()
         except:
             pass
         self.refresh_creator_info()
+        if self.main_window and hasattr(self.main_window, 'set_repertoire_elo'):
+            mw_backend = getattr(self.main_window, 'backend', None)
+            if mw_backend and getattr(mw_backend, 'active_repo_name', None) == getattr(backend, 'active_repo_name', None):
+                self.main_window.set_repertoire_elo(internal_elo)
+
 
     def save_creator_color(self):
         backend = self.ensure_backend_for_active_repo()
@@ -2537,7 +2947,15 @@ class UnifiedSettingsDialog(QDialog):
                 try: os.remove(os.path.join(repo_dir, f))
                 except: pass
         shutil.copy(f_path, os.path.join(repo_dir, f"cover.{ext}"))
+        _scaled_pixmap_cache.clear()
         self.update_creator_cover_preview(name)
+        if self.main_window:
+            if hasattr(self.main_window, 'btn_load_repo') and self.main_window.btn_load_repo:
+                mw_backend = getattr(self.main_window, 'backend', None)
+                if mw_backend and getattr(mw_backend, 'active_repo_name', None) == name:
+                    self.main_window.btn_load_repo.update_repo(name)
+            elif hasattr(self.main_window, 'refresh_active_repo_cover'):
+                self.main_window.refresh_active_repo_cover()
 
     def remove_creator_cover(self):
         name = self.combo_active_repo.currentData() if hasattr(self, 'combo_active_repo') else None
@@ -2552,14 +2970,28 @@ class UnifiedSettingsDialog(QDialog):
                 if f.lower().startswith("cover."):
                     try: os.remove(os.path.join(repo_dir, f))
                     except: pass
+        _scaled_pixmap_cache.clear()
         self.update_creator_cover_preview(name)
+        if self.main_window:
+            if hasattr(self.main_window, 'btn_load_repo') and self.main_window.btn_load_repo:
+                mw_backend = getattr(self.main_window, 'backend', None)
+                if mw_backend and getattr(mw_backend, 'active_repo_name', None) == name:
+                    self.main_window.btn_load_repo.update_repo(name)
+            elif hasattr(self.main_window, 'refresh_active_repo_cover'):
+                self.main_window.refresh_active_repo_cover()
+
 
     def add_creator_level(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend: return
-        name, ok = QInputDialog.getText(self, "Level hinzufügen", "Name des neuen Levels:")
-        if ok and name:
-            backend.add_repertoire_level(name)
+        name, ok = QInputDialog.getText(
+            self,
+            tr_ui("repo_settings.add_level_title", "Level hinzufügen"),
+            tr_ui("repo_settings.add_level_prompt", "Name des neuen Levels:")
+        )
+        if ok and name and name.strip():
+            backend.add_repertoire_level(name.strip())
+            invalidate_repertoire_levels_cache(backend.active_repo_name)
             self.refresh_creator_info()
 
     def rename_creator_level(self, item):
@@ -2567,33 +2999,135 @@ class UnifiedSettingsDialog(QDialog):
         backend = self.ensure_backend_for_active_repo()
         if not backend: return
         lvl_ord = int(self.tbl_cr_levels.item(item.row(), 0).text())
-        new_name, ok = QInputDialog.getText(self, "Level Umbenennen", "Neuer Name für dieses Level:", QLineEdit.EchoMode.Normal, item.text())
-        if ok and new_name and new_name != item.text():
-            backend.update_level_name(lvl_ord, new_name)
+        new_name, ok = QInputDialog.getText(
+            self,
+            tr_ui("repo_settings.rename_level_title", "Level umbenennen"),
+            tr_ui("repo_settings.rename_level_prompt", "Neuer Name für dieses Level:"),
+            QLineEdit.EchoMode.Normal,
+            item.text()
+        )
+        if ok and new_name and new_name.strip() and new_name.strip() != item.text():
+            backend.update_level_name(lvl_ord, new_name.strip())
+            invalidate_repertoire_levels_cache(backend.active_repo_name)
             self.refresh_creator_info()
 
-    def delete_creator_level(self):
+    def delete_creator_level(self, default_order=None):
         backend = self.ensure_backend_for_active_repo()
         if not backend: return
         levels = backend.get_repertoire_levels()
         if len(levels) <= 1:
-            QMessageBox.warning(self, "Fehler", "Mindestens 1 Level ist erforderlich.")
+            QMessageBox.warning(
+                self,
+                tr_ui("repo_settings.dlg_error", "Fehler"),
+                tr_ui("repo_settings.min_level_error", "Mindestens 1 Level ist erforderlich.")
+            )
             return
-        dlg = DeleteLevelDialog(levels, parent=self)
+
+        if default_order is None:
+            if hasattr(self, 'selected_creator_level_order') and self.selected_creator_level_order is not None:
+                default_order = self.selected_creator_level_order
+            elif hasattr(self, 'tbl_cr_levels') and self.tbl_cr_levels.selectionModel():
+                selected_rows = self.tbl_cr_levels.selectionModel().selectedRows()
+                if selected_rows:
+                    row = selected_rows[0].row()
+                    item_ord = self.tbl_cr_levels.item(row, 0)
+                    if item_ord:
+                        try:
+                            default_order = int(item_ord.text())
+                        except ValueError:
+                            pass
+
+        dlg = DeleteLevelDialog(levels, default_del_order=default_order, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             del_ord, target_ord, delete_moves = dlg.get_selection()
             if del_ord:
                 backend.delete_repertoire_level(del_ord, target_level_order=target_ord, delete_moves=delete_moves)
+                invalidate_repertoire_levels_cache(backend.active_repo_name)
+                self.selected_creator_level_order = None
                 self.refresh_creator_info()
+
+    def on_creator_level_cell_clicked(self, row, col):
+        if col == 0:
+            self.tbl_cr_levels.selectRow(row)
+            item = self.tbl_cr_levels.item(row, 0)
+            if item:
+                try:
+                    self.selected_creator_level_order = int(item.text())
+                except ValueError:
+                    self.selected_creator_level_order = None
+        elif col == 1:
+            item = self.tbl_cr_levels.item(row, col)
+            if item:
+                self.rename_creator_level(item)
+        elif col == 2:
+            self.edit_creator_level_elo(row)
+
+    def on_creator_level_cell_double_clicked(self, row, col):
+        if col == 0:
+            item = self.tbl_cr_levels.item(row, 0)
+            if item:
+                try:
+                    lvl_ord = int(item.text())
+                    self.selected_creator_level_order = lvl_ord
+                    self.delete_creator_level(default_order=lvl_ord)
+                except ValueError:
+                    pass
+
+    def edit_creator_level_elo(self, row):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend: return
+        item_ord = self.tbl_cr_levels.item(row, 0)
+        item_elo = self.tbl_cr_levels.item(row, 2)
+        if not item_ord or not item_elo: return
+
+        lvl_ord = int(item_ord.text())
+        current_elo = int(item_elo.data(Qt.ItemDataRole.UserRole) or 1500)
+
+        new_elo, ok = QInputDialog.getInt(
+            self,
+            tr_ui("repo_settings.edit_elo_title", "Ziel-Elo bearbeiten"),
+            tr_ui("repo_settings.edit_elo_prompt", "Ziel-Elo (Trainer) für dieses Level:"),
+            current_elo,
+            800,
+            4000,
+            50
+        )
+        if ok and new_elo and new_elo != current_elo:
+            backend.update_level_elo(lvl_ord, new_elo)
+            invalidate_repertoire_levels_cache(backend.active_repo_name)
+            self.refresh_creator_info()
+
+    def edit_level_elo(self, row):
+        self.edit_creator_level_elo(row)
 
     def delete_creator_repertoire(self):
         name = self.combo_active_repo.currentData()
         if not name: return
         if QMessageBox.warning(self, "Löschen", f"Möchtest du '{name}' wirklich unwiderruflich löschen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             if self.main_window and hasattr(self.main_window, 'delete_repertoire_action'):
-                self.main_window.delete_repertoire_action()
+                self.main_window.delete_repertoire_action(name)
+            else:
+                from opening_fenix.core.data_tools import delete_repertoire_db
+                succ, msg = delete_repertoire_db(name)
+                if not succ:
+                    QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"),
+                        f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
+                    return
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, "on_repertoire_deleted"):
+                        try: w.on_repertoire_deleted()
+                        except Exception: pass
+                    elif hasattr(w, "change_repertoire"):
+                        try:
+                            if getattr(getattr(w, "repertoire_manager", None), "active_repertoire_name", None) == name:
+                                w.change_repertoire(None)
+                            w.refresh_repertoire_buttons()
+                        except Exception: pass
+            invalidate_repertoire_levels_cache()
+            _scaled_pixmap_cache.clear()
             self.populate_active_repo_dropdown()
             self.refresh_creator_info()
+            QMessageBox.information(self, tr_ui("common.success", "Erfolg"), f"Repertoire '{name}' wurde gelöscht.")
 
     # ─── PAGE 4.2: Alternate Good Moves and Prio Score (Creator) ────────────
 
@@ -2637,22 +3171,71 @@ class UnifiedSettingsDialog(QDialog):
         lbl_lich_desc.setStyleSheet("color: #666; font-size: 12px;")
         v_lich.addWidget(lbl_lich_desc)
 
-        h_fetch = QHBoxLayout()
+        # Token Status Card
+        self.lbl_lich_token_status = QLabel()
+        self.lbl_lich_token_status.setWordWrap(True)
+        self.lbl_lich_token_status.setStyleSheet("font-size: 12px; padding: 2px 0;")
+        v_lich.addWidget(self.lbl_lich_token_status)
+
+        h_token_btns = QHBoxLayout()
+        self.btn_token_setup = QPushButton(tr_widget("lichess_token.btn_setup_card", "🔑 Token einrichten"))
+        self.btn_token_setup.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_token_setup.clicked.connect(self.open_lichess_token_dialog)
+        self.btn_token_test = QPushButton(tr_widget("lichess_token.btn_test_card", "🧪 Testen"))
+        self.btn_token_test.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_token_test.clicked.connect(self.test_lichess_token_quick)
+        self.btn_token_edit = QPushButton(tr_widget("lichess_token.btn_edit_card", "✏️ Ändern"))
+        self.btn_token_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_token_edit.clicked.connect(self.open_lichess_token_dialog)
+        h_token_btns.addWidget(self.btn_token_setup)
+        h_token_btns.addWidget(self.btn_token_test)
+        h_token_btns.addWidget(self.btn_token_edit)
+        h_token_btns.addStretch()
+        v_lich.addLayout(h_token_btns)
+
+        # Separator
+        line = QFrame()
+        line.setFrameShape(QFrame.Shape.HLine)
+        line.setStyleSheet("color: rgba(0,0,0,0.1);")
+        v_lich.addWidget(line)
+
         self.btn_start_lich_fetch = QPushButton(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
         self.btn_start_lich_fetch.clicked.connect(self.toggle_lichess_fetch)
-        btn_del_lich = QPushButton(tr_widget("repo_settings.btn_delete_lichess", "🗑️ Daten für diese Elo löschen"))
-        btn_del_lich.clicked.connect(self.delete_active_lichess_data)
-        h_fetch.addWidget(self.btn_start_lich_fetch)
-        h_fetch.addWidget(btn_del_lich)
-        v_lich.addLayout(h_fetch)
+        v_lich.addWidget(self.btn_start_lich_fetch)
+
+        h_del = QHBoxLayout()
+        self.btn_del_lich = QPushButton()
+        self.btn_del_lich.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_del_lich.clicked.connect(self.delete_active_lichess_data)
+
+        self.btn_del_all_lich = QPushButton(tr_widget("repo_settings.btn_delete_all_lichess", "🗑️ Lichess-Daten aller Elo-Bereiche löschen"))
+        self.btn_del_all_lich.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_del_all_lich.setToolTip(tr_ui("repo_settings.btn_delete_all_lichess_tooltip", "Löscht alle Lichess-Daten sämtlicher Elo-Bereiche aus diesem Repertoire."))
+        self.btn_del_all_lich.clicked.connect(self.delete_all_lichess_data)
+
+        h_del.addWidget(self.btn_del_lich)
+        h_del.addWidget(self.btn_del_all_lich)
+        v_lich.addLayout(h_del)
+
+        self._update_delete_lichess_button_text()
 
         self.pb_lich = QProgressBar()
         self.lbl_lich_status = QLabel(tr_ui("repo_settings.status_waiting", "Warte auf Start..."))
         v_lich.addWidget(self.lbl_lich_status)
         v_lich.addWidget(self.pb_lich)
+
+        # Error action button (hidden by default, shown on 401 error)
+        self.btn_lich_fix_token = QPushButton(tr_widget("lichess_token.btn_fix_token", "🔑 Token jetzt korrigieren / erneuern"))
+        self.btn_lich_fix_token.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lich_fix_token.setStyleSheet("color: #c0392b; font-weight: bold; border: 1px solid #c0392b; border-radius: 4px; padding: 4px 10px;")
+        self.btn_lich_fix_token.clicked.connect(self.open_lichess_token_dialog)
+        self.btn_lich_fix_token.setVisible(False)
+        v_lich.addWidget(self.btn_lich_fix_token)
+
         layout.addWidget(g_lich)
 
         layout.addStretch()
+        self._refresh_token_status_card()
 
     def toggle_engine_scan(self):
         if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
@@ -2663,10 +3246,14 @@ class UnifiedSettingsDialog(QDialog):
 
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        ep = self.get_config().get("engine_path", "")
-        if not ep or not os.path.exists(ep):
-            QMessageBox.warning(self, "Engine fehlt", "Bitte konfiguriere zuerst einen gültigen Engine-Pfad unter 'Global Settings -> Chess Engine'.")
+
+        from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
+        ep = prompt_engine_if_missing(self, self.get_config())
+        if not ep:
             return
+        self.set_setting("engine_path", ep)
+        if hasattr(self, 'txt_engine_path'):
+            self.txt_engine_path.setText(ep)
 
         from opening_fenix.gui.dialogs import repo_settings_dialog
         thread_cls = getattr(repo_settings_dialog, 'AnalysisThread', AnalysisThread)
@@ -2694,37 +3281,265 @@ class UnifiedSettingsDialog(QDialog):
 
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
+
+        # Proactively prompt if no token is configured
+        from opening_fenix.core.services.lichess_service import is_valid_token_string
+        from opening_fenix.gui.dialogs.lichess_token_dialog import prompt_lichess_token_if_missing
+        cfg = self.get_config()
+        proceed, token_configured = prompt_lichess_token_if_missing(self, cfg)
+        if not proceed:
+            return
+        # Sync updated token back into the settings widget if changed
+        if token_configured and hasattr(self, 'txt_lichess_token'):
+            self.txt_lichess_token.setText(cfg.get("lichess_token", ""))
+        self._refresh_token_status_card()
+
         target_elo = get_elo_internal(self.combo_cr_elo.currentText())
         self.w_lich = LichessImportThread(backend.active_repo_name, target_elo)
         self.pb_lich.setValue(0)
+        self.btn_lich_fix_token.setVisible(False)
+        self.lbl_lich_status.setStyleSheet("")
         self.w_lich.progress_signal.connect(self.pb_lich.setValue)
         if hasattr(self.w_lich, 'status_signal'):
             self.w_lich.status_signal.connect(self.lbl_lich_status.setText)
-            
+
         def on_done(success, message):
             self.btn_start_lich_fetch.setEnabled(True)
             self.btn_start_lich_fetch.setText(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
+            if not success:
+                # Red error styling
+                self.lbl_lich_status.setStyleSheet("color: #c0392b; font-weight: bold;")
+                # Show the fix-token button specifically for 401 errors
+                is_401 = "401" in message or "ungültig" in message.lower() or "abgelaufen" in message.lower()
+                if is_401:
+                    self.btn_lich_fix_token.setVisible(True)
+                    # Also prompt via dialog
+                    from PyQt6.QtWidgets import QMessageBox
+                    reply = QMessageBox.question(
+                        self,
+                        tr_ui("lichess_token.err_401_prompt_title", "Lichess API-Fehler (401)"),
+                        tr_ui("lichess_token.err_401_prompt_body",
+                              "Das hinterlegte Lichess API-Token ist ungültig oder abgelaufen (Fehler 401). "
+                              "Der Zugriff wurde von Lichess verweigert.\n\nMöchtest du dein Token jetzt bearbeiten?"),
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply == QMessageBox.StandardButton.Yes:
+                        self.open_lichess_token_dialog()
+                else:
+                    self.btn_lich_fix_token.setVisible(False)
+            else:
+                self.lbl_lich_status.setStyleSheet("color: #27ae60; font-weight: bold;")
+                self.btn_lich_fix_token.setVisible(False)
             self.lbl_lich_status.setText(message)
             self.refresh_creator_info()
-            
+
         self.w_lich.finished_signal.connect(on_done)
         self.w_lich.start()
         self.btn_start_lich_fetch.setText(tr_widget("repo_settings.btn_stop_fetch", "🛑 Import stoppen"))
+        self.lbl_lich_status.setStyleSheet("")
         self.lbl_lich_status.setText("Lichess Daten werden geladen...")
 
+    def _update_delete_lichess_button_text(self):
+        if not hasattr(self, 'btn_del_lich') or not self.btn_del_lich:
+            return
+        elo_display = ""
+        if hasattr(self, 'combo_cr_elo') and self.combo_cr_elo:
+            elo_display = self.combo_cr_elo.currentText()
+        if not elo_display:
+            elo_display = get_elo_display("high")
+        text = tr_widget("repo_settings.btn_delete_lichess", "🗑️ Daten für diese Elo löschen: {elo}", elo=elo_display)
+        if elo_display not in text:
+            text = f"{text}: {elo_display}"
+        self.btn_del_lich.setText(text)
+        self.btn_del_lich.setToolTip(tr_ui("repo_settings.btn_delete_lichess_tooltip", "Löscht nur die Lichess-Daten für die aktuell ausgewählte Elo-Stufe ({elo}).", elo=elo_display))
+
     def delete_active_lichess_data(self):
+        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
+                                tr_ui("repo_settings.err_import_running", "Bitte warte, bis der laufende Import abgeschlossen ist."))
+            return
+
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        elo_display = self.combo_cr_elo.currentText()
-        if QMessageBox.question(self, "Löschen", f"Lichess-Daten für '{elo_display}' wirklich löschen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            from opening_fenix.core.db.database import DatabaseManager
-            from opening_fenix.core.db.models import LichessData
-            db = DatabaseManager(get_repertoire_db_path(backend.active_repo_name))
-            sess = db.get_session()
-            cnt = sess.query(LichessData).filter(LichessData.elo_range == get_elo_internal(elo_display)).delete()
-            sess.commit(); sess.close(); db.close()
-            QMessageBox.information(self, "Erfolg", f"{cnt} Lichess-Einträge gelöscht.")
+        elo_display = self.combo_cr_elo.currentText() if hasattr(self, 'combo_cr_elo') and self.combo_cr_elo else get_elo_display("high")
+        title = tr_ui("repo_settings.dialog_delete_title", "Löschen")
+        prompt = tr_ui("repo_settings.dialog_delete_single_elo_prompt",
+                       "Lichess-Daten für '{elo}' wirklich löschen?",
+                       elo=elo_display)
+        if QMessageBox.question(self, title, prompt, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            target_elo = get_elo_internal(elo_display)
+            cnt = 0
+            if hasattr(backend, 'delete_lichess_data') and getattr(backend, 'session', None):
+                ok, msg = backend.delete_lichess_data(target_elo)
+                try:
+                    cnt = int(msg.split()[0])
+                except (ValueError, IndexError):
+                    cnt = 0
+            else:
+                from opening_fenix.core.db.database import DatabaseManager
+                from opening_fenix.core.db.models import LichessData
+                db = DatabaseManager(get_repertoire_db_path(backend.active_repo_name))
+                sess = db.get_session()
+                cnt = sess.query(LichessData).filter(LichessData.elo_range == target_elo).delete()
+                sess.commit()
+                sess.close()
+                db.close()
+            success_msg = tr_ui("repo_settings.dialog_delete_single_elo_success",
+                                "{count} Lichess-Einträge für '{elo}' gelöscht.",
+                                count=cnt, elo=elo_display)
+            QMessageBox.information(self, tr_ui("common.success", "Erfolg"), success_msg)
             self.refresh_creator_info()
+
+    def delete_all_lichess_data(self):
+        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
+                                tr_ui("repo_settings.err_import_running", "Bitte warte, bis der laufende Import abgeschlossen ist."))
+            return
+
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name: return
+        repo_name = backend.active_repo_name
+        title = tr_ui("repo_settings.dialog_delete_title", "Löschen")
+        prompt = tr_ui("repo_settings.dialog_delete_all_elo_prompt",
+                       "Möchtest du wirklich die Lichess-Daten aller Elo-Bereiche für das Repertoire '{repo}' löschen?",
+                       repo=repo_name)
+        if QMessageBox.question(self, title, prompt, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            cnt = 0
+            if hasattr(backend, 'delete_lichess_data') and getattr(backend, 'session', None):
+                ok, msg = backend.delete_lichess_data(None)
+                try:
+                    cnt = int(msg.split()[0])
+                except (ValueError, IndexError):
+                    cnt = 0
+            else:
+                from opening_fenix.core.db.database import DatabaseManager
+                from opening_fenix.core.db.models import LichessData, Metadata
+                db = DatabaseManager(get_repertoire_db_path(backend.active_repo_name))
+                sess = db.get_session()
+                cnt = sess.query(LichessData).delete()
+                sess.query(Metadata).filter_by(key="lichess_elo").delete()
+                sess.commit()
+                sess.close()
+                db.close()
+            success_msg = tr_ui("repo_settings.dialog_delete_all_elo_success",
+                                "{count} Lichess-Einträge aller Elo-Bereiche für '{repo}' gelöscht.",
+                                count=cnt, repo=repo_name)
+            QMessageBox.information(self, tr_ui("common.success", "Erfolg"), success_msg)
+            self.refresh_creator_info()
+
+    def _refresh_token_status_card(self):
+        """Update the token status label and button visibility in the Lichess scan page."""
+        if not hasattr(self, 'lbl_lich_token_status'):
+            return
+        from opening_fenix.core.services.lichess_service import is_valid_token_string
+        token = self.get_config().get("lichess_token", "")
+        has_token = is_valid_token_string(token)
+        if has_token:
+            self.lbl_lich_token_status.setText(
+                tr_ui("lichess_token.status_configured", "🔑 Lichess API-Token: Hinterlegt")
+            )
+            self.lbl_lich_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: 500;")
+            self.btn_token_setup.setVisible(False)
+            self.btn_token_test.setVisible(True)
+            self.btn_token_edit.setVisible(True)
+        else:
+            self.lbl_lich_token_status.setText(
+                tr_ui("lichess_token.status_missing_card", "Kein Lichess API-Token eingerichtet (Abfragen anonym mit strikten Limits)")
+            )
+            self.lbl_lich_token_status.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: 500;")
+            self.btn_token_setup.setVisible(True)
+            self.btn_token_test.setVisible(False)
+            self.btn_token_edit.setVisible(False)
+
+    def open_lichess_token_dialog(self):
+        """Open the LichessTokenDialog and sync the token back to the settings."""
+        from opening_fenix.gui.dialogs.lichess_token_dialog import LichessTokenDialog
+        current_token = self.get_config().get("lichess_token", "")
+        dlg = LichessTokenDialog(self, current_token=current_token)
+        if dlg.exec():
+            new_token = dlg.get_token()
+            self.set_setting("lichess_token", new_token)
+            if hasattr(self, 'txt_lichess_token'):
+                self.txt_lichess_token.blockSignals(True)
+                self.txt_lichess_token.setText(new_token)
+                self.txt_lichess_token.blockSignals(False)
+            self._refresh_token_status_card()
+
+    def test_lichess_token_quick(self):
+        """Quick in-place token test from the status card."""
+        from opening_fenix.core.services.lichess_service import verify_lichess_token, is_valid_token_string
+        token = self.get_config().get("lichess_token", "")
+        if not is_valid_token_string(token):
+            if hasattr(self, 'lbl_lich_token_status'):
+                self.lbl_lich_token_status.setText("❌ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
+                self.lbl_lich_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+            return
+        if hasattr(self, 'lbl_lich_token_status'):
+            self.lbl_lich_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
+            self.lbl_lich_token_status.setStyleSheet("color: #2980b9; font-size: 12px; font-weight: 500;")
+        from opening_fenix.core.threads import QThread, pyqtSignal as _pySig
+
+        class _TestWorker(QThread):
+            done = _pySig(bool, str)
+            def __init__(self, tok):
+                super().__init__()
+                self._tok = tok
+            def run(self):
+                from opening_fenix.core.services.lichess_service import verify_lichess_token as _v
+                self.done.emit(*_v(self._tok))
+
+        self._token_test_worker = _TestWorker(token)
+
+        def on_result(success, msg):
+            if not hasattr(self, 'lbl_lich_token_status'):
+                return
+            if success:
+                self.lbl_lich_token_status.setText("✅ " + msg)
+                self.lbl_lich_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+            else:
+                self.lbl_lich_token_status.setText("❌ " + msg)
+                self.lbl_lich_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+
+        self._token_test_worker.done.connect(on_result)
+        self._token_test_worker.start()
+
+    def _test_global_lichess_token(self):
+        """Quick in-place token test for the global trainer Analysis page."""
+        from opening_fenix.core.services.lichess_service import verify_lichess_token, is_valid_token_string
+        token = self.get_config().get("lichess_token", "")
+        if not hasattr(self, 'lbl_global_token_status'):
+            return
+        if not is_valid_token_string(token):
+            self.lbl_global_token_status.setText("❌ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
+            self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+            return
+        self.lbl_global_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
+        self.lbl_global_token_status.setStyleSheet("color: #2980b9; font-size: 12px; font-weight: 500;")
+        from opening_fenix.core.threads import QThread, pyqtSignal as _pySig
+
+        class _GlobalTestWorker(QThread):
+            done = _pySig(bool, str)
+            def __init__(self, tok):
+                super().__init__()
+                self._tok = tok
+            def run(self):
+                from opening_fenix.core.services.lichess_service import verify_lichess_token as _v
+                self.done.emit(*_v(self._tok))
+
+        self._global_token_test_worker = _GlobalTestWorker(token)
+
+        def on_result(success, msg):
+            if not hasattr(self, 'lbl_global_token_status'):
+                return
+            if success:
+                self.lbl_global_token_status.setText("✅ " + msg)
+                self.lbl_global_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+            else:
+                self.lbl_global_token_status.setText("❌ " + msg)
+                self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+
+        self._global_token_test_worker.done.connect(on_result)
+        self._global_token_test_worker.start()
 
     # ─── PAGE 4.3: Import & Export (Creator) ────────────────────────────────
 
@@ -2813,10 +3628,62 @@ class UnifiedSettingsDialog(QDialog):
 
     # ─── PAGE 4.4: Backups & Restore (Creator) ──────────────────────────────
 
+    def format_backup_details_text(self, b: dict) -> str:
+        en_cnt = b.get("en_comments", 0)
+        de_cnt = b.get("de_comments", 0)
+        levels = b.get("levels_info", [])
+        total_moves = b.get("total_moves", 0)
+        pgns = b.get("pgn_resources", {})
+
+        lines = []
+
+        # 1. Comments
+        if en_cnt > 0 or de_cnt > 0:
+            lines.append(f"💬 {en_cnt:,} EN | {de_cnt:,} DE")
+        else:
+            lines.append(f"💬 {tr_ui('repo_settings.no_comments', 'Keine Kommentare')}")
+
+        # 2. Levels (each level on a new line)
+        if levels:
+            levels_word = tr_ui("repo_settings.levels_label", "Level")
+            tot_word = tr_ui("repo_settings.total_moves_unit", "Züge gesamt")
+            moves_word = tr_ui("repo_settings.moves_unit", "Züge")
+            lines.append(f"🎯 {len(levels)} {levels_word} [{total_moves:,} {tot_word}]:")
+            for item in levels:
+                lines.append(f"   • L{item['level']} ({item['name']}): {item['moves']:,} {moves_word}")
+        else:
+            lines.append(f"🎯 {tr_ui('repo_settings.no_levels', 'Keine Level')}")
+
+        # 3. PGNs (each PGN resource category on a new line)
+        if pgns:
+            lines.append(f"📚 {tr_ui('repo_settings.pgn_resources_header', 'Extra-PGNs:')}")
+            for cat, files_list in sorted(pgns.items()):
+                cat_display = tr_ui("repo_settings.main_pgn", "Haupt-PGN") if cat == "Haupt-PGN" else cat
+                if isinstance(files_list, list):
+                    file_names = ", ".join(files_list[:3])
+                    if len(files_list) > 3:
+                        file_names += f" +{len(files_list)-3}"
+                    lines.append(f"   • {cat_display}: {file_names}")
+                elif isinstance(files_list, int):
+                    lines.append(f"   • {cat_display}: {files_list}")
+        else:
+            lines.append(f"📚 {tr_ui('repo_settings.no_extra_pgns', 'Keine Extra-PGNs')}")
+
+        return "\n".join(lines)
+
     def init_page_creator_backups(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(16))
-        layout.setContentsMargins(scale(24), scale(24), scale(24), scale(24))
+        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+
+        lbl_title = QLabel(tr_ui("repo_settings.backups_title", "⏮️ Repertoire-Backups & Wiederherstellung"))
+        lbl_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #111111;")
+        layout.addWidget(lbl_title)
+
+        lbl_sub = QLabel(tr_ui("repo_settings.backups_sub", "Automatische und manuelle Sicherungspunkte deines Repertoires inklusive aller Partien, Kommentare und PGN-Ressourcen (Typical Ideas, Model Games, Tactics)."))
+        lbl_sub.setWordWrap(True)
+        lbl_sub.setStyleSheet("color: #666; font-size: 13px;")
+        layout.addWidget(lbl_sub)
 
         h_bar = QHBoxLayout()
         btn_now = QPushButton(tr_widget("repo_settings.btn_create_backup_now", "📸 Manuelles Backup jetzt erstellen"))
@@ -2829,29 +3696,25 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_backups.setColumnCount(4)
         self.tbl_backups.setHorizontalHeaderLabels([
             tr_ui("repo_settings.col_backup_date", "Datum & Uhrzeit"),
-            tr_ui("repo_settings.col_backup_details", "Details"),
+            tr_ui("repo_settings.col_backup_details", "Repertoire-Details"),
             tr_ui("repo_settings.col_backup_size", "Größe"),
             tr_ui("repo_settings.col_backup_action", "Aktion")
         ])
-        self.tbl_backups.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self.tbl_backups.verticalHeader().setVisible(False)
+        self.tbl_backups.setWordWrap(True)
+        self.tbl_backups.horizontalHeader().setMinimumHeight(scale(38))
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_backups.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.tbl_backups.setColumnWidth(0, scale(155))
+        self.tbl_backups.setColumnWidth(3, scale(180))
+        self.tbl_backups.setStyleSheet("""
+            QTableWidget { background-color: white; border-radius: 8px; border: 1px solid rgba(0,0,0,0.1); }
+            QTableWidget::item { padding: 6px 8px; }
+            QHeaderView::section { font-size: 13px; font-weight: 700; padding: 4px; }
+        """)
         layout.addWidget(self.tbl_backups)
-
-    def ensure_backend_for_active_repo(self):
-        if self.backend and getattr(self.backend, 'active_repo_name', None):
-            return self.backend
-        if self.main_window and getattr(self.main_window, 'backend', None):
-            return self.main_window.backend
-        repo_name = getattr(self, 'selected_trainer_repo', None) or getattr(self, 'cr_active_repo_name', None)
-        if not repo_name and self.backend:
-            repo_name = getattr(self.backend, 'active_repo_name', None)
-        if repo_name:
-            if not self._owned_backend or getattr(self._owned_backend, 'active_repo_name', None) != repo_name:
-                from opening_fenix.creator.creator_window import CreatorBackend
-                self._owned_backend = CreatorBackend()
-                self._owned_backend.load_repertoire(repo_name)
-            return self._owned_backend
-        return None
 
     def refresh_backups_list(self):
         backend = self.ensure_backend_for_active_repo()
@@ -2861,31 +3724,108 @@ class UnifiedSettingsDialog(QDialog):
         for row, b in enumerate(backups):
             dt_str = b["created_at"].strftime("%d.%m.%Y %H:%M:%S")
             size_mb = f"{b['size_bytes'] / (1024 * 1024):.2f} MB"
-            self.tbl_backups.setItem(row, 0, QTableWidgetItem(dt_str))
-            self.tbl_backups.setItem(row, 1, QTableWidgetItem(f"{b.get('total_moves', 0)} Züge"))
-            self.tbl_backups.setItem(row, 2, QTableWidgetItem(size_mb))
+            summary_txt = self.format_backup_details_text(b)
 
-            btn_rest = QPushButton("⏮️ Restore")
-            btn_rest.clicked.connect(lambda _, p=b["path"], d=dt_str: self.restore_backup(p, d))
-            self.tbl_backups.setCellWidget(row, 3, btn_rest)
+            it_date = QTableWidgetItem(dt_str)
+            it_date.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+            it_details = QTableWidgetItem(summary_txt)
+            it_details.setToolTip(summary_txt)
+            it_details.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+            it_size = QTableWidgetItem(size_mb)
+            it_size.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            self.tbl_backups.setItem(row, 0, it_date)
+            self.tbl_backups.setItem(row, 1, it_details)
+            self.tbl_backups.setItem(row, 2, it_size)
+
+            btn_restore = QPushButton(tr_ui("repo_settings.btn_restore", "⏮️ Wiederherstellen"))
+            btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_restore.setFixedHeight(scale(28))
+            btn_restore.setStyleSheet("QPushButton { background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 2px 6px; } QPushButton:hover { background-color: #ebf5ff; }")
+            btn_restore.clicked.connect(lambda _, p=b["path"], d=dt_str: self.restore_backup(p, d))
+
+            btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_backup", "🗑️ Löschen"))
+            btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_delete.setFixedHeight(scale(28))
+            btn_delete.setStyleSheet("QPushButton { background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 2px 6px; } QPushButton:hover { background-color: #fadbd8; }")
+            btn_delete.clicked.connect(lambda _, p=b["path"], d=dt_str: self.delete_backup_selected(p, d))
+
+            cell_w = QWidget()
+            cell_l = QVBoxLayout(cell_w)
+            cell_l.setContentsMargins(4, 4, 4, 4)
+            cell_l.setSpacing(4)
+            cell_l.addWidget(btn_restore)
+            cell_l.addWidget(btn_delete)
+            self.tbl_backups.setCellWidget(row, 3, cell_w)
+
+        self.tbl_backups.resizeRowsToContents()
+        for r in range(self.tbl_backups.rowCount()):
+            if self.tbl_backups.rowHeight(r) < scale(85):
+                self.tbl_backups.setRowHeight(r, scale(85))
 
     def create_manual_backup(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        create_repertoire_backup(backend.active_repo_name, trigger_type="manual")
+        res = create_repertoire_backup(backend.active_repo_name, trigger_type="manual")
         self.refresh_backups_list()
-        QMessageBox.information(self, "Backup", "Manuelles Backup erfolgreich gespeichert!")
+        if res:
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_backup_created_title", "Backup erstellt"),
+                                    tr_ui("repo_settings.dlg_backup_created_msg", "Manuelles Backup erfolgreich gespeichert!"))
+        else:
+            QMessageBox.information(self, tr_ui("repo_settings.dlg_backup_created_title", "Backup unverändert"),
+                                    tr_ui("repo_settings.dlg_backup_unchanged_msg", "Seit dem letzten Backup gab es keine Änderungen im Kurs."))
 
     create_manual_backup_now = create_manual_backup
+
+    def delete_backup_selected(self, path, dt_str):
+        reply = QMessageBox.question(
+            self,
+            tr_ui("repo_settings.dlg_delete_confirm_title", "Backup löschen"),
+            tr_ui("repo_settings.dlg_delete_confirm_msg", "Möchtest du das Backup vom {date} wirklich dauerhaft löschen?", date=dt_str),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                self.refresh_backups_list()
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_delete_success_title", "Gelöscht"),
+                                        tr_ui("repo_settings.dlg_delete_success_msg", "Das Backup wurde erfolgreich gelöscht."))
+            except Exception as e:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_delete_error_title", "Fehler"),
+                                    tr_ui("repo_settings.dlg_delete_error_msg", f"Fehler beim Löschen des Backups: {e}"))
 
     def restore_backup(self, path, dt_str):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        if QMessageBox.question(self, "Restore", f"Repertoire auf Stand {dt_str} zurücksetzen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            restore_repertoire_from_backup(backend.active_repo_name, path)
-            self.refresh_creator_info()
-            self.refresh_backups_list()
-            QMessageBox.information(self, "Erfolg", "Repertoire wiederhergestellt.")
+        repo_name = backend.active_repo_name
+
+        msg = tr_ui("repo_settings.dlg_restore_confirm_msg",
+                    "Möchtest du das Repertoire '{repo}' wirklich auf den Stand vom {date} zurücksetzen?\n\nVor dem Überschreiben wird automatisch ein Sicherheitsschnappschuss erstellt.",
+                    repo=repo_name, date=dt_str)
+        if QMessageBox.question(self, tr_ui("repo_settings.dlg_restore_confirm_title", "Wiederherstellen bestätigen"),
+                                msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            ok = restore_repertoire_from_backup(repo_name, path)
+            if ok:
+                # Reload backend session so in-memory cache is fully synced
+                backend.load_repertoire(repo_name)
+                self.refresh_creator_info()
+                self.refresh_backups_list()
+                # If main window has this repo active, reload it too
+                if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+                    if getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == repo_name:
+                        self.main_window.repertoire_manager.load_repertoire(repo_name)
+                        if hasattr(self.main_window, 'update_structure_tree'):
+                            self.main_window.update_structure_tree()
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_restore_success_title", "Erfolgreich"),
+                                        tr_ui("repo_settings.dlg_restore_success_msg", "Repertoire wurde erfolgreich auf den Stand vom {date} zurückgesetzt!", date=dt_str))
+            else:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_restore_error_title", "Fehler"),
+                                    tr_ui("repo_settings.dlg_restore_error_msg", "Fehler beim Wiederherstellen des Backups."))
+
+    restore_backup_selected = restore_backup
 
     # ─── PAGE 4.5: Different Tools (Creator) ────────────────────────────────
 
@@ -3001,78 +3941,318 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_creator_maintenance(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
+        layout.setSpacing(scale(16))
         layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
 
         g_main = QGroupBox(tr_widget("repo_settings.maintenance_center_title", "🚜 Wartungs-Center (Stapelverarbeitung)"))
         v_main = QVBoxLayout(g_main)
         v_main.setSpacing(scale(14))
 
-        self.main_table = QTableWidget()
-        self.main_table.setColumnCount(6)
-        self.main_table.setHorizontalHeaderLabels(["", tr_ui("repo_settings.col_repertoire", "Repertoire"), tr_ui("repo_settings.col_prio_elo", "Prio Elo"), tr_ui("repo_settings.col_analysis", "Analyse"), tr_ui("repo_settings.col_coverage", "Coverage"), tr_ui("repo_settings.col_progress", "Fortschritt")])
-        self.main_table.verticalHeader().setVisible(False)
-        self.main_table.setMinimumHeight(scale(200))
-        self.main_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        v_main.addWidget(self.main_table)
-
+        # Top Bar above table: Repertoire Selection counter & Action buttons
         h_ctrl = QHBoxLayout()
-        btn_all = QPushButton(tr_widget("repo_settings.btn_all", "Alle")); btn_none = QPushButton(tr_widget("repo_settings.btn_none", "Keine"))
+        h_ctrl.setContentsMargins(0, 0, 0, scale(2))
+
+        self.lbl_m_repo_count = QLabel()
+        self.lbl_m_repo_count.setStyleSheet(f"font-weight: 600; color: {COLORS['bw_sub_text']}; font-size: {scale(13)}px;")
+        h_ctrl.addWidget(self.lbl_m_repo_count)
+        h_ctrl.addStretch()
+
+        btn_all = QPushButton(tr_widget("repo_settings.btn_all", "Alle"))
+        btn_all.setProperty("class", "SmallBtn")
+        btn_all.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_all.clicked.connect(lambda: self._select_all_maintenance(True))
+
+        btn_none = QPushButton(tr_widget("repo_settings.btn_none", "Keine"))
+        btn_none.setProperty("class", "SmallBtn")
+        btn_none.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_none.clicked.connect(lambda: self._select_all_maintenance(False))
-        h_ctrl.addWidget(btn_all); h_ctrl.addWidget(btn_none); h_ctrl.addStretch()
+
+        h_ctrl.addWidget(btn_all)
+        h_ctrl.addWidget(btn_none)
         v_main.addLayout(h_ctrl)
 
-        f_tasks = QFormLayout()
-        self.chk_m_engine = QCheckBox(tr_widget("repo_settings.task_engine", "Engine Analyse")); self.chk_m_engine.setChecked(True)
-        self.chk_m_lichess = QCheckBox(tr_widget("repo_settings.task_lichess", "Lichess Import")); self.chk_m_lichess.setChecked(True)
-        self.chk_m_cleanup = QCheckBox(tr_widget("repo_settings.task_cleanup_lichess", "Verwaiste Daten bereinigen")); self.chk_m_cleanup.setChecked(True)
-        self.chk_m_stats = QCheckBox(tr_widget("repo_settings.task_stats", "Prioritäten berechnen")); self.chk_m_stats.setChecked(True)
-        f_tasks.addRow(tr_ui("repo_settings.tasks_label", "Aufgaben:"), self.chk_m_engine)
-        f_tasks.addRow("", self.chk_m_lichess)
-        f_tasks.addRow("", self.chk_m_cleanup)
-        f_tasks.addRow("", self.chk_m_stats)
-        v_main.addLayout(f_tasks)
+        # Table
+        self.main_table = QTableWidget()
+        self.main_table.setColumnCount(6)
+        self.main_table.setHorizontalHeaderLabels([
+            "",
+            tr_ui("repo_settings.col_repertoire", "Repertoire"),
+            tr_ui("repo_settings.col_prio_elo", "Prio Elo"),
+            tr_ui("repo_settings.col_analysis", "Analyse"),
+            tr_ui("repo_settings.col_coverage", "Coverage"),
+            tr_ui("repo_settings.col_progress", "Fortschritt")
+        ])
+        self.main_table.verticalHeader().setVisible(False)
+        self.main_table.setAlternatingRowColors(True)
+        self.main_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.main_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.main_table.setShowGrid(False)
+        self.main_table.setMinimumHeight(scale(240))
+        self.main_table.verticalHeader().setDefaultSectionSize(scale(34))
 
+        header = self.main_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.main_table.setColumnWidth(0, scale(44))
+
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.main_table.setColumnWidth(2, scale(145))
+
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.main_table.setColumnWidth(3, scale(165))
+
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        self.main_table.setColumnWidth(4, scale(95))
+
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+        self.main_table.setColumnWidth(5, scale(140))
+
+        v_main.addWidget(self.main_table)
+
+        # Configuration Cards: Tasks & Engine Settings (Side-by-Side)
+        h_config = QHBoxLayout()
+        h_config.setSpacing(scale(16))
+
+        # Tasks Box
+        grp_tasks = QGroupBox(tr_ui("repo_settings.tasks_group_title", "📋 Aufgaben"))
+        v_tasks = QVBoxLayout(grp_tasks)
+        v_tasks.setSpacing(scale(8))
+        v_tasks.setContentsMargins(scale(16), scale(16), scale(16), scale(16))
+
+        self.chk_m_engine = QCheckBox(tr_widget("repo_settings.task_engine", "Engine Analyse (Alternativen)"))
+        self.chk_m_engine.setChecked(True)
+        self.chk_m_lichess = QCheckBox(tr_widget("repo_settings.task_lichess", "Lichess Import (Trend-Daten)"))
+        self.chk_m_lichess.setChecked(True)
+        self.chk_m_cleanup = QCheckBox(tr_widget("repo_settings.task_cleanup_lichess", "Verwaiste Lichess-Daten bereinigen"))
+        self.chk_m_cleanup.setChecked(True)
+        self.chk_m_stats = QCheckBox(tr_widget("repo_settings.task_stats", "Statistiken & Prioritäten berechnen"))
+        self.chk_m_stats.setChecked(True)
+
+        self.chk_m_engine.toggled.connect(self._update_idle_progress_format)
+        self.chk_m_lichess.toggled.connect(self._update_idle_progress_format)
+        self.chk_m_cleanup.toggled.connect(self._update_idle_progress_format)
+        self.chk_m_stats.toggled.connect(self._update_idle_progress_format)
+
+        v_tasks.addWidget(self.chk_m_engine)
+        v_tasks.addWidget(self.chk_m_lichess)
+        v_tasks.addWidget(self.chk_m_cleanup)
+        v_tasks.addWidget(self.chk_m_stats)
+        v_tasks.addStretch()
+
+        # Engine Options Box
+        self.grp_m_engine = QGroupBox(tr_ui("repo_settings.engine_options_title", "⚙️ Engine-Einstellungen"))
+        v_engine = QVBoxLayout(self.grp_m_engine)
+        v_engine.setSpacing(scale(10))
+        v_engine.setContentsMargins(scale(16), scale(16), scale(16), scale(16))
+
+        f_eng = QFormLayout()
+        f_eng.setSpacing(scale(10))
+
+        self.spin_m_engine_depth = NoWheelSpinBox()
+        self.spin_m_engine_depth.setRange(10, 50)
+        self.spin_m_engine_depth.setValue(18)
+        self.spin_m_engine_depth.setSuffix(f" {tr_ui('repo_settings.moves_unit', 'Züge')}")
+
+        self.combo_m_engine_threads = NoWheelComboBox()
+        max_cpu = multiprocessing.cpu_count()
+        for i in range(1, max_cpu + 1):
+            self.combo_m_engine_threads.addItem(f"{i} Thread{'s' if i > 1 else ''}", i)
+
+        default_threads = max(1, int(max_cpu * 0.25))
+        idx_def = self.combo_m_engine_threads.findData(default_threads)
+        if idx_def >= 0:
+            self.combo_m_engine_threads.setCurrentIndex(idx_def)
+
+        f_eng.addRow(tr_ui("repo_settings.engine_depth_label", "Engine-Tiefe:"), self.spin_m_engine_depth)
+        f_eng.addRow(tr_ui("repo_settings.engine_threads_label", "Threads:"), self.combo_m_engine_threads)
+        v_engine.addLayout(f_eng)
+
+        lbl_eng_hint = QLabel(tr_ui("repo_settings.engine_threads_hint", "Standard: 25% der CPU-Kerne ({threads} von {max} Threads)", threads=default_threads, max=max_cpu))
+        lbl_eng_hint.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(11)}px;")
+        v_engine.addWidget(lbl_eng_hint)
+        v_engine.addStretch()
+
+        self.chk_m_engine.toggled.connect(self.grp_m_engine.setEnabled)
+
+        h_config.addWidget(grp_tasks, stretch=1)
+        h_config.addWidget(self.grp_m_engine, stretch=1)
+        v_main.addLayout(h_config)
+
+        # Action & Progress Section
+        v_action = QVBoxLayout()
+        v_action.setSpacing(scale(10))
+
+        h_btn = QHBoxLayout()
         self.btn_start_batch = QPushButton(tr_widget("repo_settings.btn_start_batch_run", "🚀 Wartungs-Batch starten"))
-        self.btn_start_batch.setProperty("class", "Primary")
+        self.btn_start_batch.setProperty("class", "BatchActionBtn")
+        self.btn_start_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_start_batch.setFixedHeight(scale(42))
+        self.btn_start_batch.setMinimumWidth(scale(280))
         self.btn_start_batch.clicked.connect(self.toggle_batch_maintenance)
-        v_main.addWidget(self.btn_start_batch)
+        h_btn.addStretch()
+        h_btn.addWidget(self.btn_start_batch)
+        h_btn.addStretch()
+        v_action.addLayout(h_btn)
+
+        v_prog = QVBoxLayout()
+        v_prog.setSpacing(scale(4))
+        self.lbl_m_overall = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
+        self.lbl_m_overall.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_m_overall.setStyleSheet(f"font-weight: 600; color: {COLORS['bw_text']}; font-size: {scale(13)}px;")
 
         self.pb_m_overall = QProgressBar()
-        self.lbl_m_overall = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
-        v_main.addWidget(self.lbl_m_overall); v_main.addWidget(self.pb_m_overall)
+        self.pb_m_overall.setFixedHeight(scale(22))
+        self.pb_m_overall.setTextVisible(True)
+        self.pb_m_overall.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        v_prog.addWidget(self.lbl_m_overall)
+        v_prog.addWidget(self.pb_m_overall)
+        v_action.addLayout(v_prog)
+
+        v_main.addLayout(v_action)
 
         layout.addWidget(g_main)
         layout.addStretch()
-        self.refresh_maintenance_table()
+        # Maintenance table is lazily populated on navigation to avoid slowing dialog startup
 
-    def _select_all_maintenance(self, checked):
+    def _get_row_checkbox(self, row: int) -> Optional[QCheckBox]:
+        w = self.main_table.cellWidget(row, 0)
+        if isinstance(w, QCheckBox):
+            return w
+        if w and hasattr(w, "checkbox"):
+            return w.checkbox
+        return None
+
+    def _get_row_progressbar(self, row: int) -> Optional[QProgressBar]:
+        w = self.main_table.cellWidget(row, 5)
+        if isinstance(w, QProgressBar):
+            return w
+        if w and hasattr(w, "progress_bar"):
+            return w.progress_bar
+        return None
+
+    def _get_row_dual_cell(self, row: int, col: int) -> Optional[DualModeCell]:
+        w = self.main_table.cellWidget(row, col)
+        if isinstance(w, DualModeCell):
+            return w
+        return None
+
+    def _update_idle_progress_format(self):
+        if hasattr(self, 'm_thread') and self.m_thread and self.m_thread.isRunning():
+            return
+        total_tasks = sum([
+            self.chk_m_engine.isChecked(),
+            self.chk_m_lichess.isChecked(),
+            self.chk_m_cleanup.isChecked(),
+            self.chk_m_stats.isChecked()
+        ]) or 1
         for r in range(self.main_table.rowCount()):
-            cb = self.main_table.cellWidget(r, 0)
-            if cb: cb.setChecked(checked)
+            pb = self._get_row_progressbar(r)
+            if pb and pb.value() == 0:
+                pb.setRange(0, total_tasks)
+                pb.setFormat(f"0/{total_tasks} {tr_ui('repo_settings.progress_done', 'erledigt')}")
 
-    def refresh_maintenance_table(self, start_stats_worker=False):
-        all_repos = list_all_repertoires()
+    def _update_maintenance_selection_count(self):
+        total = self.main_table.rowCount()
+        selected = 0
+        for r in range(total):
+            cb = self._get_row_checkbox(r)
+            if cb and cb.isChecked():
+                selected += 1
+        self.lbl_m_repo_count.setText(f"Ausgewählt: {selected} von {total} Repertoires")
+
+    def _select_all_maintenance(self, checked: bool):
+        for r in range(self.main_table.rowCount()):
+            cb = self._get_row_checkbox(r)
+            if cb:
+                cb.setChecked(checked)
+        self._update_maintenance_selection_count()
+
+    def refresh_maintenance_table(self, start_stats_worker=True):
+        all_repos = list_all_repertoires(include_elo=True)
         self.main_table.setRowCount(len(all_repos))
         worker_data = []
+        total_tasks = sum([
+            self.chk_m_engine.isChecked(),
+            self.chk_m_lichess.isChecked(),
+            self.chk_m_cleanup.isChecked(),
+            self.chk_m_stats.isChecked()
+        ]) or 4
+
         for row, r in enumerate(all_repos):
-            cb = QCheckBox(); cb.setChecked(True)
-            self.main_table.setCellWidget(row, 0, cb)
-            self.main_table.setItem(row, 1, QTableWidgetItem(r['name']))
-            self.main_table.setItem(row, 2, QTableWidgetItem(get_elo_display(r['elo'])))
-            self.main_table.setItem(row, 3, QTableWidgetItem("Bereit"))
-            self.main_table.setItem(row, 4, QTableWidgetItem("-"))
-            pb = QProgressBar(); pb.setValue(0); pb.setTextVisible(True)
-            self.main_table.setCellWidget(row, 5, pb)
+            # Centered checkbox in column 0
+            container = QWidget()
+            h_cb = QHBoxLayout(container)
+            h_cb.setContentsMargins(0, 0, 0, 0)
+            h_cb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            cb = QCheckBox()
+            cb.setChecked(True)
+            cb.toggled.connect(self._update_maintenance_selection_count)
+            h_cb.addWidget(cb)
+            container.checkbox = cb
+            self.main_table.setCellWidget(row, 0, container)
+
+            # Column 1: Repertoire Name
+            item_name = QTableWidgetItem(r['name'])
+            item_name.setToolTip(r['name'])
+            item_name.setFlags(item_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.main_table.setItem(row, 1, item_name)
+
+            # Column 2: Prio Elo
+            elo_val = get_elo_display(r['elo'])
+            item_elo = QTableWidgetItem(elo_val)
+            item_elo.setToolTip(elo_val)
+            item_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_elo.setFlags(item_elo.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.main_table.setItem(row, 2, item_elo)
+
+            # Column 3: Analysis status (DualModeCell)
+            cell_ana = DualModeCell(tr_ui("analysis.loading", "Laden..."))
+            self.main_table.setCellWidget(row, 3, cell_ana)
+
+            # Column 4: Coverage (DualModeCell)
+            cell_cov = DualModeCell("-")
+            self.main_table.setCellWidget(row, 4, cell_cov)
+
+            # Column 5: Progress Bar (padded to keep clearance from scrollbar)
+            pb_container = QWidget()
+            h_pb = QHBoxLayout(pb_container)
+            h_pb.setContentsMargins(scale(6), scale(3), scale(12), scale(3))
+            pb = QProgressBar()
+            pb.setFixedHeight(scale(20))
+            pb.setRange(0, total_tasks)
+            pb.setValue(0)
+            pb.setTextVisible(True)
+            pb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pb.setFormat(f"0/{total_tasks} {tr_ui('repo_settings.progress_done', 'erledigt')}")
+            h_pb.addWidget(pb)
+            pb_container.progress_bar = pb
+            self.main_table.setCellWidget(row, 5, pb_container)
+
             worker_data.append({'row': row, 'name': r['name']})
+
+        self._update_maintenance_selection_count()
 
         if start_stats_worker:
             self.stats_worker = RepertoireStatsWorker(worker_data)
-            self.stats_worker.stats_ready.connect(lambda row, status, cov, elo: (
-                self.main_table.setItem(row, 3, QTableWidgetItem(status)),
-                self.main_table.setItem(row, 4, QTableWidgetItem(f"{cov:.1f}%"))
-            ))
+            def _on_stats(row, status, cov, elo):
+                if row < self.main_table.rowCount():
+                    cell_a = self._get_row_dual_cell(row, 3)
+                    if cell_a:
+                        status_str = str(status)
+                        cell_a.show_text(status_str, f"Analyse: {status_str}")
+                    cell_c = self._get_row_dual_cell(row, 4)
+                    if cell_c:
+                        cov_str = f"{cov:.1f}%"
+                        cell_c.show_text(cov_str, f"Coverage: {cov_str}")
+                    if elo:
+                        item_e = self.main_table.item(row, 2)
+                        if item_e:
+                            disp = get_elo_display(elo)
+                            item_e.setText(disp)
+                            item_e.setToolTip(disp)
+            self.stats_worker.stats_ready.connect(_on_stats)
             self.stats_worker.start()
 
     def toggle_batch_maintenance(self):
@@ -3083,40 +4263,177 @@ class UnifiedSettingsDialog(QDialog):
             return
 
         configs = []
+        name_to_row = {}
         for r in range(self.main_table.rowCount()):
-            cb = self.main_table.cellWidget(r, 0)
+            cb = self._get_row_checkbox(r)
             if cb and cb.isChecked():
                 nm = self.main_table.item(r, 1).text()
                 elo_d = self.main_table.item(r, 2).text()
                 configs.append({'name': nm, 'elo': get_elo_internal(elo_d)})
+                name_to_row[nm] = r
 
         if not configs:
-            QMessageBox.warning(self, "Wartung", "Bitte mindestens ein Repertoire wählen.")
+            QMessageBox.warning(self, tr_ui("repo_settings.title", "Wartung"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
             return
 
-        tasks = {'engine': self.chk_m_engine.isChecked(), 'lichess': self.chk_m_lichess.isChecked(),
-                 'cleanup': self.chk_m_cleanup.isChecked(), 'stats': self.chk_m_stats.isChecked()}
-        settings = {'depth': 18, 'threads': 2, 'path': self.get_config().get("engine_path", "")}
+        tasks = {
+            'engine': self.chk_m_engine.isChecked(),
+            'lichess': self.chk_m_lichess.isChecked(),
+            'cleanup': self.chk_m_cleanup.isChecked(),
+            'stats': self.chk_m_stats.isChecked()
+        }
+
+        if not any(tasks.values()):
+            QMessageBox.warning(self, tr_ui("repo_settings.title", "Wartung"), "Bitte mindestens eine Aufgabe auswählen.")
+            return
+
+        engine_path = self.get_config().get("engine_path", "")
+        if tasks['engine']:
+            from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
+            ep = prompt_engine_if_missing(self, self.get_config())
+            if not ep:
+                return
+            engine_path = ep
+            self.set_setting("engine_path", ep)
+
+        depth = self.spin_m_engine_depth.value()
+        threads = int(self.combo_m_engine_threads.currentData() or self.combo_m_engine_threads.currentText().split()[0])
+        settings = {'depth': depth, 'threads': threads, 'path': engine_path}
+
+        active_tasks = [t for t in ['cleanup', 'lichess', 'stats', 'engine'] if tasks.get(t)]
+        total_tasks_count = len(active_tasks)
+
+        task_labels = {
+            'cleanup': ('🧹', tr_ui("repo_settings.task_lbl_cleanup", "Bereinigung")),
+            'lichess': ('🌐', tr_ui("repo_settings.task_lbl_lichess", "Lichess-Import")),
+            'engine': ('🤖', tr_ui("repo_settings.task_lbl_engine", "Engine-Analyse")),
+            'stats': ('📊', tr_ui("repo_settings.task_lbl_stats", "Statistiken & Prio"))
+        }
+
+        completed_tasks = {cfg['name']: set() for cfg in configs}
+        task_status_map = {cfg['name']: {t: (0, "Wartend") for t in active_tasks} for cfg in configs}
+
+        # Reset row states
+        for r in range(self.main_table.rowCount()):
+            pb = self._get_row_progressbar(r)
+            if r in name_to_row.values():
+                if pb:
+                    pb.setProperty("class", "")
+                    pb.style().unpolish(pb)
+                    pb.style().polish(pb)
+                    pb.setRange(0, total_tasks_count)
+                    pb.setValue(0)
+                    pb.setFormat(f"0/{total_tasks_count} {tr_ui('repo_settings.progress_done', 'erledigt')}")
+                    pb.setToolTip(f"0 von {total_tasks_count} Aufgaben erledigt")
+
+                cell_a = self._get_row_dual_cell(r, 3)
+                if cell_a and tasks.get('engine'):
+                    cell_a.setToolTip(tr_ui("repo_settings.engine_queued_tooltip", "In Warteschlange für Analyse (Ziel-Tiefe: {depth})", depth=depth))
+
+                cell_c = self._get_row_dual_cell(r, 4)
+                if cell_c and tasks.get('lichess'):
+                    cell_c.setToolTip("In Warteschlange für Lichess-Import")
+            else:
+                if pb:
+                    pb.setValue(0)
+                    pb.setFormat("-")
+                    pb.setToolTip("Nicht für Wartung ausgewählt")
 
         self.m_thread = MaintenanceThread(configs, tasks, settings)
         self.pb_m_overall.setRange(0, len(configs))
         self.pb_m_overall.setValue(0)
-        self.lbl_m_overall.setText(f"Starte Wartung für {len(configs)} Repertoires...")
-        self.m_thread.overall_progress_signal.connect(lambda c, t, n: (self.pb_m_overall.setValue(c), self.lbl_m_overall.setText(f"Fortschritt ({c}/{t}): {n}")))
-        
+        self.lbl_m_overall.setText(f"Starte parallele Wartung für {len(configs)} Repertoires...")
+        self.btn_start_batch.setText(tr_ui("repo_settings.btn_stop_batch_run", "🛑 Wartungs-Batch stoppen"))
+
+        # Overall progress: (completed_count, total_repos, last_completed_name)
+        self.m_thread.overall_progress_signal.connect(
+            lambda c, t, n: (
+                self.pb_m_overall.setValue(c),
+                self.lbl_m_overall.setText(f"Gesamtfortschritt ({c}/{t}): {n} erledigt ✓")
+            )
+        )
+
+        def _on_repo_status(name, task_type, pct, status_text):
+            r = name_to_row.get(name)
+            if r is None or r >= self.main_table.rowCount():
+                return
+
+            if name in task_status_map and task_type in task_status_map[name]:
+                task_status_map[name][task_type] = (pct, status_text)
+
+            # 1. Engine Analysis column (Col 3)
+            if task_type == "engine":
+                cell_a = self._get_row_dual_cell(r, 3)
+                if cell_a:
+                    if pct < 100:
+                        cell_a.show_progress(pct, f"{tr_ui('repo_settings.task_lbl_engine', 'Engine-Analyse')}: {pct}% ({status_text})")
+                    else:
+                        if status_text == "Fehlgeschlagen":
+                            cell_a.show_text(f"{tr_ui('repo_settings.dlg_error', 'Fehler')} ⚠️", tr_ui("repo_settings.engine_failed", "Engine-Analyse fehlgeschlagen"))
+                        else:
+                            depth_str = tr_ui("analysis.depth", "Tiefe: {depth}", depth=depth)
+                            cell_a.show_text(f"{depth_str} ✓", tr_ui("repo_settings.engine_done_tooltip", "Engine-Analyse abgeschlossen ({depth_str})", depth_str=depth_str))
+
+            # 2. Coverage column (Col 4)
+            if task_type == "lichess":
+                cell_c = self._get_row_dual_cell(r, 4)
+                if cell_c:
+                    if pct < 100:
+                        cell_c.show_progress(pct, f"Lichess-Import: {status_text} ({pct}%)")
+                    else:
+                        if status_text == "Fehlgeschlagen":
+                            cell_c.show_text("Fehler ⚠️", "Lichess-Import fehlgeschlagen")
+                        else:
+                            cell_c.show_text("100.0% ✓", "Lichess-Import abgeschlossen")
+
+            # 3. Fortschritt column (Col 5)
+            if pct >= 100 and task_type in active_tasks:
+                if name in completed_tasks and task_type not in completed_tasks[name]:
+                    completed_tasks[name].add(task_type)
+
+            done_count = len(completed_tasks.get(name, set()))
+            pb = self._get_row_progressbar(r)
+            if pb:
+                pb.setValue(done_count)
+                if done_count >= total_tasks_count:
+                    pb.setFormat(f"{total_tasks_count}/{total_tasks_count} Fertig ✓")
+                    pb.setProperty("class", "SuccessBar")
+                    pb.style().unpolish(pb)
+                    pb.style().polish(pb)
+                else:
+                    pb.setFormat(f"{done_count}/{total_tasks_count} {tr_ui('repo_settings.progress_done', 'erledigt')}")
+
+                # Build rich multi-task tooltip
+                tooltip_lines = [f"<b>Aufgaben für {name} ({done_count}/{total_tasks_count}):</b>"]
+                for t in active_tasks:
+                    t_icon, t_name = task_labels[t]
+                    t_pct, t_st = task_status_map[name].get(t, (0, "Wartend"))
+                    if t in completed_tasks.get(name, set()):
+                        badge = "✓ Fertig"
+                    elif t_pct > 0 or t == task_type:
+                        badge = f"▶ {t_pct}% ({t_st})"
+                    else:
+                        badge = "⏳ Ausstehend"
+                    tooltip_lines.append(f"• {t_icon} {t_name}: <b>{badge}</b>")
+                pb.setToolTip("<br>".join(tooltip_lines))
+
+        self.m_thread.repo_status_signal.connect(_on_repo_status)
+
         def on_batch_done(success, message):
             self.btn_start_batch.setEnabled(True)
-            self.btn_start_batch.setText("🚀 Wartungs-Batch starten")
-            self.lbl_m_overall.setText(f"Fertig: {message}")
+            self.btn_start_batch.setText(tr_ui("repo_settings.btn_start_batch_run", "🚀 Wartungs-Batch starten"))
+            if success:
+                self.lbl_m_overall.setText(f"Fertig: {message}")
+            else:
+                self.lbl_m_overall.setText(f"Abgebrochen: {message}")
             self.refresh_creator_info()
-            
+
         self.m_thread.finished_signal.connect(on_batch_done)
         self.m_thread.start()
-        self.btn_start_batch.setText("🛑 Wartungs-Batch stoppen")
 
     # ─── Cleanup ────────────────────────────────────────────────────────────
 
-    def closeEvent(self, event):
+    def stop_all_workers(self):
         workers = [getattr(self, 'stats_loader', None), getattr(self, 'creator_stats_loader', None),
                    getattr(self, 'stats_worker', None), getattr(self, 'w_eng', None),
                    getattr(self, 'w_lich', None), getattr(self, 'm_thread', None),
@@ -3124,18 +4441,27 @@ class UnifiedSettingsDialog(QDialog):
         for w in workers:
             if w and w.isRunning():
                 try: w.disconnect()
-                except: pass
+                except Exception: pass
                 if hasattr(w, 'cancel'): w.cancel()
+                if hasattr(w, 'stop'): w.stop()
                 w.requestInterruption()
-                if not w.wait(200):
-                    try: w.terminate()
-                    except: pass
+                w.wait(200)
                     
         if hasattr(self, "loading_timer") and self.loading_timer:
             try: self.loading_timer.stop()
-            except: pass
+            except Exception: pass
 
+    def reject(self):
+        self.stop_all_workers()
+        super().reject()
+
+    def accept(self):
+        self.stop_all_workers()
+        super().accept()
+
+    def closeEvent(self, event):
+        self.stop_all_workers()
         if self._owned_backend:
             try: self._owned_backend.close()
-            except: pass
+            except Exception: pass
         super().closeEvent(event)

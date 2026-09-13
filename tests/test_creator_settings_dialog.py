@@ -44,6 +44,7 @@ def mock_main_window(qapp, sample_repertoire):
             self.board_widget.board.fen.return_value = (
                 "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
             )
+            self.btn_load_repo = MagicMock()
             self._calls = {}
 
         def set_setting(self, key, value):
@@ -59,6 +60,7 @@ def mock_main_window(qapp, sample_repertoire):
         def delete_repertoire_action(self): self._calls['delete_repertoire_action'] = True
         def set_engine_button_blocked(self, *a): pass
         def update_ui_from_fen(self): pass
+        def set_repertoire_elo(self, val): self._calls['set_repertoire_elo'] = val
         def setWindowTitle(self, t): super().setWindowTitle(t)
         def setCursor(self, c): super().setCursor(c)
 
@@ -151,16 +153,67 @@ class TestRepoSettingsGeneralPage:
         """Level-Tabelle hat genau drei Spalten."""
         assert settings_dialog.tbl_levels.columnCount() == 3
 
-    def test_level_target_elo_spinbox_loads_and_saves_value(self, settings_dialog, creator_backend):
-        """Ziel-Elo SpinBox lädt gespeicherten Wert, erlaubt Spin und speichert Wert."""
+    def test_level_target_elo_loads_and_edits_value(self, settings_dialog, creator_backend):
+        """Ziel-Elo wird als Item geladen und kann per Einzelklick im Dialog bearbeitet werden."""
         with patch.object(creator_backend, 'get_repertoire_levels', return_value=[{"id": 1, "name": "Level 1", "order": 1, "target_elo": 1250}]), \
-             patch.object(creator_backend, 'update_level_elo') as mock_update:
+             patch.object(creator_backend, 'update_level_elo') as mock_update, \
+             patch('PyQt6.QtWidgets.QInputDialog.getInt', return_value=(1300, True)):
             settings_dialog.refresh_info()
-            spin = settings_dialog.tbl_levels.cellWidget(0, 2)
-            assert spin is not None
-            assert spin.value() == 1250
-            spin.setValue(1300)
+            it_elo = settings_dialog.tbl_levels.item(0, 2)
+            assert it_elo is not None
+            assert "1250" in it_elo.text()
+            settings_dialog.on_creator_level_cell_clicked(0, 2)
             mock_update.assert_called_with(1, 1300)
+
+    def test_level_rename_single_click(self, settings_dialog, creator_backend):
+        """Level-Umbenennung öffnet sich per einfachem Klick."""
+        with patch.object(creator_backend, 'get_repertoire_levels', return_value=[{"id": 1, "name": "Level 1", "order": 1, "target_elo": 1250}]), \
+             patch.object(creator_backend, 'update_level_name') as mock_rename, \
+             patch('PyQt6.QtWidgets.QInputDialog.getText', return_value=("New Name", True)):
+            settings_dialog.refresh_info()
+            settings_dialog.on_creator_level_cell_clicked(0, 1)
+            mock_rename.assert_called_with(1, "New Name")
+
+    def test_level_click_column_0_selects_level_for_deletion(self, settings_dialog, creator_backend):
+        """Klick auf Spalte 0 (Level-Nummer) wählt das Level aus und setzt default_del_order beim Löschen."""
+        levels = [
+            {"id": 1, "name": "Level 1", "order": 1, "target_elo": 1200},
+            {"id": 2, "name": "Level 2", "order": 2, "target_elo": 1500},
+            {"id": 3, "name": "Level 3", "order": 3, "target_elo": 1800}
+        ]
+        with patch.object(creator_backend, 'get_repertoire_levels', return_value=levels):
+            settings_dialog.refresh_creator_info()
+            
+            # Klick auf Spalte 0 von Zeile 1 (Level 2)
+            settings_dialog.on_creator_level_cell_clicked(1, 0)
+            assert settings_dialog.selected_creator_level_order == 2
+            assert settings_dialog.tbl_cr_levels.currentRow() == 1
+
+            # Lösch-Dialog öffnet sich mit vorausgewähltem Level 2
+            with patch('opening_fenix.gui.dialogs.unified_settings_dialog.DeleteLevelDialog') as mock_dlg_cls:
+                mock_dlg = MagicMock()
+                mock_dlg.exec.return_value = QDialog.DialogCode.Rejected
+                mock_dlg_cls.return_value = mock_dlg
+                
+                settings_dialog.delete_creator_level()
+                mock_dlg_cls.assert_called_once_with(levels, default_del_order=2, parent=settings_dialog)
+
+    def test_level_double_click_column_0_opens_delete_dialog(self, settings_dialog, creator_backend):
+        """Doppelklick auf Spalte 0 öffnet direkt den Lösch-Dialog mit vorausgewähltem Level."""
+        levels = [
+            {"id": 1, "name": "Level 1", "order": 1, "target_elo": 1200},
+            {"id": 2, "name": "Level 2", "order": 2, "target_elo": 1500}
+        ]
+        with patch.object(creator_backend, 'get_repertoire_levels', return_value=levels):
+            settings_dialog.refresh_creator_info()
+            
+            with patch('opening_fenix.gui.dialogs.unified_settings_dialog.DeleteLevelDialog') as mock_dlg_cls:
+                mock_dlg = MagicMock()
+                mock_dlg.exec.return_value = QDialog.DialogCode.Rejected
+                mock_dlg_cls.return_value = mock_dlg
+                
+                settings_dialog.on_creator_level_cell_double_clicked(1, 0)
+                mock_dlg_cls.assert_called_once_with(levels, default_del_order=2, parent=settings_dialog)
 
     def test_level_groupbox_size_policy(self, settings_dialog):
         """g_levels besitzt Maximum Vertical SizePolicy um übermäßige Höhe zu verhindern."""
@@ -172,6 +225,16 @@ class TestRepoSettingsGeneralPage:
         # Direkt die Methode aufrufen – sollte nicht abstürzen
         settings_dialog.save_repertoire_elo("mid")
         # Wenn kein AssertionError/Exception: bestanden
+
+    def test_elo_change_notifies_main_window(self, settings_dialog, mock_main_window, creator_backend):
+        """Änderung der Repertoire-Elo benachrichtigt das MainWindow sofort mit internem Elo-Key."""
+        mock_main_window.backend = creator_backend
+        from opening_fenix.core.utils import get_elo_display
+        settings_dialog.save_creator_elo(get_elo_display("mid"))
+        assert mock_main_window._calls.get("set_repertoire_elo") == "mid"
+        assert creator_backend.get_meta("elo") == "mid"
+        assert creator_backend.get_meta("lichess_elo") == "mid"
+
 
     def test_description_save_no_crash_with_none_backend(self, qapp):
         """save_description hält an wenn Backend None ist (Guard-Clause greift)."""
@@ -225,12 +288,14 @@ class TestRepoSettingsGeneralPage:
         monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.get_user_dir", lambda: str(user_dir_path))
         monkeypatch.setattr("opening_fenix.core.data_tools.get_user_dir", lambda: str(user_dir_path))
 
+        settings_dialog.main_window.backend = settings_dialog.backend
         settings_dialog.select_cover_image()
 
         # Check that the cover image was copied
         copied_cover = repo_dir / "cover.png"
         assert copied_cover.exists()
         assert copied_cover.read_text() == "fake_png_data"
+        assert settings_dialog.main_window.btn_load_repo.update_repo.called
 
     def test_remove_cover_image_flow(self, settings_dialog, tmp_path, monkeypatch):
         """Cover-Bild entfernen löscht die Datei und aktualisiert die Vorschau."""
@@ -250,8 +315,11 @@ class TestRepoSettingsGeneralPage:
         monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.get_user_dir", lambda: str(user_dir_path))
         monkeypatch.setattr("opening_fenix.core.data_tools.get_user_dir", lambda: str(user_dir_path))
 
+        settings_dialog.main_window.backend = settings_dialog.backend
         settings_dialog.remove_cover_image()
         assert not cover_file.exists()
+        assert settings_dialog.main_window.btn_load_repo.update_repo.called
+
 
 
 # ─── Seite 2: Design & Audio ───────────────────────────────────────────────────
@@ -419,6 +487,74 @@ class TestRepoSettingsAnalysisPage:
         # 2. Click again to stop scan
         settings_dialog.start_analysis()
         assert dummy.cancelled is True
+
+    def test_delete_lichess_button_shows_current_elo(self, settings_dialog):
+        """Button 'Daten für diese Elo löschen' zeigt den aktuellen Elo-Namen an."""
+        current_elo_text = settings_dialog.combo_cr_elo.currentText()
+        assert current_elo_text != ""
+        btn_text = settings_dialog.btn_del_lich.text()
+        assert current_elo_text in btn_text
+
+    def test_delete_lichess_button_updates_on_elo_change(self, settings_dialog):
+        """Änderung der Elo in der Combobox aktualisiert den Text des Lösch-Buttons sofort."""
+        # Wähle ein anderes Elo aus
+        for i in range(settings_dialog.combo_cr_elo.count()):
+            text = settings_dialog.combo_cr_elo.itemText(i)
+            if text != settings_dialog.combo_cr_elo.currentText():
+                settings_dialog.combo_cr_elo.setCurrentIndex(i)
+                assert text in settings_dialog.btn_del_lich.text()
+                break
+
+    def test_delete_all_lichess_button_exists(self, settings_dialog):
+        """Button zum Löschen aller Elo-Bereiche existiert und hat passenden Text."""
+        assert hasattr(settings_dialog, "btn_del_all_lich")
+        text = settings_dialog.btn_del_all_lich.text().lower()
+        assert "aller elo" in text or "all elo" in text
+
+    def test_delete_active_lichess_data_flow(self, settings_dialog, creator_backend, monkeypatch):
+        """Klick auf 'Daten für diese Elo löschen' ruft backend.delete_lichess_data mit aktuellem Elo auf."""
+        mock_question = MagicMock(return_value=QMessageBox.StandardButton.Yes)
+        mock_info = MagicMock()
+        monkeypatch.setattr(QMessageBox, "question", mock_question)
+        monkeypatch.setattr(QMessageBox, "information", mock_info)
+
+        with patch.object(creator_backend, "delete_lichess_data", return_value=(True, "5 Einträge gelöscht.")) as mock_del:
+            settings_dialog.delete_active_lichess_data()
+            assert mock_question.called
+            # Prompt should include current elo
+            assert settings_dialog.combo_cr_elo.currentText() in mock_question.call_args[0][2]
+            assert mock_del.called
+
+    def test_delete_all_lichess_data_flow(self, settings_dialog, creator_backend, monkeypatch):
+        """Klick auf 'Lichess-Daten aller Elo-Bereiche löschen' ruft backend.delete_lichess_data(None) auf."""
+        mock_question = MagicMock(return_value=QMessageBox.StandardButton.Yes)
+        mock_info = MagicMock()
+        monkeypatch.setattr(QMessageBox, "question", mock_question)
+        monkeypatch.setattr(QMessageBox, "information", mock_info)
+
+        with patch.object(creator_backend, "delete_lichess_data", return_value=(True, "15 Einträge gelöscht.")) as mock_del:
+            settings_dialog.delete_all_lichess_data()
+            assert mock_question.called
+            assert mock_del.called
+            assert mock_del.call_args[0][0] is None
+
+    def test_delete_blocked_when_import_running(self, settings_dialog, monkeypatch):
+        """Löschen ist blockiert, wenn ein Import noch aktiv läuft."""
+        mock_worker = MagicMock()
+        mock_worker.isRunning.return_value = True
+        settings_dialog.w_lich = mock_worker
+
+        mock_warn = MagicMock()
+        monkeypatch.setattr(QMessageBox, "warning", mock_warn)
+
+        settings_dialog.delete_active_lichess_data()
+        assert mock_warn.called
+
+        mock_warn.reset_mock()
+        settings_dialog.delete_all_lichess_data()
+        assert mock_warn.called
+        settings_dialog.w_lich = None
+
 
 
 # ─── Seite 5: Wartung Center ───────────────────────────────────────────────────

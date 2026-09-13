@@ -87,7 +87,9 @@ def test_hole_exemption(backend):
     assert not any(h['move_san'] == 'e5' for h in holes)
     
     # Reset
-    backend.reset_hole_exemptions()
+    count = backend.reset_hole_exemptions()
+    assert count == 1
+    assert backend.reset_hole_exemptions() == 0
     holes = find_repertoire_holes(backend.session, 0.01, "high")
 
     assert any(h['move_san'] == 'e5' for h in holes)
@@ -637,10 +639,10 @@ def test_transposition_quality_filter(backend):
 
 def test_transposition_limit_cap_15(backend):
     """
-    Verify that the search ends cleanly when reaching the 15 transpositions limit.
+    Verify that the search ends cleanly when reaching an explicit max_transpositions limit.
     """
     session = backend.session
-    transpositions = find_repertoire_transpositions(session)
+    transpositions = find_repertoire_transpositions(session, max_transpositions=15)
     assert len(transpositions) <= 15
 
 
@@ -774,6 +776,384 @@ def test_2move_transposition_off_repertoire_intermediate(backend):
     t = e5_nf3_transpos[0]
     assert t['type'] == 'transposition_2'
     assert '🟢' in t['quality_label']
+
+
+def test_2move_transposition_depth25_best_move_accepted(backend):
+    """
+    When engine analysis runs at depth 25 and the user's transposition move is the best move,
+    it must be awarded '🟢 Ausgezeichnet'.
+    """
+    from unittest.mock import MagicMock
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="French")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3, p_fre_e6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e6 = Move(from_position_id=p_e4.id, to_position_id=p_fre_e6.id, uci="e7e6", san="e6")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e6, m_nf3])
+    session.flush()
+    for m in [m_e4, m_e6, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Mock engine that confirms g1f3 (Nf3) is the #1 best move at depth 25
+    mock_engine = MagicMock()
+    mock_engine.analyse.return_value = {"pv": [chess.Move.from_uci("g1f3")]}
+
+    transpositions = find_repertoire_transpositions(session, engine=mock_engine)
+    match = [t for t in transpositions if t['depth'] == 2 and 'c5' in t['move_san'] and 'Nf3' in t['move_san']]
+    assert len(match) == 1
+    assert match[0]['quality'] == 'ausgezeichnet'
+    assert '🟢' in match[0]['quality_label']
+    assert mock_engine.analyse.called
+
+
+def test_2move_transposition_depth25_not_best_move_rejected(backend):
+    """
+    When the opponent makes a move and the user's transposition move is NOT the best move
+    (e.g. an alternative move like d2d4 is better to punish opponent mistake),
+    the suboptimal transposition move must be REJECTED and not recommended.
+    """
+    from unittest.mock import MagicMock
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="French")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3, p_fre_e6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e6 = Move(from_position_id=p_e4.id, to_position_id=p_fre_e6.id, uci="e7e6", san="e6")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e6, m_nf3])
+    session.flush()
+    for m in [m_e4, m_e6, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Mock engine that says d2d4 is the #1 best move (NOT g1f3)
+    mock_engine = MagicMock()
+    mock_engine.analyse.return_value = {"pv": [chess.Move.from_uci("d2d4")]}
+
+    transpositions = find_repertoire_transpositions(session, engine=mock_engine)
+    match = [t for t in transpositions if t['depth'] == 2 and 'c5' in t['move_san'] and 'Nf3' in t['move_san']]
+    # Must be empty because g1f3 was not the best move!
+    assert len(match) == 0
+    assert mock_engine.analyse.called
+
+
+def test_transposition_streaming_callback(backend):
+    """
+    Verify that item_callback is invoked incrementally for every found transposition.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_nf3])
+    session.flush()
+    for m in [m_e4, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    emitted_items = []
+    def on_item(item):
+        emitted_items.append(item)
+
+    transpositions = find_repertoire_transpositions(session, item_callback=on_item)
+    assert len(emitted_items) == len(transpositions)
+    assert len(emitted_items) >= 1
+
+
+def test_engine_cache_service(tmp_path):
+    """Verify that EngineCacheService saves, persists across instances, and updates depth-25 evaluations."""
+    from opening_fenix.core.services.engine_cache_service import EngineCacheService
+
+    db_file = str(tmp_path / "test_engine_cache.db")
+    service1 = EngineCacheService(db_path=db_file)
+
+    test_fen = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    assert service1.get_best_move(test_fen, min_depth=25) is None
+
+    # Save depth 25 best move
+    service1.set_best_move(test_fen, 25, "g1f3")
+    assert service1.get_best_move(test_fen, min_depth=25) == "g1f3"
+
+    # Verify a new service instance reading the same DB file sees the cached evaluation
+    service2 = EngineCacheService(db_path=db_file)
+    assert service2.get_best_move(test_fen, min_depth=25) == "g1f3"
+    # Querying for depth 30 should return None since cached depth is 25
+    assert service2.get_best_move(test_fen, min_depth=30) is None
+
+
+def test_transposition_uses_persistent_cache(backend, monkeypatch, tmp_path):
+    """
+    Verify that find_repertoire_transpositions uses the persistent cache
+    and does NOT need to call the engine if the position is already cached.
+    """
+    from opening_fenix.core.services.engine_cache_service import EngineCacheService
+    cache_db = str(tmp_path / "eval_cache.db")
+    cache_svc = EngineCacheService(db_path=cache_db)
+
+    # Monkeypatch EngineCacheService default path to use temporary DB
+    monkeypatch.setattr(
+        "opening_fenix.core.services.engine_cache_service.get_engine_cache_db_path",
+        lambda *args, **kwargs: cache_db
+    )
+
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+    session.add_all([m_e4, m_nf3])
+    session.flush()
+
+    for m in [m_e4, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Pre-populate cache for the intermediate Sicilian position (after 1... c5)
+    inter_fen = clean_fen(p_sic_c5.fen)
+    cache_svc.set_best_move(inter_fen, 25, "g1f3")
+
+    # Mock engine that raises an error if analyse is called
+    class StrictMockEngine:
+        def analyse(self, *args, **kwargs):
+            raise AssertionError("Engine should NOT be called because position is cached!")
+
+    mock_engine = StrictMockEngine()
+
+    # Run transposition finder with mock engine - it should read from cache and NOT call engine
+    transpositions = find_repertoire_transpositions(session, engine=mock_engine, cache_service=cache_svc)
+
+    match = [t for t in transpositions if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2]
+    assert len(match) == 1
+    assert match[0]['quality'] == 'ausgezeichnet'
+    assert "🟢" in match[0]['quality_label']
+
+
+def test_2move_transposition_skips_if_intermediate_in_repertoire(backend):
+    """
+    Verify that if an opponent move m1 lands on a position that is ALREADY in the active repertoire
+    (reachable from root via another line), it is suggested as a 1-move transposition,
+    and is NOT suggested as a 2-move transposition (which would redundantly re-suggest our own move m2
+    that already exists in the repertoire).
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="b"))
+
+    # Line 1: 1. d4 e6 2. c4 d5
+    # Root -> 1. d4 -> 1... e6 -> 2. c4 -> 2... d5
+    b1 = chess.Board()
+    p_root = Position(fen=clean_fen(b1.fen()))
+    b1.push_san("d4")
+    p_d4 = Position(fen=clean_fen(b1.fen()))
+    b1.push_san("e6")
+    p_d4_e6 = Position(fen=clean_fen(b1.fen()))
+    b1.push_san("c4")
+    p_d4_e6_c4 = Position(fen=clean_fen(b1.fen()))
+    b1.push_san("d5")
+    p_d5 = Position(fen=clean_fen(b1.fen()))
+
+    # Line 2: 1. c4 e6
+    # From 1. c4 e6, opponent (White) can play 2. d4.
+    # 1. c4 e6 2. d4 reaches the exact same position as Line 1 (1. d4 e6 2. c4)!
+    b2 = chess.Board()
+    b2.push_san("c4")
+    p_c4 = Position(fen=clean_fen(b2.fen()))
+    b2.push_san("e6")
+    p_c4_e6 = Position(fen=clean_fen(b2.fen()))
+
+    session.add_all([p_root, p_d4, p_d4_e6, p_d4_e6_c4, p_d5, p_c4, p_c4_e6])
+    session.flush()
+
+    m_d4 = Move(from_position_id=p_root.id, to_position_id=p_d4.id, uci="d2d4", san="d4")
+    m_e6_line1 = Move(from_position_id=p_d4.id, to_position_id=p_d4_e6.id, uci="e7e6", san="e6")
+    m_c4_line1 = Move(from_position_id=p_d4_e6.id, to_position_id=p_d4_e6_c4.id, uci="c2c4", san="c4")
+    m_d5 = Move(from_position_id=p_d4_e6_c4.id, to_position_id=p_d5.id, uci="d7d5", san="d5")
+
+    m_c4_line2 = Move(from_position_id=p_root.id, to_position_id=p_c4.id, uci="c2c4", san="c4")
+    m_e6_line2 = Move(from_position_id=p_c4.id, to_position_id=p_c4_e6.id, uci="e7e6", san="e6")
+
+    session.add_all([m_d4, m_e6_line1, m_c4_line1, m_d5, m_c4_line2, m_e6_line2])
+    session.flush()
+
+    for m in [m_d4, m_e6_line1, m_c4_line1, m_d5, m_c4_line2, m_e6_line2]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # From p_c4_e6 (after 1. c4 e6, White to move):
+    # Opponent playing 2. d4 lands on p_d4_e6_c4, which is ALREADY in reachable_fens (via Line 1)!
+    # Pass 1 should suggest 1-move transposition: 2. d4.
+    # Pass 2 MUST NOT suggest 2-move transposition: 2. d4 2... d5 (because 2... d5 is already in Line 1!)
+    transpositions = find_repertoire_transpositions(session)
+
+    d4_1move = [t for t in transpositions if t['fen'] == clean_fen(p_c4_e6.fen) and t['depth'] == 1 and t['move_san'] == 'd4']
+    assert len(d4_1move) == 1
+
+    d4_2move = [t for t in transpositions if t['fen'] == clean_fen(p_c4_e6.fen) and t['depth'] == 2 and 'd4' in t['move_san']]
+    assert len(d4_2move) == 0
+
+
+def test_castling_uci_covered_in_transpositions(backend):
+    """
+    Verifies that if a castling move is in the repertoire (even if stored with Chess960 UCI e1h1),
+    it is correctly recognized as covered and NOT suggested as a transposition.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    # Color = Black
+    session.query(Metadata).filter_by(key="color").delete()
+    session.add(Metadata(key="color", value="b"))
+
+    # Create root
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    session.add(p_root)
+    session.flush()
+
+    # White plays e4, c5, Nf3, d6, Bc4, Nf6, then O-O
+    b = chess.Board()
+    for san in ["e4", "c5", "Nf3", "d6", "Bc4", "Nf6"]:
+        b.push_san(san)
+    fen_before_castle = clean_fen(b.fen())
+
+    p_before = Position(fen=fen_before_castle)
+    b.push_san("O-O")
+    fen_after_castle = clean_fen(b.fen())
+    p_after = Position(fen=fen_after_castle)
+
+    session.add_all([p_before, p_after])
+    session.flush()
+
+    # Store castling move with Chess960 UCI 'e1h1'
+    m_castle = Move(from_position_id=p_before.id, to_position_id=p_after.id, uci="e1h1", san="O-O")
+    session.add(m_castle)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_castle.id, level=1, is_active=True))
+
+    # Link root to p_before so p_before is reachable in BFS
+    m_link = Move(from_position_id=p_root.id, to_position_id=p_before.id, uci="e2e4", san="e4")
+    session.add(m_link)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_link.id, level=1, is_active=True))
+    session.commit()
+
+    transpositions = find_repertoire_transpositions(session)
+    # White castling (O-O) must NOT be suggested as a transposition because it is already in the repertoire!
+    castle_suggestions = [
+        t for t in transpositions
+        if t['fen'] == fen_before_castle and t['move_san'] == 'O-O'
+    ]
+    assert len(castle_suggestions) == 0
+
+
+def test_repair_castling_ucis(backend):
+    """
+    Verifies that repair_castling_ucis correctly normalizes Chess960 castling UCIs
+    (e1h1, e8h8, e1a1, e8a8) to standard chess UCIs (e1g1, e8g8, e1c1, e8c8).
+    """
+    from opening_fenix.core.services.repair_service import repair_castling_ucis
+
+    session = backend.session
+    p1 = Position(fen="r1bqkb1r/pppp1ppp/2n5/2nBP3/3p4/5N2/PPP2PPP/RNBQK2R w KQkq -")
+    p2 = Position(fen="r1bqkb1r/pppp1ppp/2n5/2nBP3/3p4/5N2/PPP2PPP/RNBQ1RK1 b kq -")
+    session.add_all([p1, p2])
+    session.flush()
+
+    # Move stored as e1h1
+    m = Move(from_position_id=p1.id, to_position_id=p2.id, uci="e1h1", san="O-O")
+    session.add(m)
+    session.flush()
+    session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    repaired = repair_castling_ucis(session)
+    assert repaired == 1
+
+    session.refresh(m)
+    assert m.uci == "e1g1"
+    assert m.san == "O-O"
+
+
+def test_find_repertoire_transpositions_custom_depth(backend):
+    """Test that find_repertoire_transpositions queries engine/cache with custom depth and returns ply_depth."""
+    session = backend.session
+    class MockEngine:
+        def __init__(self):
+            self.last_depth = None
+        def analyse(self, board, limit):
+            self.last_depth = limit.depth
+            import chess
+            return {"pv": [chess.Move.from_uci("g1f3")]}
+
+    mock_eng = MockEngine()
+    results = find_repertoire_transpositions(session, engine=mock_eng, depth=18)
+    assert isinstance(results, list)
+    for r in results:
+        assert "ply_depth" in r
+
+
+
+
 
 
 

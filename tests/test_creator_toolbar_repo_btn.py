@@ -76,3 +76,23 @@ def test_active_repo_button_vertical_alignment(qtbot):
     assert btn.lbl_load.alignment() & Qt.AlignmentFlag.AlignVCenter
     assert btn.objectName() == "ActiveRepoButton"
 
+
+def test_refresh_active_repo_cover(creator_window, tmp_path):
+    creator_window.load_repertoire("MyRepo")
+    assert creator_window.btn_load_repo.lbl_name.text() == "MyRepo"
+
+    # Initially no cover
+    assert creator_window.btn_load_repo.lbl_cover.text() == "♟"
+
+    # Add dummy cover
+    cover_file = str(tmp_path / "cover.png")
+    pix = QPixmap(100, 100)
+    pix.fill(Qt.GlobalColor.red)
+    pix.save(cover_file)
+
+    with patch("opening_fenix.creator.creator_window.get_repertoire_cover_path", return_value=cover_file):
+        creator_window.refresh_active_repo_cover()
+        assert not creator_window.btn_load_repo.lbl_cover.pixmap().isNull()
+        assert creator_window.btn_load_repo.lbl_cover.text() == ""
+
+

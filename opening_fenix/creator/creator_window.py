@@ -28,14 +28,14 @@ from PyQt6.QtWidgets import (
     QGraphicsDropShadowEffect, QAbstractItemView, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QUrl, QRectF, QSize, QEvent, QThread
-from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont, QPainterPath, QPixmap
+from PyQt6.QtGui import QIcon, QAction, QColor, QPainter, QBrush, QPen, QPolygonF, QPalette, QFontMetrics, QFont, QPainterPath, QPixmap, QImage
 from PyQt6.QtMultimedia import QSoundEffect
 from sqlalchemy import or_, func, desc, text
 from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -50,7 +50,7 @@ from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
@@ -89,6 +89,7 @@ class CreatorBackend:
         
         # IN-MEMORY CACHE FOR UI RESPONSIVENESS
         self._ui_cache = {}
+        self._outgoing_transpositions_cache = {}
         
         # DEBUG TRACE
         self._last_cascade_trace = []
@@ -121,12 +122,18 @@ class CreatorBackend:
         self.db_manager = DatabaseManager(db_path)
         self.session = self.db_manager.get_session()
         self._seed_default_levels()
+        try:
+            from opening_fenix.core.services.repair_service import repair_castling_ucis
+            repair_castling_ucis(self.session)
+        except Exception as e:
+            logger.warning(f"CreatorBackend: Castling repair check failed: {e}")
         self.clear_cache()
 
         self._cached_start_move = self.get_repertoire_start_move(force_refresh=True)
 
 
     def close(self):
+        self.clear_cache()
         if self.session:
             self.session.close()
             self.session = None
@@ -137,7 +144,12 @@ class CreatorBackend:
     def clear_cache(self):
         """Clears the LRU cache and expires session objects to ensure fresh data."""
         self._ui_cache = {}
+        self._outgoing_transpositions_cache = {}
         if self.session:
+            try:
+                self.session.rollback()
+            except Exception:
+                pass
             self.session.expire_all()
 
     def get_repertoire_start_move(self, force_refresh=False):
@@ -569,11 +581,13 @@ class CreatorBackend:
 
 
     def reset_hole_exemptions(self):
-
-        if not self.session: return
-        self.session.query(Position).update({Position.is_hole_exempt: False})
-        self.session.commit()
-        self.clear_cache()
+        if not self.session: return 0
+        count = self.session.query(Position).filter(Position.is_hole_exempt == True).count()
+        if count > 0:
+            self.session.query(Position).filter(Position.is_hole_exempt == True).update({Position.is_hole_exempt: False})
+            self.session.commit()
+            self.clear_cache()
+        return count
 
     def set_position_hole_exempt(self, fen, exempt):
         if not self.session: return
@@ -1073,6 +1087,9 @@ class CreatorBackend:
 
         clean_to = " ".join(board.fen().split(" ")[:4])
 
+        from opening_fenix.core.utils import normalize_castling_uci, CASTLING_ALT, CASTLING_SANS
+        move_uci = normalize_castling_uci(move_uci, move_san)
+
         to_pos = self.session.query(Position).filter_by(fen=clean_to).first()
         if not to_pos:
             to_pos = Position(fen=clean_to)
@@ -1084,6 +1101,12 @@ class CreatorBackend:
             if from_pos.cached_v3: to_pos.cached_v3 = from_pos.cached_v3
 
         db_move = self.session.query(Move).filter_by(from_position_id=from_pos.id, uci=move_uci).first()
+        if not db_move and move_san in CASTLING_SANS:
+            alt_uci = CASTLING_ALT.get(move_uci)
+            if alt_uci:
+                db_move = self.session.query(Move).filter_by(from_position_id=from_pos.id, uci=alt_uci).first()
+                if db_move:
+                    db_move.uci = move_uci
         if not db_move:
             db_move = Move(from_position_id=from_pos.id, to_position_id=to_pos.id, uci=move_uci, san=move_san, nag=nag)
             self.session.add(db_move)
@@ -1580,8 +1603,11 @@ class CreatorBackend:
         excluding moves already explicitly in the repertoire from this position."""
         if not self.session: return []
 
-        board = chess.Board(current_fen)
         clean_current = self._normalize_fen(current_fen)
+        if hasattr(self, "_outgoing_transpositions_cache") and clean_current in self._outgoing_transpositions_cache:
+            return self._outgoing_transpositions_cache[clean_current]
+
+        board = chess.Board(current_fen)
 
         # Find moves already in the repertoire FROM this position (skip those)
         current_pos_db = self.session.query(Position).filter(
@@ -1589,22 +1615,34 @@ class CreatorBackend:
         ).first()
         ignored_ucis = set()
         if current_pos_db:
-            existing = self.session.query(Move.uci).join(RepertoireMove).filter(
+            from opening_fenix.core.utils import CASTLING_ALT, CASTLING_SANS
+            existing = self.session.query(Move.uci, Move.san).join(RepertoireMove).filter(
                 Move.from_position_id == current_pos_db.id
             ).all()
-            ignored_ucis = {m.uci for m in existing}
+            for m_uci, m_san in existing:
+                u = m_uci.strip().lower()
+                ignored_ucis.add(u)
+                if m_san in CASTLING_SANS:
+                    alt = CASTLING_ALT.get(u)
+                    if alt:
+                        ignored_ucis.add(alt)
 
+        fen_index = getattr(self, "_fen_index", None)
         results = []
         for move in board.legal_moves:
             uci = move.uci()
             if uci in ignored_ucis:
                 continue
 
-            san = board.san(move)
             board.push(move)
             next_fen = self._normalize_fen(board.fen())
             board.pop()
 
+            # FAST FILTER: If in-memory FEN index is ready, skip any target not in the index!
+            if fen_index is not None and next_fen not in fen_index:
+                continue
+
+            san = board.san(move)
             pos = self.session.query(Position).filter(
                 Position.fen.op('GLOB')(next_fen + "*")
             ).first()
@@ -1625,6 +1663,9 @@ class CreatorBackend:
                         "target_fen": next_fen,
                         "variation_name": v_name,
                     })
+
+        if hasattr(self, "_outgoing_transpositions_cache"):
+            self._outgoing_transpositions_cache[clean_current] = results
         return results
 
     def find_incoming_transpositions(self, current_fen):
@@ -1831,22 +1872,43 @@ class CreatorBackend:
         vp.remove(pid)
 
     def _seed_default_levels(self):
-        """Adds default levels to a new/empty repertoire."""
+        """Adds default levels to a new/empty repertoire and syncs uncustomized defaults to active language."""
         if not self.session: return
         try:
+            from opening_fenix.core.translation import tr_ui, translator
+            from opening_fenix.core.logger import logger
+            
             count = self.session.query(RepertoireLevel).count()
             if count == 0:
                 defaults = [
-                    "Grundlagen",
-                    "Tiefe Theorie",
-                    "Nachschlagewerk und Erklärungen"
+                    tr_ui("repo_settings.level_default_1", "Grundlagen"),
+                    tr_ui("repo_settings.level_default_2", "Tiefe Theorie"),
+                    tr_ui("repo_settings.level_default_3", "Nachschlagewerk und Erklärungen")
                 ]
-                from opening_fenix.core.logger import logger
-                logger.info(f"CreatorBackend: Seeding default levels for '{self.active_repo_name}'")
+                logger.info(f"CreatorBackend: Seeding default levels for '{self.active_repo_name}' in language '{getattr(translator, 'current_lang', 'de')}'")
                 for i, name in enumerate(defaults, 1):
                     lvl = RepertoireLevel(name=name, order=i, target_elo=1500)
                     self.session.add(lvl)
                 self.session.commit()
+            elif count == 3:
+                # If the repertoire still has exactly the default levels from another language, sync them
+                current_lang = getattr(translator, 'current_lang', 'de')
+                de_defaults = ["Grundlagen", "Tiefe Theorie", "Nachschlagewerk und Erklärungen"]
+                en_defaults = ["Basics", "Deep Theory", "Reference and Explanations"]
+                
+                levels = self.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+                existing_names = [l.name for l in levels]
+                
+                if current_lang == "en" and existing_names == de_defaults:
+                    for i, lvl in enumerate(levels):
+                        lvl.name = en_defaults[i]
+                    self.session.commit()
+                    logger.info(f"CreatorBackend: Migrated default levels for '{self.active_repo_name}' to English")
+                elif current_lang == "de" and existing_names == en_defaults:
+                    for i, lvl in enumerate(levels):
+                        lvl.name = de_defaults[i]
+                    self.session.commit()
+                    logger.info(f"CreatorBackend: Migrated default levels for '{self.active_repo_name}' to German")
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Error seeding default levels: {e}")
@@ -2215,10 +2277,13 @@ class CreatorBackend:
         result['schema'] = missing_columns
 
         # 2. Check Gaps
-        subq = self.session.query(Move.from_position_id).join(RepertoireMove, Move.id == RepertoireMove.move_id).distinct()
+        subq_to = self.session.query(Move.from_position_id).join(RepertoireMove, Move.id == RepertoireMove.move_id).distinct()
+        subq_from = self.session.query(Move.to_position_id).join(RepertoireMove, Move.id == RepertoireMove.move_id).distinct()
+        start_pos = self.session.query(Position).filter_by(fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").first()
+        start_filter = (Move.from_position_id == start_pos.id) if start_pos else False
         gaps_count = self.session.query(Move).outerjoin(RepertoireMove, Move.id == RepertoireMove.move_id)\
             .filter(RepertoireMove.id == None)\
-            .filter(Move.to_position_id.in_(subq)).count()
+            .filter((Move.to_position_id.in_(subq_to)) | (Move.from_position_id.in_(subq_from)) | start_filter).count()
         result['gaps'] = gaps_count
             
         # 3. Check FEN Duplicates
@@ -2307,8 +2372,9 @@ class CreatorBackend:
         self.db_manager._migrate_schema(Base)
         
         # 2. Repair Gaps & Enforce Level Consistency
-        from opening_fenix.core.services.repair_service import repair_repertoire_health
-        repair_repertoire_health(self.session)
+        from opening_fenix.core.services.repair_service import repair_repertoire_health, repair_unassigned_moves
+        gaps_fixed, levels_updated = repair_repertoire_health(self.session)
+        unassigned_fixed = repair_unassigned_moves(self.session)
         self.session.flush()
 
         # 3. Repair FEN Duplicates (Merging)
@@ -2348,7 +2414,7 @@ class CreatorBackend:
 
         self.session.commit()
         self.clear_cache()
-        return 0
+        return gaps_fixed + levels_updated + unassigned_fixed
 
     def reset_and_repair_variation_names(self):
         """Clears all cached variation names and recalculates them from the starting position."""
@@ -2507,8 +2573,9 @@ class ActiveRepoButton(QPushButton):
             cover_path = get_repertoire_cover_path(name)
             if cover_path and os.path.exists(cover_path):
                 try:
-                    pix = QPixmap(cover_path)
-                    if not pix.isNull():
+                    img = QImage(cover_path)
+                    if not img.isNull():
+                        pix = QPixmap.fromImage(img)
                         target_size = QSize(scale(28), scale(28))
                         rounded = get_rounded_pixmap(pix, target_size, scale(6))
                         self.lbl_cover.setText("")
@@ -2587,8 +2654,18 @@ class CreatorWindow(QMainWindow):
 
         cp = os.path.join(get_user_dir(), "config.json")
         if os.path.exists(cp):
-            with open(cp, "r") as f: self.config = json.load(f)
-        else: self.config = {}
+            try:
+                with open(cp, "r", encoding="utf-8") as f:
+                    self.config = json.load(f)
+            except Exception:
+                self.config = {}
+        else:
+            self.config = {}
+
+        from opening_fenix.gui.widgets.board_widget import normalize_text_encoding
+        for k in ["theme", "highlight_color"]:
+            if k in self.config and isinstance(self.config[k], str):
+                self.config[k] = normalize_text_encoding(self.config[k])
 
         # Debounce Timer for saving details
         self.save_timer = QTimer()
@@ -2606,12 +2683,17 @@ class CreatorWindow(QMainWindow):
         self.active_comment_lang = self.get_notation_lang() or "de"
         self.current_position_comments = {}
 
-        # Tab visibility defaults
+        # Tab visibility defaults with persistent one-time migration
         if "creator_active_tabs" not in self.config:
             self.config["creator_active_tabs"] = ["DETAILS", "ANALYSIS", "TRANSPOSITIONS"]
-        elif "TRANSPOSITIONS" not in self.config["creator_active_tabs"]:
-            # Auto-enable for the first time
-            self.config["creator_active_tabs"].append("TRANSPOSITIONS")
+            self.config["transpositions_tab_migrated"] = True
+            self.save_config()
+        elif not self.config.get("transpositions_tab_migrated", False):
+            # One-time migration to enable Transpositions by default for existing installs
+            if "TRANSPOSITIONS" not in self.config["creator_active_tabs"]:
+                self.config["creator_active_tabs"].append("TRANSPOSITIONS")
+            self.config["transpositions_tab_migrated"] = True
+            self.save_config()
         
         self.init_icons()
         self.init_ui()
@@ -2707,8 +2789,8 @@ class CreatorWindow(QMainWindow):
     def save_config(self):
         config_path = os.path.join(get_user_dir(), "config.json")
         try:
-            with open(config_path, "w") as f:
-                json.dump(self.config, f, indent=4)
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
         except: pass
 
     def init_ui(self):
@@ -3257,10 +3339,14 @@ class CreatorWindow(QMainWindow):
             self.update_overhaul_progress()
 
     def open_tab_settings(self):
+        from PyQt6 import sip
         from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog
-        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog:
+        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
             self.repo_settings_dialog.finished.connect(self._on_settings_closed)
+        else:
+            if hasattr(self.repo_settings_dialog, 'on_reopen'):
+                self.repo_settings_dialog.on_reopen()
         self.repo_settings_dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
         self.repo_settings_dialog.show()
         self.repo_settings_dialog.raise_()
@@ -3292,6 +3378,8 @@ class CreatorWindow(QMainWindow):
                 active_tabs.remove(target_key)
                 self.set_setting("creator_active_tabs", active_tabs)
                 self.apply_tab_visibility()
+                if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog and hasattr(self.repo_settings_dialog, 'sync_creator_tab_checkboxes'):
+                    self.repo_settings_dialog.sync_creator_tab_checkboxes()
 
     def apply_tab_visibility(self):
         # Determine which tabs should be visible
@@ -3485,9 +3573,50 @@ class CreatorWindow(QMainWindow):
         v2_filled = is_filled(self.i_v2, tr_ui("creator.variant_placeholder_2", "Variante 2"))
         self.i_v3.setVisible(v1_filled and v2_filled)
 
+    def set_repertoire_elo(self, elo_cat):
+        """Updates the active Lichess Elo category in CreatorWindow and refreshes the UI and enrichment."""
+        internal_cat = get_elo_internal(elo_cat) if elo_cat else None
+        if not internal_cat or internal_cat not in ["low", "mid", "high", "masters"]:
+            return
+        
+        # Disconnect running enrichment threads to avoid race condition with previous Elo
+        if hasattr(self, 'enrichment_threads'):
+            for t in list(self.enrichment_threads):
+                try:
+                    t.finished_signal.disconnect()
+                except Exception:
+                    pass
+            self.enrichment_threads.clear()
+
+        # Update combo box without double-triggering signals
+        if hasattr(self, 'combo_lichess_cat'):
+            was_blocked = self.combo_lichess_cat.signalsBlocked()
+            self.combo_lichess_cat.blockSignals(True)
+            self.combo_lichess_cat.setCurrentText(internal_cat)
+            self.combo_lichess_cat.blockSignals(was_blocked)
+
+        # Update display label
+        if hasattr(self, 'lbl_lichess_cat_display'):
+            self.lbl_lichess_cat_display.setText(
+                tr_ui("creator.db_label", "Datenbank: {elo}", elo=get_elo_display(internal_cat))
+            )
+
+        # Clear cache in backend so old Elo cached stats are flushed
+        if hasattr(self, 'backend') and self.backend:
+            self.backend.clear_cache()
+
+        # Refresh the UI for current FEN
+        if hasattr(self, 'update_ui_from_fen'):
+            self.update_ui_from_fen()
+
+        # Trigger enrichment for current position with new Elo category
+        if hasattr(self, 'board_widget') and self.board_widget and hasattr(self.board_widget, 'board') and self.board_widget.board:
+            fen = self.board_widget.board.fen()
+            self.trigger_background_enrichment(fen)
+
     def _load_saved_elo_or_autoselect(self):
         """Loads the last used ELO category from DB, or auto-selects based on description."""
-        if not self.backend.session:
+        if not self.backend or not self.backend.session:
             return
             
         current_elo_meta = self.backend.session.query(Metadata).filter_by(key="elo").first()
@@ -3498,15 +3627,17 @@ class CreatorWindow(QMainWindow):
             # If there's a comma-separated list, take the first valid entry
             vals = [v.strip() for v in current_elo_meta.value.split(",")]
             for v in vals:
-                if v in ["low", "mid", "high", "masters"]:
-                    self.combo_lichess_cat.setCurrentText(v)
+                internal_v = get_elo_internal(v)
+                if internal_v in ["low", "mid", "high", "masters"]:
+                    self.set_repertoire_elo(internal_v)
                     return # Successfully loaded from DB
-
 
         # If we reach here, there was no saved metadata, so we autoselect
         self._autoselect_elo_range()
 
     def _autoselect_elo_range(self):
+        if not self.backend:
+            return
         desc = self.backend.get_repertoire_description()
         if not desc or not isinstance(desc, str):
             return
@@ -3515,13 +3646,14 @@ class CreatorWindow(QMainWindow):
         
         # Use regex to avoid "word-within-a-word" false positives
         if re.search(r'\bmasters?\b', desc_lower):
-            self.combo_lichess_cat.setCurrentText("masters")
+            self.set_repertoire_elo("masters")
         elif re.search(r'\bhigh\b', desc_lower):
-            self.combo_lichess_cat.setCurrentText("high")
+            self.set_repertoire_elo("high")
         elif re.search(r'\b(mid|medium)\b', desc_lower):
-            self.combo_lichess_cat.setCurrentText("mid")
+            self.set_repertoire_elo("mid")
         elif re.search(r'\blow\b', desc_lower):
-            self.combo_lichess_cat.setCurrentText("low")
+            self.set_repertoire_elo("low")
+
 
     def on_common_move_double_click(self, row, column):
         uci = self.table_common_moves.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -3974,7 +4106,7 @@ class CreatorWindow(QMainWindow):
             
             # If current tab is Transpositionen, refresh it
             if self.tabs.currentIndex() == idx:
-                self.update_transpositions_tab()
+                self.update_transpositions_tab(outgoing=outgoing_list)
 
 
     def block_signals_details(self, b):
@@ -4294,11 +4426,16 @@ class CreatorWindow(QMainWindow):
                 self.table_engine.setRowCount(0)
                 self.engine_thread.set_position(self.board_widget.board.fen())
         elif active:
-            # Situation 1: Engine thread was not initialized due to missing path
-            QMessageBox.warning(self, tr_ui("creator.dlg_engine_error_title", "Engine Fehler"), 
-                "Kein gültiger Engine-Pfad gefunden.\n\nBitte setze einen gültigen Engine-Pfad in den Repertoire-Einstellungen (Werkzeuge-Tab), um die Analyse nutzen zu können.")
-            
-            # Reset button UI state
+            from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
+            ep = prompt_engine_if_missing(self, self.config)
+            if ep:
+                self.config["engine_path"] = ep
+                self.init_engine()
+                if self.engine_thread:
+                    self.toggle_engine(True)
+                    return
+
+            # Reset button UI state if setup was cancelled or failed
             self.btn_engine_toggle.blockSignals(True)
             self.btn_engine_toggle.setChecked(False)
             self._on_engine_toggle_toggled(False)
@@ -4328,18 +4465,40 @@ class CreatorWindow(QMainWindow):
         self.backend.update_position_analysis(f, d, e)
 
     def open_repo_settings(self):
-        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog:
+        from PyQt6 import sip
+        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
             self.repo_settings_dialog.finished.connect(self._on_settings_closed)
+        else:
+            if hasattr(self.repo_settings_dialog, 'on_reopen'):
+                self.repo_settings_dialog.on_reopen()
         
         self.repo_settings_dialog.show()
         self.repo_settings_dialog.raise_()
         self.repo_settings_dialog.activateWindow()
 
     def _on_settings_closed(self):
-        self.repo_settings_dialog = None
+        # Ensure latest repertoire settings (e.g. elo category) are applied to CreatorWindow
+        if hasattr(self, 'backend') and self.backend and getattr(self.backend, 'session', None):
+            try:
+                self.backend.session.expire_all()
+            except Exception:
+                pass
+            self._load_saved_elo_or_autoselect()
+
+        # Update the load button cover image in case cover was added or removed
+        self.refresh_active_repo_cover()
+
         # Re-check lockout status after closing settings in case settings were changed
         QTimer.singleShot(500, self.trigger_lichess_lockout_check)
+
+    def refresh_active_repo_cover(self):
+        """Refreshes the active repertoire load button cover thumbnail."""
+        if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
+            repo_name = getattr(self.backend, 'active_repo_name', None) if hasattr(self, 'backend') and self.backend else None
+            self.btn_load_repo.update_repo(repo_name)
+
+
 
     def open_settings_from_lockout(self):
         """Emergency bypass: hides the overlay and opens settings for the user to disable."""
@@ -4354,12 +4513,17 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'lockout_worker') and self.lockout_worker and self.lockout_worker.isRunning():
             return
 
-        # Reload latest config from disk
+        # Reload latest config from disk safely
         cp = os.path.join(get_user_dir(), "config.json")
         if os.path.exists(cp):
             try:
-                with open(cp, "r") as f:
-                    self.config = json.load(f)
+                with open(cp, "r", encoding="utf-8") as f:
+                    disk_cfg = json.load(f)
+                    if isinstance(disk_cfg, dict):
+                        # Preserve in-memory active tabs if dirty or unpersisted
+                        if "creator_active_tabs" in self.config and "creator_active_tabs" not in disk_cfg:
+                            disk_cfg["creator_active_tabs"] = self.config["creator_active_tabs"]
+                        self.config.update(disk_cfg)
             except Exception:
                 pass
 
@@ -4401,54 +4565,29 @@ class CreatorWindow(QMainWindow):
                     is_error=True
                 )
 
-    def delete_repertoire_action(self):
+    def delete_repertoire_action(self, repo_name=None):
         """Actual deletion of the active repertoire files and closing the window."""
-        repo_name = self.backend.active_repo_name
+        if repo_name is None:
+            repo_name = self.backend.active_repo_name
         if not repo_name:
             return
             
-        # 1. Stop all threads in this window to release locks
-        if hasattr(self, 'engine_thread') and self.engine_thread:
-            self.engine_thread.running = False
-            self.engine_thread.is_active = False
-            self.engine_thread.wait(1000) # Wait up to 1 second
-            
-        # 2. Close backend to release database locks
-        self.backend.close()
-        
-        # 3. Small wait for the OS to finalize handle releases
-        time.sleep(0.3)
-        
-        # 4. Robust delete with retries
-        repo_dir = get_repertoire_dir(repo_name)
-        
-        def remove_readonly(func, path, _):
-            os.chmod(path, stat.S_IWRITE)
-            func(path)
-
-        success = False
-        last_err = ""
-        for attempt in range(3):
-            try:
-                if os.path.exists(repo_dir):
-                    shutil.rmtree(repo_dir, onerror=remove_readonly)
-                success = True
-                break
-            except Exception as e:
-                last_err = str(e)
-                time.sleep(0.5) # Wait longer between retries
+        from opening_fenix.core.data_tools import delete_repertoire_db
+        success, msg = delete_repertoire_db(repo_name)
         
         if success:
-            # 5. Notify application if possible
+            # Notify application if possible
             for w in QApplication.topLevelWidgets():
                 if hasattr(w, "on_repertoire_deleted"):
-                    w.on_repertoire_deleted()
+                    try: w.on_repertoire_deleted()
+                    except Exception: pass
             
-            # 6. Close the creator window
-            self.close()
+            # Close the creator window if it had this repertoire loaded
+            if self.backend.active_repo_name == repo_name:
+                self.close()
         else:
             QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"), 
-                f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {last_err}")
+                f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
 
     def import_pgn_file_dialog(self):
         """Opens a file dialog to select and import a PGN file."""
@@ -4573,9 +4712,13 @@ class CreatorWindow(QMainWindow):
     def _on_pgn_import_finished(self, success, message):
         if hasattr(self, 'p_pgn'): self.p_pgn.close()
         if success:
-            QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
-            self.update_ui_from_fen()
+            self.backend.clear_cache()
+            self.backend._fen_index = None
+            QTimer.singleShot(0, self._build_fen_index)
+            self.update_ui_from_fen(force_details=True)
             self.update_structure_tree()
+            self.init_management_slots()
+            QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
         else:
             QMessageBox.warning(self, tr_ui("creator.dlg_import_error_title", "Import Fehler"), message)
 
@@ -4737,9 +4880,17 @@ class CreatorWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if hasattr(self, 'custom_title_bar') and self.custom_title_bar:
+            self.custom_title_bar.update_maximize_button()
         QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
         QTimer.singleShot(100, self.trigger_board_adjust)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, 'custom_title_bar') and self.custom_title_bar:
+                self.custom_title_bar.update_maximize_button()
 
     def trigger_board_adjust(self):
         if hasattr(self, 'board_panel') and hasattr(self, 'main_splitter'):
@@ -4873,13 +5024,11 @@ class CreatorWindow(QMainWindow):
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_priority", "Level Aufstieg prüfen"), "priority")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_down", "Level Abstieg prüfen"), "level_down")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_check", "Level Gesundheits Check"), "level_check")
-        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_transpositions", "Transpositionen finden (1- & 2-zügig)"), "transpositions")
         
         self.combo_hole_mode.setItemData(0, tr_ui("creator.hole_mode_unanalyzed_tooltip", "Sucht nach Zügen, die noch nicht im Repertoire sind."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(1, tr_ui("creator.hole_mode_priority_tooltip", "Prüft, ob Züge im Repertoire das richtige Level haben."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(2, tr_ui("creator.hole_mode_level_down_tooltip", "Findet Züge, die abstellen sollten, weil sie selten vorkommen."), Qt.ItemDataRole.ToolTipRole)
         self.combo_hole_mode.setItemData(3, tr_ui("creator.hole_mode_level_check_tooltip", "Findet Repertoire-Lücken zwischen Leveln."), Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(4, tr_ui("creator.hole_mode_transpositions_tooltip", "Findet ungenutzte Überleitungen im gesamten Repertoire (1- und 2-zügig)."), Qt.ItemDataRole.ToolTipRole)
         
         combo_layout.addWidget(self.combo_hole_mode)
         combo_layout.addStretch()
@@ -4971,6 +5120,9 @@ class CreatorWindow(QMainWindow):
         self.btn_hole_exempt = QPushButton(tr_ui("creator.hole_btn_ignore", "🚫 Auswahl ignorieren"))
         self.btn_hole_exempt.clicked.connect(self.exempt_selected_hole)
         h_btm.addWidget(self.btn_hole_exempt)
+        self.btn_hole_clear_exempt = QPushButton(tr_ui("creator.hole_btn_clear_exempt", "♻️ Alle Ignorierungen aufheben"))
+        self.btn_hole_clear_exempt.clicked.connect(self.clear_all_hole_exemptions)
+        h_btm.addWidget(self.btn_hole_clear_exempt)
         h_btm.addStretch()
         main_layout.addLayout(h_btm)
         
@@ -4980,6 +5132,11 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, "table_holes") and self.table_holes:
             self.table_holes.setColumnHidden(0, False)
         mode = self.combo_hole_mode.currentData()
+        can_exempt = mode in ("holes", "transpositions")
+        if hasattr(self, "btn_hole_exempt") and self.btn_hole_exempt:
+            self.btn_hole_exempt.setVisible(can_exempt)
+        if hasattr(self, "btn_hole_clear_exempt") and self.btn_hole_clear_exempt:
+            self.btn_hole_clear_exempt.setVisible(can_exempt)
         
         if mode == "holes":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_holes_desc", "Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben."))
@@ -5004,13 +5161,6 @@ class CreatorWindow(QMainWindow):
             self.chk_prio_rare.setVisible(False)
         elif mode == "level_check":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_check_desc", "Findet Probleme mit der Level einstufung"))
-            self.combo_hole_level.setVisible(False)
-            self.lbl_hole_level.setVisible(False)
-            self.lbl_hole_threshold.setVisible(False)
-            self.combo_hole_threshold.setVisible(False)
-            self.chk_prio_rare.setVisible(False)
-        elif mode == "transpositions":
-            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_transpositions_desc", "Findet 1- und 2-zügige Überleitungen im gesamten Repertoire, die noch nicht verknüpft sind."))
             self.combo_hole_level.setVisible(False)
             self.lbl_hole_level.setVisible(False)
             self.lbl_hole_threshold.setVisible(False)
@@ -5041,6 +5191,25 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'table_holes') and self.table_holes:
             self.table_holes.setRowCount(0)
             self.table_holes.setColumnHidden(0, False)
+
+        if hasattr(self, 'global_transpos_thread') and self.global_transpos_thread and self.global_transpos_thread.isRunning():
+            try:
+                self.global_transpos_thread.stop()
+                self.global_transpos_thread.wait(500)
+            except Exception:
+                pass
+            self.global_transpos_thread = None
+
+        if hasattr(self, 'btn_global_transpos_scan') and self.btn_global_transpos_scan:
+            self.btn_global_transpos_scan.setEnabled(True)
+            self.btn_global_transpos_scan.setText(tr_ui("creator.transpos_btn_scan", "🔎 Repertoire scannen"))
+
+        if hasattr(self, 'lbl_global_transpos_status') and self.lbl_global_transpos_status:
+            self.lbl_global_transpos_status.setText("")
+
+        if hasattr(self, 'table_global_transpositions') and self.table_global_transpositions:
+            self.table_global_transpositions.setRowCount(0)
+            self.table_global_transpositions.setColumnHidden(2, True)
 
         self._preset_transposition = None
 
@@ -5153,96 +5322,208 @@ class CreatorWindow(QMainWindow):
 
     def init_transpositions_tab(self):
         outer = QVBoxLayout(self.tab_transpositions)
-        outer.setContentsMargins(0, scale(5), 0, 0)
-        outer.setSpacing(scale(15))
+        outer.setContentsMargins(0, scale(4), 0, 0)
+        outer.setSpacing(scale(6))
 
-        # ── Single GlassPill Card ──────────────────────────────────────
-        card = QFrame()
-        card.setObjectName("TranspositionPill")
-        self.repolish(card)
-        inner = QVBoxLayout(card)
-        inner.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
-        inner.setSpacing(scale(15))
+        # ── Vertical Splitter ───────────────────────────────────────────
+        self.transpos_splitter = QSplitter(Qt.Orientation.Vertical)
+        self.transpos_splitter.setHandleWidth(scale(6))
+        self.transpos_splitter.setStyleSheet(
+            "QSplitter::handle:vertical { background-color: rgba(0, 0, 0, 0.08); border-radius: 3px; margin: 2px 20px; } "
+            "QSplitter::handle:vertical:hover { background-color: rgba(0, 0, 0, 0.22); }"
+        )
 
-        # Combined table for Direct and Deep search
-        self.table_transpositions = QTableWidget(0, 4)
+        # ── Top Card: Current Position Transpositions ───────────────────
+        card_top = QFrame()
+        card_top.setObjectName("TranspositionPill")
+        self.repolish(card_top)
+        inner_top = QVBoxLayout(card_top)
+        inner_top.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
+        inner_top.setSpacing(scale(8))
+
+        # Header row
+        h_top_header = QHBoxLayout()
+        self.lbl_transpos_status = QLabel("") 
+        self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: 11px;")
+        h_top_header.addWidget(self.lbl_transpos_status, 1)
+
+        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
+        self.btn_deep_transpos.setMinimumHeight(scale(30))
+        self.btn_deep_transpos.setProperty("class", "GlassPill")
+        self.btn_deep_transpos.setToolTip(tr_ui("creator.transpositions_btn_start_tooltip", "Sucht nach 3-, 4- und mehrzügigen Zugfolgen, die aus dieser Stellung zurück ins Repertoire führen."))
+        self.repolish(self.btn_deep_transpos)
+        self.btn_deep_transpos.setEnabled(False)
+        self.btn_deep_transpos.clicked.connect(self.on_deep_transpos_button_clicked)
+        h_top_header.addWidget(self.btn_deep_transpos)
+
+        inner_top.addLayout(h_top_header)
+
+        # Combined table for Direct and Deep search on current position
+        self.table_transpositions = QTableWidget(0, 3)
         self.table_transpositions.setHorizontalHeaderLabels([
             tr_ui("creator.transpositions_header_move", "Zug / Zugfolge"),
-            tr_ui("creator.transpositions_header_depth", "Tiefe"),
-            tr_ui("creator.transpositions_header_quality", "Ranking / Qualität"),
-            tr_ui("creator.transpositions_header_add_level", "Zu Level hinzufügen")
+            tr_ui("creator.transpositions_header_quality", "Qualität"),
+            tr_ui("creator.transpositions_header_add_level", "Zu Level")
         ])
         self.table_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_transpositions.verticalHeader().setVisible(False)
-        self.table_transpositions.verticalHeader().setDefaultSectionSize(scale(34))
-        self.table_transpositions.verticalHeader().setMinimumSectionSize(scale(32))
+        self.table_transpositions.verticalHeader().setDefaultSectionSize(scale(38))
+        self.table_transpositions.verticalHeader().setMinimumSectionSize(scale(36))
         self.table_transpositions.setAlternatingRowColors(True)
         self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
         self.table_transpositions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_transpositions.customContextMenuRequested.connect(self.on_transposition_context_menu)
-        self.table_transpositions.itemSelectionChanged.connect(self._update_bottom_level_buttons)
         
         hdr = self.table_transpositions.horizontalHeader()
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
         hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.table_transpositions.setShowGrid(False)
         self.table_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        inner.addWidget(self.table_transpositions)
+        inner_top.addWidget(self.table_transpositions, 1)
 
-        # Status row
-        self.lbl_transpos_status = QLabel("") 
-        self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: 12px;")
-        inner.addWidget(self.lbl_transpos_status)
+        # ── Bottom Card: Whole-Repertoire Scanner (1- & 2-Move) ─────────
+        card_bottom = QFrame()
+        card_bottom.setObjectName("TranspositionPill")
+        self.repolish(card_bottom)
+        inner_bottom = QVBoxLayout(card_bottom)
+        inner_bottom.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
+        inner_bottom.setSpacing(scale(8))
 
-        # Bottom layout for level actions and deep search button
-        h_deep_bottom = QHBoxLayout()
-        h_deep_bottom.setSpacing(scale(10))
+        # Header row for whole-repertoire scan
+        h_bot_header = QHBoxLayout()
+        h_bot_header.setSpacing(scale(8))
+        lbl_bot_title = QLabel(tr_ui("creator.transpos_global_title", "<b>🌐 Gesamtes Repertoire: 1- & 2-Zug Überleitungen</b>"))
+        lbl_bot_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['dark_accent']};")
+        h_bot_header.addWidget(lbl_bot_title)
 
-        self.lbl_transpos_add = QLabel(tr_ui("creator.transpositions_lbl_add_selected", "Auswahl zu:"))
-        self.lbl_transpos_add.setStyleSheet(f"color: {COLORS['light_text']}; font-size: 12px; font-weight: bold;")
-        self.lbl_transpos_add.setVisible(False)
-        h_deep_bottom.addWidget(self.lbl_transpos_add)
+        self.lbl_global_transpos_status = QLabel("")
+        self.lbl_global_transpos_status.setStyleSheet(
+            f"color: {COLORS['light_text']}; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+        )
+        h_bot_header.addWidget(self.lbl_global_transpos_status, 1)
 
-        self.h_bottom_levels_layout = QHBoxLayout()
-        self.h_bottom_levels_layout.setSpacing(scale(6))
-        h_deep_bottom.addLayout(self.h_bottom_levels_layout)
+        depth_tooltip = tr_ui("creator.transpos_engine_depth_tooltip", "Stockfish-Rechentiefe: Bestimmt, wie gründlich die Engine prüft, ob 2-zügige Überleitungen taktisch solide sind.")
 
-        h_deep_bottom.addStretch()
-        
-        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
-        self.btn_deep_transpos.setMinimumHeight(scale(40))
-        self.btn_deep_transpos.setProperty("class", "GlassPill")
-        self.repolish(self.btn_deep_transpos)
-        self.btn_deep_transpos.setEnabled(False)
-        self.btn_deep_transpos.clicked.connect(self.on_deep_transpos_button_clicked)
-        h_deep_bottom.addWidget(self.btn_deep_transpos)
-        
-        inner.addLayout(h_deep_bottom)
-        outer.addWidget(card, 1)
+        lbl_transpos_depth = QLabel(tr_ui("creator.transpos_engine_depth_label", "⚙️ Engine-Tiefe:"))
+        lbl_transpos_depth.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: 13px; font-weight: 600;")
+        lbl_transpos_depth.setToolTip(depth_tooltip)
+        h_bot_header.addWidget(lbl_transpos_depth)
+
+        self.combo_transpos_depth = QComboBox()
+        self.combo_transpos_depth.setEditable(True)
+        self.combo_transpos_depth.lineEdit().setReadOnly(True)
+        self.combo_transpos_depth.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.combo_transpos_depth.addItems(["15", "18", "20", "22", "25", "28", "30"])
+        saved_depth = str(self.config.get("transposition_depth", "25"))
+        if self.combo_transpos_depth.findText(saved_depth) != -1:
+            self.combo_transpos_depth.setCurrentText(saved_depth)
+        else:
+            self.combo_transpos_depth.setCurrentText("25")
+        self.combo_transpos_depth.setFixedWidth(scale(64))
+        self.combo_transpos_depth.setMinimumHeight(scale(30))
+        self.combo_transpos_depth.setToolTip(depth_tooltip)
+        self.combo_transpos_depth.setObjectName("TransposDepthCombo")
+        self.combo_transpos_depth.setStyleSheet(f"""
+            QComboBox#TransposDepthCombo {{
+                background-color: {COLORS['white']};
+                color: {COLORS['brown_text']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(10)}px;
+                padding-left: {scale(8)}px;
+                padding-right: {scale(20)}px;
+                font-weight: bold;
+                font-size: 12px;
+                min-height: {scale(28)}px;
+            }}
+            QComboBox#TransposDepthCombo:hover {{
+                border-color: {COLORS['burnt_orange']};
+            }}
+            QComboBox#TransposDepthCombo::drop-down {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                width: {scale(18)}px;
+                border: none;
+            }}
+            QComboBox#TransposDepthCombo::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(10)}px;
+                height: {scale(10)}px;
+            }}
+        """)
+        self.combo_transpos_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_transpos_depth.currentTextChanged.connect(self._on_transpos_depth_changed)
+        h_bot_header.addWidget(self.combo_transpos_depth)
+
+        self.btn_global_transpos_scan = QPushButton(tr_ui("creator.transpos_btn_scan", "🔎 Repertoire scannen"))
+        self.btn_global_transpos_scan.setMinimumHeight(scale(30))
+        self.btn_global_transpos_scan.setProperty("class", "GlassPill")
+        self.repolish(self.btn_global_transpos_scan)
+        self.btn_global_transpos_scan.clicked.connect(self.run_global_transpos_scan)
+        h_bot_header.addWidget(self.btn_global_transpos_scan)
+
+        inner_bottom.addLayout(h_bot_header)
+
+        # Whole-repertoire table (4 columns: Move, Type, Quality, Add Level)
+        self.table_global_transpositions = QTableWidget(0, 4)
+        self.table_global_transpositions.setHorizontalHeaderLabels([
+            tr_ui("creator.hole_header_move", "Zug"),
+            tr_ui("creator.hole_header_depth_type", "Typ"),
+            tr_ui("creator.hole_header_quality", "Qualität"),
+            tr_ui("creator.transpositions_header_add_level", "Zu Level")
+        ])
+        self.table_global_transpositions.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_global_transpositions.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table_global_transpositions.verticalHeader().setVisible(False)
+        self.table_global_transpositions.verticalHeader().setDefaultSectionSize(scale(38))
+        self.table_global_transpositions.verticalHeader().setMinimumSectionSize(scale(36))
+        self.table_global_transpositions.setAlternatingRowColors(True)
+        self.table_global_transpositions.itemDoubleClicked.connect(self.on_global_transposition_activated)
+        self.table_global_transpositions.itemClicked.connect(self.on_global_transposition_activated)
+
+        hdr_bot = self.table_global_transpositions.horizontalHeader()
+        hdr_bot.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        hdr_bot.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        hdr_bot.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        hdr_bot.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        hdr_bot.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.table_global_transpositions.setShowGrid(False)
+        self.table_global_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table_global_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table_global_transpositions.setColumnHidden(2, True) # Quality hidden until depth 2 present
+        inner_bottom.addWidget(self.table_global_transpositions, 1)
+
+        # Add both cards to splitter
+        self.transpos_splitter.addWidget(card_top)
+        self.transpos_splitter.addWidget(card_bottom)
+        self.transpos_splitter.setStretchFactor(0, 4)
+        self.transpos_splitter.setStretchFactor(1, 6)
+        self.transpos_splitter.setSizes([scale(200), scale(320)])
+        outer.addWidget(self.transpos_splitter, 1)
 
         # Internal BFS state
         self._bfs_thread = None
         self._fen_index_thread = None
         self._path_quality_thread = None
         self._instant_multipv_thread = None
+        self._global_transpos_thread = None
         self._bfs_next_depth = 3           # first click searches depth 3
         self._bfs_start_fen = None         # FEN at time BFS was started
         self._bfs_running = False
 
         # FEN index is built lazily after each repertoire load (see load_repertoire)
 
-    def update_transpositions_tab(self):
+    def update_transpositions_tab(self, outgoing=None):
         fen = self.board_widget.board.fen()
         if not fen:
             return
 
         # ── Outgoing immediate transpositions (1-move) ───────────────────────────
-        outgoing = self.backend.find_outgoing_transpositions(fen)
+        if outgoing is None:
+            outgoing = self.backend.find_outgoing_transpositions(fen)
         self._populate_outgoing_table(outgoing)
 
         # Check for preset transposition from Hole Finder / Move Finder
@@ -5277,7 +5558,8 @@ class CreatorWindow(QMainWindow):
                         
                         r = self.table_transpositions.rowCount()
                         self.table_transpositions.insertRow(r)
-                        m_item = QTableWidgetItem(p_move_san)
+                        disp_move = format_move_notation(self.board_widget.board, p_move_san)
+                        m_item = QTableWidgetItem(disp_move)
                         row_data = {
                             "type": "direct",
                             "target_fen": p_target,
@@ -5289,17 +5571,13 @@ class CreatorWindow(QMainWindow):
                         m_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         self.table_transpositions.setItem(r, 0, m_item)
                         
-                        d_item = QTableWidgetItem("1")
-                        d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 1, d_item)
-                        
                         q_item = QTableWidgetItem(p_qual_label if p_qual_label else "—")
                         q_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         q_item.setForeground(QColor(COLORS['light_text']))
-                        self.table_transpositions.setItem(r, 2, q_item)
+                        self.table_transpositions.setItem(r, 1, q_item)
 
                         lvl_cell = self._create_transposition_level_cell(row_data)
-                        self.table_transpositions.setCellWidget(r, 3, lvl_cell)
+                        self.table_transpositions.setCellWidget(r, 2, lvl_cell)
                         found_row = r
 
                     if found_row >= 0:
@@ -5324,7 +5602,8 @@ class CreatorWindow(QMainWindow):
                         self.table_transpositions.insertRow(r)
                         
                         seq_str = "  ".join(p_sans) if p_sans else p_move_san
-                        seq_item = QTableWidgetItem(seq_str)
+                        disp_seq = format_move_notation(self.board_widget.board, seq_str)
+                        seq_item = QTableWidgetItem(disp_seq)
                         row_data = {
                             "type": "bfs",
                             "search_fen": fen,
@@ -5339,10 +5618,6 @@ class CreatorWindow(QMainWindow):
                         seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         self.table_transpositions.setItem(r, 0, seq_item)
                         
-                        d_item = QTableWidgetItem("2")
-                        d_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 1, d_item)
-                        
                         if not p_qual_label:
                             p_qual_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if p_qual == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
                         qual_item = QTableWidgetItem(p_qual_label)
@@ -5353,10 +5628,10 @@ class CreatorWindow(QMainWindow):
                             qual_item.setForeground(QColor("#f1c40f"))
                         else:
                             qual_item.setForeground(QColor(COLORS['light_text']))
-                        self.table_transpositions.setItem(r, 2, qual_item)
+                        self.table_transpositions.setItem(r, 1, qual_item)
 
                         lvl_cell = self._create_transposition_level_cell(row_data)
-                        self.table_transpositions.setCellWidget(r, 3, lvl_cell)
+                        self.table_transpositions.setCellWidget(r, 2, lvl_cell)
                         found_row = r
 
                     if found_row >= 0:
@@ -5370,8 +5645,11 @@ class CreatorWindow(QMainWindow):
             if ep and os.path.exists(ep):
                 t_ucis = [ot["move_uci"] for ot in outgoing]
                 if hasattr(self, "_instant_multipv_thread") and self._instant_multipv_thread and self._instant_multipv_thread.isRunning():
+                    try:
+                        self._instant_multipv_thread.finished.disconnect()
+                    except Exception:
+                        pass
                     self._instant_multipv_thread.requestInterruption()
-                    self._instant_multipv_thread.wait()
                 th = InstantMultiPVThread(
                     fen, t_ucis, ep,
                     threads_count=int(self.combo_threads.currentText())
@@ -5385,7 +5663,6 @@ class CreatorWindow(QMainWindow):
         self._bfs_next_depth = 3
         self._bfs_running = False
         self._update_deep_button_state()
-        self._update_bottom_level_buttons()
         self._adjust_transposition_table_columns()
 
     def _populate_outgoing_table(self, items):
@@ -5395,18 +5672,26 @@ class CreatorWindow(QMainWindow):
             
             if not items:
                 self.table_transpositions.setRowCount(1)
-                item = QTableWidgetItem(tr_ui("creator.transpositions_no_moves", "Kein unbekannter Zug führt direkt in eine bekannte Stellung"))
+                self.table_transpositions.setRowHeight(0, scale(54))
+                no_moves_text = (
+                    tr_ui("creator.transpositions_no_moves", "Keine direkten Überleitungen aus dieser Stellung")
+                    + "\n"
+                    + tr_ui("creator.transpositions_no_moves_sub", "(Tipp: 'Tiefe Suche starten' für mehrzügige Überleitungen)")
+                )
+                item = QTableWidgetItem(no_moves_text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 item.setForeground(QColor(COLORS['light_text']))
                 self.table_transpositions.setItem(0, 0, item)
-                self.table_transpositions.setSpan(0, 0, 1, 4)
+                self.table_transpositions.setSpan(0, 0, 1, 3)
                 return
 
             for i, it in enumerate(items):
                 self.table_transpositions.insertRow(i)
                 
                 # Col 0: Zug / Zugfolge
-                move_item = QTableWidgetItem(it['move_san'])
+                disp_move = format_move_notation(self.board_widget.board, it['move_san'])
+                move_item = QTableWidgetItem(disp_move)
+                move_item.setToolTip(f"{disp_move}\n" + tr_ui("creator.tooltip_click_board", "Klicken, um Zug auf dem Brett auszuführen."))
                 data = {
                     "type": "direct",
                     "target_fen": it['target_fen'],
@@ -5418,19 +5703,14 @@ class CreatorWindow(QMainWindow):
                 move_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_transpositions.setItem(i, 0, move_item)
                 
-                # Col 1: Tiefe (Always 1 for direct)
-                depth_item = QTableWidgetItem("1")
-                depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_transpositions.setItem(i, 1, depth_item)
-                
-                # Col 2: Ranking / Qualität
+                # Col 1: Ranking / Qualität
                 rank_item = QTableWidgetItem(tr_ui("creator.evaluating", "Bewerte..."))
                 rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_transpositions.setItem(i, 2, rank_item)
+                self.table_transpositions.setItem(i, 1, rank_item)
 
-                # Col 3: Level Buttons
+                # Col 2: Level Buttons
                 lvl_cell = self._create_transposition_level_cell(data)
-                self.table_transpositions.setCellWidget(i, 3, lvl_cell)
+                self.table_transpositions.setCellWidget(i, 2, lvl_cell)
             self._adjust_transposition_table_columns()
         finally:
             self.table_transpositions.setUpdatesEnabled(True)
@@ -5463,17 +5743,14 @@ class CreatorWindow(QMainWindow):
             }
 
             # Col 0: Zug / Zugfolge
-            seq_item = QTableWidgetItem(" ".join(p["path_sans"]))
+            seq_str = "  ".join(p["path_sans"])
+            disp_seq = format_move_notation(self.board_widget.board, seq_str)
+            seq_item = QTableWidgetItem(disp_seq)
             seq_item.setData(Qt.ItemDataRole.UserRole, data)
             seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_transpositions.setItem(row, 0, seq_item)
 
-            # Col 1: Tiefe
-            depth_item = QTableWidgetItem(str(p["depth"]))
-            depth_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table_transpositions.setItem(row, 1, depth_item)
-
-            # Col 2: Ranking / Qualität
+            # Col 1: Ranking / Qualität
             q = p.get("quality")
             if q == "möglich":
                 quality_label = tr_ui("creator.transpositions_quality_possible", "🟡 Möglich")
@@ -5491,13 +5768,12 @@ class CreatorWindow(QMainWindow):
                 qual_item.setForeground(QColor("rgba(255,255,255,0.4)"))
             else:
                 qual_item.setForeground(QColor("#f1c40f"))
-            self.table_transpositions.setItem(row, 2, qual_item)
+            self.table_transpositions.setItem(row, 1, qual_item)
 
-            # Col 3: Level Buttons
+            # Col 2: Level Buttons
             lvl_cell = self._create_transposition_level_cell(data)
-            self.table_transpositions.setCellWidget(row, 3, lvl_cell)
+            self.table_transpositions.setCellWidget(row, 2, lvl_cell)
 
-        self._update_bottom_level_buttons()
         self._adjust_transposition_table_columns()
 
     # ── BFS Deep Search helpers ─────────────────────────────────────────────────
@@ -5570,10 +5846,11 @@ class CreatorWindow(QMainWindow):
         if not getattr(self.backend, "_fen_index", None):
             return
 
-        ep = self.config.get("engine_path", "")
-        if not ep or not os.path.exists(ep):
-            QMessageBox.warning(self, tr_ui("creator.engine_error_title", "Engine Fehler"), tr_ui("creator.engine_error_desc", "Kein Engine-Pfad in den Einstellungen hinterlegt."))
+        from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
+        ep = prompt_engine_if_missing(self, self.config)
+        if not ep:
             return
+        self.config["engine_path"] = ep
 
         # First click: reset start FEN and accumulated results
         if self._bfs_start_fen is None:
@@ -5713,7 +5990,7 @@ class CreatorWindow(QMainWindow):
             rank_item = QTableWidgetItem(label)
             rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             rank_item.setForeground(QColor(color))
-            self.table_transpositions.setItem(row, 2, rank_item)
+            self.table_transpositions.setItem(row, 1, rank_item)
 
     # ── Double-click handler ─────────────────────────────────────────────────────
 
@@ -5779,6 +6056,7 @@ class CreatorWindow(QMainWindow):
                         except Exception:
                             break
 
+                added_fens = []
                 for u, s in steps:
                     f_fen = self.board_widget.board.fen()
                     try:
@@ -5786,6 +6064,7 @@ class CreatorWindow(QMainWindow):
                         if m in self.board_widget.board.legal_moves:
                             self.board_widget.board.push(m)
                             self.backend.add_move(f_fen, u, s)
+                            added_fens.append(self.board_widget.board.fen())
                         else:
                             break
                     except Exception:
@@ -5794,7 +6073,8 @@ class CreatorWindow(QMainWindow):
                 self.board_widget.update()
                 self.play_sound("move")
                 self.update_ui_from_fen()
-                self.trigger_background_enrichment(self.board_widget.board.fen())
+                for fen_to_enrich in added_fens:
+                    self.trigger_background_enrichment(fen_to_enrich)
             elif data.get("target_fen"):
                 self.set_board_to_fen(data["target_fen"])
 
@@ -5936,7 +6216,8 @@ class CreatorWindow(QMainWindow):
 
         m_type = data.get("type")
         move_label = ""
-        origin_fen = data.get("search_fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else "")
+        origin_fen = data.get("search_fen") or data.get("fen") or (self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else "")
+        added_fens = []
 
         if m_type == "direct" or ("move_uci" in data and "path_ucis" not in data):
             uci = data.get("move_uci")
@@ -5951,9 +6232,21 @@ class CreatorWindow(QMainWindow):
             if origin_fen and uci:
                 self.backend.add_move(origin_fen, uci, san or uci, level_order=level_order)
                 move_label = san or uci
+                target = data.get("target_fen")
+                if not target:
+                    try:
+                        b = chess.Board(origin_fen)
+                        m = chess.Move.from_uci(uci)
+                        if m in b.legal_moves:
+                            b.push(m)
+                            target = b.fen()
+                    except Exception:
+                        pass
+                if target:
+                    added_fens.append(target)
 
         elif m_type == "bfs" or "path_ucis" in data:
-            search_fen = data.get("search_fen") or getattr(self, "_bfs_start_fen", None) or origin_fen
+            search_fen = data.get("search_fen") or data.get("fen") or getattr(self, "_bfs_start_fen", None) or origin_fen
             path_ucis = data.get("path_ucis", [])
             path_sans = data.get("path_sans", [])
 
@@ -5989,6 +6282,7 @@ class CreatorWindow(QMainWindow):
                         if m in temp_b.legal_moves:
                             self.backend.add_move(curr_fen, u, s, level_order=level_order)
                             temp_b.push(m)
+                            added_fens.append(temp_b.fen())
                         else:
                             break
                     except Exception:
@@ -6015,9 +6309,31 @@ class CreatorWindow(QMainWindow):
             for r in reversed(rows_to_del):
                 self.table_holes.removeRow(r)
 
+        # Remove matching transposition from table_global_transpositions if present
+        if hasattr(self, "table_global_transpositions") and self.table_global_transpositions:
+            rows_to_del = []
+            clean_orig = " ".join(origin_fen.strip().split()[:4]) if origin_fen else ""
+            for r in range(self.table_global_transpositions.rowCount()):
+                it0 = self.table_global_transpositions.item(r, 0)
+                if it0:
+                    h_fen = it0.data(Qt.ItemDataRole.UserRole)
+                    h_data = it0.data(Qt.ItemDataRole.UserRole + 10)
+                    if h_fen and clean_orig and " ".join(h_fen.strip().split()[:4]) == clean_orig:
+                        if h_data and isinstance(h_data, dict):
+                            if h_data.get("target_fen") == data.get("target_fen") or h_data.get("move_san") == move_label:
+                                rows_to_del.append(r)
+            for r in reversed(rows_to_del):
+                self.table_global_transpositions.removeRow(r)
+            self._adjust_global_transpos_columns()
+
         # Feedback & UI updates
         self.play_sound("move")
         self.update_ui_from_fen()
+
+        # Trigger background enrichment (Lichess data + light engine analysis)
+        # for all added positions (intermediate & target)
+        for fen_to_enrich in added_fens:
+            self.trigger_background_enrichment(fen_to_enrich)
 
         # Update / clear transposition tab marker if no more outgoing transpositions
         outgoing_rem = self.backend.find_outgoing_transpositions(origin_fen or self.board_widget.board.fen())
@@ -6052,22 +6368,13 @@ class CreatorWindow(QMainWindow):
             it0 = self.table_transpositions.item(r, 0)
             if it0:
                 d = it0.data(Qt.ItemDataRole.UserRole)
-                if d and isinstance(d, dict) and d.get("depth", 1) > 1:
+                if d and isinstance(d, dict) and (d.get("depth", 1) > 1 or d.get("type") == "bfs"):
                     has_deep = True
                     break
-            it1 = self.table_transpositions.item(r, 1)
-            if it1 and it1.text() not in ("", "1"):
-                try:
-                    if int(it1.text()) > 1:
-                        has_deep = True
-                        break
-                except ValueError:
-                    pass
 
-        self.table_transpositions.setColumnHidden(2, not has_deep)
-        self.table_transpositions.resizeColumnToContents(1)
+        self.table_transpositions.setColumnHidden(1, not has_deep)
         if has_deep:
-            self.table_transpositions.resizeColumnToContents(2)
+            self.table_transpositions.resizeColumnToContents(1)
 
         levels = self.backend.get_repertoire_levels() if self.backend else []
         levels_count = max(1, len(levels))
@@ -6075,18 +6382,18 @@ class CreatorWindow(QMainWindow):
         # Suggested button width (~72px) + (N-1) standard buttons (~50px each) + spacing + cell padding
         needed_buttons_w = scale(72) + (levels_count - 1) * scale(50) + (levels_count - 1) * scale(4) + scale(24)
         
-        hdr_item = self.table_transpositions.horizontalHeaderItem(3)
+        hdr_item = self.table_transpositions.horizontalHeaderItem(2)
         hdr_text = hdr_item.text() if hdr_item else "Zu Level hinzufügen"
         hdr_w = self.table_transpositions.fontMetrics().horizontalAdvance(hdr_text) + scale(32)
         
         final_w = max(needed_buttons_w, hdr_w)
-        self.table_transpositions.setColumnWidth(3, int(final_w))
+        self.table_transpositions.setColumnWidth(2, int(final_w))
 
     def _create_transposition_level_cell(self, data: dict) -> QWidget:
         """Creates a compact container widget with action buttons for all available reachable levels."""
         container = QWidget()
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(scale(2), scale(1), scale(2), scale(1))
+        layout.setContentsMargins(scale(4), scale(2), scale(4), scale(2))
         layout.setSpacing(scale(4))
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -6346,6 +6653,176 @@ class CreatorWindow(QMainWindow):
 
         menu.exec(self.table_transpositions.viewport().mapToGlobal(pos))
 
+    def _adjust_global_transpos_columns(self):
+        """Hides the Quality column in table_global_transpositions if only 1-move transpositions exist."""
+        has_2m = False
+        for r in range(self.table_global_transpositions.rowCount()):
+            it = self.table_global_transpositions.item(r, 0)
+            if it:
+                h = it.data(Qt.ItemDataRole.UserRole + 10)
+                if isinstance(h, dict) and h.get('depth', 1) >= 2:
+                    has_2m = True
+                    break
+        self.table_global_transpositions.setColumnHidden(2, not has_2m)
+
+    def _on_transpos_depth_changed(self, text):
+        if text and text.isdigit():
+            self.config["transposition_depth"] = text
+            self.save_config()
+
+    def run_global_transpos_scan(self):
+        if not self.backend or not self.backend.active_repo_name:
+            QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), "Bitte lade zuerst ein Repertoire.")
+            return
+
+        if hasattr(self, "global_transpos_thread") and self.global_transpos_thread and self.global_transpos_thread.isRunning():
+            self.global_transpos_thread.stop()
+            self.global_transpos_thread.wait(500)
+            self.global_transpos_thread = None
+            self.btn_global_transpos_scan.setText(tr_ui("creator.transpos_btn_scan", "🔎 Repertoire scannen"))
+            self.btn_global_transpos_scan.setEnabled(True)
+            self.lbl_global_transpos_status.setText(tr_ui("creator.transpositions_status_stopped", "Scan gestoppt."))
+            self.lbl_global_transpos_status.setStyleSheet(
+                f"background-color: rgba(0, 0, 0, 0.06); color: {COLORS['light_text']}; "
+                f"font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+            )
+            return
+
+        depth_val = 25
+        if hasattr(self, "combo_transpos_depth"):
+            try:
+                depth_val = int(self.combo_transpos_depth.currentText())
+            except Exception:
+                depth_val = 25
+
+        self.btn_global_transpos_scan.setText(tr_ui("creator.scanning", "Scannend..."))
+        self.lbl_global_transpos_status.setText(f"Scan läuft... (Tiefe {depth_val})")
+        self.lbl_global_transpos_status.setStyleSheet(
+            f"background-color: rgba(211, 84, 0, 0.12); color: #d35400; "
+            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+        )
+        self.table_global_transpositions.setRowCount(0)
+        self.table_global_transpositions.setColumnHidden(2, True)
+
+        elo = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
+        ep = self.config.get("engine_path", "")
+        threads = int(self.combo_threads.currentText()) if hasattr(self, "combo_threads") else 1
+
+        self.global_transpos_thread = HoleFinderThread(
+            self.backend.active_repo_name,
+            self.backend.is_test,
+            threshold=1.0,
+            elo_range=elo,
+            mode="transpositions",
+            engine_path=ep,
+            threads_count=threads,
+            depth=depth_val,
+        )
+        self.global_transpos_thread.item_found_signal.connect(self._on_global_transpos_item_found)
+        self.global_transpos_thread.finished_signal.connect(self._on_global_transpos_scan_finished)
+        self.global_transpos_thread.start()
+
+    def _add_global_transpos_row(self, h):
+        row = self.table_global_transpositions.rowCount()
+        self.table_global_transpositions.insertRow(row)
+
+        d = h.get('depth', 1)
+        q = h.get('quality', '')
+        q_label = h.get('quality_label', '')
+        move_seq = h.get('move_san', '—')
+        fen = h.get('fen', '')
+        disp_move = format_move_notation(fen, move_seq, ply_depth=h.get('ply_depth'))
+
+        # Col 0: Ausgangszug / Folge
+        it_move = QTableWidgetItem(disp_move)
+        it_move.setData(Qt.ItemDataRole.UserRole, h.get('fen', ''))
+        it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+        it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if d == 1:
+            it_move.setToolTip(f"1-Zug Überleitung: {disp_move}\nKlicken, um Stellung auf dem Brett zu laden.")
+        else:
+            it_move.setToolTip(f"2-Zug Überleitung: {disp_move}\nKlicken, um Stellung auf dem Brett zu laden.")
+        self.table_global_transpositions.setItem(row, 0, it_move)
+
+        # Col 1: Typ
+        t_str = tr_ui("creator.tag_transpos_1", "1-Zug") if d == 1 else tr_ui("creator.tag_transpos_2", "2-Züge")
+        item_type = QTableWidgetItem(t_str)
+        item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        if d == 1:
+            item_type.setToolTip(tr_ui("creator.tooltip_transpos_1", "1-Zug Überleitung: Ein Zug des Gegners führt direkt in eine bekannte Repertoire-Stellung."))
+        else:
+            item_type.setToolTip(tr_ui("creator.tooltip_transpos_2", "2-Zug Überleitung: Der Gegner weicht ab, deine geprüfte Antwort leitet solide zurück."))
+        self.table_global_transpositions.setItem(row, 1, item_type)
+
+        # Col 2: Qualität (only relevant for depth >= 2)
+        if d == 1:
+            item_qual = QTableWidgetItem("—")
+            item_qual.setForeground(QBrush(QColor(COLORS['light_text'])))
+        else:
+            if not q_label:
+                q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
+            item_qual = QTableWidgetItem(q_label)
+            item_qual.setForeground(QBrush(QColor(COLORS['success_green'] if q == 'ausgezeichnet' else "#f1c40f")))
+        item_qual.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table_global_transpositions.setItem(row, 2, item_qual)
+
+        # Col 3: Zu Level hinzufügen
+        h_copy = dict(h)
+        h_copy["search_fen"] = h.get("fen")
+        lvl_cell = self._create_transposition_level_cell(h_copy)
+        self.table_global_transpositions.setCellWidget(row, 3, lvl_cell)
+
+    def _on_global_transpos_item_found(self, h, mode):
+        self._add_global_transpos_row(h)
+        count = self.table_global_transpositions.rowCount()
+        self.lbl_global_transpos_status.setText(f"Scan läuft... {count} gefunden")
+        self.lbl_global_transpos_status.setStyleSheet(
+            f"background-color: rgba(211, 84, 0, 0.12); color: #d35400; "
+            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+        )
+        self._adjust_global_transpos_columns()
+
+    def _on_global_transpos_scan_finished(self, holes, mode):
+        self.btn_global_transpos_scan.setText(tr_ui("creator.transpos_btn_scan", "🔎 Repertoire scannen"))
+        self.btn_global_transpos_scan.setEnabled(True)
+        if self.table_global_transpositions.rowCount() == 0 and holes:
+            self.table_global_transpositions.setUpdatesEnabled(False)
+            try:
+                for h in holes:
+                    self._add_global_transpos_row(h)
+            finally:
+                self.table_global_transpositions.setUpdatesEnabled(True)
+        count = self.table_global_transpositions.rowCount()
+        self.lbl_global_transpos_status.setText(
+            tr_ui("creator.transpositions_found_count", f"✓ {count} Überleitung(en) gefunden.", count=count)
+        )
+        self.lbl_global_transpos_status.setStyleSheet(
+            f"background-color: rgba(46, 125, 50, 0.12); color: #2e7d32; "
+            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+        )
+        self._adjust_global_transpos_columns()
+
+    def on_global_transposition_activated(self, item):
+        row = item.row()
+        item0 = self.table_global_transpositions.item(row, 0)
+        if not item0:
+            return
+        h_data = item0.data(Qt.ItemDataRole.UserRole + 10)
+        fen = item0.data(Qt.ItemDataRole.UserRole)
+        if not fen:
+            return
+        if h_data and isinstance(h_data, dict):
+            self._preset_transposition = h_data
+            path_ucis = h_data.get('path_ucis', [])
+            if path_ucis and len(path_ucis[0]) >= 4:
+                import chess
+                try:
+                    self.board_widget.last_move = chess.Move.from_uci(path_ucis[0][:4])
+                except Exception:
+                    pass
+        self.set_board_to_fen(fen)
+
+
     def toggle_overhaul_pause(self):
         self.overhaul_paused = not self.overhaul_paused
         self._update_overhaul_ui_state()
@@ -6491,9 +6968,42 @@ class CreatorWindow(QMainWindow):
         self.lbl_hole_scan_res.setText(tr_ui("creator.scan_running", "Scan läuft..."))
         self.table_holes.setRowCount(0)
         
+        # Pre-set headers and reset rows immediately so streaming items populate correctly
+        if mode == "transpositions":
+            self.table_holes.setColumnHidden(0, False)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_quality", "Qualität"),
+                tr_ui("creator.hole_header_depth_type", "Tiefe / Typ"),
+                tr_ui("creator.hole_header_move", "Zug")
+            ])
+            self.btn_hole_exempt.setVisible(True)
+            self.btn_hole_clear_exempt.setVisible(True)
+        elif mode == "holes":
+            self.table_holes.setColumnHidden(0, False)
+            self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
+            self.btn_hole_exempt.setVisible(True)
+            self.btn_hole_clear_exempt.setVisible(True)
+        elif mode == "level_check":
+            self.table_holes.setColumnHidden(0, False)
+            self.table_holes.setHorizontalHeaderLabels(["Info", "Analyse", "Unser Zug"])
+            self.btn_hole_exempt.setVisible(False)
+            self.btn_hole_clear_exempt.setVisible(False)
+        else:
+            self.table_holes.setColumnHidden(0, False)
+            self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
+            self.btn_hole_exempt.setVisible(False)
+            self.btn_hole_clear_exempt.setVisible(False)
+
         # We don't have the elo combo box anymore in the UI redesign, we default to the globally selected Lichess Category
         elo = self.combo_lichess_cat.currentText()
         
+        ep = self.config.get("engine_path", "")
+        threads = int(self.combo_threads.currentText()) if hasattr(self, "combo_threads") else 1
+
+        if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
+            self.hole_thread.stop()
+            self.hole_thread.wait(500)
+
         self.hole_thread = HoleFinderThread(
             self.backend.active_repo_name,
             self.backend.is_test,
@@ -6501,9 +7011,13 @@ class CreatorWindow(QMainWindow):
             elo,
             mode,
             level,
-            find_rare=(mode == "level_down" or (mode == "priority" and self.chk_prio_rare.isChecked()))
+            find_rare=(mode == "level_down" or (mode == "priority" and self.chk_prio_rare.isChecked())),
+            engine_path=ep,
+            threads_count=threads,
         )
+        self.hole_thread.item_found_signal.connect(self._on_hole_item_found)
         self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)
+        self._hole_scan_streamed = (mode == "transpositions")
         self.hole_thread.start()
 
     def _animate_hole_button(self):
@@ -6511,126 +7025,134 @@ class CreatorWindow(QMainWindow):
         dots = "." * self._hole_dots
         self.btn_hole_scan.setText(f"{tr_ui('creator.scanning', 'Scannend')}{dots}")
 
+    def _add_hole_row(self, h, mode):
+        row = self.table_holes.rowCount()
+        self.table_holes.insertRow(row)
+
+        if h.get('type') in ('transposition_1', 'transposition_2'):
+            d = h.get('depth', 1)
+            q = h.get('quality', '')
+            q_label = h.get('quality_label', '')
+
+            if d == 1:
+                item_pop = QTableWidgetItem("—")
+                item_pop.setForeground(QBrush(QColor(COLORS['light_text'])))
+            else:
+                if not q_label:
+                    q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
+                item_pop = QTableWidgetItem(q_label)
+                if q == 'ausgezeichnet':
+                    item_pop.setForeground(QBrush(QColor(COLORS['success_green'])))
+                else:
+                    item_pop.setForeground(QBrush(QColor("#f1c40f")))
+
+            item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+            item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
+            if 'move_san' in h:
+                item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+            if 'target_fen' in h:
+                item_pop.setData(Qt.ItemDataRole.UserRole + 2, h['target_fen'])
+
+            t_str = tr_ui("creator.tag_transpos_1", "1-ZUG (GEGNER)") if d == 1 else tr_ui("creator.tag_transpos_2", "2-ZÜGE")
+            item_type = QTableWidgetItem(t_str)
+            item_type.setForeground(QBrush(QColor("#3498db" if d == 1 else "#9b59b6")))
+
+            move_seq = h.get('move_san', '—')
+            fen = h.get('fen', '')
+            disp_move = format_move_notation(fen, move_seq, ply_depth=h.get('ply_depth'))
+            it_move = QTableWidgetItem(disp_move)
+            it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+        else:
+            pop_val = h.get('popularity', 0)
+            item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
+            item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+            item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
+            if 'move_san' in h:
+                item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+            
+            item_type = QTableWidgetItem(h['type'].upper())
+            if h['type'] == 'user':
+                item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
+                item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
+            elif h['type'] == 'opponent':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
+            elif h['type'] == 'priority_check':
+                if mode == "level_down":
+                    item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                    item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
+                else:
+                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                    item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
+            elif h['type'] == 'level_mismatch':
+                item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
+                item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
+            elif h['type'] == 'orphaned_move':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
+                item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
+                # Add diagnostic level info to the move text
+                if 'from_level' in h and 'to_level' in h:
+                    move_text = h.get('move_san', '—')
+                    h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
+            elif h['type'] == 'repertoire_gap':
+                item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
+                item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
+                item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
+
+            raw_move = h.get('move_san', '—')
+            fen = h.get('fen', '')
+            disp_move = format_move_notation(fen, raw_move, ply_depth=h.get('ply_depth'))
+            it_move = QTableWidgetItem(disp_move)
+            it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+
+        item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table_holes.setItem(row, 0, item_pop)
+        self.table_holes.setItem(row, 1, item_type)
+        self.table_holes.setItem(row, 2, it_move)
+
+    def _on_hole_item_found(self, h, mode):
+        self._add_hole_row(h, mode)
+        count = self.table_holes.rowCount()
+        if mode == "transpositions":
+            has_deep_transpos = any(
+                self.table_holes.item(r, 0) and self.table_holes.item(r, 0).text() != "—"
+                for r in range(self.table_holes.rowCount())
+            )
+            self.table_holes.setColumnHidden(0, not has_deep_transpos)
+            self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_streaming_status", f"Scan läuft... {count} Transposition(en) gefunden.", count=count))
+        else:
+            self.lbl_hole_scan_res.setText(f"Scan läuft... {count} Ergebnisse gefunden.")
+
     def _on_hole_scan_finished(self, holes, mode):
         self.hole_anim_timer.stop()
         self.btn_hole_scan.setEnabled(True)
         self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
-        
-        count = len(holes)
+
+        streamed = getattr(self, "_hole_scan_streamed", False)
+        self._hole_scan_streamed = False
+
+        if not streamed or self.table_holes.rowCount() == 0:
+            self.table_holes.setRowCount(0)
+            if holes:
+                self.table_holes.setUpdatesEnabled(False)
+                try:
+                    for h in holes:
+                        self._add_hole_row(h, mode)
+                finally:
+                    self.table_holes.setUpdatesEnabled(True)
+
+        count = self.table_holes.rowCount()
         if mode == "transpositions":
-            if count >= 15:
-                self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_limit_reached", "✓ 15 Transpositionen gefunden (Limit von 15 erreicht)."))
-            else:
-                self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_found_count", f"✓ {count} Transposition(en) gefunden.", count=count))
+            has_deep_transpos = any(
+                h.get('depth', 1) > 1 for h in holes if isinstance(h, dict) and h.get('type') in ('transposition_1', 'transposition_2')
+            )
+            self.table_holes.setColumnHidden(0, not has_deep_transpos)
+            self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_found_count", f"✓ {count} Transposition(en) gefunden.", count=count))
         else:
             self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
-        
-        if mode == "holes":
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
-            self.btn_hole_exempt.setVisible(True)
-        elif mode == "level_check":
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Info", "Analyse", "Unser Zug"])
-            self.btn_hole_exempt.setVisible(False)
-        elif mode == "transpositions":
-            has_deep_transpos = any(h.get('depth', 1) > 1 for h in holes if h.get('type') in ('transposition_1', 'transposition_2'))
-            self.table_holes.setColumnHidden(0, not has_deep_transpos)
-            self.table_holes.setHorizontalHeaderLabels([
-                tr_ui("creator.hole_header_quality", "Qualität"),
-                tr_ui("creator.hole_header_depth_type", "Tiefe / Typ"),
-                tr_ui("creator.hole_header_move", "Zug")
-            ])
-            self.btn_hole_exempt.setVisible(True)
-        else:
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
-            self.btn_hole_exempt.setVisible(False)
-
-        self.table_holes.setUpdatesEnabled(False)
-        try:
-            self.table_holes.setRowCount(len(holes))
-            for i, h in enumerate(holes):
-                if h.get('type') in ('transposition_1', 'transposition_2'):
-                    d = h.get('depth', 1)
-                    q = h.get('quality', '')
-                    q_label = h.get('quality_label', '')
-
-                    if d == 1:
-                        item_pop = QTableWidgetItem("—")
-                        item_pop.setForeground(QBrush(QColor(COLORS['light_text'])))
-                    else:
-                        if not q_label:
-                            q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
-                        item_pop = QTableWidgetItem(q_label)
-                        if q == 'ausgezeichnet':
-                            item_pop.setForeground(QBrush(QColor(COLORS['success_green'])))
-                        else:
-                            item_pop.setForeground(QBrush(QColor("#f1c40f")))
-
-                    item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
-                    item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
-                    if 'move_san' in h:
-                        item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
-                    if 'target_fen' in h:
-                        item_pop.setData(Qt.ItemDataRole.UserRole + 2, h['target_fen'])
-
-                    t_str = tr_ui("creator.tag_transpos_1", "1-ZUG (GEGNER)") if d == 1 else tr_ui("creator.tag_transpos_2", "2-ZÜGE")
-                    item_type = QTableWidgetItem(t_str)
-                    item_type.setForeground(QBrush(QColor("#3498db" if d == 1 else "#9b59b6")))
-
-                    move_seq = h.get('move_san', '—')
-                    it_move = QTableWidgetItem(move_seq)
-                    it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
-                else:
-                    pop_val = h.get('popularity', 0)
-                    item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
-                    item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
-                    item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
-                    if 'move_san' in h:
-                        item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
-                    
-                    item_type = QTableWidgetItem(h['type'].upper())
-                    if h['type'] == 'user':
-                        item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
-                        item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
-                    elif h['type'] == 'opponent':
-                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                        item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
-                    elif h['type'] == 'priority_check':
-                        if mode == "level_down":
-                            item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                            item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
-                        else:
-                            item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
-                            item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
-                    elif h['type'] == 'level_mismatch':
-                        item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
-                        item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
-                    elif h['type'] == 'orphaned_move':
-                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                        item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
-                        item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
-                        # Add diagnostic level info to the move text
-                        if 'from_level' in h and 'to_level' in h:
-                            move_text = h.get('move_san', '—')
-                            h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
-                    elif h['type'] == 'repertoire_gap':
-                        item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
-                        item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
-                        item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
-
-                    it_move = QTableWidgetItem(h.get('move_san', '—'))
-                    it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
-
-                item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_holes.setItem(i, 0, item_pop)
-                self.table_holes.setItem(i, 1, item_type)
-                self.table_holes.setItem(i, 2, it_move)
-        finally:
-            self.table_holes.setUpdatesEnabled(True)
 
 
     def on_hole_click(self, item):
@@ -6662,6 +7184,8 @@ class CreatorWindow(QMainWindow):
                 active_tabs.append("TRANSPOSITIONS")
                 self.set_setting("creator_active_tabs", active_tabs)
                 self.apply_tab_visibility()
+                if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog and hasattr(self.repo_settings_dialog, 'sync_creator_tab_checkboxes'):
+                    self.repo_settings_dialog.sync_creator_tab_checkboxes()
 
             # 2. Store preset transposition
             if h_data and isinstance(h_data, dict):
@@ -6700,6 +7224,31 @@ class CreatorWindow(QMainWindow):
         if fen:
             self.backend.set_position_hole_exempt(fen, True)
             self.table_holes.removeRow(row)
+
+    def clear_all_hole_exemptions(self):
+        reply = QMessageBox.question(
+            self,
+            tr_ui("creator.dlg_reset_ignored_title", "Ignorierte Stellungen zurücksetzen"),
+            tr_ui("creator.dlg_reset_ignored_confirm", "Möchtest du wirklich alle ignorierten Stellungen für dieses Repertoire zurücksetzen?"),
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        count = self.backend.reset_hole_exemptions()
+        if count > 0:
+            QMessageBox.information(
+                self,
+                tr_ui("creator.dlg_success", "Erfolg"),
+                tr_ui("creator.dlg_reset_ignored_done", f"Alle ignorierten Stellungen wurden zurückgesetzt ({count} Stellung(en)).", count=count)
+            )
+        else:
+            QMessageBox.information(
+                self,
+                tr_ui("creator.dlg_info", "Info"),
+                tr_ui("creator.dlg_reset_ignored_none", "Es sind keine ignorierten Stellungen vorhanden.")
+            )
 
     def toggle_overhaul_session(self):
         if not self.overhaul_active:
@@ -6812,6 +7361,12 @@ class CreatorWindow(QMainWindow):
                 self.engine_thread.running = False
                 if not self.engine_thread.wait(200):
                     self.engine_thread.terminate()
+            except: pass
+
+        if hasattr(self, 'global_transpos_thread') and self.global_transpos_thread and self.global_transpos_thread.isRunning():
+            try:
+                self.global_transpos_thread.stop()
+                self.global_transpos_thread.wait(200)
             except: pass
             
         if hasattr(self, 'backend') and self.backend:

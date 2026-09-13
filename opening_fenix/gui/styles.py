@@ -146,6 +146,10 @@ def get_chevron_icon_path():
     """Returns the forward-slash path to the chevron dropdown icon for stylesheets."""
     return os.path.join(get_base_path(), "assets", "Icons", "chevron_down.svg").replace("\\", "/")
 
+def get_chevron_up_icon_path():
+    """Returns the forward-slash path to the chevron up icon for stylesheets."""
+    return os.path.join(get_base_path(), "assets", "Icons", "chevron_up.svg").replace("\\", "/")
+
 def get_checkmark_icon_path():
     """Returns the forward-slash path to the checkmark icon for stylesheets."""
     return os.path.join(get_base_path(), "assets", "Icons", "checkmark.svg").replace("\\", "/")
@@ -973,6 +977,57 @@ def get_bw_glass_style():
     QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
         border-color: {COLORS['bw_accent']};
     }}
+    
+    QSpinBox[class="TablePillSpinBox"], NoWheelSpinBox[class="TablePillSpinBox"] {{
+        background-color: #fafafa;
+        border: 1px solid rgba(0, 0, 0, 0.16);
+        border-radius: {scale(6)}px;
+        padding-left: {scale(8)}px;
+        padding-right: {scale(22)}px;
+        color: {COLORS['bw_text']};
+        font-weight: 600;
+        font-size: {scale(13)}px;
+    }}
+    QSpinBox[class="TablePillSpinBox"]:hover, NoWheelSpinBox[class="TablePillSpinBox"]:hover {{
+        background-color: #ffffff;
+        border-color: rgba(0, 0, 0, 0.32);
+    }}
+    QSpinBox[class="TablePillSpinBox"]:focus, NoWheelSpinBox[class="TablePillSpinBox"]:focus {{
+        background-color: #ffffff;
+        border: 1.5px solid {COLORS['burnt_orange']};
+    }}
+    QSpinBox[class="TablePillSpinBox"]::up-button, NoWheelSpinBox[class="TablePillSpinBox"]::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: {scale(18)}px;
+        border-left: 1px solid rgba(0, 0, 0, 0.08);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        border-top-right-radius: {scale(5)}px;
+        background: rgba(0, 0, 0, 0.03);
+    }}
+    QSpinBox[class="TablePillSpinBox"]::down-button, NoWheelSpinBox[class="TablePillSpinBox"]::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: {scale(18)}px;
+        border-left: 1px solid rgba(0, 0, 0, 0.08);
+        border-bottom-right-radius: {scale(5)}px;
+        background: rgba(0, 0, 0, 0.03);
+    }}
+    QSpinBox[class="TablePillSpinBox"]::up-button:hover, NoWheelSpinBox[class="TablePillSpinBox"]::up-button:hover,
+    QSpinBox[class="TablePillSpinBox"]::down-button:hover, NoWheelSpinBox[class="TablePillSpinBox"]::down-button:hover {{
+        background: rgba(0, 0, 0, 0.09);
+    }}
+    QSpinBox[class="TablePillSpinBox"]::up-arrow, NoWheelSpinBox[class="TablePillSpinBox"]::up-arrow {{
+        image: url("{get_chevron_up_icon_path()}");
+        width: {scale(8)}px;
+        height: {scale(8)}px;
+    }}
+    QSpinBox[class="TablePillSpinBox"]::down-arrow, NoWheelSpinBox[class="TablePillSpinBox"]::down-arrow {{
+        image: url("{get_chevron_icon_path()}");
+        width: {scale(8)}px;
+        height: {scale(8)}px;
+    }}
+
     QComboBox::drop-down {{
         subcontrol-origin: padding;
         subcontrol-position: center right;
@@ -1029,13 +1084,66 @@ def get_bw_glass_style():
         border: 1px solid rgba(0, 0, 0, 0.1);
         border-radius: {scale(8)}px;
         gridline-color: rgba(0, 0, 0, 0.05);
+        alternate-background-color: #fcfcfd;
     }}
     QHeaderView::section {{
-        background-color: #fafafa;
+        background-color: #f7f7f9;
         padding: {scale(8)}px;
         border: none;
         border-bottom: 1px solid rgba(0, 0, 0, 0.1);
         font-weight: bold;
+    }}
+
+    QProgressBar {{
+        background-color: #f0f0f3;
+        border: 1px solid rgba(0, 0, 0, 0.08);
+        border-radius: {scale(6)}px;
+        text-align: center;
+        font-size: {scale(11)}px;
+        font-weight: 600;
+        color: {COLORS['bw_text']};
+    }}
+    QProgressBar::chunk {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #3b82f6, stop:1 #2563eb);
+        border-radius: {scale(5)}px;
+    }}
+    QProgressBar[class="SuccessBar"]::chunk {{
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #10b981, stop:1 #059669);
+        border-radius: {scale(5)}px;
+    }}
+
+    QPushButton[class="BatchActionBtn"] {{
+        background-color: #1e293b;
+        color: white;
+        border: none;
+        border-radius: {scale(8)}px;
+        font-size: {scale(14)}px;
+        font-weight: 600;
+        padding: {scale(8)}px {scale(24)}px;
+    }}
+    QPushButton[class="BatchActionBtn"]:hover {{
+        background-color: #334155;
+    }}
+    QPushButton[class="BatchActionBtn"]:pressed {{
+        background-color: #0f172a;
+    }}
+    QPushButton[class="BatchActionBtn"]:disabled {{
+        background-color: #cbd5e1;
+        color: #94a3b8;
+    }}
+
+    QPushButton[class="SmallBtn"] {{
+        background-color: white;
+        border: 1px solid rgba(0, 0, 0, 0.15);
+        border-radius: {scale(6)}px;
+        padding: {scale(3)}px {scale(10)}px;
+        font-size: {scale(12)}px;
+        font-weight: 500;
+        color: {COLORS['bw_text']};
+    }}
+    QPushButton[class="SmallBtn"]:hover {{
+        background-color: #f8fafc;
+        border-color: rgba(0, 0, 0, 0.25);
     }}
 
     QLabel {{

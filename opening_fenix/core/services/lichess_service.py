@@ -17,6 +17,21 @@ ELO_MAPPING: Dict[str, List[str]] = {
     'masters': []
 }
 
+def is_valid_token_string(token: Optional[str]) -> bool:
+    """Checks whether a given token string is non-empty and not a placeholder."""
+    if not token or not isinstance(token, str):
+        return False
+    t = token.strip()
+    if not t or "TOKEN_HERE" in t.upper() or t.startswith("YOUR_"):
+        return False
+    return True
+
+def clean_lichess_token(token: Optional[str]) -> str:
+    """Returns stripped token if valid format, otherwise empty string."""
+    if is_valid_token_string(token):
+        return token.strip()
+    return ""
+
 def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
     from opening_fenix.core.db.models import LichessData # local import if needed
     db_path = get_repertoire_db_path(repo_name)
@@ -34,7 +49,8 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
     
     current_delay = config.get("lichess_delay", 0.5)
     # Support LICHESS_TOKEN from environment for CI/CD
-    lichess_token = os.environ.get("LICHESS_TOKEN") or config.get("lichess_token", "")
+    raw_token = os.environ.get("LICHESS_TOKEN") or config.get("lichess_token", "")
+    lichess_token = clean_lichess_token(raw_token)
     
     print(f"INFO: Starting Lichess import with a delay of {current_delay:.3f}s")
 
@@ -60,7 +76,6 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         new_data_points_added = 0
         successful_requests_in_a_row = 0
         last_failure_delay = None
-        start_time = time.time()
         
         i = 0
         while i < len(positions_to_query):
@@ -97,12 +112,12 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
             
             try:
                 headers = {'User-Agent': 'OpeningFenix/1.0 (Python urllib)'}
-                if lichess_token and lichess_token != "YOUR_TOKEN_HERE":
+                if lichess_token:
                     headers['Authorization'] = f'Bearer {lichess_token}'
                 
                 req = urllib.request.Request(url, headers=headers)
                 
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(req, timeout=15) as response:
                     data = json.loads(response.read().decode('utf-8'))
                     successful_requests_in_a_row += 1
                     
@@ -152,7 +167,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     time.sleep(60)
                     retry_same_position = True
                 elif e.code == 401:
-                    return False, "Fehler 401: Ungültiges Lichess Token. Bitte überprüfe config.json."
+                    return False, "Fehler 401: Das Lichess API-Token ist ungültig oder abgelaufen. Bitte überprüfe dein Token in den Einstellungen."
                 else:
                     print(f"HTTP Error {e.code} for FEN {pos.fen}. Skipping.")
             except Exception as e:
@@ -182,22 +197,11 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
 
             if progress_callback:
                 pct = int(i * 100 / total_pos)
-                elapsed = max(time.time() - start_time, 0.001)
-                avg_per_item = elapsed / i
-                remaining_items = total_pos - i
-                eta_sec = int(remaining_items * avg_per_item)
-                if eta_sec < 60:
-                    eta_str = f"{eta_sec}s"
-                elif eta_sec < 3600:
-                    eta_str = f"{eta_sec // 60}m {eta_sec % 60}s"
-                else:
-                    eta_str = f"{eta_sec // 3600}h {(eta_sec % 3600) // 60}m"
-                
+                status_text = f"{i}/{total_pos}"
                 try:
-                    progress_callback(pct, i, total_pos, eta_str)
+                    progress_callback(pct, i, total_pos)
                 except TypeError:
                     try:
-                        status_text = f"{i}/{total_pos} (ca. {eta_str} verbleibend)"
                         progress_callback(pct, status_text)
                     except TypeError:
                         progress_callback(pct)
@@ -260,7 +264,7 @@ def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, p
 
     return True, "Lichess import und Prioritäts-Scores erfolgreich abgeschlossen."
 
-def delete_lichess_data(repo_name: str, elo_category: str) -> Tuple[bool, str]:
+def delete_lichess_data(repo_name: str, elo_category: Optional[str] = None) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return False, "Repertoire-Datenbank nicht gefunden."
@@ -268,20 +272,30 @@ def delete_lichess_data(repo_name: str, elo_category: str) -> Tuple[bool, str]:
     db = DatabaseManager(db_path)
     session = db.get_session()
     try:
-        num_deleted = session.query(LichessData).filter_by(
-            elo_range=elo_category
-        ).delete(synchronize_session=False)
+        query = session.query(LichessData)
+        if elo_category is not None:
+            query = query.filter_by(elo_range=elo_category)
+        num_deleted = query.delete(synchronize_session=False)
 
-        current_elo = get_meta(session, "lichess_elo")
-        if current_elo == elo_category:
+        if elo_category is not None:
+            current_elo = get_meta(session, "lichess_elo")
+            if current_elo == elo_category:
+                set_meta(session, "lichess_elo", None)
+        else:
             set_meta(session, "lichess_elo", None)
         
         session.commit()
         
-        if num_deleted > 0:
-            return True, f"{num_deleted} Lichess-Daten-Einträge für ELO '{elo_category}' gelöscht."
+        if elo_category is not None:
+            if num_deleted > 0:
+                return True, f"{num_deleted} Lichess-Daten-Einträge für ELO '{elo_category}' gelöscht."
+            else:
+                return True, f"Keine Lichess-Daten für ELO '{elo_category}' zum Löschen gefunden."
         else:
-            return True, f"Keine Lichess-Daten für ELO '{elo_category}' zum Löschen gefunden."
+            if num_deleted > 0:
+                return True, f"{num_deleted} Lichess-Daten-Einträge aller ELO-Bereiche gelöscht."
+            else:
+                return True, "Keine Lichess-Daten zum Löschen gefunden."
 
     except Exception as e:
         session.rollback()
@@ -296,18 +310,19 @@ def verify_lichess_token(token: str) -> Tuple[bool, str]:
     Verifies a Lichess API token by making a request to the /api/account endpoint.
     Returns (Success: bool, Message: str).
     """
-    if not token or token == "YOUR_TOKEN_HERE":
-        return False, "Kein Token angegeben."
+    cleaned = clean_lichess_token(token)
+    if not cleaned:
+        return False, "Kein gültiges Token angegeben."
 
     url = "https://lichess.org/api/account"
     headers = {
         'User-Agent': 'OpeningFenix/1.0',
-        'Authorization': f'Bearer {token}'
+        'Authorization': f'Bearer {cleaned}'
     }
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=8) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode('utf-8'))
                 username = data.get('username', 'Unbekannt')

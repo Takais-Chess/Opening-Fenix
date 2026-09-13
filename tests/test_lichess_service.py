@@ -98,6 +98,25 @@ def test_delete_lichess_data(mock_user_dir, sample_repertoire):
     session.close()
     db.close()
 
+def test_delete_all_lichess_data(mock_user_dir, sample_repertoire):
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.utils import get_repertoire_db_path
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    
+    # Add dummy data with multiple elo ranges
+    session.add(LichessData(fen="fen1", elo_range="low", moves_json="{}"))
+    session.add(LichessData(fen="fen2", elo_range="high", moves_json="{}"))
+    session.commit()
+    
+    success, msg = delete_lichess_data(sample_repertoire, None)
+    assert success is True
+    assert session.query(LichessData).count() == 0
+    session.close()
+    db.close()
+
+
 def test_run_lichess_import_and_calculate_scores_success(mock_user_dir, sample_repertoire):
     with patch("opening_fenix.core.services.lichess_service.run_lichess_import") as mock_import, \
          patch("opening_fenix.core.services.priority_service.calculate_priority_scores") as mock_stats:
@@ -203,5 +222,31 @@ def test_run_lichess_import_duplicate_collision(mock_user_dir, sample_repertoire
     assert count == 1
     session.close()
     db.close()
+
+
+def test_run_lichess_import_progress_callback_no_eta(mock_user_dir, sample_repertoire, mock_urlopen):
+    mock_response = MagicMock()
+    mock_response.read.return_value = json.dumps({
+        "moves": [{"uci": "e2e4", "white": 100, "draws": 50, "black": 30}]
+    }).encode("utf-8")
+    mock_urlopen.return_value.__enter__.return_value = mock_response
+
+    captured_progress = []
+    def progress_cb(*args):
+        captured_progress.append(args)
+
+    with patch("time.sleep"), patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"):
+        success, msg = run_lichess_import(sample_repertoire, "high", progress_callback=progress_cb)
+
+    assert success is True
+    assert len(captured_progress) > 0
+    # Verify each progress call passes (pct, cur, total) with 3 elements without eta string
+    for call in captured_progress:
+        assert len(call) == 3
+        pct, cur, total = call
+        assert isinstance(pct, int)
+        assert isinstance(cur, int)
+        assert isinstance(total, int)
+
 
 

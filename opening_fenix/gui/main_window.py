@@ -43,6 +43,7 @@ from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consiste
 
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
+from opening_fenix.core.services.update_service import get_config_dict
 from opening_fenix.core.logger import logger
 from opening_fenix.core.db.database import DatabaseCorruptedException
 from opening_fenix.core.version import APP_VERSION
@@ -126,6 +127,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(2000, self.check_for_updates)
 
     def check_for_updates(self):
+        import sys
+        if "pytest" in sys.modules:
+            return
         from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
         if not should_check_for_updates(manual=False):
             return
@@ -1193,15 +1197,18 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(50, lambda: self.txt_notation.moveCursor(QTextCursor.MoveOperation.End))
 
     def open_settings(self):
-        if not hasattr(self, 'settings_dialog') or not self.settings_dialog:
+        from PyQt6 import sip
+        if not hasattr(self, 'settings_dialog') or not self.settings_dialog or sip.isdeleted(self.settings_dialog):
             self.settings_dialog = SettingsDialog(self)
             self.settings_dialog.finished.connect(self._on_settings_closed)
+        else:
+            if hasattr(self.settings_dialog, 'on_reopen'):
+                self.settings_dialog.on_reopen()
         self.settings_dialog.show()
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
 
     def _on_settings_closed(self):
-        self.settings_dialog = None
         self.refresh_repertoire_buttons()
         self.update_settings_from_manager()
 
@@ -1210,9 +1217,9 @@ class MainWindow(QMainWindow):
         self.btn_auto_continue.setChecked(not self.training_manager.get_setting("stop_at_variation_end"))
 
     def apply_theme(self):
-        t_name = self.training_manager.get_setting("theme") or "Braun (Klassisch)"
+        t_name = self.training_manager.get_setting("theme") or get_config_dict().get("theme") or "Braun (Klassisch)"
         self.board_widget.set_theme(t_name)
-        hl_color = self.training_manager.get_setting("highlight_color") or "Gelb (Standard)"
+        hl_color = self.training_manager.get_setting("highlight_color") or get_config_dict().get("highlight_color") or "Gelb (Standard)"
         self.board_widget.set_highlight_color(hl_color)
 
     def set_master_volume(self, volume):
@@ -1487,6 +1494,8 @@ class MainWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.Type.WindowStateChange:
+            if hasattr(self, 'custom_title_bar') and self.custom_title_bar:
+                self.custom_title_bar.update_maximize_button()
             if hasattr(self, 'board_widget') and self.board_widget:
                 self.board_widget.update_animation_metrics()
             self._fit_board_splitter()
@@ -1507,6 +1516,17 @@ class MainWindow(QMainWindow):
             try:
                 self.creator_window.close()
             except: pass
+
+        if hasattr(self, 'backup_worker') and self.backup_worker and self.backup_worker.isRunning():
+            try:
+                self.backup_worker.requestInterruption()
+                self.backup_worker.wait(200)
+            except Exception: pass
+        if hasattr(self, 'update_checker') and self.update_checker and self.update_checker.isRunning():
+            try:
+                self.update_checker.requestInterruption()
+                self.update_checker.wait(200)
+            except Exception: pass
 
         if self.training_manager:
             self.training_manager.close()

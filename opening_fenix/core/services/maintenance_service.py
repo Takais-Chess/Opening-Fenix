@@ -24,7 +24,7 @@ def get_repertoire_elo(repo_name):
         session.close()
         db.close()
         
-        val = val.lower()
+        val = val.lower() if val else "high"
         if "low" in val: return "low"
         if "mid" in val: return "mid"
         if "masters" in val: return "masters"
@@ -66,135 +66,155 @@ class MaintenanceOrchestrator:
                  overall_progress_callback, repo_status_callback, check_cancel):
         self.repo_configs = repo_configs
         self.tasks = tasks
-        self.engine_settings = engine_settings
+        self.engine_settings = engine_settings or {}
         self.overall_cb = overall_progress_callback
         self.repo_status_cb = repo_status_callback # (repo_name, task_type, progress, status)
         self.check_cancel = check_cancel
         
-        self.engine_queue = queue.Queue()
-        self.lichess_queue = queue.Queue()
-        self.cleanup_queue = queue.Queue()
-        self.repo_configs_dict = {cfg['name']: cfg for cfg in repo_configs}
-        self.stats_pending = {cfg['name']: {'engine': False, 'lichess': False, 'cleanup': False} for cfg in repo_configs}
-        self.stats_lock = threading.Lock()
-        
+        self.active_tasks = [t for t in ['cleanup', 'lichess', 'engine', 'stats'] if self.tasks.get(t)]
+        self.tasks_done = {cfg['name']: set() for cfg in repo_configs}
+        self.lock = threading.Lock()
         self.completed_repos = set()
         self.total_repos = len(repo_configs)
         self._is_aborted = False
 
-    def run(self):
-        # 1. Fill Queues
+    def _check_repo_done(self, name):
+        with self.lock:
+            if not self._is_aborted and name not in self.completed_repos:
+                if all(t in self.tasks_done[name] for t in self.active_tasks):
+                    self.completed_repos.add(name)
+                    if self.overall_cb:
+                        self.overall_cb(len(self.completed_repos), self.total_repos, name)
+
+    def _mark_task_finished(self, name, task_type):
+        with self.lock:
+            self.tasks_done[name].add(task_type)
+        self._check_repo_done(name)
+
+    def _engine_worker(self):
         for cfg in self.repo_configs:
-            if self.tasks.get('engine'):
-                self.engine_queue.put(cfg)
-            else:
-                with self.stats_lock: self.stats_pending[cfg['name']]['engine'] = True
-            
-            if self.tasks.get('lichess'):
-                self.lichess_queue.put(cfg)
-            else:
-                with self.stats_lock: self.stats_pending[cfg['name']]['lichess'] = True
+            if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                self._is_aborted = True
+                break
+            name = cfg['name']
+            if self.repo_status_cb:
+                self.repo_status_cb(name, "engine", 0, "Analysiere...")
+            success, msg = run_db_analysis(
+                name, self.engine_settings.get('path', ''), self.engine_settings.get('depth', 18), self.engine_settings.get('threads', 1),
+                progress_callback=lambda p: self.repo_status_cb(name, "engine", p, "Analysiere...") if self.repo_status_cb else None,
+                check_cancel=self.check_cancel
+            )
+            if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                self._is_aborted = True
+                break
+            if self.repo_status_cb:
+                self.repo_status_cb(name, "engine", 100, "Fertig" if success else "Fehlgeschlagen")
+            self._mark_task_finished(name, "engine")
 
-            if self.tasks.get('cleanup'):
-                self.cleanup_queue.put(cfg)
-            else:
-                with self.stats_lock: self.stats_pending[cfg['name']]['cleanup'] = True
+    def _data_worker(self):
+        for cfg in self.repo_configs:
+            if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                self._is_aborted = True
+                break
+            name = cfg['name']
+            elo = cfg.get('elo', 'high')
 
-        # 2. Start Workers
-        t1 = threading.Thread(target=self._engine_worker, daemon=True)
-        t2 = threading.Thread(target=self._lichess_worker, daemon=True)
-        t3 = threading.Thread(target=self._cleanup_worker, daemon=True)
-        t1.start(); t2.start(); t3.start()
+            # 1. Cleanup
+            if self.tasks.get('cleanup') and not self._is_aborted:
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "cleanup", 0, "Bereinige...")
+                success, msg = run_lichess_orphan_cleanup(
+                    name,
+                    progress_callback=lambda p: self.repo_status_cb(name, "cleanup", p, "Bereinige...") if self.repo_status_cb else None
+                )
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "cleanup", 100, "Fertig" if success else "Fehler")
+                self._mark_task_finished(name, "cleanup")
 
-        # 3. Wait for all completion or cancel
-        while t1.is_alive() or t2.is_alive() or t3.is_alive():
+            # 2. Lichess Import
+            if self.tasks.get('lichess') and not self._is_aborted:
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "lichess", 0, "Lichess...")
+
+                def on_lichess_progress(pct, *args):
+                    if not self.repo_status_cb: return
+                    if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
+                        cur, total = args[0], args[1]
+                        status_text = f"{cur}/{total}"
+                    elif len(args) == 1 and isinstance(args[0], str):
+                        status_text = args[0]
+                    else:
+                        status_text = f"{pct}%"
+                    self.repo_status_cb(name, "lichess", pct, status_text)
+
+                success, msg = run_lichess_import(
+                    name, elo,
+                    progress_callback=on_lichess_progress,
+                    check_cancel=self.check_cancel
+                )
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "lichess", 100, "Fertig" if success else "Fehlgeschlagen")
+                self._mark_task_finished(name, "lichess")
+
+            # 3. Stats & Prio (Runs strictly AFTER Lichess import for this course!)
+            if self.tasks.get('stats') and not self._is_aborted:
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "stats", 0, "Statistiken...")
+                try:
+                    calculate_priority_scores(name, elo)
+                    if self.repo_status_cb:
+                        self.repo_status_cb(name, "stats", 100, "Fertig")
+                except Exception as e:
+                    logger.error(f"Stats failed for {name}: {e}")
+                    if self.repo_status_cb:
+                        self.repo_status_cb(name, "stats", 100, "Fehler")
+                self._mark_task_finished(name, "stats")
+
+    def run(self):
+        if self.check_cancel and self.check_cancel():
+            return False, "Abgebrochen durch Benutzer"
+
+        if not self.repo_configs or not self.active_tasks:
+            return True, "Wartung erfolgreich abgeschlossen."
+
+        threads = []
+        if self.tasks.get('engine'):
+            t_eng = threading.Thread(target=self._engine_worker, daemon=True)
+            threads.append(t_eng)
+            t_eng.start()
+
+        if any(self.tasks.get(t) for t in ['cleanup', 'lichess', 'stats']):
+            t_data = threading.Thread(target=self._data_worker, daemon=True)
+            threads.append(t_data)
+            t_data.start()
+
+        while any(t.is_alive() for t in threads):
             if self.check_cancel and self.check_cancel():
                 self._is_aborted = True
                 break
-            time.sleep(0.5)
+            time.sleep(0.1)
 
-        if self._is_aborted:
+        for t in threads:
+            t.join(timeout=0.5)
+
+        if self._is_aborted or (self.check_cancel and self.check_cancel()):
             return False, "Abgebrochen durch Benutzer"
         return True, "Wartung erfolgreich abgeschlossen."
-
-    def _engine_worker(self):
-        while not self.engine_queue.empty() and not self._is_aborted:
-            cfg = self.engine_queue.get()
-            name = cfg['name']
-            
-            self.repo_status_cb(name, "engine", 0, "Analysiere...")
-            success, msg = run_db_analysis(
-                name, self.engine_settings['path'], self.engine_settings['depth'], self.engine_settings['threads'],
-                progress_callback=lambda p: self.repo_status_cb(name, "engine", p, "Analysiere..."),
-                check_cancel=self.check_cancel
-            )
-            
-            self.repo_status_cb(name, "engine", 100, "Fertig" if success else "Fehlgeschlagen")
-            self._mark_task_done(name, 'engine')
-            self.engine_queue.task_done()
-
-    def _lichess_worker(self):
-        while not self.lichess_queue.empty() and not self._is_aborted:
-            cfg = self.lichess_queue.get()
-            name = cfg['name']
-            elo = cfg['elo']
-            
-            def on_progress(pct, *args):
-                if len(args) == 3:
-                    cur, total, eta = args
-                    status_text = f"{cur}/{total} ~{eta}"
-                elif len(args) == 1 and isinstance(args[0], str):
-                    status_text = args[0]
-                else:
-                    status_text = f"{pct}%"
-                self.repo_status_cb(name, "lichess", pct, status_text)
-
-            self.repo_status_cb(name, "lichess", 0, "Lichess...")
-            success, msg = run_lichess_import(
-                name, elo,
-                progress_callback=on_progress,
-                check_cancel=self.check_cancel
-            )
-            
-            self.repo_status_cb(name, "lichess", 100, "Fertig" if success else "Fehlgeschlagen")
-            self._mark_task_done(name, 'lichess')
-            self.lichess_queue.task_done()
-
-    def _cleanup_worker(self):
-        while not self.cleanup_queue.empty() and not self._is_aborted:
-            cfg = self.cleanup_queue.get()
-            name = cfg['name']
-            
-            self.repo_status_cb(name, "cleanup", 0, "Cleanup...")
-            success, msg = run_lichess_orphan_cleanup(
-                name,
-                progress_callback=lambda p: self.repo_status_cb(name, "cleanup", p, "Cleanup...")
-            )
-            
-            self.repo_status_cb(name, "cleanup", 100, "Fertig" if success else "Fehler")
-            self._mark_task_done(name, 'cleanup')
-            self.cleanup_queue.task_done()
-
-    def _mark_task_done(self, name, task_type):
-        with self.stats_lock:
-            self.stats_pending[name][task_type] = True
-            ready_for_stats = self.stats_pending[name]['engine'] and self.stats_pending[name]['lichess'] and self.stats_pending[name]['cleanup']
-            
-        if ready_for_stats and self.tasks.get('stats') and not self._is_aborted:
-            self.repo_status_cb(name, "stats", 0, "Statistiken...")
-            try:
-                elo_cat = self.repo_configs_dict.get(name, {}).get('elo', 'high')
-                calculate_priority_scores(name, elo_cat)
-                self.repo_status_cb(name, "stats", 100, "Abgeschlossen")
-            except Exception as e:
-                logger.error(f"Stats failed for {name}: {e}")
-                self.repo_status_cb(name, "stats", 100, "Fehler")
-        
-        # Update overall 
-        if ready_for_stats:
-            self.completed_repos.add(name)
-            if self.overall_cb:
-                self.overall_cb(len(self.completed_repos), self.total_repos, name)
 
 def run_group_maintenance(repo_configs, tasks, engine_settings=None, 
                           overall_progress_callback=None, repo_status_callback=None, check_cancel=None):
