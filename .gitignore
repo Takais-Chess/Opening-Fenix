@@ -113,6 +113,10 @@ repertoires/**/*.db
 repertoires/**/*.db-shm
 repertoires/**/*.db-wal
 repertoires/**/*.pgn
+repertoires/**/*.jpg
+repertoires/**/*.jpeg
+repertoires/**/*.png
+repertoires/**/*.webp
 config.json
 
 # Allow public example courses in git

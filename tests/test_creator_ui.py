@@ -957,6 +957,99 @@ def test_creator_window_set_repertoire_elo(creator_window, qapp):
     assert "Hobby" in lbl_text_low or "1400" in lbl_text_low
 
 
+def test_transposition_highlight_cleared_on_position_change(creator_window, qapp):
+    """Verify that transposition preview highlights the move, and clears when navigating to a different position."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_item = {
+        "fen": start_fen,
+        "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -",
+        "move_san": "c5",
+        "path_sans": ["c5"],
+        "path_ucis": ["c7c5"],
+        "depth": 1,
+        "type": "transposition_1",
+    }
+    creator_window.table_global_transpositions.setRowCount(0)
+    creator_window._on_global_transpos_scan_finished([mock_item], mode="transpositions")
+    qapp.processEvents()
+
+    # 1. Activate transposition -> last_move must be set to c7c5 (potential new move)
+    item0 = creator_window.table_global_transpositions.item(0, 0)
+    creator_window.on_global_transposition_activated(item0)
+    qapp.processEvents()
+
+    assert creator_window._transposition_highlight_move == chess.Move.from_uci("c7c5")
+    assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+
+    # 2. Navigate to a different position
+    other_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    creator_window.set_board_to_fen(other_fen)
+    qapp.processEvents()
+
+    # 3. Transposition highlight must be cleared!
+    assert creator_window._transposition_highlight_fen is None
+    assert creator_window._transposition_highlight_move is None
+    assert creator_window.board_widget.last_move != chess.Move.from_uci("c7c5")
+
+
+def test_transposition_highlight_cleared_on_tab_switch(creator_window, qapp):
+    """Verify that switching tabs away from Transpositions clears the preview highlight."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_item = {
+        "fen": start_fen,
+        "move_san": "c5",
+        "path_sans": ["c5"],
+        "path_ucis": ["c7c5"],
+        "depth": 1,
+        "type": "transposition_1",
+    }
+    creator_window.table_global_transpositions.setRowCount(0)
+    creator_window._on_global_transpos_scan_finished([mock_item], mode="transpositions")
+    qapp.processEvents()
+
+    # Switch to transpositions tab first
+    creator_window.tabs.setCurrentWidget(creator_window.tab_transpositions)
+    qapp.processEvents()
+
+    # Activate
+    item0 = creator_window.table_global_transpositions.item(0, 0)
+    creator_window.on_global_transposition_activated(item0)
+    qapp.processEvents()
+
+    assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+
+    # Switch away from tab_transpositions to DETAILS tab
+    creator_window.tabs.setCurrentWidget(creator_window.tab_details)
+    qapp.processEvents()
+
+    assert creator_window._transposition_highlight_move is None
+    assert creator_window._transposition_highlight_fen is None
+    assert creator_window.board_widget.last_move != chess.Move.from_uci("c7c5")
+
+
+def test_table_transpositions_click_highlights_move(creator_window, qapp):
+    """Verify that clicking a row in table_transpositions sets the transposition preview highlight."""
+    creator_window.set_board_to_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -")
+    qapp.processEvents()
+
+    items = [
+        {
+            "move_san": "c5",
+            "move_uci": "c7c5",
+            "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        }
+    ]
+    creator_window._populate_outgoing_table(items)
+    qapp.processEvents()
+
+    item0 = creator_window.table_transpositions.item(0, 0)
+    creator_window.on_transposition_clicked(item0)
+    qapp.processEvents()
+
+    assert creator_window._transposition_highlight_move == chess.Move.from_uci("c7c5")
+    assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+
+
 
 
 

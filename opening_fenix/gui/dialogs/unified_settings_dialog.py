@@ -795,20 +795,34 @@ class UnifiedSettingsDialog(QDialog):
         self.profile_settings = self._load_profile_settings(self.profile_name)
 
         display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
-        # Preserve the user's current dropdown selection across reopens.
-        # populate_active_repo_dropdown() resets the combo to the backend's active repo,
-        # so we save the selection beforehand and restore it if it still exists.
-        previous_selection = self.combo_active_repo.currentData() if hasattr(self, 'combo_active_repo') else None
-        self.populate_active_repo_dropdown()
-        if previous_selection:
-            idx = self.combo_active_repo.findData(previous_selection)
-            if idx >= 0:
-                self.combo_active_repo.blockSignals(True)
-                self.combo_active_repo.setCurrentIndex(idx)
-                self.combo_active_repo.blockSignals(False)
+
+        # Determine currently open/active repertoire
+        curr_open = None
+        if self.backend and getattr(self.backend, 'active_repo_name', None):
+            curr_open = self.backend.active_repo_name
+        elif self.main_window and hasattr(self.main_window, 'active_repo_name') and getattr(self.main_window, 'active_repo_name', None):
+            curr_open = self.main_window.active_repo_name
+        elif self.main_window and hasattr(self.main_window, 'backend') and getattr(self.main_window.backend, 'active_repo_name', None):
+            curr_open = self.main_window.backend.active_repo_name
+        elif self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+            curr_open = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+
+        # In Creator mode or when an active course is open, ALWAYS auto-select the currently open course.
+        # Only fall back to previous dropdown selection if no active repo is open.
+        if curr_open:
+            self.populate_active_repo_dropdown(target_repo=curr_open)
+        else:
+            previous_selection = self.combo_active_repo.currentData() if hasattr(self, 'combo_active_repo') else None
+            self.populate_active_repo_dropdown()
+            if previous_selection:
+                idx = self.combo_active_repo.findData(previous_selection)
+                if idx >= 0:
+                    self.combo_active_repo.blockSignals(True)
+                    self.combo_active_repo.setCurrentIndex(idx)
+                    self.combo_active_repo.blockSignals(False)
 
         if self.initial_section == "creator":
-            repo_name = getattr(self.backend, 'active_repo_name', None) if self.backend else None
+            repo_name = self.combo_active_repo.currentData() or (getattr(self.backend, 'active_repo_name', None) if self.backend else None)
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
             self.ensure_backend_for_active_repo()
             self.refresh_creator_info()
@@ -1201,25 +1215,53 @@ class UnifiedSettingsDialog(QDialog):
 
         main_layout.addWidget(self.content_container, 1)
 
-    def populate_active_repo_dropdown(self):
+    def populate_active_repo_dropdown(self, target_repo=None):
         self.combo_active_repo.blockSignals(True)
         self.combo_active_repo.clear()
         repos = sorted(RepertoireService().get_all_repertoires())
         for r in repos:
             self.combo_active_repo.addItem(r, r)
 
-        curr_active = None
-        if self.backend and getattr(self.backend, 'active_repo_name', None):
-            curr_active = self.backend.active_repo_name
-        elif self.main_window and hasattr(self.main_window, 'repertoire_manager'):
-            curr_active = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+        curr_active = target_repo
+        if not curr_active:
+            if self.backend and getattr(self.backend, 'active_repo_name', None):
+                curr_active = self.backend.active_repo_name
+            elif self.main_window and hasattr(self.main_window, 'active_repo_name') and getattr(self.main_window, 'active_repo_name', None):
+                curr_active = self.main_window.active_repo_name
+            elif self.main_window and hasattr(self.main_window, 'backend') and getattr(self.main_window.backend, 'active_repo_name', None):
+                curr_active = self.main_window.backend.active_repo_name
+            elif self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+                curr_active = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
 
-        if curr_active and curr_active in repos:
+        if curr_active:
             idx = self.combo_active_repo.findData(curr_active)
-            if idx >= 0: self.combo_active_repo.setCurrentIndex(idx)
+            if idx < 0:
+                self.combo_active_repo.addItem(curr_active, curr_active)
+                idx = self.combo_active_repo.findData(curr_active)
+            if idx >= 0:
+                self.combo_active_repo.setCurrentIndex(idx)
         elif repos:
             self.combo_active_repo.setCurrentIndex(0)
         self.combo_active_repo.blockSignals(False)
+
+    def select_course(self, repo_name: str):
+        """Explicitly selects the given course/repertoire in the creator dropdown and refreshes its view."""
+        if not repo_name or not hasattr(self, 'combo_active_repo'):
+            return
+        idx = self.combo_active_repo.findData(repo_name)
+        if idx < 0:
+            self.combo_active_repo.addItem(repo_name, repo_name)
+            idx = self.combo_active_repo.findData(repo_name)
+        if idx >= 0:
+            if self.combo_active_repo.currentIndex() != idx:
+                self.combo_active_repo.blockSignals(True)
+                self.combo_active_repo.setCurrentIndex(idx)
+                self.combo_active_repo.blockSignals(False)
+            self.ensure_backend_for_active_repo()
+            self.refresh_creator_info()
+            self.refresh_backups_list()
+            if self.initial_section == "creator":
+                self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
 
     def ensure_backend_for_active_repo(self):
         repo_name = None
@@ -2874,6 +2916,8 @@ class UnifiedSettingsDialog(QDialog):
                     for w in QApplication.topLevelWidgets():
                         if hasattr(w, "backend") and getattr(w.backend, 'active_repo_name', None) == old_name:
                             try:
+                                if hasattr(w, "active_repo_name"):
+                                    w.active_repo_name = new_name
                                 w.setWindowTitle(f"Creator - {new_name}")
                                 if hasattr(w, 'btn_load_repo') and w.btn_load_repo:
                                     w.btn_load_repo.update_repo(new_name)
@@ -3135,6 +3179,21 @@ class UnifiedSettingsDialog(QDialog):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(20))
         layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+
+        # Warning Notice for Background Tasks
+        lbl_alt_warn = QLabel(tr_ui("repo_settings.bg_task_warning", "💡 <b>Hinweis:</b> Bitte bearbeite das Repertoire im Creator nicht, solange Engine-Analyse oder Lichess-Import laufen, um Datenkonflikte zu vermeiden."))
+        lbl_alt_warn.setWordWrap(True)
+        lbl_alt_warn.setStyleSheet(f"""
+            QLabel {{
+                background-color: #fff9db;
+                color: #856404;
+                border: 1px solid #ffeeba;
+                border-radius: {scale(6)}px;
+                padding: {scale(8)}px {scale(14)}px;
+                font-size: {scale(12)}px;
+            }}
+        """)
+        layout.addWidget(lbl_alt_warn)
 
         # 🤖 Engine Analysis
         g_eng = QGroupBox(tr_widget("repo_settings.engine_scan_title", "🤖 Engine-Analyse (Alternativ gute Züge)"))
@@ -4083,6 +4142,21 @@ class UnifiedSettingsDialog(QDialog):
         v_action = QVBoxLayout()
         v_action.setSpacing(scale(10))
 
+        # Warning Notice for Background Tasks
+        lbl_batch_warn = QLabel(tr_ui("repo_settings.bg_batch_warning", "💡 <b>Hinweis:</b> Bitte bearbeite die ausgewählten Repertoires im Creator nicht, solange Hintergrund-Aufgaben laufen, um Datenkonflikte zu vermeiden."))
+        lbl_batch_warn.setWordWrap(True)
+        lbl_batch_warn.setStyleSheet(f"""
+            QLabel {{
+                background-color: #fff9db;
+                color: #856404;
+                border: 1px solid #ffeeba;
+                border-radius: {scale(6)}px;
+                padding: {scale(8)}px {scale(14)}px;
+                font-size: {scale(12)}px;
+            }}
+        """)
+        v_action.addWidget(lbl_batch_warn)
+
         h_btn = QHBoxLayout()
         self.btn_start_batch = QPushButton(tr_widget("repo_settings.btn_start_batch_run", "🚀 Wartungs-Batch starten"))
         self.btn_start_batch.setProperty("class", "BatchActionBtn")
@@ -4384,7 +4458,21 @@ class UnifiedSettingsDialog(QDialog):
                         if status_text == "Fehlgeschlagen":
                             cell_c.show_text("Fehler ⚠️", "Lichess-Import fehlgeschlagen")
                         else:
-                            cell_c.show_text("100.0% ✓", "Lichess-Import abgeschlossen")
+                            try:
+                                from opening_fenix.core.db.database import DatabaseManager
+                                from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
+                                from opening_fenix.core.utils import get_repertoire_db_path
+                                db_path = get_repertoire_db_path(name)
+                                db_m = DatabaseManager(db_path)
+                                s = db_m.get_session()
+                                info = fetch_repertoire_info(s, name, fast_only=False)
+                                s.close()
+                                db_m.close()
+                                actual_cov = info.get("coverage_pct", 0.0)
+                                cov_str = f"{actual_cov:.1f}% ✓"
+                                cell_c.show_text(cov_str, f"Lichess-Import abgeschlossen (Coverage: {actual_cov:.1f}%)")
+                            except Exception:
+                                cell_c.show_text("Fertig ✓", "Lichess-Import abgeschlossen")
 
             # 3. Fortschritt column (Col 5)
             if pct >= 100 and task_type in active_tasks:

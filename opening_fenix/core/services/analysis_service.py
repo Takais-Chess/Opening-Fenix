@@ -46,14 +46,41 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
         engine.configure({"Threads": threads, "Hash": hash_size})
 
+        def analyse_with_cancel(board_to_analyse, limit, multipv=1):
+            if isinstance(engine, chess.engine.SimpleEngine):
+                results = {}
+                try:
+                    with engine.analysis(board_to_analyse, limit, multipv=multipv) as analysis:
+                        for info in analysis:
+                            if check_cancel and check_cancel():
+                                break
+                            pv_idx = info.get("multipv", 1) - 1
+                            results[pv_idx] = info
+                    return [results[k] for k in sorted(results.keys()) if "pv" in results[k] and results[k]["pv"]]
+                except Exception:
+                    if check_cancel and check_cancel():
+                        return []
+                    raise
+            return engine.analyse(board_to_analyse, limit, multipv=multipv)
+
         for i, pos in enumerate(positions_to_analyze):
             if check_cancel and check_cancel():
-                commit_with_retry(session)
+                try:
+                    commit_with_retry(session)
+                except Exception:
+                    session.rollback()
                 return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
             
-            board = chess.Board(pos.fen)
+            # Refresh position state to avoid ObjectDeletedError/StaleDataError if modified or deleted in Creator
+            current_pos = session.get(Position, pos.id)
+            if current_pos is None:
+                if progress_callback:
+                    progress_callback(int((i + 1) * 100 / total_positions))
+                continue
+
+            board = chess.Board(current_pos.fen)
             
-            repertoire_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).first()
+            repertoire_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == current_pos.id).first()
             repertoire_uci = repertoire_move.uci if repertoire_move else None
 
             try:
@@ -67,10 +94,13 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                     discovery_multipv = min(5, max_allowed)
                 
                 # Fast look
-                discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
+                discovery_res = analyse_with_cancel(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
                 
                 if check_cancel and check_cancel():
-                    commit_with_retry(session)
+                    try:
+                        commit_with_retry(session)
+                    except Exception:
+                        session.rollback()
                     return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
 
                 # --- STAGE 2: DECISION & DEEPENING ---
@@ -85,7 +115,14 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                         final_multipv = discovery_multipv
 
                 # Full analysis to target depth
-                result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
+                result = analyse_with_cancel(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
+                
+                if check_cancel and check_cancel():
+                    try:
+                        commit_with_retry(session)
+                    except Exception:
+                        session.rollback()
+                    return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
                 
                 if not result:
                     continue
@@ -106,22 +143,34 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                         if move.uci() not in good_moves:
                             good_moves.append(move.uci())
 
-                pos.good_moves = json.dumps(list(set(good_moves)))
-                pos.analysis_depth = depth
+                current_pos = session.get(Position, pos.id)
+                if current_pos is not None:
+                    current_pos.good_moves = json.dumps(list(set(good_moves)))
+                    current_pos.analysis_depth = depth
 
             except Exception as e:
                 print(f"Error analyzing FEN {pos.fen}: {e}")
-                pos.good_moves = json.dumps([])
+                current_pos = session.get(Position, pos.id)
+                if current_pos is not None:
+                    current_pos.good_moves = json.dumps([])
 
             if progress_callback:
                 progress_callback(int((i + 1) * 100 / total_positions))
             
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
-                 commit_with_retry(session)
+                try:
+                    commit_with_retry(session)
+                except Exception as commit_err:
+                    session.rollback()
+                    from opening_fenix.core.logger import logger
+                    logger.warning(f"Batch commit warning during analysis: {commit_err}")
         
         # Invalidate cache after successful analysis
         set_meta(session, "ana_cache_count", "-1")
-        commit_with_retry(session)
+        try:
+            commit_with_retry(session)
+        except Exception:
+            session.rollback()
         
         return True, f"Analyse von {total_positions} Positionen abgeschlossen."
 

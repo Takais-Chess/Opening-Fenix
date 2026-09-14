@@ -5,7 +5,7 @@ import json
 import sqlite3
 import traceback
 from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QLocale
 
 # Tune Python garbage collector thresholds to eliminate Gen-2 stop-the-world pauses during chess operations
 gc.set_threshold(50000, 50, 50)
@@ -142,16 +142,32 @@ if __name__ == "__main__":
         ensure_default_engine_path()
 
         config_path = os.path.join(get_user_dir(), "config.json")
+        config = {}
         auto_login_profile = None
         ui_lang = "de"
         if os.path.exists(config_path):
             try:
-                with open(config_path, "r") as f:
+                with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                     auto_login_profile = config.get("auto_login_profile")
-                    ui_lang = config.get("ui_language", "de")
             except Exception as e:
                 logger.warning(f"Error reading config: {e}")
+
+        # Persistent language determination:
+        # If already configured in config.json, strictly use saved preference (never touch system language).
+        # If running for the first time (no ui_language key), detect system locale once and save it.
+        if "ui_language" in config:
+            ui_lang = config["ui_language"]
+        else:
+            sys_locale = QLocale.system().name().lower()  # e.g., 'de_at', 'de_de', 'en_us'
+            ui_lang = "de" if sys_locale.startswith("de") else "en"
+            config["ui_language"] = ui_lang
+            try:
+                with open(config_path, "w", encoding="utf-8") as f:
+                    json.dump(config, f, indent=4)
+                logger.info(f"First start: Detected system locale '{sys_locale}', saved '{ui_lang}' to config.json.")
+            except Exception as e:
+                logger.error(f"Failed to persist initial ui_language to config.json: {e}")
 
         # Initialize TranslationManager with global language
         from opening_fenix.core.translation import translator

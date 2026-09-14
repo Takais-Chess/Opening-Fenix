@@ -145,13 +145,19 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
     # Calculate coverage %
     total_pos = session.query(func.count(Position.id)).scalar() or 0
     elo_cat = get_meta(session, "lichess_elo", "N/A")
+    total_ld = session.query(func.count(LichessData.id)).filter(LichessData.elo_range == elo_cat).scalar() or 0
     
     cached_count = get_meta(session, "cov_cache_count", "-1")
+    cached_ld = get_meta(session, "cov_cache_ld", "-1")
     cached_pct = get_meta(session, "cov_cache_pct", "")
     cached_elo = get_meta(session, "cov_cache_elo", "")
     cached_covered = get_meta(session, "cov_cache_covered", "")
     
-    if str(total_pos) == str(cached_count) and cached_elo == elo_cat and cached_pct and cached_covered:
+    if (str(total_pos) == str(cached_count) and 
+        str(total_ld) == str(cached_ld) and 
+        cached_elo == elo_cat and 
+        cached_pct and 
+        cached_covered):
         coverage_pct = float(cached_pct)
         try:
             covered_pos = int(cached_covered)
@@ -167,6 +173,7 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         
         # Save to cache
         set_meta(session, "cov_cache_count", total_pos)
+        set_meta(session, "cov_cache_ld", total_ld)
         set_meta(session, "cov_cache_pct", coverage_pct)
         set_meta(session, "cov_cache_elo", elo_cat)
         set_meta(session, "cov_cache_covered", covered_pos)

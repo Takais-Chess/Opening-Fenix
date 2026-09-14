@@ -624,3 +624,61 @@ class TestDiagnosticDialog:
         dlg = DiagnosticDialog(creator_backend)
         assert len(dlg.lbl_info.text()) > 0
         dlg.close()
+
+
+# ─── Kurs-Autoauswahl ─────────────────────────────────────────────────────────
+
+class TestCourseAutoSelection:
+
+    def test_initial_open_autoselects_active_course(self, settings_dialog, sample_repertoire):
+        """Beim Öffnen wird das aktuell im Backend geöffnete Repertoire ausgewählt."""
+        assert settings_dialog.combo_active_repo.currentData() == sample_repertoire
+
+    def test_reopen_after_switching_course_autoselects_new_course(self, settings_dialog, creator_backend, mock_user_dir):
+        """Nach dem Wechseln des Repertoires wählt on_reopen() den neuen Kurs automatisch aus."""
+        # Zweites Test-Repertoire erstellen und laden
+        new_repo = "Neuer Testkurs"
+        creator_backend.load_repertoire(new_repo)
+        assert creator_backend.active_repo_name == new_repo
+        
+        # Einstellungen erneut öffnen
+        settings_dialog.on_reopen()
+        
+        # Prüfen, dass der neu geöffnete Kurs aktiv im Dropdown ausgewählt ist
+        assert settings_dialog.combo_active_repo.currentData() == new_repo
+        assert new_repo in settings_dialog.windowTitle()
+
+    def test_reopen_resets_manual_dropdown_switch_to_open_course(self, settings_dialog, creator_backend, mock_user_dir):
+        """Wenn der Nutzer im Dialog einen anderen Kurs gewählt hatte, wählt der nächste Reopen wieder den im Creator offenen Kurs."""
+        other_repo = "Anderer Kurs"
+        temp_backend = CreatorBackend()
+        temp_backend.load_repertoire(other_repo)
+        temp_backend.close()
+
+        settings_dialog.populate_active_repo_dropdown()
+
+        # Nutzer wählt 'Anderer Kurs' im Dropdown
+        idx = settings_dialog.combo_active_repo.findData(other_repo)
+        assert idx >= 0
+        settings_dialog.combo_active_repo.setCurrentIndex(idx)
+        assert settings_dialog.combo_active_repo.currentData() == other_repo
+
+        # Aber im Creator ist weiterhin 'sample_repertoire' offen
+        initial_repo = creator_backend.active_repo_name
+        
+        # Reopen simulieren
+        settings_dialog.on_reopen()
+
+        # Muss wieder auf initial_repo (den im Creator offenen Kurs) zurückgesetzt werden
+        assert settings_dialog.combo_active_repo.currentData() == initial_repo
+
+    def test_select_course_explicit(self, settings_dialog, mock_user_dir):
+        """select_course wählt den gewünschten Kurs explizit aus."""
+        target = "Zielkurs"
+        temp_backend = CreatorBackend()
+        temp_backend.load_repertoire(target)
+        temp_backend.close()
+
+        settings_dialog.select_course(target)
+        assert settings_dialog.combo_active_repo.currentData() == target
+        assert target in settings_dialog.windowTitle()

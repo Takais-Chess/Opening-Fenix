@@ -1501,6 +1501,7 @@ class CreatorBackend:
             if elo_category:
                 query = query.filter_by(elo_range=elo_category)
             n = query.delete()
+            self.set_meta("cov_cache_count", "-1")
             self.session.commit()
             self.scan_and_update_metadata()
             self.clear_cache()
@@ -2630,6 +2631,7 @@ class CreatorWindow(QMainWindow):
         self.resize(scale(1400), scale(900))
 
         self.backend = CreatorBackend(is_test=is_test)
+        self.active_repo_name = None
         self.training_manager = training_manager
         self.profile_name = getattr(training_manager, 'profile_name', None) if training_manager else None
         self.is_test = is_test
@@ -2650,6 +2652,9 @@ class CreatorWindow(QMainWindow):
         self.hole_anim_timer = QTimer(self)
         self.hole_anim_timer.timeout.connect(self._animate_hole_button)
         self._hole_dots = 0
+        self._preset_transposition = None
+        self._transposition_highlight_fen = None
+        self._transposition_highlight_move = None
 
 
         cp = os.path.join(get_user_dir(), "config.json")
@@ -3335,18 +3340,37 @@ class CreatorWindow(QMainWindow):
         
         if widget == self.tab_transpositions:
             self.update_transpositions_tab()
-        elif widget == self.tab_kontrolle:
+        else:
+            if getattr(self, "_transposition_highlight_move", None):
+                self._transposition_highlight_fen = None
+                self._transposition_highlight_move = None
+                if hasattr(self, "board_widget") and self.board_widget:
+                    if len(self.board_widget.board.move_stack) > 0:
+                        self.board_widget.last_move = self.board_widget.board.peek()
+                    else:
+                        self.board_widget.last_move = None
+                    self.board_widget.update()
+        if widget == self.tab_kontrolle:
             self.update_overhaul_progress()
 
     def open_tab_settings(self):
         from PyQt6 import sip
         from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog
+        active_repo = getattr(self, 'active_repo_name', None) or getattr(self.backend, 'active_repo_name', None)
+        if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
+            self.backend.load_repertoire(active_repo, self.is_test)
+
         if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
             self.repo_settings_dialog.finished.connect(self._on_settings_closed)
         else:
+            self.repo_settings_dialog.backend = self.backend
             if hasattr(self.repo_settings_dialog, 'on_reopen'):
                 self.repo_settings_dialog.on_reopen()
+
+        if hasattr(self.repo_settings_dialog, 'select_course') and active_repo:
+            self.repo_settings_dialog.select_course(active_repo)
+
         self.repo_settings_dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
         self.repo_settings_dialog.show()
         self.repo_settings_dialog.raise_()
@@ -3912,6 +3936,23 @@ class CreatorWindow(QMainWindow):
             
         f = self.board_widget.board.fen()
         
+        # Board highlight: maintain transposition preview if still on that position,
+        # otherwise clear transposition preview and show standard last move (or None if starting pos)
+        curr_fen_4 = " ".join(f.strip().split()[:4])
+        t_fen = getattr(self, "_transposition_highlight_fen", None)
+        t_move = getattr(self, "_transposition_highlight_move", None)
+
+        if t_fen and t_move and curr_fen_4 == t_fen:
+            self.board_widget.last_move = t_move
+        else:
+            self._transposition_highlight_fen = None
+            self._transposition_highlight_move = None
+            if len(self.board_widget.board.move_stack) > 0:
+                self.board_widget.last_move = self.board_widget.board.peek()
+            else:
+                self.board_widget.last_move = None
+        self.board_widget.update()
+        
         # Auto-mark for overhaul if session is active and NOT paused
         if self.overhaul_active and not self.overhaul_paused:
             self.backend.mark_position_reviewed(f)
@@ -4466,18 +4507,31 @@ class CreatorWindow(QMainWindow):
 
     def open_repo_settings(self):
         from PyQt6 import sip
+        active_repo = getattr(self, 'active_repo_name', None) or getattr(self.backend, 'active_repo_name', None)
+        if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
+            self.backend.load_repertoire(active_repo, self.is_test)
+
         if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
             self.repo_settings_dialog.finished.connect(self._on_settings_closed)
         else:
+            self.repo_settings_dialog.backend = self.backend
             if hasattr(self.repo_settings_dialog, 'on_reopen'):
                 self.repo_settings_dialog.on_reopen()
+
+        if hasattr(self.repo_settings_dialog, 'select_course') and active_repo:
+            self.repo_settings_dialog.select_course(active_repo)
         
         self.repo_settings_dialog.show()
         self.repo_settings_dialog.raise_()
         self.repo_settings_dialog.activateWindow()
 
     def _on_settings_closed(self):
+        # Restore backend to creator's active repo if settings dialog switched it
+        active_repo = getattr(self, 'active_repo_name', None)
+        if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
+            self.backend.load_repertoire(active_repo, self.is_test)
+
         # Ensure latest repertoire settings (e.g. elo category) are applied to CreatorWindow
         if hasattr(self, 'backend') and self.backend and getattr(self.backend, 'session', None):
             try:
@@ -4789,6 +4843,7 @@ class CreatorWindow(QMainWindow):
         self.clear_search_tab()
         
         if not repo_name:
+            self.active_repo_name = None
             self.backend.close()
             self.backend.active_repo_name = None
             self.setWindowTitle(tr_ui("creator.window_title_no_repo_loaded", "Creator - Kein Repertoire geladen"))
@@ -4799,6 +4854,9 @@ class CreatorWindow(QMainWindow):
             self.board_widget.update()
             return
             
+        self.active_repo_name = repo_name
+        self.config["last_active_repertoire"] = repo_name
+        self.save_config()
         self.backend.load_repertoire(repo_name, is_test)
         self._load_saved_elo_or_autoselect()
         if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
@@ -5212,6 +5270,14 @@ class CreatorWindow(QMainWindow):
             self.table_global_transpositions.setColumnHidden(2, True)
 
         self._preset_transposition = None
+        self._transposition_highlight_fen = None
+        self._transposition_highlight_move = None
+        if hasattr(self, "board_widget") and self.board_widget:
+            if len(self.board_widget.board.move_stack) > 0:
+                self.board_widget.last_move = self.board_widget.board.peek()
+            else:
+                self.board_widget.last_move = None
+            self.board_widget.update()
 
     def init_kontrolle_tab(self):
         layout = QVBoxLayout(self.tab_kontrolle)
@@ -5372,6 +5438,7 @@ class CreatorWindow(QMainWindow):
         self.table_transpositions.verticalHeader().setMinimumSectionSize(scale(36))
         self.table_transpositions.setAlternatingRowColors(True)
         self.table_transpositions.itemDoubleClicked.connect(self.on_transposition_double_clicked)
+        self.table_transpositions.itemClicked.connect(self.on_transposition_clicked)
         self.table_transpositions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_transpositions.customContextMenuRequested.connect(self.on_transposition_context_menu)
         
@@ -5992,7 +6059,49 @@ class CreatorWindow(QMainWindow):
             rank_item.setForeground(QColor(color))
             self.table_transpositions.setItem(row, 1, rank_item)
 
-    # ── Double-click handler ─────────────────────────────────────────────────────
+    # ── Click & Double-click handlers ────────────────────────────────────────────
+
+    def on_transposition_clicked(self, item):
+        tw = item.tableWidget() if hasattr(item, "tableWidget") else self.table_transpositions
+        if not tw:
+            return
+        row = item.row()
+        it0 = tw.item(row, 0)
+        if not it0:
+            return
+        data = it0.data(Qt.ItemDataRole.UserRole)
+        if not data or not isinstance(data, dict):
+            return
+
+        move_uci = None
+        if data.get("type") in ("direct", "outgoing"):
+            move_uci = data.get("move_uci")
+            if not move_uci and data.get("move_san"):
+                try:
+                    m = self.board_widget.board.parse_san(data["move_san"])
+                    move_uci = m.uci()
+                except Exception:
+                    pass
+        elif data.get("type") == "bfs":
+            path_ucis = data.get("path_ucis", [])
+            if path_ucis:
+                move_uci = path_ucis[0]
+            elif data.get("path_sans"):
+                try:
+                    m = self.board_widget.board.parse_san(data["path_sans"][0])
+                    move_uci = m.uci()
+                except Exception:
+                    pass
+
+        if move_uci and len(move_uci) >= 4:
+            import chess
+            try:
+                self._transposition_highlight_fen = " ".join(self.board_widget.board.fen().strip().split()[:4])
+                self._transposition_highlight_move = chess.Move.from_uci(move_uci[:4])
+                self.board_widget.last_move = self._transposition_highlight_move
+                self.board_widget.update()
+            except Exception:
+                pass
 
     def on_transposition_double_clicked(self, item):
         tw = item.tableWidget()
@@ -6814,12 +6923,28 @@ class CreatorWindow(QMainWindow):
         if h_data and isinstance(h_data, dict):
             self._preset_transposition = h_data
             path_ucis = h_data.get('path_ucis', [])
-            if path_ucis and len(path_ucis[0]) >= 4:
-                import chess
+            move_uci = path_ucis[0] if (path_ucis and len(path_ucis[0]) >= 4) else None
+            if not move_uci and h_data.get('move_san'):
                 try:
-                    self.board_widget.last_move = chess.Move.from_uci(path_ucis[0][:4])
+                    tb = chess.Board(fen)
+                    m = tb.parse_san(h_data['move_san'].split()[0])
+                    move_uci = m.uci()
                 except Exception:
                     pass
+            if move_uci and len(move_uci) >= 4:
+                import chess
+                try:
+                    self._transposition_highlight_fen = " ".join(fen.strip().split()[:4])
+                    self._transposition_highlight_move = chess.Move.from_uci(move_uci[:4])
+                except Exception:
+                    self._transposition_highlight_fen = None
+                    self._transposition_highlight_move = None
+            else:
+                self._transposition_highlight_fen = None
+                self._transposition_highlight_move = None
+        else:
+            self._transposition_highlight_fen = None
+            self._transposition_highlight_move = None
         self.set_board_to_fen(fen)
 
 
@@ -7201,6 +7326,28 @@ class CreatorWindow(QMainWindow):
                     "path_ucis": []
                 }
 
+            path_ucis = self._preset_transposition.get('path_ucis', [])
+            move_uci = path_ucis[0] if (path_ucis and len(path_ucis[0]) >= 4) else None
+            if not move_uci and self._preset_transposition.get('move_san'):
+                import chess
+                try:
+                    tb = chess.Board(fen)
+                    m = tb.parse_san(self._preset_transposition['move_san'].split()[0])
+                    move_uci = m.uci()
+                except Exception:
+                    pass
+            if move_uci and len(move_uci) >= 4:
+                import chess
+                try:
+                    self._transposition_highlight_fen = " ".join(fen.strip().split()[:4])
+                    self._transposition_highlight_move = chess.Move.from_uci(move_uci[:4])
+                except Exception:
+                    self._transposition_highlight_fen = None
+                    self._transposition_highlight_move = None
+            else:
+                self._transposition_highlight_fen = None
+                self._transposition_highlight_move = None
+
             # 3. Set board to starting position
             self.set_board_to_fen(fen)
 
@@ -7214,6 +7361,8 @@ class CreatorWindow(QMainWindow):
             # 5. Populate and show transposition in the tab
             self.update_transpositions_tab()
         else:
+            self._transposition_highlight_fen = None
+            self._transposition_highlight_move = None
             self.set_board_to_fen(fen)
             self.tabs.setCurrentIndex(0) # Switch to DETAILS to add the move
 

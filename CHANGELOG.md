@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.11] - 2026-09-14
+
+### Added & Improved
+- **Interactive Transposition Move Preview**: Clicking a candidate transposition in either the local or global transposition table immediately highlights the source and target squares on the chessboard, allowing users to visually evaluate alternate paths before adding them.
+- **Smart Move Highlight Auto-Clear**: Transposition move highlights automatically clear when navigating to different board positions, switching tabs away from Transpositions, or activating another move.
+- **Active Course Auto-Selection in Settings**: The Unified Settings dialog now automatically detects and selects the currently open repertoire upon opening or switching courses, keeping course configuration perfectly synchronized with Creator view.
+- **Real-Time Maintenance Coverage Feedback**: Maintenance dialog displays actual Lichess coverage percentages with an immediate checkmark completion indicator once background enrichment tasks finish.
+- **German & English Localization Polish**: Added localized tooltips and status strings for transposition preview interactions and maintenance task states.
+- **Test Suite Expansion**: Added comprehensive automated tests for course auto-selection and transposition highlight clearing behaviors.
+
 ## [0.9.10] - 2026-09-13
 
 ### Added & Improved

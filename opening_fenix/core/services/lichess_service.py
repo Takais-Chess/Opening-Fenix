@@ -77,6 +77,17 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         successful_requests_in_a_row = 0
         last_failure_delay = None
         
+        def interruptible_sleep(duration):
+            remaining = duration
+            step = 0.05
+            while remaining > 0:
+                if check_cancel and check_cancel():
+                    return True
+                sleep_time = min(step, remaining)
+                time.sleep(sleep_time)
+                remaining -= sleep_time
+            return check_cancel and check_cancel() if check_cancel else False
+
         i = 0
         while i < len(positions_to_query):
             # Refresh position state before querying to avoid ObjectDeletedError using a new query to fetch it fresh if needed
@@ -87,6 +98,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 continue
                 
             if check_cancel and check_cancel():
+                set_meta(session, "cov_cache_count", "-1")
                 commit_with_retry(session)
                 _update_lichess_delay_config(current_delay)
                 return False, "Import abgebrochen."
@@ -164,7 +176,11 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     _update_lichess_delay_config(current_delay) 
                     
                     print("Waiting 60 seconds before retrying...")
-                    time.sleep(60)
+                    if interruptible_sleep(60):
+                        set_meta(session, "cov_cache_count", "-1")
+                        commit_with_retry(session)
+                        _update_lichess_delay_config(current_delay)
+                        return False, "Import abgebrochen."
                     retry_same_position = True
                 elif e.code == 401:
                     return False, "Fehler 401: Das Lichess API-Token ist ungültig oder abgelaufen. Bitte überprüfe dein Token in den Einstellungen."
@@ -206,9 +222,14 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     except TypeError:
                         progress_callback(pct)
             
-            time.sleep(current_delay)
+            if interruptible_sleep(current_delay):
+                set_meta(session, "cov_cache_count", "-1")
+                commit_with_retry(session)
+                _update_lichess_delay_config(current_delay)
+                return False, "Import abgebrochen."
 
         set_meta(session, "lichess_elo", elo_category)
+        set_meta(session, "cov_cache_count", "-1")
         commit_with_retry(session)
         _update_lichess_delay_config(current_delay)
         return True, f"{new_data_points_added} neue Lichess-Datenpunkte für ELO '{elo_category}' erfolgreich importiert."
@@ -284,6 +305,7 @@ def delete_lichess_data(repo_name: str, elo_category: Optional[str] = None) -> T
         else:
             set_meta(session, "lichess_elo", None)
         
+        set_meta(session, "cov_cache_count", "-1")
         session.commit()
         
         if elo_category is not None:

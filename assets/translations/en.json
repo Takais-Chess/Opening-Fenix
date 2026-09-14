@@ -376,6 +376,8 @@
     "msg_transfer_success": "{count} comments transferred from '{src}' to '{target}'.",
     "msg_transfer_move_success": "{count} comments moved from '{src}' to '{target}'.",
     "msg_transfer_error": "Error transferring comments: {error}",
+    "bg_task_warning": "💡 <b>Note:</b> Please avoid editing this repertoire in the Creator while engine analysis or Lichess import is running to prevent data conflicts.",
+    "bg_batch_warning": "💡 <b>Note:</b> Please avoid editing selected repertoires in the Creator while background tasks are running to prevent data conflicts.",
     "engine_scan_title": "🤖 Calculate Alternative Good Moves via Full Repertoire Engine Analysis",
     "engine_path_label": "Engine Path:",
     "search_depth_label": "Search Depth:",

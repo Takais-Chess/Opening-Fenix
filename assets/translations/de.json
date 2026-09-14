@@ -376,6 +376,8 @@
     "msg_transfer_success": "{count} Kommentare von '{src}' nach '{target}' übertragen.",
     "msg_transfer_move_success": "{count} Kommentare von '{src}' nach '{target}' verschoben.",
     "msg_transfer_error": "Fehler beim Übertragen der Kommentare: {error}",
+    "bg_task_warning": "💡 <b>Hinweis:</b> Bitte bearbeite das Repertoire im Creator nicht, solange Engine-Analyse oder Lichess-Import laufen, um Datenkonflikte zu vermeiden.",
+    "bg_batch_warning": "💡 <b>Hinweis:</b> Bitte bearbeite die ausgewählten Repertoires im Creator nicht, solange Hintergrund-Aufgaben laufen, um Datenkonflikte zu vermeiden.",
     "engine_scan_title": "🤖 Alternativ gute Züge berechnen mit Engine Analyse des gesamten Repertoires",
     "engine_path_label": "Engine Pfad:",
     "search_depth_label": "Suchtiefe:",
