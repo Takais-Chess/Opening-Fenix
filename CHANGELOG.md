@@ -1,7 +1,16 @@
 # Changelog
-
+ 
 All notable changes to this project will be documented in this file.
-
+ 
+## [0.9.12] - 2026-09-15
+ 
+### Added & Improved
+- **Enhanced 2-Move Transposition Detection**: Refined transposition search logic to permit valid sibling branch transpositions of equal ply depth and hardened internal SAN move generation.
+- **Smart Promotion & Underpromotion Filtering**: Filtered out underpromotions (`=R`, `=B`, `=N`) and promotion sequences where the promoted piece is immediately captured on the next half-move from both global and local transposition scanners.
+- **Course Import & Multi-Profile Synchronization**: Added robust PGN course import service with interactive dialog, native window close event filtering, and multi-profile course management.
+- **Lichess Explorer & Priority Score Hardening**: Improved Lichess data synchronization, priority calculations, and error resilience during background data retrieval.
+- **Installer & Build Automation**: Hardened installer build pipeline with safe directory deletion and automatic process termination for locked binaries.
+ 
 ## [0.9.11] - 2026-09-14
 
 ### Added & Improved

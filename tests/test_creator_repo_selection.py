@@ -1,6 +1,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QPushButton
 from opening_fenix.creator.repo_selection_dialog import RepoSelectionDialog, RepoSelectionButton
 
 @pytest.fixture
@@ -85,5 +86,27 @@ def test_new_repertoire_dialog_button_styling(qtbot):
     for btn in buttons:
         assert "padding: 0" in btn.styleSheet()
         assert btn.height() == scale(40) or btn.maximumHeight() == scale(40)
+
+
+def test_dialog_no_redundant_close_button(repo_selection_dialog):
+    # Ensure the redundant in-dialog '✕' close button was removed since the window frame has a close button
+    assert not hasattr(repo_selection_dialog, "btn_close")
+    buttons = repo_selection_dialog.findChildren(QPushButton)
+    assert all(btn.text() != "✕" for btn in buttons)
+
+
+def test_repo_selection_taskbar_close_filter(qtbot):
+    from opening_fenix.creator.repo_selection_dialog import RepoSelectionDialog
+    import sys
+
+    dlg = RepoSelectionDialog()
+    qtbot.addWidget(dlg)
+
+    if sys.platform == "win32":
+        assert getattr(dlg, "_taskbar_filter", None) is not None
+
+    dlg.reject()
+    assert getattr(dlg, "_taskbar_filter", None) is None
+
 
 

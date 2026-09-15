@@ -304,11 +304,21 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         rep_move_ids = {rm.move_id for rm in rep_moves_db}
         user_turn_char = get_meta(session, "color", "w")
         
-        reachable_pos = session.query(Position.id, Position.fen).filter(Position.id.in_(list(reachable_ids))).all()
+        reachable_pos = []
+        reachable_ids_list = list(reachable_ids)
+        chunk_size = 900
+        for i in range(0, len(reachable_ids_list), chunk_size):
+            chunk = reachable_ids_list[i:i + chunk_size]
+            reachable_pos.extend(session.query(Position.id, Position.fen).filter(Position.id.in_(chunk)).all())
+
         id_to_fen_dict = {p.id: p.fen for p in reachable_pos}
-        reachable_clean_fens = {" ".join(p.fen.split(" ")[:4]) for p in reachable_pos}
+        reachable_clean_fens = list({" ".join(p.fen.split(" ")[:4]) for p in reachable_pos})
         
-        lichess_data_cache = {" ".join(ld.fen.split(" ")[:4]): json.loads(ld.moves_json) for ld in session.query(LichessData).filter(LichessData.fen.in_(list(reachable_clean_fens)), LichessData.elo_range == elo_category).all()}
+        lichess_data_cache = {}
+        for i in range(0, len(reachable_clean_fens), chunk_size):
+            chunk = reachable_clean_fens[i:i + chunk_size]
+            for ld in session.query(LichessData).filter(LichessData.fen.in_(chunk), LichessData.elo_range == elo_category).all():
+                lichess_data_cache[" ".join(ld.fen.split(" ")[:4])] = json.loads(ld.moves_json)
 
         for depth_list in subtree_positions_by_depth:
             for pos_id in depth_list:

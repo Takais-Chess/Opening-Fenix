@@ -30,6 +30,7 @@ def set_meta(session: Session, key: str, value: Any) -> None:
 def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
     """
     Deletes the directory and database file for a given repertoire.
+    Also removes all learning data and settings for this repertoire across all user profiles.
     
     Args:
         repo_name: The name of the repertoire to delete.
@@ -39,10 +40,22 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
     """
     try:
         from opening_fenix.core.utils import release_repertoire_locks
+        from opening_fenix.core.services.profile_service import delete_repertoire_from_profiles_globally
+        
         release_repertoire_locks(repo_name)
 
-        repo_dir = get_repertoire_dir(repo_name)
-        if not os.path.exists(repo_dir):
+        # Collect any existing directories (regular and/or test)
+        dirs_to_delete = []
+        regular_dir = get_repertoire_dir(repo_name, is_test=False)
+        test_dir = get_repertoire_dir(repo_name, is_test=True)
+        if regular_dir and os.path.exists(regular_dir) and os.path.isdir(regular_dir):
+            dirs_to_delete.append(regular_dir)
+        if test_dir and os.path.exists(test_dir) and os.path.isdir(test_dir) and test_dir not in dirs_to_delete:
+            dirs_to_delete.append(test_dir)
+
+        if not dirs_to_delete:
+            # Repertoire directory not found on disk, but still self-heal profiles
+            delete_repertoire_from_profiles_globally(repo_name)
             return False, "Repertoire-Verzeichnis nicht gefunden."
 
         def remove_readonly(func, path, _):
@@ -51,27 +64,50 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
                 os.chmod(path, stat.S_IWRITE)
             except Exception:
                 pass
-            func(path)
+            try:
+                func(path)
+            except Exception:
+                pass
 
-        deleted = False
-        last_err = None
         import time
         import gc
-        for attempt in range(8):
-            try:
-                if os.path.exists(repo_dir):
-                    shutil.rmtree(repo_dir, onerror=remove_readonly)
-                deleted = True
-                break
-            except Exception as e:
-                last_err = e
-                gc.collect()
-                time.sleep(0.25 * (attempt + 1))
+        import stat
+        last_err = None
 
-        if deleted:
-            return True, f"Repertoire '{repo_name}' wurde gelöscht."
-        else:
-            return False, f"Fehler beim Löschen: {last_err}"
+        for repo_dir in dirs_to_delete:
+            deleted = False
+            for attempt in range(8):
+                try:
+                    if os.path.exists(repo_dir):
+                        # Ensure all files and subdirectories are writable
+                        for root, dirs, files in os.walk(repo_dir):
+                            for d in dirs:
+                                try: os.chmod(os.path.join(root, d), stat.S_IWRITE)
+                                except Exception: pass
+                            for f in files:
+                                try: os.chmod(os.path.join(root, f), stat.S_IWRITE)
+                                except Exception: pass
+                        try: os.chmod(repo_dir, stat.S_IWRITE)
+                        except Exception: pass
+
+                        shutil.rmtree(repo_dir, onerror=remove_readonly)
+
+                    if not os.path.exists(repo_dir):
+                        deleted = True
+                        break
+                except Exception as e:
+                    last_err = e
+                    release_repertoire_locks(repo_name)
+                    gc.collect()
+                    time.sleep(0.25 * (attempt + 1))
+
+            if not deleted and os.path.exists(repo_dir):
+                return False, f"Fehler beim Löschen: {last_err}"
+
+        # Clean up learning progress and settings for this repertoire across all user profiles
+        delete_repertoire_from_profiles_globally(repo_name)
+
+        return True, f"Repertoire '{repo_name}' wurde gelöscht."
     except Exception as e:
         return False, f"Fehler beim Löschen: {e}"
 

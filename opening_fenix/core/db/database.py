@@ -25,11 +25,19 @@ def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: fl
         except (OperationalError, DatabaseError, sqlite3.OperationalError) as e:
             err_str = str(e).lower()
             if "database is locked" in err_str or "locked" in err_str or "busy" in err_str:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
                 if attempt == max_retries - 1:
                     raise
                 time.sleep(delay)
                 delay = min(delay * 1.5, 2.0)
             else:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
                 raise
 
 class DatabaseCorruptedException(Exception):
@@ -44,6 +52,7 @@ class DatabaseManager:
     SQLite PRAGMAS for optimal performance (e.g., WAL mode, 60s busy_timeout),
     and applies schema migrations automatically on startup.
     """
+    _instances = set()
 
     def __init__(self, db_filename: str, base: Type = Base) -> None:
         """
@@ -53,7 +62,9 @@ class DatabaseManager:
             db_filename: The file path to the SQLite database.
             base: The declarative base class containing the metadata to create tables.
         """
+        self.db_filename = db_filename
         with _db_init_lock:
+            DatabaseManager._instances.add(self)
             if db_filename == ":memory:":
                 self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
             else:
@@ -190,4 +201,26 @@ class DatabaseManager:
 
     def close(self) -> None:
         """Disposes the underlying SQLAlchemy engine and connection pool."""
-        self.engine.dispose()
+        try:
+            self.engine.dispose()
+        except Exception:
+            pass
+        finally:
+            DatabaseManager._instances.discard(self)
+
+    @classmethod
+    def close_all_for_path(cls, db_filename: str) -> None:
+        """Disposes all active DatabaseManager engines bound to the given file path."""
+        if not db_filename:
+            return
+        try:
+            target_abs = os.path.abspath(db_filename).lower()
+            for inst in list(cls._instances):
+                try:
+                    if inst.db_filename and inst.db_filename != ":memory:":
+                        if os.path.abspath(inst.db_filename).lower() == target_abs:
+                            inst.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass

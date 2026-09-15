@@ -15,6 +15,7 @@ import heapq
 import webbrowser
 import time
 import stat
+import unicodedata
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -140,6 +141,7 @@ class CreatorBackend:
         if self.db_manager:
             self.db_manager.close()
             self.db_manager = None
+        self.active_repo_name = None
 
     def clear_cache(self):
         """Clears the LRU cache and expires session objects to ensure fresh data."""
@@ -178,12 +180,13 @@ class CreatorBackend:
         service = RepertoireService()
         
         # If the renamed repo is the one we have open, close it first
-        if self.active_repo_name == old_name:
+        was_active = (self.active_repo_name == old_name)
+        if was_active:
             self.close()
             
         success, msg = service.rename_repertoire(old_name, new_name)
         
-        if success and self.active_repo_name == old_name:
+        if success and was_active:
             self.load_repertoire(new_name)
             
         return success, msg
@@ -362,14 +365,20 @@ class CreatorBackend:
                 if nxt not in reachable:
                     reachable.add(nxt)
                     queue.append(nxt)
-        
-        # 3. Post-Filtering: If variation_filter is set, only keep matching positions
+                # 3. Post-Filtering: If variation_filter is set, only keep matching positions
         if variation_filter:
             # Query the names for all reachable IDs
-            p_data = self.session.query(Position.id, Position.variation_1, Position.variation_2, Position.variation_3, 
-                                      Position.cached_v1, Position.cached_v2, Position.cached_v3).filter(
-                Position.id.in_(list(reachable))
-            ).all()
+            p_data = []
+            reachable_list = list(reachable)
+            chunk_size = 900
+            for i in range(0, len(reachable_list), chunk_size):
+                chunk = reachable_list[i:i + chunk_size]
+                p_data.extend(
+                    self.session.query(Position.id, Position.variation_1, Position.variation_2, Position.variation_3, 
+                                              Position.cached_v1, Position.cached_v2, Position.cached_v3).filter(
+                        Position.id.in_(chunk)
+                    ).all()
+                )
             
             filtered_ids = set()
             for pid, v1, v2, v3, cv1, cv2, cv3 in p_data:
@@ -393,7 +402,7 @@ class CreatorBackend:
     def get_variation_structure(self):
         """
         Builds a hierarchical dictionary mapping V1 variation names to a list of V2 names.
-        Modified version of the trainer's logic for the Creator context.
+        Modified version of the音声's logic for the Creator context.
         """
         if not self.session: return {}
         
@@ -442,13 +451,18 @@ class CreatorBackend:
         
         if total_count == 0: return 0, 0
         
-        query = self.session.query(Position).filter(Position.id.in_(total_ids))
-        if session_start:
-            query = query.filter(Position.last_overhaul_review >= session_start)
-        else:
-            query = query.filter(Position.last_overhaul_review != None)
+        checked_count = 0
+        total_ids_list = list(total_ids)
+        chunk_size = 900
+        for i in range(0, len(total_ids_list), chunk_size):
+            chunk = total_ids_list[i:i + chunk_size]
+            query = self.session.query(Position).filter(Position.id.in_(chunk))
+            if session_start:
+                query = query.filter(Position.last_overhaul_review >= session_start)
+            else:
+                query = query.filter(Position.last_overhaul_review != None)
+            checked_count += query.count()
             
-        checked_count = query.count()
         return checked_count, total_count
 
     def get_overhaul_session_start(self):
@@ -1236,41 +1250,102 @@ class CreatorBackend:
             
             self.clear_cache()
 
+    @staticmethod
+    def _strip_accents(s: str) -> str:
+        if not s:
+            return ""
+        return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+    @staticmethod
+    def _better_text(a: str, b: str) -> str:
+        score_a = sum(1 for c in a if ord(c) > 127)
+        score_b = sum(1 for c in b if ord(c) > 127)
+        return a if score_a >= score_b else b
+
+    @classmethod
+    def _dedupe_single_line(cls, text: str) -> str:
+        """Detect and collapse repeated blocks within a single line or paragraph."""
+        if not text or len(text) < 10:
+            return text
+        norm = cls._strip_accents(text)
+        prefix_len = min(20, len(norm) // 2)
+        prefix = norm[:prefix_len].strip()
+        if len(prefix) < 4:
+            return text
+
+        start = 1
+        while True:
+            idx = norm.find(prefix, start)
+            if idx == -1:
+                break
+            p1_norm = norm[:idx].strip(" |")
+            p2_norm = norm[idx:].strip(" |")
+            if p1_norm and p1_norm == p2_norm:
+                p1_orig = text[:idx].strip(" |")
+                p2_orig = text[idx:].strip(" |")
+                return cls._better_text(p1_orig, p2_orig)
+            tokens = [t.strip(" |") for t in p2_norm.split(p1_norm)]
+            if p1_norm and all(t == "" for t in tokens):
+                p1_orig = text[:idx].strip(" |")
+                return p1_orig
+            start = idx + 1
+        return text
+
     def _dedupe_comment_text(self, text: str) -> str:
         """Remove duplicate repetitions inside a single comment.
-        - If the comment consists of a block repeated N times, keep the first block only.
-        - Additionally collapse consecutive duplicate lines.
+        - Checks for repeating single-line/paragraph text (even without newlines or across pipe separators).
+        - If the comment consists of a multi-line block repeated N times, keep the first block only.
+        - Additionally collapses consecutive duplicate lines.
+        - Normalizes accents/diacritics so accented versions (e.g. 'Grünfeld') match ASCII versions ('Grunfeld'),
+          preserving the accented variant.
         Keep scope strictly inside one comment, no cross-position logic.
         """
-        if not text: return text
+        if not text or not text.strip(): return text
 
-        # Normalize: strip outer whitespace and keep non-empty lines for analysis, but
-        # preserve original line breaks for output using the decided lines.
+        # 1. First run single-line deduplication on each line
         raw_lines = [ln.rstrip() for ln in text.strip().splitlines()]
-        lines = [ln.strip() for ln in raw_lines if ln.strip() != ""]
+        cleaned_lines = []
+        for ln in raw_lines:
+            s_ln = ln.strip()
+            if s_ln:
+                cleaned_lines.append(self._dedupe_single_line(s_ln))
+            else:
+                cleaned_lines.append("")
+
+        lines = [ln for ln in cleaned_lines if ln != ""]
         if not lines:
             return text.strip()
 
+        if len(lines) == 1:
+            return lines[0]
+
         n = len(lines)
         # Try to find the smallest repeating block of lines that composes the whole comment
+        norm_lines = [self._strip_accents(l).strip() for l in lines]
         best = None
         for p in range(1, (n // 2) + 1):
             if n % p != 0: continue
-            block = lines[:p]
-            if block * (n // p) == lines:
-                best = block
+            block = norm_lines[:p]
+            if block * (n // p) == norm_lines:
+                best = lines[:p]
                 break
         dedup_lines = best if best is not None else lines
 
-        # Also collapse consecutive duplicates within the chosen lines
+        # Also collapse consecutive duplicates within the chosen lines (accent-insensitive)
         collapsed = []
         for ln in dedup_lines:
-            if not collapsed or collapsed[-1] != ln:
+            if not collapsed:
                 collapsed.append(ln)
+            else:
+                if self._strip_accents(collapsed[-1]).strip() == self._strip_accents(ln).strip():
+                    collapsed[-1] = self._better_text(collapsed[-1], ln)
+                else:
+                    collapsed.append(ln)
         return "\n".join(collapsed)
 
     def deduplicate_comments_in_repo(self):
         """Deduplicate repeated text inside position comments of the active repertoire.
+        Handles both plain text comments and multilingual JSON comment structures.
         Returns the number of positions whose comments were changed.
         """
         if not self.session: return 0
@@ -1279,8 +1354,25 @@ class CreatorBackend:
             (Position.comment != None) & (Position.comment != "")
         ).all()
         for p in positions:
-            new_text = self._dedupe_comment_text(p.comment or "")
-            if new_text != (p.comment or ""):
+            orig = p.comment or ""
+            raw = orig.strip()
+            if raw.startswith("{") and raw.endswith("}"):
+                c_dict = get_multilingual_comment_dict(raw)
+                if c_dict and any(isinstance(v, str) for v in c_dict.values()):
+                    new_dict = {}
+                    dict_changed = False
+                    for lang, val in c_dict.items():
+                        new_val = self._dedupe_comment_text(val)
+                        if new_val != val:
+                            dict_changed = True
+                        new_dict[lang] = new_val
+                    if dict_changed:
+                        p.comment = format_multilingual_comment(new_dict)
+                        changed += 1
+                    continue
+
+            new_text = self._dedupe_comment_text(orig)
+            if new_text != orig:
                 p.comment = new_text
                 changed += 1
         if changed:
@@ -1524,8 +1616,7 @@ class CreatorBackend:
     def delete_repertoire(self):
         if not self.active_repo_name: return False, "No active repo."
         n = self.active_repo_name
-        if self.session: self.session.close(); self.session = None
-        if self.db_manager: self.db_manager.close(); self.db_manager = None
+        self.close()
         import gc
         gc.collect()
         from opening_fenix.core.data_tools import delete_repertoire_db
@@ -4620,28 +4711,55 @@ class CreatorWindow(QMainWindow):
                 )
 
     def delete_repertoire_action(self, repo_name=None):
-        """Actual deletion of the active repertoire files and closing the window."""
+        """Actual deletion of the active repertoire files and notifying windows."""
         if repo_name is None:
             repo_name = self.backend.active_repo_name
         if not repo_name:
             return
             
+        was_active = (self.backend.active_repo_name == repo_name)
+        if was_active:
+            self.backend.close()
+
         from opening_fenix.core.data_tools import delete_repertoire_db
         success, msg = delete_repertoire_db(repo_name)
         
         if success:
-            # Notify application if possible
+            # Notify application widgets
+            from opening_fenix.core.services.repertoire_service import RepertoireService
             for w in QApplication.topLevelWidgets():
                 if hasattr(w, "on_repertoire_deleted"):
                     try: w.on_repertoire_deleted()
                     except Exception: pass
+                if hasattr(w, "change_repertoire"):
+                    try:
+                        if getattr(getattr(w, "repertoire_manager", None), "active_repertoire_name", None) == repo_name:
+                            w.repertoire_manager.core.active_repertoire_name = None
+                            if hasattr(w, "sorted_repo_names") and w.sorted_repo_names and repo_name in w.sorted_repo_names:
+                                w.sorted_repo_names.remove(repo_name)
+                            next_repo = w.sorted_repo_names[0] if getattr(w, "sorted_repo_names", None) else None
+                            w.change_repertoire(next_repo)
+                        w.refresh_repertoire_buttons()
+                    except Exception: pass
             
-            # Close the creator window if it had this repertoire loaded
-            if self.backend.active_repo_name == repo_name:
-                self.close()
+            # If the creator window had this repertoire loaded, switch to remaining or close
+            if was_active:
+                remaining = RepertoireService().get_all_repertoires()
+                if remaining:
+                    self.load_repertoire(remaining[0])
+                else:
+                    self.close()
         else:
             QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"), 
                 f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
+
+    def import_course_dialog(self):
+        """Opens the automated Course Import dialog (Chessable PGN importer)."""
+        from opening_fenix.gui.dialogs.course_import_dialog import CourseImportDialog
+        dlg = CourseImportDialog(self)
+        if dlg.exec():
+            if dlg.imported_repo_name:
+                self.load_repertoire(dlg.imported_repo_name)
 
     def import_pgn_file_dialog(self):
         """Opens a file dialog to select and import a PGN file."""
@@ -5267,7 +5385,7 @@ class CreatorWindow(QMainWindow):
 
         if hasattr(self, 'table_global_transpositions') and self.table_global_transpositions:
             self.table_global_transpositions.setRowCount(0)
-            self.table_global_transpositions.setColumnHidden(2, True)
+            self.table_global_transpositions.setColumnHidden(3, True)
 
         self._preset_transposition = None
         self._transposition_highlight_fen = None
@@ -5534,11 +5652,12 @@ class CreatorWindow(QMainWindow):
 
         inner_bottom.addLayout(h_bot_header)
 
-        # Whole-repertoire table (4 columns: Move, Type, Quality, Add Level)
-        self.table_global_transpositions = QTableWidget(0, 4)
+        # Whole-repertoire table (5 columns: Move, Type, Prio, Quality, Add Level)
+        self.table_global_transpositions = QTableWidget(0, 5)
         self.table_global_transpositions.setHorizontalHeaderLabels([
             tr_ui("creator.hole_header_move", "Zug"),
             tr_ui("creator.hole_header_depth_type", "Typ"),
+            tr_ui("creator.hole_header_prio", "Prio"),
             tr_ui("creator.hole_header_quality", "Qualität"),
             tr_ui("creator.transpositions_header_add_level", "Zu Level")
         ])
@@ -5557,10 +5676,11 @@ class CreatorWindow(QMainWindow):
         hdr_bot.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr_bot.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr_bot.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        hdr_bot.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
         self.table_global_transpositions.setShowGrid(False)
         self.table_global_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_global_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.table_global_transpositions.setColumnHidden(2, True) # Quality hidden until depth 2 present
+        self.table_global_transpositions.setColumnHidden(3, True) # Quality hidden until depth 2 present
         inner_bottom.addWidget(self.table_global_transpositions, 1)
 
         # Add both cards to splitter
@@ -6772,7 +6892,7 @@ class CreatorWindow(QMainWindow):
                 if isinstance(h, dict) and h.get('depth', 1) >= 2:
                     has_2m = True
                     break
-        self.table_global_transpositions.setColumnHidden(2, not has_2m)
+        self.table_global_transpositions.setColumnHidden(3, not has_2m)
 
     def _on_transpos_depth_changed(self, text):
         if text and text.isdigit():
@@ -6811,7 +6931,7 @@ class CreatorWindow(QMainWindow):
             f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
         )
         self.table_global_transpositions.setRowCount(0)
-        self.table_global_transpositions.setColumnHidden(2, True)
+        self.table_global_transpositions.setColumnHidden(3, True)
 
         elo = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
         ep = self.config.get("engine_path", "")
@@ -6863,7 +6983,28 @@ class CreatorWindow(QMainWindow):
             item_type.setToolTip(tr_ui("creator.tooltip_transpos_2", "2-Zug Überleitung: Der Gegner weicht ab, deine geprüfte Antwort leitet solide zurück."))
         self.table_global_transpositions.setItem(row, 1, item_type)
 
-        # Col 2: Qualität (only relevant for depth >= 2)
+        # Col 2: Prio-Score
+        prio_val = h.get('priority_score', None)
+        if prio_val is None:
+            pop = h.get('popularity', 0)
+            prio_val = pop / 100.0 if pop > 0 else 0.0
+        prio_pct = prio_val * 100.0
+        if prio_pct >= 0.1:
+            prio_str = f"{prio_pct:.1f}%"
+        elif prio_pct > 0:
+            prio_str = f"{prio_pct:.2f}%"
+        else:
+            prio_str = "0.0%"
+        item_prio = QTableWidgetItem(prio_str)
+        item_prio.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        item_prio.setData(Qt.ItemDataRole.UserRole, prio_val)
+        if d == 1:
+            item_prio.setToolTip(f"Potentieller Prio-Score: {prio_pct:.2f}%\n(Wahrscheinlichkeit dieses Überleitungszugs)")
+        else:
+            item_prio.setToolTip(f"Potentieller Prio-Score: {prio_pct:.2f}%\n(Wahrscheinlichkeit des ersten gegnerischen Zugs)")
+        self.table_global_transpositions.setItem(row, 2, item_prio)
+
+        # Col 3: Qualität (only relevant for depth >= 2)
         if d == 1:
             item_qual = QTableWidgetItem("—")
             item_qual.setForeground(QBrush(QColor(COLORS['light_text'])))
@@ -6873,13 +7014,13 @@ class CreatorWindow(QMainWindow):
             item_qual = QTableWidgetItem(q_label)
             item_qual.setForeground(QBrush(QColor(COLORS['success_green'] if q == 'ausgezeichnet' else "#f1c40f")))
         item_qual.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table_global_transpositions.setItem(row, 2, item_qual)
+        self.table_global_transpositions.setItem(row, 3, item_qual)
 
-        # Col 3: Zu Level hinzufügen
+        # Col 4: Zu Level hinzufügen
         h_copy = dict(h)
         h_copy["search_fen"] = h.get("fen")
         lvl_cell = self._create_transposition_level_cell(h_copy)
-        self.table_global_transpositions.setCellWidget(row, 3, lvl_cell)
+        self.table_global_transpositions.setCellWidget(row, 4, lvl_cell)
 
     def _on_global_transpos_item_found(self, h, mode):
         self._add_global_transpos_row(h)

@@ -39,10 +39,10 @@ class RepertoireManager:
     def get_all_repertoires(self) -> List[str]:
         return self.core.get_all_repertoires()
 
-    def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = None) -> None:
-        self.core.set_active_repertoire(repo_name, is_test)
+    def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = None, create_if_missing: bool = True) -> None:
+        self.core.set_active_repertoire(repo_name, is_test, create_if_missing=create_if_missing)
         
-        if repo_name:
+        if self.core.repo_session:
             self.nav = TreeNavigationService(self.core.repo_session)
             self.explorer = ExplorerService(self.core.repo_session)
         else:

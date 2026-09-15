@@ -2,7 +2,7 @@
 
 [![Python Version](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/)
 [![UI Framework](https://img.shields.io/badge/UI-PyQt6-green.svg)](https://www.riverbankcomputing.com/software/pyqt/)
-[![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 **Opening Fenix V2** is a modern, high-performance chess repertoire management and training platform. Designed for players of all levels, it combines **Spaced Repetition (SRS)**, **Lichess statistical integration**, **Stockfish evaluation**, and **smart gap analysis** to build an unshakeable opening repertoire.
 
@@ -98,8 +98,23 @@ Opening-Fenix/
 
 ---
 
+## 📄 License
+
+This project is licensed under the **GNU General Public License v3.0 (GPLv3)** - see the [LICENSE](LICENSE) file for details.
+
+Opening Fenix uses open-source libraries including [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) (GPLv3), [python-chess](https://github.com/niklasf/python-chess) (GPLv3), and [Stockfish](https://stockfishchess.org/) (GPLv3).
+
+### Distribution & Bundling Policy
+Under **GPLv3 Section 7(c) & 7(e)**, anyone who redistributes or bundles Opening Fenix alongside courses, repertoires, or commercial offerings must prominently disclose prior to acquisition:
+> **"Opening Fenix is free, open-source software available for free at github.com/Takais-Chess/Opening-Fenix"**
+
+See [TRADEMARK.md](TRADEMARK.md) for full trademark and distribution guidelines.
+
+---
+
 ## 🤝 Contributing & Support
 
 Contributions, issue reports, and feature requests are always welcome! Feel free to submit a Pull Request or open an Issue on GitHub.
 
 *Built with ❤️ for the Chess Community*
+

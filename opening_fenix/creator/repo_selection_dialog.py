@@ -1,7 +1,8 @@
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QScrollArea, QWidget, QGridLayout, 
-    QPushButton, QHBoxLayout, QApplication, QFormLayout, QLineEdit, QComboBox
+    QPushButton, QHBoxLayout, QApplication, QFormLayout, QLineEdit, QComboBox,
+    QMessageBox
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap, QFont
@@ -10,6 +11,7 @@ from opening_fenix.core.services.repertoire_core_service import RepertoireServic
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
+from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
 def get_repertoire_cover_path(name):
     from opening_fenix.core.data_tools import get_user_dir
@@ -150,6 +152,36 @@ class NewRepertoireDialog(QDialog):
     def get_data(self):
         return self.name_input.text().strip(), self.color_combo.currentData()
 
+    # Windows-forbidden characters in file/directory names
+    _FORBIDDEN_CHARS = set('\\/:*?"<>|')
+
+    def accept(self):
+        name = self.name_input.text().strip()
+        if not name:
+            QMessageBox.warning(
+                self,
+                tr_ui("creator.new_repo_invalid_name_title", "Invalid Name"),
+                tr_ui("creator.new_repo_invalid_name_empty", "The repertoire name cannot be empty.")
+            )
+            return
+        bad = [c for c in name if c in self._FORBIDDEN_CHARS]
+        if bad:
+            bad_str = "  " + "  ".join(sorted(set(bad)))
+            QMessageBox.warning(
+                self,
+                tr_ui("creator.new_repo_invalid_name_title", "Invalid Name"),
+                tr_ui(
+                    "creator.new_repo_invalid_name_chars",
+                    "The repertoire name contains characters that are not allowed in file names:\n\n"
+                    "{chars}\n\n"
+                    "Please remove them and try again.",
+                    chars=bad_str
+                )
+            )
+            return
+        super().accept()
+
+
 class RepoSelectionButton(QPushButton):
     def __init__(self, name, parent=None):
         super().__init__("", parent)
@@ -222,42 +254,16 @@ class RepoSelectionDialog(QDialog):
         self.new_color = 'w'
         
         self.setStyleSheet(get_login_dialog_style())
+        self._taskbar_filter = install_taskbar_close_filter(self)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
         layout.setSpacing(scale(10))
 
-        # Title bar with centered text and a close button
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.addSpacing(scale(40)) # Spacer to compensate for close button width and center the title
-        
         lbl_title = QLabel(tr_ui("repo_selection.title", "Repertoire laden"))
         lbl_title.setObjectName("LoginTitle")
         lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_layout.addWidget(lbl_title, 1)
-        
-        self.btn_close = QPushButton("✕")
-        self.btn_close.setFixedSize(scale(40), scale(30))
-        self.btn_close.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_close.setStyleSheet(f"""
-            QPushButton {{
-                border: none;
-                background: transparent;
-                color: {COLORS['brown_text']};
-                font-size: {scale(16)}px;
-                font-weight: bold;
-                border-radius: {scale(4)}px;
-            }}
-            QPushButton:hover {{
-                background-color: {COLORS['burnt_orange']};
-                color: white;
-            }}
-        """)
-        self.btn_close.clicked.connect(self.close_dialog_or_app)
-        header_layout.addWidget(self.btn_close, alignment=Qt.AlignmentFlag.AlignTop)
-        
-        layout.addLayout(header_layout)
+        layout.addWidget(lbl_title)
 
         lbl_sub = QLabel(tr_ui("repo_selection.subtitle", "Wähle ein Repertoire zum Bearbeiten aus:"))
         lbl_sub.setObjectName("LoginSubtitle")
@@ -319,6 +325,28 @@ class RepoSelectionDialog(QDialog):
         h_btns = QHBoxLayout()
         h_btns.addStretch()
         
+        self.btn_import_course = QPushButton(tr_ui("repo_selection.btn_import_course", "⚡ Kurs-Import (PGN)"))
+        self.btn_import_course.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_import_course.setMinimumWidth(scale(190))
+        self.btn_import_course.setFixedHeight(scale(45))
+        self.btn_import_course.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.65);
+                border: 2px solid {COLORS['burnt_orange']};
+                border-radius: {scale(12)}px;
+                color: {COLORS['burnt_orange']};
+                font-size: {scale(14)}px;
+                font-weight: bold;
+                padding: 0 {scale(15)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(211, 84, 0, 0.15);
+            }}
+        """)
+        self.btn_import_course.clicked.connect(self.on_import_course)
+        h_btns.addWidget(self.btn_import_course)
+        h_btns.addSpacing(scale(12))
+
         self.btn_new = QPushButton(tr_ui("repo_selection.btn_new", "➕ Neues Repertoire"))
         self.btn_new.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_new.setMinimumWidth(scale(180))
@@ -367,6 +395,15 @@ class RepoSelectionDialog(QDialog):
         h_btns.addStretch()
         layout.addLayout(h_btns)
 
+    def on_import_course(self):
+        from opening_fenix.gui.dialogs.course_import_dialog import CourseImportDialog
+        dlg = CourseImportDialog(self)
+        if dlg.exec():
+            if dlg.imported_repo_name:
+                self.selected_repo = dlg.imported_repo_name
+                self.is_new_repo = False
+                self.accept()
+
     def on_create_new_repertoire(self):
         dlg = NewRepertoireDialog(self)
         if dlg.exec():
@@ -382,10 +419,18 @@ class RepoSelectionDialog(QDialog):
         self.is_new_repo = False
         self.accept()
 
-    def close_dialog_or_app(self):
-        # If no active repertoire is loaded in the parent CreatorWindow, exit the entire app
-        parent = self.parent()
-        if parent and hasattr(parent, "backend") and not parent.backend.active_repo_name:
-            QApplication.quit()
-        else:
-            self.reject()
+    def closeEvent(self, event):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().closeEvent(event)
+
+    def reject(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().reject()
+
+    def accept(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().accept()
+

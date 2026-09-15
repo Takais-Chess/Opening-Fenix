@@ -1152,6 +1152,77 @@ def test_find_repertoire_transpositions_custom_depth(backend):
         assert "ply_depth" in r
 
 
+def test_transposition_potential_prio_score_calculation(backend):
+    """Test that potential priority score is calculated accurately for 1-move and 2-move transpositions."""
+    session = backend.session
+    
+    # Path A: 1. d4 Nf6 2. c4
+    # Path B: 1. c4 (opponent can play Nf6 which transposes into Path A)
+    # Let's populate LichessData for c4 position with Nf6 having 40% frequency (400 / 1000 games)
+    c4_fen = clean_fen("rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR b KQkq -")
+    ld_c4 = LichessData(fen=c4_fen, elo_range="high", moves_json=json.dumps({
+        "g8f6": {"san": "Nf6", "total": 400},
+        "e7e5": {"san": "e5", "total": 600}
+    }))
+    session.add(ld_c4)
+    session.commit()
+
+    results = find_repertoire_transpositions(session, elo_range="high")
+    assert isinstance(results, list)
+    for item in results:
+        assert "priority_score" in item
+        assert "popularity" in item
+        assert item["popularity"] == pytest.approx(item["priority_score"] * 100.0)
+        if item.get("move_san") == "Nf6" and item.get("fen") == c4_fen:
+            # 1.0 (start) * 1.0 (c4) * 0.40 (Nf6) = 0.40 (40%)
+            assert item["priority_score"] == pytest.approx(0.40)
+            assert item["popularity"] == pytest.approx(40.0)
+
+
+def test_transposition_filters_underpromotion_and_captured_promotions(backend):
+    """
+    Test that underpromotions (e.g. exf8=R+, exf8=N) and promotions where the promoted piece
+    is immediately captured (e.g. exf8=Q+ Kxf8) are filtered out from transposition results.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="b"))
+
+    # Position 1 (White to move): White can play exf8=Q+, exf8=R+, exf8=N+
+    board = chess.Board("5rk1/4Pppp/8/8/8/8/8/4K3 w - - 0 1")
+    p_orig = Position(fen=clean_fen(board.fen()))
+    
+    # Target position after Kxf8 (e.g. White played exf8=something, Black played Kxf8)
+    board_after = chess.Board("5k2/5ppp/8/8/8/8/8/4K3 w - - 0 2")
+    p_target = Position(fen=clean_fen(board_after.fen()))
+
+    # Repertoire move from root leading here, target position is active in repertoire
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    session.add_all([p_orig, p_target, p_root])
+    session.flush()
+
+    m_to_orig = Move(from_position_id=p_root.id, to_position_id=p_orig.id, uci="e2e4", san="e4")
+    m_to_target = Move(from_position_id=p_root.id, to_position_id=p_target.id, uci="d2d4", san="d4")
+    session.add_all([m_to_orig, m_to_target])
+    session.flush()
+    session.add(RepertoireMove(move_id=m_to_orig.id, level=1, is_active=True))
+    session.add(RepertoireMove(move_id=m_to_target.id, level=1, is_active=True))
+    session.commit()
+
+    results = find_repertoire_transpositions(session)
+    # Underpromotions and promotions captured on the next move must be filtered out
+    promotion_results = [
+        r for r in results
+        if "=" in r.get("move_san", "") or any(u.endswith(("q", "r", "b", "n")) for u in r.get("path_ucis", []))
+    ]
+    assert len(promotion_results) == 0
+
+
+
+
 
 
 

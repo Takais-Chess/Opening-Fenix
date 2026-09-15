@@ -241,7 +241,7 @@ class RepertoireService:
         from opening_fenix.core.utils import filter_repertoires_by_build_type
         return filter_repertoires_by_build_type(valid_repos)
 
-    def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = False) -> None:
+    def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = False, create_if_missing: bool = True) -> None:
         self.close()
         self.active_repertoire_name = repo_name
         self.is_active_test = (is_test is True)
@@ -250,6 +250,11 @@ class RepertoireService:
             return
 
         db_path = get_repertoire_db_path(repo_name, is_test)
+        if not create_if_missing and (not db_path or not os.path.exists(db_path)):
+            logger.warning(f"Repertoire '{repo_name}' does not exist on disk at {db_path}. Not activating.")
+            self.active_repertoire_name = None
+            return
+
         self.repo_db = DatabaseManager(db_path, base=Base)
         self.repo_session = self.repo_db.get_session()
 

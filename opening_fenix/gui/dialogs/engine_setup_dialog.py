@@ -60,6 +60,10 @@ class EngineActionDialog(QDialog):
         layout.addWidget(lbl_desc)
 
         # Card 1: Download Option
+        dl_layout = QVBoxLayout()
+        dl_layout.setContentsMargins(0, 0, 0, 0)
+        dl_layout.setSpacing(scale(4))
+
         btn_download = QPushButton(tr_ui("engine_setup.btn_download", "⚡ Stockfish automatisch herunterladen (Empfohlen)"))
         btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_download.setStyleSheet(f"""
@@ -76,14 +80,19 @@ class EngineActionDialog(QDialog):
             QPushButton:hover {{ background-color: #e67e22; }}
         """)
         btn_download.clicked.connect(self._on_download_clicked)
-        layout.addWidget(btn_download)
+        dl_layout.addWidget(btn_download)
 
         lbl_dl_hint = QLabel(tr_ui("engine_setup.download_hint", "Lädt die offizielle Universal-Version (~81 MB) direkt von GitHub herunter. 1-Klick Setup, keine manuelle Konfiguration."))
         lbl_dl_hint.setWordWrap(True)
-        lbl_dl_hint.setStyleSheet(f"color: #777; font-size: {scale(11)}px; margin-left: {scale(8)}px; margin-top: {scale(-8)}px;")
-        layout.addWidget(lbl_dl_hint)
+        lbl_dl_hint.setStyleSheet(f"color: #777; font-size: {scale(11)}px; margin-left: {scale(8)}px;")
+        dl_layout.addWidget(lbl_dl_hint)
+        layout.addLayout(dl_layout)
 
         # Card 2: Browse Local Option
+        browse_layout = QVBoxLayout()
+        browse_layout.setContentsMargins(0, 0, 0, 0)
+        browse_layout.setSpacing(scale(4))
+
         btn_browse = QPushButton(tr_ui("engine_setup.btn_browse", "📁 Vorhandene lokale Engine auswählen (.exe)"))
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
         btn_browse.setStyleSheet(f"""
@@ -100,12 +109,13 @@ class EngineActionDialog(QDialog):
             QPushButton:hover {{ background-color: #f8f8f8; border-color: #999; }}
         """)
         btn_browse.clicked.connect(self._on_browse_clicked)
-        layout.addWidget(btn_browse)
+        browse_layout.addWidget(btn_browse)
 
         lbl_browse_hint = QLabel(tr_ui("engine_setup.browse_hint", "Wähle eine bereits installierte Engine auf deiner Festplatte (z.B. Stockfish, Leela Chess Zero, Komodo)."))
         lbl_browse_hint.setWordWrap(True)
-        lbl_browse_hint.setStyleSheet(f"color: #777; font-size: {scale(11)}px; margin-left: {scale(8)}px; margin-top: {scale(-8)}px;")
-        layout.addWidget(lbl_browse_hint)
+        lbl_browse_hint.setStyleSheet(f"color: #777; font-size: {scale(11)}px; margin-left: {scale(8)}px;")
+        browse_layout.addWidget(lbl_browse_hint)
+        layout.addLayout(browse_layout)
 
         # Legal Note
         lbl_legal = QLabel(

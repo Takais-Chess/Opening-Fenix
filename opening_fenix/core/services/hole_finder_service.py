@@ -482,7 +482,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             if f_fen:
                 inactive_adj_fen[f_fen].update(alts)
 
-    # 3. BFS from Root to get reachable active repertoire positions
+    # 3. BFS from Root to get reachable active repertoire positions and reach probabilities
     sp = session.query(Position.id, Position.fen).filter(
         Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
     ).first()
@@ -490,6 +490,28 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
         return []
     root_id, root_fen = sp
     root_norm = clean_fen(root_fen)
+
+    # Pre-fetch Lichess data for elo_range
+    lichess_cache = {}
+    rows = session.query(LichessData).filter_by(elo_range=elo_range).all()
+    if not rows:
+        meta_elo = session.query(Metadata).filter(Metadata.key.in_(["elo", "lichess_elo"])).all()
+        for m_e in meta_elo:
+            if m_e.value and m_e.value.strip() != elo_range:
+                rows = session.query(LichessData).filter_by(elo_range=m_e.value.strip()).all()
+                if rows:
+                    break
+        if not rows:
+            first_ld = session.query(LichessData.elo_range).first()
+            if first_ld:
+                rows = session.query(LichessData).filter_by(elo_range=first_ld[0]).all()
+
+    for ld in rows:
+        clean = clean_fen(ld.fen)
+        try:
+            lichess_cache[clean] = json.loads(ld.moves_json)
+        except Exception:
+            pass
 
     def get_variation_name(pos):
         if not pos:
@@ -503,12 +525,52 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
 
     reachable_fens = {root_norm}
     reachable_depths = {root_norm: 0}
+    reach_probs = {root_id: 1.0}
+    reach_probs_fen = {root_norm: 1.0}
     bfs_queue = collections.deque([(root_id, root_norm, 0)])
     visited_ids = {root_id}
 
     while bfs_queue:
         curr_id, curr_norm, depth = bfs_queue.popleft()
-        for move in rep_moves_from_id.get(curr_id, []):
+        p_curr = reach_probs.get(curr_id, 0.0)
+        curr_is_user = (len(curr_norm.split()) > 1 and curr_norm.split()[1] == player_color)
+        rep_moves = rep_moves_from_id.get(curr_id, [])
+
+        if curr_is_user:
+            if rep_moves:
+                p_split = p_curr / len(rep_moves)
+                for move in rep_moves:
+                    tid = move.to_position_id
+                    if tid:
+                        reach_probs[tid] = reach_probs.get(tid, 0.0) + p_split
+                        t_norm = id_to_clean_fen.get(tid)
+                        if t_norm:
+                            reach_probs_fen[t_norm] = reach_probs[tid]
+        else:
+            lichess_moves = lichess_cache.get(curr_norm, {})
+            total_games = sum(v.get('total', 0) for v in lichess_moves.values())
+            for move in rep_moves:
+                tid = move.to_position_id
+                if tid:
+                    if move.priority_score and move.priority_score > 0:
+                        p_move = move.priority_score
+                    elif total_games > 0:
+                        u = move.uci.strip().lower()
+                        stats = lichess_moves.get(u) or lichess_moves.get(move.san)
+                        if not stats and move.san in CASTLING_SANS:
+                            alt = CASTLING_ALT.get(u)
+                            if alt:
+                                stats = lichess_moves.get(alt)
+                        move_total = stats.get('total', 0) if stats else 0
+                        p_move = p_curr * (move_total / total_games)
+                    else:
+                        p_move = p_curr / len(rep_moves) if rep_moves else 0.0
+                    reach_probs[tid] = reach_probs.get(tid, 0.0) + p_move
+                    t_norm = id_to_clean_fen.get(tid)
+                    if t_norm:
+                        reach_probs_fen[t_norm] = reach_probs[tid]
+
+        for move in rep_moves:
             tid = move.to_position_id
             if tid and tid not in visited_ids:
                 visited_ids.add(tid)
@@ -517,6 +579,33 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     reachable_fens.add(t_norm)
                     reachable_depths[t_norm] = depth + 1
                     bfs_queue.append((tid, t_norm, depth + 1))
+
+    # Helper to calculate potential prio score of an unadded opponent move
+    def calculate_potential_prio(from_pos_id, from_fen, move_uci, move_san):
+        if from_fen == root_norm:
+            p_reach = 1.0
+        else:
+            p_reach = reach_probs.get(from_pos_id) or reach_probs_fen.get(from_fen, 0.0)
+            if p_reach <= 0.0 and from_pos_id:
+                p_obj = fen_to_pos.get(from_fen)
+                if p_obj and p_obj.incoming_moves:
+                    p_reach = max((m.priority_score or 0.0 for m in p_obj.incoming_moves), default=0.0)
+        
+        if p_reach <= 0.0 and from_fen != root_norm:
+            p_reach = 1.0
+
+        lichess_moves = lichess_cache.get(from_fen, {})
+        total_games = sum(v.get('total', 0) for v in lichess_moves.values())
+        if total_games > 0:
+            stats = lichess_moves.get(move_uci) or lichess_moves.get(move_san)
+            if not stats and move_san in CASTLING_SANS:
+                alt = CASTLING_ALT.get(move_uci)
+                if alt:
+                    stats = lichess_moves.get(alt)
+            if stats and stats.get('total', 0) > 0:
+                share = stats.get('total', 0) / total_games
+                return p_reach * share
+        return 0.0
 
     # 4. Helpers to evaluate move soundness when offline / without live engine
     def evaluate_user_move(from_pos, from_fen, move_uci, target_pos, covered_from_inter=None):
@@ -579,6 +668,10 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             if u1 in covered_from_orig or u1 in inactive_from_orig:
                 continue
 
+            # Filter out underpromotions on m1
+            if m1.promotion is not None and m1.promotion != chess.QUEEN:
+                continue
+
             board_1.push(m1)
             t1_fen = clean_fen(board_1.fen())
             board_1.pop()
@@ -597,6 +690,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     except Exception:
                         s1 = u1
 
+                    prio_score = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
                     res_item = {
                         "fen": f_orig,
                         "target_fen": t1_fen,
@@ -608,7 +702,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                         "turn": "opponent",
                         "quality": "",
                         "quality_label": "—",
-                        "popularity": 50,
+                        "priority_score": prio_score,
+                        "popularity": prio_score * 100.0,
                         "ply_depth": orig_depth,
                     }
                     results.append(res_item)
@@ -666,6 +761,15 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     if u1 in covered_from_orig or u1 in inactive_from_orig:
                         continue
 
+                    # Filter out underpromotions on m1
+                    if m1.promotion is not None and m1.promotion != chess.QUEEN:
+                        continue
+
+                    try:
+                        s1 = board_1.san(m1)
+                    except Exception:
+                        s1 = u1
+
                     board_1.push(m1)
                     inter_fen = clean_fen(board_1.fen())
 
@@ -690,6 +794,15 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                             if u2 in inactive_from_inter:
                                 continue
 
+                            # Filter out underpromotions on m2
+                            if m2.promotion is not None and m2.promotion != chess.QUEEN:
+                                continue
+
+                            # Filter out transpositions where m1 was a promotion and m2 captures the promoted piece
+                            # (since piece choice is irrelevant to the resulting position)
+                            if m1.promotion is not None and m2.to_square == m1.to_square:
+                                continue
+
                             board_1.push(m2)
                             t2_fen = clean_fen(board_1.fen())
                             board_1.pop()
@@ -697,7 +810,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                             if t2_fen in fen_to_pos and t2_fen != f_orig and t2_fen != inter_fen:
                                 # Forward-only check (eliminate backward cycles / shallower depth)
                                 t2_depth = reachable_depths.get(t2_fen)
-                                if orig_depth is not None and t2_depth is not None and t2_depth <= orig_depth:
+                                if orig_depth is not None and t2_depth is not None and t2_depth < orig_depth:
                                     continue
 
                                 p_target = fen_to_pos.get(t2_fen)
@@ -721,7 +834,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                     eval_board,
                                                     chess.engine.Limit(depth=depth)
                                                 )
-                                                pv = info.get("pv", [])
+                                                pv = info.get("pv", []) if isinstance(info, dict) else (info[0].get("pv", []) if info else [])
                                                 best_uci = pv[0].uci().lower() if pv else None
                                                 engine_eval_cache[inter_fen] = best_uci
                                                 if best_uci and cache_service:
@@ -743,13 +856,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                             s2 = board_1.san(m2)
                                         except Exception:
                                             s2 = u2
-                                        board_1.pop()
-                                        try:
-                                            s1 = board_1.san(m1)
-                                        except Exception:
-                                            s1 = u1
-                                        board_1.push(m1)
 
+                                        prio_score = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
                                         seq_str = f"{s1}  {s2}"
                                         res_item = {
                                             "fen": f_orig,
@@ -762,7 +870,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                             "turn": "user",
                                             "quality": "ausgezeichnet",
                                             "quality_label": "🟢 Ausgezeichnet",
-                                            "popularity": 70,
+                                            "priority_score": prio_score,
+                                            "popularity": prio_score * 100.0,
                                             "ply_depth": orig_depth,
                                         }
                                         results.append(res_item)

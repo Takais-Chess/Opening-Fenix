@@ -129,6 +129,25 @@ class PGNImportThread(QThread):
         self.finished_signal.emit(success, msg)
 
 
+from opening_fenix.core.services.course_import_service import CourseImportPlan, CourseImportResult, execute_course_import
+
+class CourseImportThread(QThread):
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, str, object)
+
+    def __init__(self, plan: CourseImportPlan):
+        super().__init__()
+        self.plan = plan
+
+    def run(self):
+        def on_progress(pct: int, msg: str):
+            self.progress_signal.emit(pct, msg)
+
+        res = execute_course_import(self.plan, progress_callback=on_progress)
+        self.finished_signal.emit(res.success, res.message, res)
+
+
+
 from opening_fenix.core.services.maintenance_service import run_group_maintenance
 
 class MaintenanceThread(QThread):
@@ -432,6 +451,17 @@ class BfsTranspositionThread(QThread):
                 for move in board.legal_moves:
                     if self._stop:
                         break
+
+                    # Filter out underpromotions
+                    if move.promotion is not None and move.promotion != chess.QUEEN:
+                        continue
+
+                    # If previous move was a promotion and this move captures on the promotion square,
+                    # piece choice does not matter to the resulting position — filter out.
+                    if path_ucis:
+                        prev_move = chess.Move.from_uci(path_ucis[-1])
+                        if prev_move.promotion is not None and move.to_square == prev_move.to_square:
+                            continue
                     
                     nodes_explored += 1
                     # Yield slightly every 1000 nodes to keep UI responsive

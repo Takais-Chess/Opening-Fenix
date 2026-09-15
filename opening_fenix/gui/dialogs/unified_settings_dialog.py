@@ -1224,24 +1224,25 @@ class UnifiedSettingsDialog(QDialog):
 
         curr_active = target_repo
         if not curr_active:
-            if self.backend and getattr(self.backend, 'active_repo_name', None):
+            if self.backend and getattr(self.backend, 'active_repo_name', None) in repos:
                 curr_active = self.backend.active_repo_name
-            elif self.main_window and hasattr(self.main_window, 'active_repo_name') and getattr(self.main_window, 'active_repo_name', None):
+            elif self.main_window and hasattr(self.main_window, 'active_repo_name') and getattr(self.main_window, 'active_repo_name', None) in repos:
                 curr_active = self.main_window.active_repo_name
-            elif self.main_window and hasattr(self.main_window, 'backend') and getattr(self.main_window.backend, 'active_repo_name', None):
+            elif self.main_window and hasattr(self.main_window, 'backend') and getattr(self.main_window.backend, 'active_repo_name', None) in repos:
                 curr_active = self.main_window.backend.active_repo_name
             elif self.main_window and hasattr(self.main_window, 'repertoire_manager'):
-                curr_active = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+                act = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+                if act in repos:
+                    curr_active = act
 
-        if curr_active:
+        if curr_active and curr_active in repos:
             idx = self.combo_active_repo.findData(curr_active)
-            if idx < 0:
-                self.combo_active_repo.addItem(curr_active, curr_active)
-                idx = self.combo_active_repo.findData(curr_active)
             if idx >= 0:
                 self.combo_active_repo.setCurrentIndex(idx)
         elif repos:
             self.combo_active_repo.setCurrentIndex(0)
+        else:
+            self.combo_active_repo.setCurrentIndex(-1)
         self.combo_active_repo.blockSignals(False)
 
     def select_course(self, repo_name: str):
@@ -1272,6 +1273,11 @@ class UnifiedSettingsDialog(QDialog):
         if not repo_name and hasattr(self, 'selected_trainer_repo') and self.selected_trainer_repo:
             repo_name = self.selected_trainer_repo
         if not repo_name:
+            return None
+
+        # Verify repo actually exists before attempting to load or create backend!
+        db_path = get_repertoire_db_path(repo_name)
+        if not db_path or not os.path.exists(db_path):
             return None
 
         from opening_fenix.creator.creator_window import CreatorBackend
@@ -1984,6 +1990,16 @@ class UnifiedSettingsDialog(QDialog):
         lbl_author = QLabel("Entwickelt von Felix. Open Source & frei für die Community.")
         lbl_author.setStyleSheet("color: #777; font-size: 12px;")
         v_card.addWidget(lbl_author)
+
+        lbl_notice = QLabel(
+            "<b>Opening Fenix is free, open-source software available for free at "
+            "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #c0392b;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
+            "<span style='color: #666; font-size: 12px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
+        )
+        lbl_notice.setOpenExternalLinks(True)
+        lbl_notice.setWordWrap(True)
+        lbl_notice.setStyleSheet("font-size: 13px; margin-top: 6px;")
+        v_card.addWidget(lbl_notice)
 
         layout.addWidget(card)
         layout.addStretch()
@@ -3148,6 +3164,12 @@ class UnifiedSettingsDialog(QDialog):
         name = self.combo_active_repo.currentData()
         if not name: return
         if QMessageBox.warning(self, "Löschen", f"Möchtest du '{name}' wirklich unwiderruflich löschen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            # 1. First close backend if it has this repo loaded
+            if self.backend and getattr(self.backend, 'active_repo_name', None) == name:
+                self.backend.close()
+                self.backend.active_repo_name = None
+
+            # 2. Delete repertoire
             if self.main_window and hasattr(self.main_window, 'delete_repertoire_action'):
                 self.main_window.delete_repertoire_action(name)
             else:
@@ -3157,20 +3179,45 @@ class UnifiedSettingsDialog(QDialog):
                     QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"),
                         f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
                     return
-                for w in QApplication.topLevelWidgets():
-                    if hasattr(w, "on_repertoire_deleted"):
-                        try: w.on_repertoire_deleted()
-                        except Exception: pass
-                    elif hasattr(w, "change_repertoire"):
-                        try:
-                            if getattr(getattr(w, "repertoire_manager", None), "active_repertoire_name", None) == name:
-                                w.change_repertoire(None)
-                            w.refresh_repertoire_buttons()
-                        except Exception: pass
+
+            # 3. Notify all application windows
+            for w in QApplication.topLevelWidgets():
+                if hasattr(w, "on_repertoire_deleted"):
+                    try: w.on_repertoire_deleted()
+                    except Exception: pass
+                if hasattr(w, "change_repertoire"):
+                    try:
+                        if getattr(getattr(w, "repertoire_manager", None), "active_repertoire_name", None) == name:
+                            w.repertoire_manager.core.active_repertoire_name = None
+                            if hasattr(w, "sorted_repo_names") and w.sorted_repo_names and name in w.sorted_repo_names:
+                                w.sorted_repo_names.remove(name)
+                            next_repo = w.sorted_repo_names[0] if getattr(w, "sorted_repo_names", None) else None
+                            w.change_repertoire(next_repo)
+                        w.refresh_repertoire_buttons()
+                    except Exception: pass
+
             invalidate_repertoire_levels_cache()
             _scaled_pixmap_cache.clear()
-            self.populate_active_repo_dropdown()
-            self.refresh_creator_info()
+
+            # 4. Refresh dropdown with the first remaining repo, or clear
+            remaining_repos = RepertoireService().get_all_repertoires()
+            next_target = remaining_repos[0] if remaining_repos else None
+            self.populate_active_repo_dropdown(target_repo=next_target)
+            if next_target:
+                self.ensure_backend_for_active_repo()
+                self.refresh_creator_info()
+            else:
+                if self.backend:
+                    self.backend.close()
+                    self.backend.active_repo_name = None
+                self.lbl_cr_name.setText("-")
+                self.txt_cr_desc.clear()
+                self.tbl_cr_levels.setRowCount(0)
+
+            # Also refresh trainer cards if page exists
+            if hasattr(self, 'refresh_trainer_repertoire_cards'):
+                self.refresh_trainer_repertoire_cards()
+
             QMessageBox.information(self, tr_ui("common.success", "Erfolg"), f"Repertoire '{name}' wurde gelöscht.")
 
     # ─── PAGE 4.2: Alternate Good Moves and Prio Score (Creator) ────────────
@@ -3616,6 +3663,10 @@ class UnifiedSettingsDialog(QDialog):
         btn_file.clicked.connect(lambda: self.main_window.import_pgn_file_dialog() if self.main_window and hasattr(self.main_window, 'import_pgn_file_dialog') else None)
         h_imp.addWidget(btn_paste); h_imp.addWidget(btn_file)
         v_imp.addLayout(h_imp)
+
+        btn_course_assistant = QPushButton("⚡ Kurs-Import-Assistent (Chessable PGN)")
+        btn_course_assistant.clicked.connect(lambda: self.main_window.import_course_dialog() if self.main_window and hasattr(self.main_window, 'import_course_dialog') else None)
+        v_imp.addWidget(btn_course_assistant)
         layout.addWidget(g_imp)
 
         g_exp = QGroupBox(tr_widget("repo_settings.export_management_title", "📤 Export & Management"))

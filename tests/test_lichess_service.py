@@ -249,4 +249,72 @@ def test_run_lichess_import_progress_callback_no_eta(mock_user_dir, sample_reper
         assert isinstance(total, int)
 
 
+def test_compute_position_bfs_depths(mock_user_dir, sample_repertoire):
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.utils import get_repertoire_db_path
+    from opening_fenix.core.services.lichess_service import compute_position_bfs_depths
+    
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    try:
+        depths = compute_position_bfs_depths(session)
+        assert len(depths) > 0
+        # Starting position has depth 0
+        min_depth = min(depths.values())
+        assert min_depth == 0
+    finally:
+        session.close()
+        db.close()
+
+
+def test_run_lichess_import_and_calculate_scores_on_cancel(mock_user_dir, sample_repertoire):
+    with patch("opening_fenix.core.services.lichess_service.run_lichess_import") as mock_import, \
+         patch("opening_fenix.core.services.priority_service.calculate_priority_scores") as mock_stats:
+        
+        mock_import.return_value = (False, "Import abgebrochen.")
+        mock_stats.return_value = (True, "Priority OK")
+        
+        success, msg = run_lichess_import_and_calculate_scores(sample_repertoire, "high")
+        assert success is False
+        assert "abgebrochen" in msg
+        # Must still have called calculate_priority_scores
+        assert mock_stats.called
+
+
+def test_adaptive_sliding_window_limiter():
+    from opening_fenix.core.services.lichess_service import AdaptiveSlidingWindowLimiter
+    
+    # 1. Token limiter defaults
+    limiter = AdaptiveSlidingWindowLimiter(has_token=True)
+    assert limiter.target_rpm == 30.0
+    assert limiter.min_rpm == 20.0
+    assert limiter.max_rpm == 80.0
+
+    # 2. Non-token limiter defaults
+    anon_limiter = AdaptiveSlidingWindowLimiter(has_token=False)
+    assert anon_limiter.target_rpm == 20.0
+    assert anon_limiter.min_rpm == 15.0
+    assert anon_limiter.max_rpm == 30.0
+
+    # 3. Dynamic RPM adaptation on low latency
+    for _ in range(25):
+        limiter.record_success(0.04)
+    assert limiter.target_rpm == 31.0
+
+    # 4. Dynamic RPM adaptation on latency spike
+    limiter.record_success(0.450)
+    assert limiter.target_rpm == 28.0
+
+    # 5. Multiplicative backoff on 429
+    limiter.record_429()
+    assert limiter.target_rpm == 20.0  # Hit min_rpm floor
+
+    # 6. Cancellation test in wait_for_slot
+    cancelled = limiter.wait_for_slot(check_cancel=lambda: True)
+    assert cancelled is True
+
+
+
+
 

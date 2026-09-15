@@ -177,13 +177,33 @@ class TrainingManager:
         return daily_data.get(today_str, 0)
 
     def get_visible_repos(self) -> List[str]:
+        all_existing = set(self.repertoire_manager.get_all_repertoires()) if self.repertoire_manager else set()
         if is_free_training_profile(self.profile_name):
             # All repertoires are visible in free training
-            return self.repertoire_manager.get_all_repertoires()
+            return sorted(list(all_existing))
             
         if not self.user_session: return []
         settings = self.user_session.query(UserRepertoireSettings).all()
-        return [s.repertoire_name for s in settings]
+        
+        valid_repos = []
+        orphaned = []
+        for s in settings:
+            if s.repertoire_name in all_existing:
+                valid_repos.append(s.repertoire_name)
+            else:
+                orphaned.append(s)
+
+        # Self-heal profile DB: remove orphaned settings for deleted repertoires
+        if orphaned:
+            try:
+                for s in orphaned:
+                    self.user_session.delete(s)
+                self.user_session.commit()
+            except Exception as e:
+                from opening_fenix.core.logger import logger
+                logger.warning(f"Failed to clean up orphaned profile settings: {e}")
+
+        return valid_repos
 
     def set_repo_visibility(self, repo_name: str, is_visible: bool) -> None:
         if not self.user_session: return

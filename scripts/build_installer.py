@@ -5,6 +5,11 @@ import shutil
 import subprocess
 import PyInstaller.__main__
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 
 def safe_rmtree(path):
     """Safely delete directory trees, clearing read-only attributes on Windows."""
@@ -46,6 +51,8 @@ def _sync_engines(dist_dir):
 def build_private(dist_dir, iscc_exe, iss_file, app_version):
     """Compile the PRIVATE installer (all profiles & repertoires included)."""
     print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires)...")
+
+    _sync_engines(dist_dir)
 
     for marker_dir in [dist_dir, os.path.join(dist_dir, '_internal')]:
         pub_marker = os.path.join(marker_dir, 'PUBLIC_VERSION')
@@ -101,7 +108,8 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                     item_lower = item.lower()
                     if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
                         safe_rmtree(item_path)
-                        print(f" -> Removed non-example repertoire '{item}' from '{repo_dir}'")
+                        safe_item = item.encode('ascii', errors='replace').decode('ascii')
+                        print(f" -> Removed non-example repertoire '{safe_item}' from '{repo_dir}'")
     print(" -> Synced example repertoires to public bundle")
 
     # Remove engines from public bundle (users download Stockfish on-demand to maintain 0 GPL overhead)
@@ -138,40 +146,44 @@ def main():
     args = sys.argv[1:]
     do_private = "--public-only" not in args
     do_public  = "--private-only" not in args
+    skip_build = "--skip-build" in args or "--no-build" in args
 
     if not do_private and not do_public:
         print("ERROR: Cannot combine --public-only and --private-only.")
         sys.exit(1)
 
     # --------------------------------------------------------
-    # Step 1: PyInstaller bundle (always needed)
+    # Step 1: PyInstaller bundle (always needed unless --skip-build)
     # --------------------------------------------------------
     dist_dir = os.path.join(project_root, 'dist', 'Opening Fenix')
-    if os.path.exists(dist_dir):
-        # Try to cleanly remove dist_dir without touching any running processes.
-        safe_rmtree(dist_dir)
-        # If files inside dist_dir are locked, only terminate processes running specifically from dist_dir.
+    if skip_build and os.path.exists(dist_dir):
+        print("\n1. Skipping PyInstaller build (--skip-build specified and dist/ exists)...")
+    else:
         if os.path.exists(dist_dir):
-            try:
-                norm_target = os.path.normcase(os.path.abspath(dist_dir))
-                ps_script = (
-                    f"$target = '{norm_target}'; "
-                    "Get-Process | Where-Object { $_.Path -and ($_.Path.ToLower().StartsWith($target.ToLower())) } | "
-                    "Select-Object -ExpandProperty Id"
-                )
-                res = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script], capture_output=True, text=True)
-                for line in res.stdout.splitlines():
-                    pid = line.strip()
-                    if pid.isdigit():
-                        subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
-                import time
-                time.sleep(0.5)
-                safe_rmtree(dist_dir)
-            except Exception:
-                pass
+            # Try to cleanly remove dist_dir without touching any running processes.
+            safe_rmtree(dist_dir)
+            # If files inside dist_dir are locked, only terminate processes running specifically from dist_dir.
+            if os.path.exists(dist_dir):
+                try:
+                    norm_target = os.path.normcase(os.path.abspath(dist_dir))
+                    ps_script = (
+                        f"$target = '{norm_target}'; "
+                        "Get-Process | Where-Object { $_.Path -and ($_.Path.ToLower().StartsWith($target.ToLower())) } | "
+                        "Select-Object -ExpandProperty Id"
+                    )
+                    res = subprocess.run(['powershell', '-NoProfile', '-Command', ps_script], capture_output=True, text=True)
+                    for line in res.stdout.splitlines():
+                        pid = line.strip()
+                        if pid.isdigit():
+                            subprocess.run(['taskkill', '/F', '/PID', pid], capture_output=True)
+                    import time
+                    time.sleep(0.5)
+                    safe_rmtree(dist_dir)
+                except Exception:
+                    pass
 
-    print("\n1. Building PyInstaller Application Bundle...")
-    PyInstaller.__main__.run(['--noconfirm', 'Opening Fenix.spec'])
+        print("\n1. Building PyInstaller Application Bundle...")
+        PyInstaller.__main__.run(['--noconfirm', 'Opening Fenix.spec'])
 
     dist_dir = os.path.join(project_root, 'dist', 'Opening Fenix')
     if not os.path.exists(dist_dir):

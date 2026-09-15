@@ -4,7 +4,8 @@ from opening_fenix.core.utils import (
     parse_comment,
     format_multilingual_comment,
     parse_pgn_tagged_comment,
-    combine_comments
+    combine_comments,
+    clean_comment_text
 )
 
 def test_parse_plain_text_comment():
@@ -69,6 +70,20 @@ def test_combine_comments_with_target_lang():
     dict_en = get_multilingual_comment_dict(res_en, default_lang="en")
     assert dict_en.get("en") == "English plain comment"
     assert dict_en.get("de") is None
+
+def test_clean_comment_text():
+    raw = "Apart from\n3.Nc3\n,\nthe Advance Variation with (\n3.e5\nBf5\n)\nis dangerous."
+    cleaned = clean_comment_text(raw)
+    assert cleaned == "Apart from 3.Nc3, the Advance Variation with (3.e5 Bf5) is dangerous."
+
+def test_combine_comments_near_duplicate():
+    v1 = "The Advance Variation with 3.e5 tends to be the acid test for Black in modern chess. White gains central space and establishes a firm grip on d4 and e5 with great opportunities."
+    v2 = "The Advance Variation with 3.e5 tends to be the acid test for Black in modern chess. White gains central space and establishes a firm grip on d4 and e5 with great dynamic opportunities."
+    
+    combined = combine_comments(v1, v2, default_lang="en")
+    # Must not duplicate with ' | ' because they are 95% identical
+    assert " | " not in combined
+    assert "great dynamic opportunities" in combined
 
 def test_copy_repertoire_comments(mock_user_dir, sample_repertoire):
     from opening_fenix.core.data_tools import copy_repertoire_comments
