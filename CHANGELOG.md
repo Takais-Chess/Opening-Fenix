@@ -10,7 +10,8 @@ All notable changes to this project will be documented in this file.
 - **3 Core Metric Badges**: Real-world Lichess expected win rate (Effectiveness), Stockfish path evaluation score (Soundness), and memory load categorization (Learnability).
 - **1-Step Move Coverage Curve**: Dynamic step-by-step opponent coverage curve tracking book survival rate per move with colored visual indicators.
 - **Clean Level Sizing Breakdown**: Non-cluttered text breakdown of unique positions across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
-- **2-Move Transposition Scanner Speed & Quality Overhaul**: Fixed engine depth variable shadowing bug that caused runaway engine analysis on deep lines, added 15-centipawn tolerance (`🟡 Solide (-X cp)`) accepting practical transposition moves alongside top engine moves, implemented lazy SAN computation, and added detailed real-time logging.
+- **2-Move Transposition Scanner Speed & Quality Overhaul**: Fixed engine depth variable shadowing bug that caused runaway engine analysis on deep lines, tuned tolerance to 10 centipawns (`🟡 Solide (-X cp)`) accepting practical transposition moves alongside top engine moves, implemented lazy SAN computation, and added detailed real-time logging.
+- **Transposition Scan System Responsiveness**: Prevented full system freezing during deep multi-move scans by dynamically reserving at least 1 CPU core for the OS and UI, lowering per-position engine analysis timeout from 10s to 5s, and inserting GIL yields between evaluations.
 
 ## [0.9.12] - 2026-09-15
  

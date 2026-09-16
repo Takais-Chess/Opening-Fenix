@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import subprocess
+import time
 import chess
 import chess.engine
 from sqlalchemy.orm import Session
@@ -724,7 +725,9 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                 active_engine = chess.engine.SimpleEngine.popen_uci(
                     engine_path, creationflags=creationflags
                 )
-                active_engine.configure({"Threads": max(1, int(threads_count))})
+                # Reserve 1 CPU thread for the OS / UI so the PC stays responsive.
+                scan_threads = max(1, int(threads_count) - 1)
+                active_engine.configure({"Threads": scan_threads})
                 own_engine = True
             except Exception:
                 active_engine = None
@@ -839,7 +842,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                 eval_board = chess.Board(inter_fen + " 0 1")
                                                 info = active_engine.analyse(
                                                     eval_board,
-                                                    chess.engine.Limit(depth=target_engine_depth, time=10.0)
+                                                    chess.engine.Limit(depth=target_engine_depth, time=5.0)
                                                 )
                                                 pv = info.get("pv", []) if isinstance(info, dict) else (info[0].get("pv", []) if info else [])
                                                 best_uci = pv[0].uci().lower() if pv else None
@@ -857,6 +860,9 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
 
                                                 if best_uci and cache_service:
                                                     cache_service.set_best_move(inter_fen, target_engine_depth, best_uci)
+
+                                                # Yield to OS so the PC stays responsive between engine calls.
+                                                time.sleep(0)
                                             except Exception as e:
                                                 logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen}: {e}")
                                                 engine_eval_cache[inter_fen] = None
@@ -881,7 +887,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                     eval_board = chess.Board(inter_fen + " 0 1")
                                                     u2_info = active_engine.analyse(
                                                         eval_board,
-                                                        chess.engine.Limit(depth=target_engine_depth, time=10.0),
+                                                        chess.engine.Limit(depth=target_engine_depth, time=5.0),
                                                         root_moves=[chess.Move.from_uci(u2)]
                                                     )
                                                     u2_score_obj = u2_info.get("score") if isinstance(u2_info, dict) else (u2_info[0].get("score") if u2_info else None)
