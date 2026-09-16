@@ -5807,7 +5807,7 @@ class CreatorWindow(QMainWindow):
                                     found_row = r
                                     break
                     if found_row == -1:
-                        if self.table_transpositions.rowCount() == 1 and self.table_transpositions.rowSpan(0, 0) > 1:
+                        if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
                             self.table_transpositions.clearSpans()
                             self.table_transpositions.setRowCount(0)
                         
@@ -5839,7 +5839,7 @@ class CreatorWindow(QMainWindow):
                         self.table_transpositions.selectRow(found_row)
 
                 elif p_depth == 2:
-                    if self.table_transpositions.rowCount() == 1 and self.table_transpositions.rowSpan(0, 0) > 1:
+                    if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
                         self.table_transpositions.clearSpans()
                         self.table_transpositions.setRowCount(0)
 

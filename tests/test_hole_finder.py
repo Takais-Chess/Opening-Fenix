@@ -1221,9 +1221,9 @@ def test_transposition_filters_underpromotion_and_captured_promotions(backend):
     assert len(promotion_results) == 0
 
 
-def test_2move_transposition_within_15cp_accepted(backend):
+def test_2move_transposition_within_10cp_accepted(backend):
     """
-    When the user's transposition move is not the #1 move, but is within 15 centipawns
+    When the user's transposition move is not the #1 move, but is within 10 centipawns
     of the best move, it must be accepted with quality 'solide'.
     """
     from unittest.mock import MagicMock
@@ -1255,7 +1255,7 @@ def test_2move_transposition_within_15cp_accepted(backend):
 
     # Mock engine:
     # 1. Main analysis returns best_uci = "d2d4" with score = 40 cp
-    # 2. root_moves analysis for g1f3 returns score = 32 cp (loss = 8 cp <= 15 cp)
+    # 2. root_moves analysis for g1f3 returns score = 32 cp (loss = 8 cp <= 10 cp)
     mock_engine = MagicMock()
     class MockScore:
         def __init__(self, cp):
