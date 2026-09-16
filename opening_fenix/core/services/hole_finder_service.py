@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTLING_SANS
+from opening_fenix.core.logger import logger
 
 def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                         engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
@@ -523,6 +524,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             "Variante"
         )
 
+    target_engine_depth = depth
     reachable_fens = {root_norm}
     reachable_depths = {root_norm: 0}
     reach_probs = {root_id: 1.0}
@@ -531,7 +533,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
     visited_ids = {root_id}
 
     while bfs_queue:
-        curr_id, curr_norm, depth = bfs_queue.popleft()
+        curr_id, curr_norm, curr_ply = bfs_queue.popleft()
         p_curr = reach_probs.get(curr_id, 0.0)
         curr_is_user = (len(curr_norm.split()) > 1 and curr_norm.split()[1] == player_color)
         rep_moves = rep_moves_from_id.get(curr_id, [])
@@ -577,8 +579,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                 t_norm = id_to_clean_fen.get(tid)
                 if t_norm:
                     reachable_fens.add(t_norm)
-                    reachable_depths[t_norm] = depth + 1
-                    bfs_queue.append((tid, t_norm, depth + 1))
+                    reachable_depths[t_norm] = curr_ply + 1
+                    bfs_queue.append((tid, t_norm, curr_ply + 1))
 
     # Helper to calculate potential prio score of an unadded opponent move
     def calculate_potential_prio(from_pos_id, from_fen, move_uci, move_san):
@@ -765,11 +767,6 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     if m1.promotion is not None and m1.promotion != chess.QUEEN:
                         continue
 
-                    try:
-                        s1 = board_1.san(m1)
-                    except Exception:
-                        s1 = u1
-
                     board_1.push(m1)
                     inter_fen = clean_fen(board_1.fen())
 
@@ -817,14 +814,24 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                 key = (f_orig, t2_fen, f"{u1}_{u2}")
                                 if key not in seen_keys:
                                     seen_keys.add(key)
+                                    logger.info(f"[Transpos-2M] Candidate: from {f_orig} -> m1: {u1} -> m2: {u2} -> reaches {t2_fen}")
 
-                                    # User plays m2: evaluate if user move is the best move
+                                    # User plays m2: evaluate if user move is sound (within 15 cp of best move)
                                     is_best = False
-                                    if inter_fen not in engine_eval_cache:
+                                    quality = "ausgezeichnet"
+                                    quality_label = "🟢 Ausgezeichnet"
+
+                                    eval_data = engine_eval_cache.get(inter_fen)
+                                    if eval_data is None:
                                         # 1. Check persistent global cache
-                                        cached_move = cache_service.get_best_move(inter_fen, min_depth=depth) if cache_service else None
+                                        cached_move = cache_service.get_best_move(inter_fen, min_depth=target_engine_depth) if cache_service else None
                                         if cached_move is not None:
-                                            engine_eval_cache[inter_fen] = cached_move
+                                            eval_data = {
+                                                "best_uci": cached_move,
+                                                "best_score": None,
+                                                "moves": {cached_move: 0}
+                                            }
+                                            engine_eval_cache[inter_fen] = eval_data
                                         elif active_engine is not None:
                                             if cancel_check and cancel_check():
                                                 break
@@ -832,26 +839,92 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                 eval_board = chess.Board(inter_fen + " 0 1")
                                                 info = active_engine.analyse(
                                                     eval_board,
-                                                    chess.engine.Limit(depth=depth)
+                                                    chess.engine.Limit(depth=target_engine_depth, time=10.0)
                                                 )
                                                 pv = info.get("pv", []) if isinstance(info, dict) else (info[0].get("pv", []) if info else [])
                                                 best_uci = pv[0].uci().lower() if pv else None
-                                                engine_eval_cache[inter_fen] = best_uci
+                                                score_obj = info.get("score") if isinstance(info, dict) else (info[0].get("score") if info else None)
+                                                best_score = score_obj.relative.score(mate_score=10000) if score_obj else None
+
+                                                eval_data = {
+                                                    "best_uci": best_uci,
+                                                    "best_score": best_score,
+                                                    "moves": {}
+                                                }
+                                                if best_uci and best_score is not None:
+                                                    eval_data["moves"][best_uci] = best_score
+                                                engine_eval_cache[inter_fen] = eval_data
+
                                                 if best_uci and cache_service:
-                                                    cache_service.set_best_move(inter_fen, depth, best_uci)
-                                            except Exception:
+                                                    cache_service.set_best_move(inter_fen, target_engine_depth, best_uci)
+                                            except Exception as e:
+                                                logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen}: {e}")
                                                 engine_eval_cache[inter_fen] = None
 
-                                    best_uci = engine_eval_cache.get(inter_fen)
-                                    if best_uci is not None:
-                                        # Strict: User move m2 must be the #1 best move at configured depth
-                                        is_best = (u2 == best_uci)
+                                    if eval_data:
+                                        best_uci = eval_data.get("best_uci")
+                                        best_score = eval_data.get("best_score")
+
+                                        if u2 == best_uci:
+                                            is_best = True
+                                            quality = "ausgezeichnet"
+                                            quality_label = "🟢 Ausgezeichnet"
+                                            logger.info(f"[Transpos-2M] ✓ m2={u2} is the #1 engine move from {inter_fen}")
+                                        elif best_score is not None and active_engine is not None:
+                                            # Check if u2 was already scored for this inter_fen
+                                            if u2 in eval_data["moves"]:
+                                                u2_score = eval_data["moves"][u2]
+                                            else:
+                                                if cancel_check and cancel_check():
+                                                    break
+                                                try:
+                                                    eval_board = chess.Board(inter_fen + " 0 1")
+                                                    u2_info = active_engine.analyse(
+                                                        eval_board,
+                                                        chess.engine.Limit(depth=target_engine_depth, time=10.0),
+                                                        root_moves=[chess.Move.from_uci(u2)]
+                                                    )
+                                                    u2_score_obj = u2_info.get("score") if isinstance(u2_info, dict) else (u2_info[0].get("score") if u2_info else None)
+                                                    u2_score = u2_score_obj.relative.score(mate_score=10000) if u2_score_obj else None
+                                                    eval_data["moves"][u2] = u2_score
+                                                except Exception as ex:
+                                                    logger.warning(f"[Transpos-2M] Engine root_move eval error for {u2}: {ex}")
+                                                    u2_score = None
+
+                                            if u2_score is not None:
+                                                cp_loss = best_score - u2_score
+                                                if cp_loss <= 15:
+                                                    is_best = True
+                                                    quality = "solide"
+                                                    quality_label = f"🟡 Solide (-{cp_loss} cp)" if cp_loss > 0 else "🟢 Ausgezeichnet"
+                                                    logger.info(f"[Transpos-2M] ✓ m2={u2} accepted: loss {cp_loss} cp <= 15 cp (best={best_uci} [{best_score} cp], m2=[{u2_score} cp])")
+                                                else:
+                                                    logger.info(f"[Transpos-2M] ✗ m2={u2} rejected: loss {cp_loss} cp > 15 cp (best={best_uci} [{best_score} cp], m2=[{u2_score} cp])")
+                                            else:
+                                                logger.info(f"[Transpos-2M] ✗ m2={u2} could not be evaluated by engine")
+                                        else:
+                                            # Fallback if best_score is None (e.g. mock engine or cached move without score)
+                                            is_best = (u2 == best_uci)
+                                            if not is_best:
+                                                logger.info(f"[Transpos-2M] ✗ m2={u2} != best_uci={best_uci} (no engine scores available)")
                                     elif active_engine is None:
                                         # Offline fallback when no live engine is configured and not in cache
                                         is_best = evaluate_user_move(p_inter, inter_fen, u2, p_target, covered_from_inter)
+                                        if is_best:
+                                            logger.info(f"[Transpos-2M] ✓ m2={u2} accepted via offline heuristic")
+                                        else:
+                                            logger.info(f"[Transpos-2M] ✗ m2={u2} rejected via offline heuristic")
 
                                     if is_best:
                                         # Lazy SAN calculation
+                                        board_1.pop()
+                                        try:
+                                            s1 = board_1.san(m1)
+                                        except Exception:
+                                            s1 = u1
+                                        finally:
+                                            board_1.push(m1)
+
                                         try:
                                             s2 = board_1.san(m2)
                                         except Exception:
@@ -868,8 +941,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                             "depth": 2,
                                             "type": "transposition_2",
                                             "turn": "user",
-                                            "quality": "ausgezeichnet",
-                                            "quality_label": "🟢 Ausgezeichnet",
+                                            "quality": quality,
+                                            "quality_label": quality_label,
                                             "priority_score": prio_score,
                                             "popularity": prio_score * 100.0,
                                             "ply_depth": orig_depth,

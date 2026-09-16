@@ -11,8 +11,34 @@ from opening_fenix.core.utils import (
     get_repertoire_db_path,
     initialize_repertoire_assets,
     migrate_repertoire_storage,
-    localize_san
+    localize_san,
+    natural_sort_key
 )
+
+def test_natural_sort_key():
+    items = [
+        "11) Archangel with 7.Nxe5",
+        "1) Archangel with 5.Qe2",
+        "2) Archangel with 6.c3",
+        "10) Archangel with 6.d3",
+        "100) Deep line",
+        "Quickstarter Guide",
+        "20) Another variation",
+    ]
+    sorted_items = sorted(items, key=natural_sort_key)
+    expected = [
+        "1) Archangel with 5.Qe2",
+        "2) Archangel with 6.c3",
+        "10) Archangel with 6.d3",
+        "11) Archangel with 7.Nxe5",
+        "20) Another variation",
+        "100) Deep line",
+        "Quickstarter Guide",
+    ]
+    assert sorted_items == expected
+    # Test None and empty string
+    assert natural_sort_key(None) == []
+    assert natural_sort_key("") == []
 
 def test_get_paths():
     # Basic sanity checks

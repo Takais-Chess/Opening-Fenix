@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import difflib
+from typing import Any
 
 ELO_DISPLAY_MAP = {
     "low": "Hobby Spieler",
@@ -36,6 +37,21 @@ CASTLING_ALT = {
     'e8g8': 'e8h8', 'e8h8': 'e8g8',
     'e8c8': 'e8a8', 'e8a8': 'e8c8',
 }
+
+def natural_sort_key(s: Any) -> list:
+    """
+    Key function for natural (alphanumeric) sorting.
+    Splits string into numeric and non-numeric chunks so that e.g.:
+    '1) Archangel' < '2) Archangel' < '11) Archangel'.
+    Guaranteed type-safe by tagging chunks with (0, int) and (1, str).
+    """
+    if s is None:
+        return []
+    return [
+        (0, int(text)) if text.isdigit() else (1, text.lower())
+        for text in re.split(r'(\d+)', str(s))
+        if text
+    ]
 
 def normalize_castling_uci(uci: str, san: str = None) -> str:
     """
@@ -419,11 +435,13 @@ def ensure_user_data_seeded():
     is_pub = is_public_version()
 
     profiles_seeded = False
+    repertoires_seeded = False
     if os.path.exists(user_config):
         try:
             with open(user_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             profiles_seeded = cfg.get("profiles_seeded", False)
+            repertoires_seeded = cfg.get("repertoires_seeded", False)
         except Exception:
             pass
 
@@ -441,12 +459,30 @@ def ensure_user_data_seeded():
             except Exception:
                 pass
 
+    # If repertoires_seeded is not yet recorded, check if repertoires already exist in user_dir
+    dest_repertoires = os.path.join(user_dir, "repertoires")
+    if not repertoires_seeded and os.path.exists(dest_repertoires) and os.listdir(dest_repertoires):
+        repertoires_seeded = True
+        if os.path.exists(user_config):
+            try:
+                with open(user_config, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                cfg["repertoires_seeded"] = True
+                with open(user_config, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=4, ensure_ascii=False)
+            except Exception:
+                pass
+
     for folder in ["profiles", "repertoires"]:
         if is_pub and folder == "profiles":
             continue
         if folder == "profiles" and profiles_seeded:
             # Do NOT re-seed profiles once initial seeding is complete;
             # otherwise user-deleted profiles will reappear on restart.
+            continue
+        if folder == "repertoires" and repertoires_seeded:
+            # Do NOT re-seed repertoires once initial seeding is complete;
+            # otherwise user-deleted/renamed repertoires will reappear on restart.
             continue
 
         dest_folder = os.path.join(user_dir, folder)
@@ -476,12 +512,13 @@ def ensure_user_data_seeded():
                         except Exception as e:
                             print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
 
-    # Mark profiles as seeded in config.json after seeding
-    if not profiles_seeded and os.path.exists(user_config):
+    # Mark profiles and repertoires as seeded in config.json after seeding
+    if (not profiles_seeded or not repertoires_seeded) and os.path.exists(user_config):
         try:
             with open(user_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
             cfg["profiles_seeded"] = True
+            cfg["repertoires_seeded"] = True
             with open(user_config, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=4, ensure_ascii=False)
         except Exception:
@@ -966,12 +1003,12 @@ def get_repertoire_comment_stats(session) -> str:
     return ", ".join(parts)
 
 
-def release_repertoire_locks(repo_name: str) -> None:
+def release_repertoire_locks(repo_name: str, checkpoint_wal: bool = False) -> None:
     """
     Safely terminates any background threads, closes database sessions/managers,
-    checkpoints SQLite WAL files, and removes read-only file attributes for the
+    optionally checkpoints SQLite WAL files, and removes read-only file attributes for the
     specified repertoire across the entire application.
-    Vital on Windows to avoid [WinError 5] Zugriff verweigert during rename or delete.
+    Vital on Windows to avoid [WinError 5] or [WinError 32] during rename or delete.
     """
     if not repo_name:
         return
@@ -989,13 +1026,21 @@ def release_repertoire_locks(repo_name: str) -> None:
         if app:
             for w in app.topLevelWidgets():
                 try:
+                    # Check CreatorWindow save timer
+                    if hasattr(w, "save_timer") and w.save_timer:
+                        try:
+                            w.save_timer.stop()
+                            w.details_changed = False
+                        except Exception:
+                            pass
+
                     # Check CreatorWindow enrichment threads
                     if hasattr(w, "enrichment_threads") and isinstance(w.enrichment_threads, list):
                         for t in list(w.enrichment_threads):
                             try:
                                 if getattr(t, "repo_name", None) == repo_name:
                                     t.requestInterruption()
-                                    t.wait(300)
+                                    t.wait(1000)
                                     if t in w.enrichment_threads:
                                         w.enrichment_threads.remove(t)
                             except Exception:
@@ -1007,7 +1052,7 @@ def release_repertoire_locks(repo_name: str) -> None:
                             w.engine_thread.stop_engine()
                             w.engine_thread.running = False
                             w.engine_thread.is_active = False
-                            w.engine_thread.wait(300)
+                            w.engine_thread.wait(1000)
                         except Exception:
                             pass
 
@@ -1022,9 +1067,9 @@ def release_repertoire_locks(repo_name: str) -> None:
                                 try:
                                     if hasattr(th, "stop"):
                                         th.stop()
-                                    elif hasattr(th, "requestInterruption"):
+                                    if hasattr(th, "requestInterruption"):
                                         th.requestInterruption()
-                                    th.wait(300)
+                                    th.wait(2000)
                                 except Exception:
                                     pass
                                 try:
@@ -1039,7 +1084,7 @@ def release_repertoire_locks(repo_name: str) -> None:
                             if sw:
                                 try:
                                     sw.requestInterruption()
-                                    sw.wait(300)
+                                    sw.wait(2000)
                                 except Exception:
                                     pass
                                 try:
@@ -1051,7 +1096,9 @@ def release_repertoire_locks(repo_name: str) -> None:
                     for b_attr in ["backend", "_owned_backend"]:
                         if hasattr(w, b_attr):
                             b = getattr(w, b_attr)
-                            if b and getattr(b, "active_repo_name", None) == repo_name:
+                            b_name = getattr(b, "active_repo_name", None)
+                            w_name = getattr(w, "active_repo_name", None)
+                            if b and (b_name == repo_name or w_name == repo_name):
                                 try:
                                     b.close()
                                     b.active_repo_name = None
@@ -1082,47 +1129,48 @@ def release_repertoire_locks(repo_name: str) -> None:
     except Exception as e:
         logger.debug(f"Error accessing Qt widgets for lock release: {e}")
 
-    # 2. Dispose any open DatabaseManager instances bound to regular or test database paths
+    # 2. Dispose any open DatabaseManager instances bound to regular or test database paths or dirs
     try:
         from opening_fenix.core.db.database import DatabaseManager
         for is_t in (False, True):
             p = get_repertoire_db_path(repo_name, is_test=is_t)
             if p:
                 DatabaseManager.close_all_for_path(p)
+            d = get_repertoire_dir(repo_name, is_test=is_t)
+            if d:
+                DatabaseManager.close_all_for_directory(d)
     except Exception as e:
         logger.debug(f"Error disposing DatabaseManager instances for {repo_name}: {e}")
 
-    # 3. Checkpoint WAL and truncate auxiliary files if DB exists (regular and test)
+    # 3. Checkpoint WAL and truncate auxiliary files ONLY if requested (e.g. rename, not delete)
+    if checkpoint_wal:
+        for is_t in (False, True):
+            db_path = get_repertoire_db_path(repo_name, is_test=is_t)
+            if db_path and os.path.exists(db_path):
+                try:
+                    conn = sqlite3.connect(db_path, timeout=3)
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                except Exception as e:
+                    logger.debug(f"WAL checkpoint for {repo_name} (is_test={is_t}): {e}")
+
+    # 4. Strip read-only attributes on directory and all files (regular and test)
     for is_t in (False, True):
-        db_path = get_repertoire_db_path(repo_name, is_test=is_t)
-        if db_path and os.path.exists(db_path):
+        repo_dir = get_repertoire_dir(repo_name, is_test=is_t)
+        if repo_dir and os.path.exists(repo_dir):
             try:
-                conn = sqlite3.connect(db_path, timeout=3)
-                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                conn.close()
-            except Exception as e:
-                logger.debug(f"WAL checkpoint for {repo_name} (is_test={is_t}): {e}")
+                os.chmod(repo_dir, stat.S_IWRITE)
+            except Exception:
+                pass
+            for root, dirs, files in os.walk(repo_dir):
+                for d in dirs:
+                    try: os.chmod(os.path.join(root, d), stat.S_IWRITE)
+                    except Exception: pass
+                for f in files:
+                    try: os.chmod(os.path.join(root, f), stat.S_IWRITE)
+                    except Exception: pass
 
-    # 3. Strip read-only attributes on directory and all files
-    repo_dir = get_repertoire_dir(repo_name)
-    if repo_dir and os.path.exists(repo_dir):
-        try:
-            os.chmod(repo_dir, stat.S_IWRITE)
-        except Exception:
-            pass
-        for root, dirs, files in os.walk(repo_dir):
-            for d in dirs:
-                try:
-                    os.chmod(os.path.join(root, d), stat.S_IWRITE)
-                except Exception:
-                    pass
-            for f in files:
-                try:
-                    os.chmod(os.path.join(root, f), stat.S_IWRITE)
-                except Exception:
-                    pass
-
-    # 4. Trigger garbage collection to release file descriptors held by Python objects
+    # 5. Trigger garbage collection to release file descriptors held by Python objects
     gc.collect()
     try:
         from PyQt6.QtWidgets import QApplication

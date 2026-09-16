@@ -2,6 +2,16 @@
  
 All notable changes to this project will be documented in this file.
  
+## [0.9.13] - 2026-09-16
+ 
+### Added & Improved
+- **Repertoire Statistics & Insights**: Introduced a dedicated Statistics modal accessible directly from the Creator toolbar (right of the Resources button).
+- **Opening Scope Detection**: Smart root branch detection (e.g. `Gegen 1.e4`, `1.d4 Repertoire`) that scopes coverage curves and expected win rates specifically within the course's focus, eliminating false alerts for out-of-scope openings.
+- **3 Core Metric Badges**: Real-world Lichess expected win rate (Effectiveness), Stockfish path evaluation score (Soundness), and memory load categorization (Learnability).
+- **1-Step Move Coverage Curve**: Dynamic step-by-step opponent coverage curve tracking book survival rate per move with colored visual indicators.
+- **Clean Level Sizing Breakdown**: Non-cluttered text breakdown of unique positions across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
+- **2-Move Transposition Scanner Speed & Quality Overhaul**: Fixed engine depth variable shadowing bug that caused runaway engine analysis on deep lines, added 15-centipawn tolerance (`🟡 Solide (-X cp)`) accepting practical transposition moves alongside top engine moves, implemented lazy SAN computation, and added detailed real-time logging.
+
 ## [0.9.12] - 2026-09-15
  
 ### Added & Improved

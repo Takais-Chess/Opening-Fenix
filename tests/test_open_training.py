@@ -78,3 +78,21 @@ def test_open_training_setup_dialog_init(qapp, repertoire_manager):
     repo, level, variation, comment_lang = dlg.get_selections()
     assert level == 999 or isinstance(level, int)
     assert comment_lang in ("auto", "en", "de")
+
+
+def test_open_training_setup_dialog_taskbar_close_filter(qapp, repertoire_manager):
+    import sys
+    class MockMainWindow:
+        def __init__(self, rm):
+            self.repertoire_manager = rm
+            self.training_manager = TrainingManager(profile_name="Freies Training", repertoire_manager=rm)
+            self.active_variation_filter = None
+
+    mock_mw = MockMainWindow(repertoire_manager)
+    dlg = OpenTrainingSetupDialog(mock_mw)
+
+    if sys.platform == "win32":
+        assert getattr(dlg, "_taskbar_filter", None) is not None
+
+    dlg.reject()
+    assert getattr(dlg, "_taskbar_filter", None) is None

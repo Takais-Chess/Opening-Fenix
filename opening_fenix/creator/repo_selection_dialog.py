@@ -42,6 +42,7 @@ class NewRepertoireDialog(QDialog):
         self.setFixedWidth(scale(420))
         set_consistent_icon(self)
         self.setStyleSheet(get_login_dialog_style())
+        self._taskbar_filter = install_taskbar_close_filter(self)
         self.init_ui()
 
     def init_ui(self):
@@ -179,15 +180,28 @@ class NewRepertoireDialog(QDialog):
                 )
             )
             return
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
         super().accept()
+
+    def reject(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().reject()
+
+    def closeEvent(self, event):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().closeEvent(event)
 
 
 class RepoSelectionButton(QPushButton):
     def __init__(self, name, parent=None):
         super().__init__("", parent)
         self.repo_name = name
-        self.setFixedSize(scale(160), scale(200))
+        self.setFixedSize(scale(160), scale(196))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(name)
         self.setStyleSheet(f"""
             QPushButton {{
                 background-color: rgba(255, 255, 255, 0.4);
@@ -207,8 +221,8 @@ class RepoSelectionButton(QPushButton):
         """)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
-        layout.setSpacing(scale(6))
+        layout.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
+        layout.setSpacing(scale(4))
         
         self.lbl_image = QLabel()
         self.lbl_image.setFixedSize(scale(140), scale(140))
@@ -237,18 +251,37 @@ class RepoSelectionButton(QPushButton):
             
         layout.addWidget(self.lbl_image)
         
+        # Dynamic Auto-Shrink Font Size (supports 1 to 3 lines cleanly without wasted vertical space)
+        font_size = self._calculate_font_size(name, max_width=scale(140), max_height=scale(36))
+
         self.lbl_title = QLabel(name)
         self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_title.setWordWrap(True)
+        self.lbl_title.setToolTip(name)
         self.lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.lbl_title.setStyleSheet(f"font-size: {scale(12)}px; font-weight: bold; color: {COLORS['brown_text']}; border: none; background: transparent;")
+        self.lbl_title.setStyleSheet(f"font-size: {font_size}px; font-weight: bold; color: {COLORS['brown_text']}; border: none; background: transparent;")
         layout.addWidget(self.lbl_title)
+
+    def _calculate_font_size(self, text: str, max_width: int, max_height: int) -> int:
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtGui import QFontMetrics
+        for size in [12, 11, 10, 9]:
+            scaled_sz = scale(size)
+            font = QFont("Segoe UI")
+            font.setPixelSize(scaled_sz)
+            font.setBold(True)
+            fm = QFontMetrics(font)
+            rect = fm.boundingRect(QRect(0, 0, max_width, 1000), int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter), text)
+            if rect.height() <= max_height:
+                return scaled_sz
+        return scale(9)
 
 class RepoSelectionDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("repo_selection.window_title", "Repertoire laden"))
-        self.setMinimumSize(scale(800), scale(680))
+        self.setMinimumSize(scale(800), scale(640))
         self.selected_repo = None
         self.is_new_repo = False
         self.new_color = 'w'

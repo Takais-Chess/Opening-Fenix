@@ -15,7 +15,8 @@ from opening_fenix.core.utils import (
     get_repertoire_db_path,
     initialize_repertoire_assets,
     combine_comments,
-    normalize_castling_uci
+    normalize_castling_uci,
+    natural_sort_key
 )
 from opening_fenix.core.services.repair_service import repair_repertoire_health
 from opening_fenix.core.logger import logger
@@ -40,6 +41,7 @@ class CourseGameInfo:
     fen: str = ""
     is_puzzle: bool = False
     is_model: bool = False
+    is_intro: bool = False
     target_type: str = "" # Inferred default target (e.g. level_1, level_2, tactics, etc.)
 
 @dataclass
@@ -50,6 +52,7 @@ class CourseChapterInfo:
     target_type: str = CATEGORY_LEVEL_2
     embedded_puzzles: int = 0
     embedded_models: int = 0
+    embedded_intros: int = 0
     games: List[CourseGameInfo] = field(default_factory=list)
 
 @dataclass
@@ -103,6 +106,7 @@ class CourseImportResult:
     ignored_games: int = 0
     embedded_puzzles: int = 0
     embedded_models: int = 0
+    embedded_intros: int = 0
 
 class SanitizedPGNReader:
     """Wrapper around a file object to strip empty [FEN \"\"] tags that crash python-chess."""
@@ -159,10 +163,12 @@ def classify_chapter(name: str) -> str:
     if re.search(r'(quickstarter|schnellstarter)', n):
         return CATEGORY_LEVEL_1
 
-    # 2. Introduction / Einleitung / Overview
-    if re.search(r'\b(introduction|einleitung|overview|about the author|preface)\b', n):
+    # 2. Introduction / Einleitung / Overview / Info
+    if "[%info]" in n or "[info]" in n:
         return CATEGORY_INTRO
-    if n in ("intro", "introduction", "einleitung"):
+    if re.search(r'\b(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|intro|infos|information|informationen)\b', n):
+        return CATEGORY_INTRO
+    if re.search(r'^\s*(info\b|intro\b)', n):
         return CATEGORY_INTRO
 
     # 3. Motives / Typische Motive
@@ -179,6 +185,31 @@ def classify_chapter(name: str) -> str:
 
     # 6. Default to Level 2 (Deep Theory)
     return CATEGORY_LEVEL_2
+
+def is_header_intro(headers: Any) -> bool:
+    """Checks whether PGN headers represent an introduction or informational game."""
+    if not hasattr(headers, "get"):
+        return False
+    white = headers.get("White", "").strip()
+    black = headers.get("Black", "").strip()
+    event = headers.get("Event", "").strip()
+    section = headers.get("Section", "").strip()
+    annotator = headers.get("Annotator", "").strip()
+    
+    for h_val in (white, black, event, section, annotator):
+        if not h_val:
+            continue
+        h_lower = h_val.lower()
+        if "[%info]" in h_lower or "[info]" in h_lower:
+            return True
+        if re.search(r'(?i)^\s*(\[%info\]|\[info\]|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', h_val):
+            return True
+
+    intro_keywords = r'(?i)\b(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|informational)\b'
+    if re.search(intro_keywords, white) or re.search(intro_keywords, event) or re.search(intro_keywords, section):
+        return True
+        
+    return False
 
 def is_header_puzzle(headers: Any) -> bool:
     """Checks whether PGN headers represent a puzzle or tactical exercise."""
@@ -200,6 +231,40 @@ def is_header_model(headers: Any) -> bool:
     model_keywords = r'(?i)\b(model game|reference game|musterpartie|example game)\b'
     if re.search(model_keywords, white) or re.search(model_keywords, black) or re.search(model_keywords, event):
         return True
+    return False
+
+def is_game_intro(game: chess.pgn.Game) -> bool:
+    """
+    Checks whether a specific individual game is an introduction or informational text,
+    even if it appears inside a regular opening chapter (e.g. starting with [%info]).
+    """
+    if is_header_intro(game.headers):
+        return True
+
+    # Check root comment (before move 1)
+    first_comment = (game.comment or "").strip()
+    if first_comment:
+        f_lower = first_comment.lower()
+        if "[%info]" in f_lower or "[info]" in f_lower:
+            return True
+        if re.search(r'(?i)^\s*(\[%info\]?|\[info\]?|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', first_comment):
+            return True
+
+    # Check first move comment (e.g. 1. e4 { [%info] ... })
+    if game.variations:
+        first_node = game.variations[0]
+        node_comment = (first_node.comment or "").strip()
+        if node_comment:
+            n_lower = node_comment.lower()
+            if "[%info]" in n_lower or "[info]" in n_lower:
+                return True
+            if re.search(r'(?i)^\s*(\[%info\]?|\[info\]?|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', node_comment):
+                return True
+
+    # Check text-only games (0 moves with comment)
+    if not game.variations and first_comment:
+        return True
+
     return False
 
 def is_game_puzzle(game: chess.pgn.Game) -> bool:
@@ -289,18 +354,20 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
         with open(p, "r", encoding="utf-8", errors="replace") as fp:
             reader = SanitizedPGNReader(fp)
             while True:
-                headers = chess.pgn.read_headers(reader)
-                if headers is None:
+                game = chess.pgn.read_game(reader)
+                if game is None:
                     break
                 game_idx = total_games
                 total_games += 1
+                headers = game.headers
                 chapter_name = headers.get("Black", "").strip() or headers.get("Event", "Default Chapter").strip()
                 white_title = headers.get("White", "").strip() or f"Line {total_games}"
                 eco = headers.get("ECO", "").strip()
                 fen = headers.get("FEN", "").strip()
 
-                is_puz = is_header_puzzle(headers)
-                is_mod = is_header_model(headers)
+                is_puz = is_game_puzzle(game)
+                is_mod = is_game_model(game)
+                is_intr = is_game_intro(game)
 
                 if chapter_name not in chapters_dict:
                     category = classify_chapter(chapter_name)
@@ -317,13 +384,16 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                 if len(info.sample_titles) < 3 and white_title:
                     info.sample_titles.append(white_title)
 
-                # Check for embedded puzzles / model games
+                # Check for embedded puzzles / model games / introductions
                 if info.target_type != CATEGORY_TACTICS and is_puz:
                     info.embedded_puzzles += 1
                     game_target = CATEGORY_TACTICS
                 elif info.target_type != CATEGORY_MODEL and is_mod:
                     info.embedded_models += 1
                     game_target = CATEGORY_MODEL
+                elif info.target_type != CATEGORY_INTRO and is_intr:
+                    info.embedded_intros += 1
+                    game_target = CATEGORY_INTRO
                 else:
                     game_target = info.target_type
 
@@ -336,6 +406,7 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                     fen=fen,
                     is_puzzle=is_puz,
                     is_model=is_mod,
+                    is_intro=is_intr,
                     target_type=game_target
                 )
                 info.games.append(game_info)
@@ -350,7 +421,7 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
         CATEGORY_INTRO: 5,
         CATEGORY_IGNORE: 6
     }
-    sorted_chapters = sorted(chapters_dict.values(), key=lambda c: (order_map.get(c.target_type, 9), c.name))
+    sorted_chapters = sorted(chapters_dict.values(), key=lambda c: (order_map.get(c.target_type, 9), natural_sort_key(c.name)))
 
     category_counts = {
         CATEGORY_LEVEL_1: 0,
@@ -462,6 +533,7 @@ def execute_course_import(
     level_2_moves_count = 0
     embedded_puzzles_count = 0
     embedded_models_count = 0
+    embedded_intros_count = 0
 
     try:
         chosen_elo = plan.elo or "high"
@@ -553,6 +625,9 @@ def execute_course_import(
                             elif is_game_model(game):
                                 target = CATEGORY_MODEL
                                 embedded_models_count += 1
+                            elif is_game_intro(game):
+                                target = CATEGORY_INTRO
+                                embedded_intros_count += 1
                             else:
                                 target = ch_target
                         else:
@@ -726,6 +801,10 @@ def execute_course_import(
         if embedded_models_count > 0:
             mod_text += f" ({tr_ui('course_import.success_embedded_mod', 'davon {count} aus Kapiteln extrahiert', count=embedded_models_count)})"
 
+        intro_text = f"{intro_games_saved} Partien"
+        if embedded_intros_count > 0:
+            intro_text += f" ({tr_ui('course_import.success_embedded_intro', 'davon {count} aus Kapiteln extrahiert', count=embedded_intros_count)})"
+
         msg = tr_ui(
             "course_import.success_summary",
             "Kurs erfolgreich importiert!\n\n"
@@ -734,13 +813,13 @@ def execute_course_import(
             "• Taktikübungen: {tac} in Tactics.pgn\n"
             "• Musterpartien: {mod} in Model Games.pgn\n"
             "• Typische Motive: {mot} Partien in Typical Motives.pgn\n"
-            "• Einleitungen: {intro} Partien in Introductions from pgn import.pgn",
+            "• Einleitungen: {intro} in Introductions from pgn import.pgn",
             l1=level_1_moves_count,
             l2=level_2_moves_count,
             tac=tac_text,
             mod=mod_text,
             mot=motives_games_count,
-            intro=intro_games_saved
+            intro=intro_text
         )
 
         return CourseImportResult(
@@ -756,7 +835,8 @@ def execute_course_import(
             intro_games_skipped=intro_games_saved,
             ignored_games=ignored_games_count,
             embedded_puzzles=embedded_puzzles_count,
-            embedded_models=embedded_models_count
+            embedded_models=embedded_models_count,
+            embedded_intros=embedded_intros_count
         )
 
     except Exception as e:

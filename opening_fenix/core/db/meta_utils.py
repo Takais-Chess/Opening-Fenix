@@ -41,8 +41,9 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
     try:
         from opening_fenix.core.utils import release_repertoire_locks
         from opening_fenix.core.services.profile_service import delete_repertoire_from_profiles_globally
+        from opening_fenix.core.logger import logger
         
-        release_repertoire_locks(repo_name)
+        release_repertoire_locks(repo_name, checkpoint_wal=False)
 
         # Collect any existing directories (regular and/or test)
         dirs_to_delete = []
@@ -76,7 +77,7 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
 
         for repo_dir in dirs_to_delete:
             deleted = False
-            for attempt in range(8):
+            for attempt in range(10):
                 try:
                     if os.path.exists(repo_dir):
                         # Ensure all files and subdirectories are writable
@@ -97,18 +98,22 @@ def delete_repertoire_db(repo_name: str) -> Tuple[bool, str]:
                         break
                 except Exception as e:
                     last_err = e
-                    release_repertoire_locks(repo_name)
+                    release_repertoire_locks(repo_name, checkpoint_wal=False)
                     gc.collect()
                     time.sleep(0.25 * (attempt + 1))
 
             if not deleted and os.path.exists(repo_dir):
+                logger.error(f"delete_repertoire_db failed for '{repo_name}': {last_err}")
                 return False, f"Fehler beim Löschen: {last_err}"
 
         # Clean up learning progress and settings for this repertoire across all user profiles
         delete_repertoire_from_profiles_globally(repo_name)
 
+        logger.info(f"Repertoire '{repo_name}' was successfully deleted from disk.")
         return True, f"Repertoire '{repo_name}' wurde gelöscht."
     except Exception as e:
+        from opening_fenix.core.logger import logger
+        logger.error(f"delete_repertoire_db exception for '{repo_name}': {e}")
         return False, f"Fehler beim Löschen: {e}"
 
 def _get_all_repertoire_db_paths():

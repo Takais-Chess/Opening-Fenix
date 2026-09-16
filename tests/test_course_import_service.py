@@ -14,6 +14,8 @@ from opening_fenix.core.services.course_import_service import (
     analyze_course_pgns,
     is_game_puzzle,
     is_game_model,
+    is_header_intro,
+    is_game_intro,
     execute_course_import,
     CourseImportPlan,
     CATEGORY_LEVEL_1,
@@ -345,4 +347,200 @@ def test_motives_introductions_and_line_overrides(temp_course_env):
     # 3. Verify ignored line was neither in motives nor intros
     assert "Line To Ignore" not in intro_text
     assert "Line To Ignore" not in motives_text
+
+def test_course_import_natural_chapter_sorting(tmp_path):
+    pgn_content = """[Event "Course"]
+[Site "?"]
+[Date "2026.01.01"]
+[Round "1"]
+[White "Line 1"]
+[Black "11) Archangel with 7.Nxe5"]
+[Result "*"]
+
+1. e4 e5 *
+
+[Event "Course"]
+[Site "?"]
+[Date "2026.01.01"]
+[Round "2"]
+[White "Line 2"]
+[Black "1) Archangel with 5.Qe2"]
+[Result "*"]
+
+1. e4 e5 *
+
+[Event "Course"]
+[Site "?"]
+[Date "2026.01.01"]
+[Round "3"]
+[White "Line 3"]
+[Black "2) Archangel with 6.c3"]
+[Result "*"]
+
+1. e4 e5 *
+
+[Event "Course"]
+[Site "?"]
+[Date "2026.01.01"]
+[Round "4"]
+[White "Line 4"]
+[Black "Quickstarter Guide"]
+[Result "*"]
+
+1. e4 e5 *
+"""
+    p = tmp_path / "archangel.pgn"
+    p.write_text(pgn_content, encoding="utf-8")
+
+    analysis = analyze_course_pgn(str(p))
+    chapter_names = [c.name for c in analysis.chapters]
+    
+    assert chapter_names == [
+        "Quickstarter Guide",
+        "1) Archangel with 5.Qe2",
+        "2) Archangel with 6.c3",
+        "11) Archangel with 7.Nxe5"
+    ]
+
+def test_is_intro_detection():
+    import io
+
+    # 1. Starting root comment with [%info]
+    pgn1 = """[Event "Course"]
+[White "1.e4 e5"]
+[Black "Openings"]
+
+{ [%info] Welcome to the course overview } 1. e4 e5 *
+"""
+    g1 = chess.pgn.read_game(io.StringIO(pgn1))
+    assert is_game_intro(g1) is True
+
+    # 2. Starting root comment with just [%info]
+    pgn2 = """[Event "Course"]
+[White "1.e4 e5"]
+[Black "Openings"]
+
+{ [%info] } 1. e4 e5 *
+"""
+    g2 = chess.pgn.read_game(io.StringIO(pgn2))
+    assert is_game_intro(g2) is True
+
+    # 3. First move comment with [%info]
+    pgn3 = """[Event "Course"]
+[White "1.e4 e5"]
+[Black "Openings"]
+
+1. e4 { [%info] Information about 1.e4 } e5 *
+"""
+    g3 = chess.pgn.read_game(io.StringIO(pgn3))
+    assert is_game_intro(g3) is True
+
+    # 4. White header starting with Info
+    pgn4 = """[Event "Course"]
+[White "Info: Scotch Game Introduction"]
+[Black "Openings"]
+
+1. e4 e5 2. Nf3 Nc6 3. d4 *
+"""
+    g4 = chess.pgn.read_game(io.StringIO(pgn4))
+    assert is_game_intro(g4) is True
+
+    # 5. Header with [%info] tag
+    pgn5 = """[Event "Course"]
+[White "[%info] 1.e4"]
+[Black "Openings"]
+
+1. e4 e5 *
+"""
+    g5 = chess.pgn.read_game(io.StringIO(pgn5))
+    assert is_game_intro(g5) is True
+
+    # 6. Text-only game with 0 moves and a comment
+    pgn6 = """[Event "Course"]
+[White "Course Introduction"]
+[Black "Openings"]
+
+{ In this video and chapter we cover the general ideas } *
+"""
+    g6 = chess.pgn.read_game(io.StringIO(pgn6))
+    assert is_game_intro(g6) is True
+
+    # 7. Regular theory game (should NOT be detected as intro)
+    pgn7 = """[Event "Course"]
+[White "1. e4 e5 2. Nf3 Nc6"]
+[Black "Openings"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bc4 *
+"""
+    g7 = chess.pgn.read_game(io.StringIO(pgn7))
+    assert is_game_intro(g7) is False
+
+def test_classify_chapter_intro_variants():
+    assert classify_chapter("Info") == CATEGORY_INTRO
+    assert classify_chapter("Infos") == CATEGORY_INTRO
+    assert classify_chapter("Information") == CATEGORY_INTRO
+    assert classify_chapter("Informationen") == CATEGORY_INTRO
+    assert classify_chapter("1. Intro") == CATEGORY_INTRO
+    assert classify_chapter("Introduction") == CATEGORY_INTRO
+    assert classify_chapter("Überblick und Konzept") == CATEGORY_INTRO
+    assert classify_chapter("Ueberblick") == CATEGORY_INTRO
+    assert classify_chapter("Vorwort") == CATEGORY_INTRO
+    assert classify_chapter("[%info] Course Notes") == CATEGORY_INTRO
+
+def test_embedded_intro_extraction_in_course_import(temp_course_env):
+    # Chapter 1 is a normal opening chapter (Level 2), but contains an embedded [%info] game
+    pgn_content = """
+[Event "Ruy Lopez Masterclass"]
+[White "1.e4 e5 Overview"]
+[Black "Chapter 1: Open Games"]
+[Result "*"]
+{ [%info] This line provides an overview of the pawn structures } 1. e4 e5 2. Nf3 Nc6 *
+
+[Event "Ruy Lopez Masterclass"]
+[White "Mainline 3.Bb5 a6"]
+[Black "Chapter 1: Open Games"]
+[Result "*"]
+1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 *
+"""
+    p = os.path.join(temp_course_env, "Ruy Lopez.pgn")
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(pgn_content)
+
+    # 1. Analyze
+    analysis = analyze_course_pgn(p)
+    assert analysis.total_games == 2
+    assert len(analysis.chapters) == 1
+    ch1 = analysis.chapters[0]
+    assert ch1.name == "Chapter 1: Open Games"
+    assert ch1.target_type == CATEGORY_LEVEL_2
+    assert ch1.embedded_intros == 1
+    assert ch1.games[0].is_intro is True
+    assert ch1.games[0].target_type == CATEGORY_INTRO
+    assert ch1.games[1].is_intro is False
+    assert ch1.games[1].target_type == CATEGORY_LEVEL_2
+
+    # 2. Execute import
+    plan = CourseImportPlan(
+        pgn_paths=[p],
+        repo_name="Ruy Lopez Intro Test",
+        side="w",
+        chapter_targets={c.name: c.target_type for c in analysis.chapters}
+    )
+    result = execute_course_import(plan)
+    assert result.success is True
+    assert result.embedded_intros == 1
+    assert result.intro_games_saved == 1
+    assert result.level_2_moves > 0
+
+    # 3. Verify Introductions from pgn import.pgn was created with the [%info] game
+    from opening_fenix.core.utils import get_repertoire_dir
+    repo_dir = get_repertoire_dir("Ruy Lopez Intro Test")
+    intro_file = os.path.join(repo_dir, "Introductions from pgn import.pgn")
+    assert os.path.exists(intro_file)
+    with open(intro_file, "r", encoding="utf-8") as f:
+        content = f.read()
+    assert "1.e4 e5 Overview" in content
+    assert "This line provides an overview" in content
+
+
 

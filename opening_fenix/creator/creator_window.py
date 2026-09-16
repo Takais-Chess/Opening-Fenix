@@ -36,7 +36,7 @@ from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -434,8 +434,8 @@ class CreatorBackend:
 
         # Build final result with sorted V2s
         res = {}
-        for v1 in sorted(structure.keys()):
-            v2s = sorted(list(structure[v1]))
+        for v1 in sorted(structure.keys(), key=natural_sort_key):
+            v2s = sorted(list(structure[v1]), key=natural_sort_key)
             res[v1] = v2s
 
         return res
@@ -541,7 +541,7 @@ class CreatorBackend:
         for r in v2.all(): names.add(r[0])
         for r in v3.all(): names.add(r[0])
         
-        return sorted(list(names))
+        return sorted(list(names), key=natural_sort_key)
 
     def find_nearest_unreviewed(self, current_fen, level=None, variation_filter=None, session_start=None):
         """Finds the nearest unchecked position in the repertoire tree, strictly filtered by variation."""
@@ -948,7 +948,7 @@ class CreatorBackend:
                 move_count += 1
                 queue.append(m.to_position_id)
                 
-        return move_count, sorted([v for v in variation_names if v])
+        return move_count, sorted([v for v in variation_names if v], key=natural_sort_key)
 
     def update_move_level_strong(self, move_id, level_order):
         """
@@ -2543,7 +2543,7 @@ class SortableTreeWidgetItem(QTreeWidgetItem):
             if v1 is None: v1 = -1.0
             if v2 is None: v2 = -1.0
             return v1 < v2
-        return self.text(col) < other.text(col)
+        return natural_sort_key(self.text(col)) < natural_sort_key(other.text(col))
 
 
 from .repo_selection_dialog import NewRepertoireDialog, get_repertoire_cover_path
@@ -2966,6 +2966,15 @@ class CreatorWindow(QMainWindow):
         self.btn_resources.setToolTip(tr_ui("creator.toolbar_resources_tooltip", "Öffne den Repertoire-Ordner für weitere Ressourcen (Model Games, Tactics, etc.)"))
         self.btn_resources.clicked.connect(self.open_repertoire_folder)
         self.toolbar.addWidget(self.btn_resources)
+
+        # Repertoire Statistics Button
+        self.btn_stats = QPushButton(tr_ui("creator.toolbar_stats", "📊 Statistiken"))
+        self.btn_stats.setProperty("class", "GlassPill")
+        self.btn_stats.setFixedHeight(scale(40))
+        self.repolish(self.btn_stats)
+        self.btn_stats.setToolTip(tr_ui("creator.toolbar_stats_tooltip", "Öffne Repertoire-Statistiken & Insights"))
+        self.btn_stats.clicked.connect(self.open_repertoire_statistics)
+        self.toolbar.addWidget(self.btn_stats)
 
         top_layout.addWidget(self.toolbar)
 
@@ -4621,7 +4630,16 @@ class CreatorWindow(QMainWindow):
         # Restore backend to creator's active repo if settings dialog switched it
         active_repo = getattr(self, 'active_repo_name', None)
         if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
-            self.backend.load_repertoire(active_repo, self.is_test)
+            db_path = get_repertoire_db_path(active_repo, self.is_test)
+            if db_path and os.path.exists(db_path):
+                self.backend.load_repertoire(active_repo, self.is_test)
+            else:
+                from opening_fenix.core.services.repertoire_service import RepertoireService
+                remaining = RepertoireService().get_all_repertoires()
+                if remaining:
+                    self.load_repertoire(remaining[0])
+                else:
+                    self.load_repertoire(None)
 
         # Ensure latest repertoire settings (e.g. elo category) are applied to CreatorWindow
         if hasattr(self, 'backend') and self.backend and getattr(self.backend, 'session', None):
@@ -4713,13 +4731,44 @@ class CreatorWindow(QMainWindow):
     def delete_repertoire_action(self, repo_name=None):
         """Actual deletion of the active repertoire files and notifying windows."""
         if repo_name is None:
-            repo_name = self.backend.active_repo_name
+            repo_name = getattr(self.backend, "active_repo_name", None) or getattr(self, "active_repo_name", None)
         if not repo_name:
-            return
+            return False, "Kein Repertoire angegeben."
             
-        was_active = (self.backend.active_repo_name == repo_name)
+        was_active = (
+            getattr(self.backend, "active_repo_name", None) == repo_name or 
+            getattr(self, "active_repo_name", None) == repo_name
+        )
         if was_active:
+            # Stop any running debounce timers
+            if hasattr(self, "save_timer") and self.save_timer:
+                self.save_timer.stop()
+            self.details_changed = False
+
+            # Stop active background threads immediately
+            for thread_attr in [
+                "hole_thread", "global_transpos_thread", "_fen_index_thread",
+                "_bfs_thread", "_path_quality_thread", "_instant_multipv_thread"
+            ]:
+                if hasattr(self, thread_attr):
+                    th = getattr(self, thread_attr)
+                    if th:
+                        try:
+                            if hasattr(th, "stop"):
+                                th.stop()
+                            if hasattr(th, "requestInterruption"):
+                                th.requestInterruption()
+                            th.wait(2000)
+                        except Exception:
+                            pass
+                        try:
+                            setattr(self, thread_attr, None)
+                        except Exception:
+                            pass
+
             self.backend.close()
+            self.backend.active_repo_name = None
+            self.active_repo_name = None
 
         from opening_fenix.core.data_tools import delete_repertoire_db
         success, msg = delete_repertoire_db(repo_name)
@@ -4742,16 +4791,25 @@ class CreatorWindow(QMainWindow):
                         w.refresh_repertoire_buttons()
                     except Exception: pass
             
-            # If the creator window had this repertoire loaded, switch to remaining or close
+            # If the creator window had this repertoire loaded, switch to remaining or clear
             if was_active:
                 remaining = RepertoireService().get_all_repertoires()
                 if remaining:
                     self.load_repertoire(remaining[0])
                 else:
-                    self.close()
+                    self.load_repertoire(None)
+            return True, msg
         else:
+            if was_active:
+                # Restore active_repo_name if deletion failed
+                self.active_repo_name = repo_name
+                try:
+                    self.backend.load_repertoire(repo_name, self.is_test)
+                except Exception:
+                    pass
             QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"), 
                 f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
+            return False, msg
 
     def import_course_dialog(self):
         """Opens the automated Course Import dialog (Chessable PGN importer)."""
@@ -5149,6 +5207,16 @@ class CreatorWindow(QMainWindow):
             os.startfile(path)
         else:
             QMessageBox.warning(self, tr_ui("main.dlg_folder_not_found_title", "Ordner nicht gefunden"), tr_ui("main.dlg_folder_not_found_text", f"Der Repertoire-Ordner konnte nicht gefunden werden:\n{path}"))
+
+    def open_repertoire_statistics(self):
+        """Opens the Repertoire Statistics & Insights dialog."""
+        repo_name = self.backend.active_repo_name
+        if not repo_name:
+            return
+        
+        from opening_fenix.gui.dialogs.stats_dialog import RepertoireStatisticsDialog
+        dlg = RepertoireStatisticsDialog(parent=self, repo_name=repo_name, is_test=self.backend.is_test)
+        dlg.exec()
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
@@ -5697,7 +5765,7 @@ class CreatorWindow(QMainWindow):
         self._path_quality_thread = None
         self._instant_multipv_thread = None
         self._global_transpos_thread = None
-        self._bfs_next_depth = 3           # first click searches depth 3
+        self._bfs_next_depth = 2           # first click searches depth 2 (2-move transpositions)
         self._bfs_start_fen = None         # FEN at time BFS was started
         self._bfs_running = False
 
@@ -5847,7 +5915,7 @@ class CreatorWindow(QMainWindow):
         
         # Clear deep state + reset button state when position changes
         self._bfs_start_fen = None
-        self._bfs_next_depth = 3
+        self._bfs_next_depth = 2
         self._bfs_running = False
         self._update_deep_button_state()
         self._adjust_transposition_table_columns()

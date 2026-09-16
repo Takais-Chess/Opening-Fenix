@@ -72,6 +72,8 @@ class ChapterLinesDialog(QDialog):
                         self.game_targets[g.game_id] = CATEGORY_TACTICS
                     elif g.is_model:
                         self.game_targets[g.game_id] = CATEGORY_MODEL
+                    elif g.is_intro:
+                        self.game_targets[g.game_id] = CATEGORY_INTRO
                     else:
                         self.game_targets[g.game_id] = default_target
                 else:
@@ -297,6 +299,8 @@ class ChapterLinesDialog(QDialog):
                 txt_type = "🧩 Puzzle"
             elif g.is_model:
                 txt_type = "🏆 Muster"
+            elif g.is_intro:
+                txt_type = "📖 Einleitung"
             elif g.eco:
                 txt_type = f"ECO {g.eco}"
             else:
@@ -1206,6 +1210,8 @@ class CourseImportDialog(QDialog):
                             effective = CATEGORY_TACTICS
                         elif g.is_model:
                             effective = CATEGORY_MODEL
+                        elif g.is_intro:
+                            effective = CATEGORY_INTRO
                         else:
                             effective = ch_target
                     else:
@@ -1397,6 +1403,8 @@ class CourseImportDialog(QDialog):
                     g_item.setText(1, "🧩 Puzzle")
                 elif g.is_model:
                     g_item.setText(1, "🏆 Muster")
+                elif g.is_intro:
+                    g_item.setText(1, "📖 Einleitung")
                 elif g.eco:
                     g_item.setText(1, f"ECO {g.eco}")
                 else:
@@ -1436,6 +1444,8 @@ class CourseImportDialog(QDialog):
                         eff = CATEGORY_TACTICS
                     elif g.is_model:
                         eff = CATEGORY_MODEL
+                    elif g.is_intro:
+                        eff = CATEGORY_INTRO
                     else:
                         eff = ch_target
                 else:

@@ -16,10 +16,22 @@ def repo_selection_dialog(qtbot):
         return dialog
 
 def test_repo_selection_button_style(qtbot):
-    btn = RepoSelectionButton("Test")
-    qtbot.add_widget(btn)
-    assert btn.repo_name == "Test"
-    assert btn.height() > 0
+    # 1. Long name
+    long_name = "Jonas Ruy Lopez Dark Archangel Masterclass"
+    btn_long = RepoSelectionButton(long_name)
+    qtbot.add_widget(btn_long)
+    assert btn_long.repo_name == long_name
+    assert btn_long.height() > 0
+    assert btn_long.toolTip() == long_name
+    assert btn_long.lbl_title.wordWrap() is True
+    assert btn_long.lbl_title.toolTip() == long_name
+
+    # 2. Short name (clean, compact)
+    short_name = "Der Noori Grand Prix"
+    btn_short = RepoSelectionButton(short_name)
+    qtbot.add_widget(btn_short)
+    assert btn_short.repo_name == short_name
+    assert btn_short.lbl_title.wordWrap() is True
 
 def test_dialog_lists_repos(qtbot, repo_selection_dialog):
     # Verify that buttons were created

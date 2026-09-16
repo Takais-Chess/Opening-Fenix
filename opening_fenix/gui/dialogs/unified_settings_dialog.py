@@ -3164,21 +3164,44 @@ class UnifiedSettingsDialog(QDialog):
         name = self.combo_active_repo.currentData()
         if not name: return
         if QMessageBox.warning(self, "Löschen", f"Möchtest du '{name}' wirklich unwiderruflich löschen?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
-            # 1. First close backend if it has this repo loaded
-            if self.backend and getattr(self.backend, 'active_repo_name', None) == name:
-                self.backend.close()
-                self.backend.active_repo_name = None
+            # 1. First stop any running background stats loaders in settings dialog
+            if hasattr(self, 'creator_stats_loader') and self.creator_stats_loader:
+                try:
+                    self.creator_stats_loader.requestInterruption()
+                    self.creator_stats_loader.wait(2000)
+                except Exception:
+                    pass
+                self.creator_stats_loader = None
 
-            # 2. Delete repertoire
+            if hasattr(self, 'stats_loader') and self.stats_loader:
+                try:
+                    self.stats_loader.requestInterruption()
+                    self.stats_loader.wait(2000)
+                except Exception:
+                    pass
+                self.stats_loader = None
+
+            # 2. Delete repertoire via CreatorWindow action or directly
             if self.main_window and hasattr(self.main_window, 'delete_repertoire_action'):
-                self.main_window.delete_repertoire_action(name)
+                res = self.main_window.delete_repertoire_action(name)
+                succ = res[0] if isinstance(res, tuple) else bool(res)
+                if not succ:
+                    return
             else:
+                if self.backend and getattr(self.backend, 'active_repo_name', None) == name:
+                    self.backend.close()
+                    self.backend.active_repo_name = None
                 from opening_fenix.core.data_tools import delete_repertoire_db
                 succ, msg = delete_repertoire_db(name)
                 if not succ:
                     QMessageBox.critical(self, tr_ui("creator.dlg_delete_error_title", "Fehler beim Löschen"),
                         f"Das Repertoire konnte nicht vollständig gelöscht werden.\nWindows verweigert den Zugriff (Datei evtl. noch gesperrt).\n\nDetails: {msg}")
                     return
+
+            # Ensure backend is cleared if it was pointing to this repo
+            if self.backend and getattr(self.backend, 'active_repo_name', None) == name:
+                self.backend.close()
+                self.backend.active_repo_name = None
 
             # 3. Notify all application windows
             for w in QApplication.topLevelWidgets():

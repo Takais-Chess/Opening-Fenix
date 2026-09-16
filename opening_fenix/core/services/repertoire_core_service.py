@@ -369,6 +369,14 @@ class RepertoireService:
                 session.commit()
                 session.close()
                 db.close()
+                
+                # Checkpoint WAL immediately to flush the metadata write and avoid leaving open WAL locks
+                try:
+                    conn = sqlite3.connect(new_db, timeout=5)
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error(f"Renamed files but failed to update internal metadata: {e}")
             

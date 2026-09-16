@@ -24,8 +24,8 @@ def setup_light_palette(app):
     palette.setColor(QPalette.ColorRole.WindowText, window_text)
     palette.setColor(QPalette.ColorRole.Base, base_color)
     palette.setColor(QPalette.ColorRole.AlternateBase, QColor(247, 247, 247))
-    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 220))
-    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(0, 0, 0))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(255, 255, 255))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(62, 39, 35))
     palette.setColor(QPalette.ColorRole.Text, text_color)
     palette.setColor(QPalette.ColorRole.Button, button_color)
     palette.setColor(QPalette.ColorRole.ButtonText, button_text)
@@ -241,6 +241,21 @@ def get_scrollbar_style():
     }}
     """
 
+def get_tooltip_style():
+    """Consistent, sharp tooltip styling across the entire application to prevent blacked-out OS dark mode glitches."""
+    return f"""
+    QToolTip {{
+        background-color: #ffffff;
+        color: {COLORS['brown_text']};
+        border: 1px solid rgba(0, 0, 0, 0.25);
+        border-radius: {scale(6)}px;
+        padding: {scale(5)}px {scale(8)}px;
+        font-family: 'Segoe UI', 'Inter', 'Arial', sans-serif;
+        font-size: {scale(12)}px;
+        font-weight: 500;
+    }}
+    """
+
 # Stylesheet for the MainWindow (Training Hub)
 def get_main_window_style():
     return f"""
@@ -376,13 +391,8 @@ def get_main_window_style():
         border-radius: {scale(4)}px;
     }}
     
-    QToolTip {{ 
-        background-color: {COLORS['white']}; 
-        color: {COLORS['brown_text']}; 
-        border: 1px solid {COLORS['border']}; 
-        padding: {scale(5)}px; 
-        border-radius: {scale(4)}px; 
-    }}
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
     
     /* Global Indicator Styling */
     {get_indicator_style()}
@@ -404,6 +414,9 @@ def get_creator_window_style():
     QMainWindow {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['beige']}, stop:1 #d1bfae); }}
     QWidget {{ font-family: 'Segoe UI'; font-size: {scale(14)}px; color: {COLORS['brown_text']}; }}
     
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
+
     /* Scrollbars styling for Creator Window */
     {get_scrollbar_style()}
     
@@ -732,7 +745,10 @@ def get_creator_toolbar_style():
     QToolButton:hover {{ 
         background-color: rgba(255, 255, 255, 0.7); 
     }}
-"""
+    
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
+    """
 
 
 
@@ -810,9 +826,12 @@ def get_repo_settings_style():
     
     QSplitter::handle {{ background-color: transparent; }}
     
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
+    
     /* Indicator Styling */
     {get_indicator_style()}
-"""
+    """
 
 
 # Stylesheet for ExportDialog
@@ -872,9 +891,12 @@ def get_export_dialog_style():
         outline: none;
     }}
     
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
+    
     /* Indicator Styling */
     {get_indicator_style()}
-"""
+    """
 
 
 # BW Glass Style for Settings
@@ -1150,6 +1172,9 @@ def get_bw_glass_style():
         color: {COLORS['bw_text']};
     }}
     
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
+    
     /* Indicator Styling for Settings & Maintenance Dialogs */
     {get_indicator_style(accent_color=COLORS['bw_accent'], border_color='rgba(0, 0, 0, 0.25)', bg_color='#ffffff')}
     
@@ -1292,6 +1317,9 @@ def get_login_dialog_style():
         border-radius: {scale(4)}px;
         margin: 0px {scale(4)}px;
     }}
+    
+    /* Global ToolTip Styling */
+    {get_tooltip_style()}
     
     /* Indicator Styling */
     {get_indicator_style()}

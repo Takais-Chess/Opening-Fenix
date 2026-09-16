@@ -764,11 +764,11 @@ def test_transposition_tab_split_layout(creator_window, qapp):
     assert hasattr(creator_window, "table_global_transpositions")
     assert hasattr(creator_window, "btn_global_transpos_scan")
     assert hasattr(creator_window, "combo_transpos_depth")
-    assert creator_window.table_global_transpositions.columnCount() == 4
+    assert creator_window.table_global_transpositions.columnCount() == 5
 
 
 def test_global_transposition_quality_column_hidden_until_2m(creator_window, qapp):
-    """Test that Quality column (index 2) is hidden in global transpositions table when only 1-move items exist, and shown when 2-move items exist."""
+    """Test that Quality column (index 3) is hidden in global transpositions table when only 1-move items exist, and shown when 2-move items exist."""
     start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
     mock_1m_only = [
         {
@@ -790,8 +790,8 @@ def test_global_transposition_quality_column_hidden_until_2m(creator_window, qap
     qapp.processEvents()
 
     assert creator_window.table_global_transpositions.rowCount() == 1
-    # Quality column (column 2) is hidden when there are only 1-move transpositions
-    assert creator_window.table_global_transpositions.isColumnHidden(2) is True
+    # Quality column (column 3) is hidden when there are only 1-move transpositions
+    assert creator_window.table_global_transpositions.isColumnHidden(3) is True
 
     mock_both = mock_1m_only + [
         {
@@ -814,8 +814,8 @@ def test_global_transposition_quality_column_hidden_until_2m(creator_window, qap
     qapp.processEvents()
 
     assert creator_window.table_global_transpositions.rowCount() == 2
-    # Quality column (column 2) is visible when there are 2-move transpositions
-    assert creator_window.table_global_transpositions.isColumnHidden(2) is False
+    # Quality column (column 3) is visible when there are 2-move transpositions
+    assert creator_window.table_global_transpositions.isColumnHidden(3) is False
 
 
 def test_global_transposition_activation_and_level_add(creator_window, qapp):

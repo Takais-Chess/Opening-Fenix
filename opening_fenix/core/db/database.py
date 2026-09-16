@@ -218,7 +218,27 @@ class DatabaseManager:
             for inst in list(cls._instances):
                 try:
                     if inst.db_filename and inst.db_filename != ":memory:":
-                        if os.path.abspath(inst.db_filename).lower() == target_abs:
+                        inst_abs = os.path.abspath(inst.db_filename).lower()
+                        if inst_abs == target_abs:
+                            inst.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    @classmethod
+    def close_all_for_directory(cls, dir_path: str) -> None:
+        """Disposes all active DatabaseManager engines bound to any DB within the given directory."""
+        if not dir_path:
+            return
+        try:
+            dir_abs = os.path.abspath(dir_path).lower()
+            prefix = dir_abs if dir_abs.endswith(os.sep) else dir_abs + os.sep
+            for inst in list(cls._instances):
+                try:
+                    if inst.db_filename and inst.db_filename != ":memory:":
+                        inst_abs = os.path.abspath(inst.db_filename).lower()
+                        if inst_abs == dir_abs or inst_abs.startswith(prefix):
                             inst.close()
                 except Exception:
                     pass

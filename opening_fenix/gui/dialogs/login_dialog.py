@@ -15,12 +15,14 @@ from opening_fenix.core.utils import get_base_path, get_user_dir
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
+from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
 
 class RepertoireButton(QPushButton):
     def __init__(self, name, parent=None):
         super().__init__(name, parent)
         self.repo_name = name
+        self.setToolTip(name)
         self.setCheckable(True)
         self.setChecked(False)
         self.setFixedHeight(scale(50))
@@ -72,6 +74,7 @@ class RepertoireSelectionDialog(QDialog):
         
         # Reuse Login Style for consistency
         self.setStyleSheet(get_login_dialog_style())
+        self._taskbar_filter = install_taskbar_close_filter(self)
         
         
         layout = QVBoxLayout(self)
@@ -228,6 +231,21 @@ class RepertoireSelectionDialog(QDialog):
         self.selected_language = checked_lang.property("lang_code")
         self.accept()
 
+    def closeEvent(self, event):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().closeEvent(event)
+
+    def reject(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().reject()
+
+    def accept(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().accept()
+
 class ProfileGridButton(QPushButton):
     """Compact button for profile grid with centered text."""
     def __init__(self, name, parent=None):
@@ -236,6 +254,7 @@ class ProfileGridButton(QPushButton):
         self.setProperty("class", "ProfileGridButton")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setMinimumHeight(scale(50))
+        self.setToolTip(name)
 
 
 class LoginDialog(QDialog):
@@ -254,6 +273,7 @@ class LoginDialog(QDialog):
 
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setStyleSheet(get_login_dialog_style())
+        self._taskbar_filter = install_taskbar_close_filter(self)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
@@ -399,6 +419,21 @@ class LoginDialog(QDialog):
         overlay_layout.addWidget(self.lbl_loading)
         
         self.loading_overlay.hide()
+
+    def closeEvent(self, event):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().closeEvent(event)
+
+    def reject(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().reject()
+
+    def accept(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().accept()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

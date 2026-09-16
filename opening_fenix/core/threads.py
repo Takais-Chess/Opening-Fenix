@@ -292,23 +292,31 @@ class FenIndexBuilderThread(QThread):
     def __init__(self, db_path, parent=None):
         super().__init__(parent)
         self.db_path = db_path
+        self._stopped = False
+
+    def stop(self):
+        self._stopped = True
+        self.requestInterruption()
+
+    def _is_cancelled(self):
+        return self._stopped or self.isInterruptionRequested()
 
     def run(self):
         import sqlite3
         con = None
         try:
-            if self.isInterruptionRequested():
+            if self._is_cancelled():
                 return
             con = sqlite3.connect(self.db_path)
             cur = con.cursor()
 
             # ── 1. All position FENs ──────────────────────────────────────────────
-            if self.isInterruptionRequested():
+            if self._is_cancelled():
                 return
             cur.execute("SELECT fen FROM positions")
             fen_set = set()
             while True:
-                if self.isInterruptionRequested():
+                if self._is_cancelled():
                     return
                 rows = cur.fetchmany(1000)
                 if not rows:
@@ -320,7 +328,7 @@ class FenIndexBuilderThread(QThread):
             # ── 2. Repertoire move adjacency (one JOIN, one query) ────────────────
             repo_adj: dict = {}
             try:
-                if self.isInterruptionRequested():
+                if self._is_cancelled():
                     return
                 cur.execute("""
                     SELECT p.fen, m.uci
@@ -329,7 +337,7 @@ class FenIndexBuilderThread(QThread):
                     INNER JOIN repertoire_moves rm ON rm.move_id = m.id
                 """)
                 while True:
-                    if self.isInterruptionRequested():
+                    if self._is_cancelled():
                         return
                     rows = cur.fetchmany(1000)
                     if not rows:
@@ -340,13 +348,13 @@ class FenIndexBuilderThread(QThread):
             except Exception:
                 pass   # schema mismatch — fall back to no exclusions
 
-            if self.isInterruptionRequested():
+            if self._is_cancelled():
                 return
             self.ready.emit(fen_set, repo_adj)
         except Exception as e:
             import logging
             logging.error(f"FenIndexBuilderThread error: {e}")
-            if not self.isInterruptionRequested():
+            if not self._is_cancelled():
                 self.ready.emit(set(), {})
         finally:
             if con:
@@ -385,32 +393,25 @@ class BfsTranspositionThread(QThread):
 
     # ── helpers ──────────────────────────────────────────────────────────────────
 
-    def _compute_exclude_fens(self):
-        """In-memory BFS over repo_adjacency to find positions already connected."""
+    def _is_repertoire_path(self, path_ucis):
+        """Checks if the entire move path is already an existing sequence in the repertoire from start_fen."""
         import chess
 
         def norm(f):
             return " ".join(f.strip().split()[:4])
 
-        start_norm = norm(self.start_fen)
-        visited = {start_norm}
-        frontier = [start_norm]
-
-        for _ in range(self.target_depth):
-            next_frontier = []
-            for fn in frontier:
-                for uci in self.repo_adjacency.get(fn, []):
-                    try:
-                        board = chess.Board(fn + " 0 1")
-                        board.push(chess.Move.from_uci(uci))
-                        new_fn = norm(board.fen())
-                        if new_fn not in visited:
-                            visited.add(new_fn)
-                            next_frontier.append(new_fn)
-                    except Exception:
-                        pass
-            frontier = next_frontier
-        return visited
+        curr_norm = norm(self.start_fen)
+        for uci in path_ucis:
+            moves = self.repo_adjacency.get(curr_norm, [])
+            if uci not in moves:
+                return False
+            try:
+                board = chess.Board(curr_norm + " 0 1")
+                board.push(chess.Move.from_uci(uci))
+                curr_norm = norm(board.fen())
+            except Exception:
+                return False
+        return True
 
     # ── main BFS ─────────────────────────────────────────────────────────────────
 
@@ -419,9 +420,6 @@ class BfsTranspositionThread(QThread):
 
         def norm(f):
             return " ".join(f.strip().split()[:4])
-
-        # Positions reachable via existing repertoire moves (computed off main thread)
-        exclude_fens = self._compute_exclude_fens()
 
         start_norm = norm(self.start_fen)
 
@@ -485,10 +483,11 @@ class BfsTranspositionThread(QThread):
                     new_ucis = path_ucis + [uci]
                     new_sans = path_sans + [san]
 
-                    # Report if in repertoire, not yet reported, not already linked
+                    # Report if in repertoire, not start position, not yet reported, and not an already connected path
                     if (new_norm in self.fen_index
+                            and new_norm != start_norm
                             and new_norm not in seen_targets
-                            and new_norm not in exclude_fens):
+                            and not self._is_repertoire_path(new_ucis)):
                         seen_targets.add(new_norm)
                         all_results.append({
                             "path_ucis": new_ucis,
@@ -705,7 +704,7 @@ class PathQualityEvalThread(QThread):
                 full_fen = fen_norm_to_full[fn]
                 try:
                     board = chess.Board(full_fen)
-                    n_pv = max(len(ucis_needed), 5)
+                    n_pv = max(len(ucis_needed) + 5, 10)
                     info_list = engine.analyse(
                         board,
                         chess.engine.Limit(depth=10),
@@ -723,16 +722,17 @@ class PathQualityEvalThread(QThread):
                     if "pv" in info and info["pv"]:
                         m_uci = info["pv"][0].uci()
                         score_obj = info.get("score")
-                        s = score_obj.white().score(mate_score=10000) if score_obj else 0
-                        if best_score is None:
-                            best_score = s
-                        uci_scores[m_uci] = s
+                        if score_obj:
+                            s = score_obj.relative.score(mate_score=10000)
+                            if best_score is None or s > best_score:
+                                best_score = s
+                            uci_scores[m_uci] = s
 
                 for uci in ucis_needed:
                     if best_score is None or uci not in uci_scores:
                         move_ok[(fn, uci)] = False   # not in top-N → likely worse than threshold
                     else:
-                        delta = abs(uci_scores[uci] - best_score)
+                        delta = best_score - uci_scores[uci]
                         move_ok[(fn, uci)] = delta <= self.THRESHOLD_CP
 
             # ── Step 3: Classify each path ──

@@ -14,6 +14,7 @@ from opening_fenix.core.utils import get_repertoire_db_path
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
 from opening_fenix.core.services.tree_navigation_service import TreeNavigationService
+from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
 
 def fetch_variation_structure_for_repo(repo_name: str) -> Dict[str, List[str]]:
@@ -47,6 +48,7 @@ class OpenTrainingSetupDialog(QDialog):
 
         self.setWindowTitle(tr_ui("open_training.dialog_title", "Freies Training"))
         self.setFixedWidth(scale(480))
+        self._taskbar_filter = install_taskbar_close_filter(self)
         self.setStyleSheet(f"""
             QDialog {{
                 background-color: {COLORS['beige']};
@@ -339,7 +341,19 @@ class OpenTrainingSetupDialog(QDialog):
         self.selected_comment_lang = self.combo_comment_lang.currentData() or "auto"
         if self.training_manager:
             self.training_manager.set_setting("comment_language", self.selected_comment_lang)
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
         self.accept()
+
+    def reject(self):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().reject()
+
+    def closeEvent(self, event):
+        uninstall_taskbar_close_filter(self._taskbar_filter)
+        self._taskbar_filter = None
+        super().closeEvent(event)
 
     def get_selections(self):
         return self.selected_repo, self.selected_level, self.selected_variation, getattr(self, 'selected_comment_lang', 'auto')
