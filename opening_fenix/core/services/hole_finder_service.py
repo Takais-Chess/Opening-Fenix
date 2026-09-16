@@ -842,7 +842,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                 eval_board = chess.Board(inter_fen + " 0 1")
                                                 info = active_engine.analyse(
                                                     eval_board,
-                                                    chess.engine.Limit(depth=target_engine_depth, time=5.0)
+                                                    chess.engine.Limit(depth=target_engine_depth)
                                                 )
                                                 pv = info.get("pv", []) if isinstance(info, dict) else (info[0].get("pv", []) if info else [])
                                                 best_uci = pv[0].uci().lower() if pv else None
@@ -887,7 +887,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                     eval_board = chess.Board(inter_fen + " 0 1")
                                                     u2_info = active_engine.analyse(
                                                         eval_board,
-                                                        chess.engine.Limit(depth=target_engine_depth, time=5.0),
+                                                        chess.engine.Limit(depth=target_engine_depth),
                                                         root_moves=[chess.Move.from_uci(u2)]
                                                     )
                                                     u2_score_obj = u2_info.get("score") if isinstance(u2_info, dict) else (u2_info[0].get("score") if u2_info else None)
