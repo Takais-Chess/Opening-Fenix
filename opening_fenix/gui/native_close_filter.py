@@ -40,6 +40,23 @@ if sys.platform == 'win32':
                         msg.message == _WM_SYSCOMMAND and (msg.wParam & 0xFFF0) == _SC_CLOSE
                     )
                     if is_close:
+                        # Check if the close event is directed at the dialog itself (e.g. user clicked 'X' on dialog title bar)
+                        target_hwnd = msg.hwnd
+                        dialog_hwnd = None
+                        try:
+                            dialog_hwnd = int(self.dialog.winId())
+                        except Exception:
+                            pass
+
+                        from PyQt6.QtWidgets import QWidget
+                        target_widget = QWidget.find(target_hwnd) if target_hwnd else None
+
+                        if (dialog_hwnd and target_hwnd == dialog_hwnd) or (
+                            target_widget and (target_widget == self.dialog or self.dialog.isAncestorOf(target_widget) or isinstance(target_widget, QDialog))
+                        ):
+                            # Normal dialog close/cancel. Let Qt handle it via closeEvent/reject.
+                            return False, 0
+
                         self._triggered = True
                         for w in list(QApplication.topLevelWidgets()):
                             if isinstance(w, QDialog) and w != self.dialog:

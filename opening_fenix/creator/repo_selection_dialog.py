@@ -8,7 +8,7 @@ from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QPixmap, QFont
 
 from opening_fenix.core.services.repertoire_core_service import RepertoireService
-from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
+from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_tooltip_style
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
@@ -218,6 +218,7 @@ class RepoSelectionButton(QPushButton):
                 background-color: rgba(211, 84, 0, 0.1);
                 border: 2px solid {COLORS['burnt_orange']};
             }}
+            {get_tooltip_style()}
         """)
 
         layout = QVBoxLayout(self)
@@ -320,12 +321,22 @@ class RepoSelectionDialog(QDialog):
 
         # Scroll Area
         self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("RepoSelectScrollArea")
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll_area.setStyleSheet("background: transparent; border: none;")
+        self.scroll_area.setStyleSheet("""
+            QScrollArea#RepoSelectScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#RepoSelectScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+        """)
         
         scroll_content = QWidget()
-        scroll_content.setStyleSheet("background: transparent;")
+        scroll_content.setObjectName("RepoSelectScrollContent")
+        scroll_content.setStyleSheet("#RepoSelectScrollContent { background: transparent; }")
         self.grid_layout = QGridLayout(scroll_content)
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setContentsMargins(0, 0, 0, 0)

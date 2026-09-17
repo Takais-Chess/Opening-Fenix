@@ -111,8 +111,12 @@ def compute_position_bfs_depths(session) -> Dict[int, int]:
     for r in roots:
         pos_depths[r] = 0
 
+    nodes_visited = 0
     while queue:
         curr_id, d = queue.popleft()
+        nodes_visited += 1
+        if nodes_visited % 200 == 0:
+            time.sleep(0.001)  # Yield GIL periodically during BFS graph traversal
         for next_id in outgoing.get(curr_id, []):
             if next_id not in pos_depths:
                 pos_depths[next_id] = d + 1
@@ -298,7 +302,10 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         lichess_ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
 
         new_data_points_added = 0
+        uncommitted_items = 0
         successful_requests_in_a_row = 0
+        last_progress_emit_time = 0.0
+        last_reported_429_hits = 0
 
         def interruptible_sleep(duration):
             remaining = duration
@@ -328,6 +335,11 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 set_meta(session, "cov_cache_count", "-1")
                 commit_with_retry(session)
                 return False, "Import abgebrochen."
+
+            # Release SQLite write transaction before waiting for rate-limit slot (prevents 2-3s locks)
+            if uncommitted_items > 0:
+                commit_with_retry(session)
+                uncommitted_items = 0
 
             if limiter.wait_for_slot(check_cancel):
                 logger.info(
@@ -398,6 +410,7 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                         with session.begin_nested():
                             session.flush()
                         new_data_points_added += 1
+                        uncommitted_items += 1
                     except Exception:
                         # Ignored collision (already inserted by another thread)
                         pass
@@ -405,6 +418,9 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
             except urllib.error.HTTPError as e:
                 successful_requests_in_a_row = 0
                 if e.code == 429:
+                    if uncommitted_items > 0:
+                        commit_with_retry(session)
+                        uncommitted_items = 0
                     old_rpm, new_rpm = limiter.record_429(fen=pos.fen)
                     window_count = limiter.get_current_window_count()
                     logger.warning(
@@ -448,8 +464,9 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
 
             i += 1
             
-            if new_data_points_added > 0 and new_data_points_added % 10 == 0:
+            if uncommitted_items >= 5:
                 commit_with_retry(session)
+                uncommitted_items = 0
 
             pct = int(i * 100 / total_pos) if total_pos > 0 else 0
 
@@ -464,7 +481,17 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     f"429 Hits: {limiter.total_429_hits}"
                 )
 
-            if progress_callback:
+            now_t = time.time()
+            is_first = (i == 1)
+            is_last = (i == total_pos)
+            has_429_alert = (limiter.total_429_hits > 0 and limiter.total_429_hits != last_reported_429_hits)
+            time_since_last_emit = now_t - last_progress_emit_time
+
+            # Throttle UI progress updates to at most once per 250ms to prevent flooding the Qt event loop
+            if progress_callback and (is_first or is_last or has_429_alert or time_since_last_emit >= 0.25):
+                last_progress_emit_time = now_t
+                if has_429_alert:
+                    last_reported_429_hits = limiter.total_429_hits
                 if limiter.total_429_hits > 0:
                     status_text = f"{i}/{total_pos} [⚠️ 429: {limiter.total_429_hits}x, RPM: {limiter.target_rpm:.0f}]"
                 else:
@@ -476,6 +503,13 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                         progress_callback(pct, status_text)
                     except TypeError:
                         progress_callback(pct)
+
+            # Micro-yield GIL to keep GUI animations and user inputs completely smooth
+            time.sleep(0.002)
+
+        if uncommitted_items > 0:
+            commit_with_retry(session)
+            uncommitted_items = 0
 
         logger.info(
             f"[Lichess Import] Finished for '{repo_name}': {new_data_points_added} points saved. "

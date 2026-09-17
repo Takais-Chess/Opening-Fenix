@@ -121,4 +121,96 @@ def test_repo_selection_taskbar_close_filter(qtbot):
     assert getattr(dlg, "_taskbar_filter", None) is None
 
 
+def test_repo_selection_native_close_does_not_quit_app(qtbot):
+    from opening_fenix.creator.repo_selection_dialog import RepoSelectionDialog
+    import sys
+    if sys.platform != "win32":
+        return
+
+    import ctypes
+    from opening_fenix.gui.native_close_filter import _WindowsMSG, _WM_SYSCOMMAND, _SC_CLOSE
+
+    dlg = RepoSelectionDialog()
+    qtbot.addWidget(dlg)
+
+    filter_obj = getattr(dlg, "_taskbar_filter", None)
+    assert filter_obj is not None
+
+    msg = _WindowsMSG()
+    msg.hwnd = int(dlg.winId())
+    msg.message = _WM_SYSCOMMAND
+    msg.wParam = _SC_CLOSE
+
+    handled, result = filter_obj.nativeEventFilter("windows_generic_MSG", ctypes.addressof(msg))
+    assert handled is False
+    assert result == 0
+    assert filter_obj._triggered is False
+    dlg.reject()
+
+
+def test_load_repertoire_dialog_cancel_when_no_repo_closes_creator(qtbot, monkeypatch):
+    from opening_fenix.creator.creator_window import CreatorWindow
+    from opening_fenix.creator.repo_selection_dialog import RepoSelectionDialog
+
+    cw = CreatorWindow()
+    qtbot.addWidget(cw)
+    cw.backend.active_repo_name = None
+    cw.active_repo_name = None
+
+    monkeypatch.setattr(RepoSelectionDialog, "exec", lambda self: 0)
+
+    closed_called = []
+    monkeypatch.setattr(cw, "close", lambda: closed_called.append(True))
+
+    cw._real_load_repertoire_dialog()
+    assert closed_called == [True]
+
+
+def test_load_repertoire_dialog_cancel_when_repo_active_keeps_creator(qtbot, monkeypatch):
+    from opening_fenix.creator.creator_window import CreatorWindow
+    from opening_fenix.creator.repo_selection_dialog import RepoSelectionDialog
+
+    cw = CreatorWindow()
+    qtbot.addWidget(cw)
+    cw.backend.active_repo_name = "ActiveTestRepo"
+    cw.active_repo_name = "ActiveTestRepo"
+
+    monkeypatch.setattr(RepoSelectionDialog, "exec", lambda self: 0)
+
+    closed_called = []
+    monkeypatch.setattr(cw, "close", lambda: closed_called.append(True))
+
+    cw._real_load_repertoire_dialog()
+    assert closed_called == []
+
+
+def test_repo_selection_button_tooltip_not_blacked_out(qtbot, repo_selection_dialog):
+    from PyQt6.QtWidgets import QToolTip, QLabel, QApplication
+    from PyQt6.QtCore import QPoint
+
+    buttons = repo_selection_dialog.findChildren(RepoSelectionButton)
+    assert len(buttons) > 0
+    btn = buttons[0]
+
+    repo_selection_dialog.show()
+    QToolTip.showText(btn.mapToGlobal(QPoint(10, 10)), btn.toolTip(), btn)
+    
+    app = QApplication.instance()
+    app.processEvents()
+
+    found_tooltip = False
+    for w in app.allWidgets():
+        if isinstance(w, QLabel) and w.windowType().name == "ToolTip":
+            found_tooltip = True
+            bg_color = w.palette().window().color().name().lower()
+            text_color = w.palette().windowText().color().name().lower()
+            assert bg_color != "#000000", f"Tooltip background is blacked out: {bg_color}"
+            assert bg_color == "#ffffff"
+            assert text_color != "#000000"
+            break
+    assert found_tooltip, "Tooltip widget was not created"
+
+
+
+
 

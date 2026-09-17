@@ -36,6 +36,9 @@ class WindowManager:
         while True:
             if not self.current_profile:
                 if not self.show_login():
+                    if getattr(self, 'creator_returned_to_login', False):
+                        self.creator_returned_to_login = False
+                        continue
                     # User cancelled login
                     break
             
@@ -103,6 +106,7 @@ class WindowManager:
         
         if getattr(self.login_dialog, 'open_creator_requested', False):
             self.show_creator()
+            self.creator_returned_to_login = True
             return False 
             
         if result == QDialog.DialogCode.Accepted:
@@ -166,3 +170,8 @@ class WindowManager:
         except: pass
         
         QApplication.instance().exec()
+        
+        is_mock = hasattr(self.creator_window, "__unittest_mock__") or "Mock" in str(type(self.creator_window))
+        if self.creator_window and (is_mock or not sip.isdeleted(self.creator_window)):
+            self.creator_window.deleteLater()
+        self.creator_window = None

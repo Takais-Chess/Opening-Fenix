@@ -607,8 +607,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     stats = lichess_moves.get(alt)
             if stats and stats.get('total', 0) > 0:
                 share = stats.get('total', 0) / total_games
-                return p_reach * share
-        return 0.0
+                return p_reach * share, share
+        return 0.0, 0.0
 
     # 4. Helpers to evaluate move soundness when offline / without live engine
     def evaluate_user_move(from_pos, from_fen, move_uci, target_pos, covered_from_inter=None):
@@ -693,7 +693,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     except Exception:
                         s1 = u1
 
-                    prio_score = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
+                    prio_score, pos_prio = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
                     res_item = {
                         "fen": f_orig,
                         "target_fen": t1_fen,
@@ -706,12 +706,14 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                         "quality": "",
                         "quality_label": "—",
                         "priority_score": prio_score,
+                        "pos_prio": pos_prio,
                         "popularity": prio_score * 100.0,
                         "ply_depth": orig_depth,
                     }
                     results.append(res_item)
                     if item_callback:
                         item_callback(res_item)
+                        time.sleep(0.001)
 
     # Pass 2: 2-Move Transpositions (Opponent plays m1, then WE play m2 to get back into repertoire)
     if max_transpositions is None or len(results) < max_transpositions:
@@ -936,7 +938,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                         except Exception:
                                             s2 = u2
 
-                                        prio_score = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
+                                        prio_score, pos_prio = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
                                         seq_str = f"{s1}  {s2}"
                                         res_item = {
                                             "fen": f_orig,
@@ -950,12 +952,14 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                             "quality": quality,
                                             "quality_label": quality_label,
                                             "priority_score": prio_score,
+                                            "pos_prio": pos_prio,
                                             "popularity": prio_score * 100.0,
                                             "ply_depth": orig_depth,
                                         }
                                         results.append(res_item)
                                         if item_callback:
                                             item_callback(res_item)
+                                            time.sleep(0.001)
                     except Exception:
                         pass
 

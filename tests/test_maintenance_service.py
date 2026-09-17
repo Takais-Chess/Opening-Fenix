@@ -129,15 +129,54 @@ def test_dual_mode_cell(qapp):
     assert not cell.label.isHidden()
     assert cell.progress_bar.isHidden()
 
-    # Switch to progress mode
-    cell.show_progress(45, "Calculating 45%")
+    # Switch to progress mode with custom format_str
+    cell.show_progress(45, "Calculating 45%", format_str="45% (15/33)")
     assert cell.label.isHidden()
     assert not cell.progress_bar.isHidden()
     assert cell.progress_bar.value() == 45
-    assert cell.progress_bar.format() == "45%"
+    assert cell.progress_bar.format() == "45% (15/33)"
+
+    # Test heartbeat animation
+    cell.update_heartbeat("...")
+    assert cell.progress_bar.format() == "45% (15/33) ..."
 
     # Switch back to text mode
+    cell.show_text("Laden...", "Loading tooltip")
+    assert not cell.label.isHidden()
+    assert cell.progress_bar.isHidden()
+    assert cell.text() == "Laden..."
+
+    # Test update_loading_text
+    cell.update_loading_text("Laden..")
+    assert cell.text() == "Laden.."
+
+    # Finished text mode
     cell.show_text("Tiefe: 18 ✓", "Finished")
     assert not cell.label.isHidden()
     assert cell.progress_bar.isHidden()
     assert cell.text() == "Tiefe: 18 ✓"
+    # update_loading_text should not touch completed text
+    cell.update_loading_text("Laden...")
+    assert cell.text() == "Tiefe: 18 ✓"
+
+@patch("opening_fenix.core.services.maintenance_service.run_db_analysis")
+def test_engine_worker_micro_progress(mock_analysis):
+    def fake_analysis(name, path, depth, threads, progress_callback, check_cancel):
+        progress_callback(12, 15, 120)
+        return True, "OK"
+    mock_analysis.side_effect = fake_analysis
+
+    status_events = []
+    def status_cb(repo_name, task_type, pct, text):
+        status_events.append((repo_name, task_type, pct, text))
+
+    orchestrator = MaintenanceOrchestrator(
+        [{'name': 'TestRepo', 'elo': 'high'}],
+        {'engine': True},
+        {'path': 'stockfish.exe', 'depth': 18, 'threads': 1},
+        None, status_cb, lambda: False
+    )
+    orchestrator._engine_worker()
+
+    assert any(ev == ('TestRepo', 'engine', 12, '15/120') for ev in status_events)
+    assert any(ev == ('TestRepo', 'engine', 100, 'Fertig') for ev in status_events)

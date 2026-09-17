@@ -12,6 +12,7 @@ All notable changes to this project will be documented in this file.
 - **Clean Level Sizing Breakdown**: Non-cluttered text breakdown of unique positions across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
 - **2-Move Transposition Scanner Speed & Quality Overhaul**: Fixed engine depth variable shadowing bug that caused runaway engine analysis on deep lines, tuned tolerance to 10 centipawns (`🟡 Solide (-X cp)`) accepting practical transposition moves alongside top engine moves, implemented lazy SAN computation, and added detailed real-time logging.
 - **Transposition Scan System Responsiveness**: Prevented full system freezing during deep multi-move scans by dynamically reserving at least 1 CPU core for the OS and UI, and inserting GIL yields between evaluations, with engine analysis driven strictly by the configured search depth.
+- **Batch Maintenance & Trainer Fluidity**: Throttled high-frequency progress signals (250ms) during Lichess imports to prevent flooding the Qt event loop, released SQLite write transactions before network rate-limit waits, and introduced cooperative GIL yielding and low background thread priority to ensure butter-smooth Trainer board animations.
 
 ## [0.9.12] - 2026-09-15
  

@@ -150,4 +150,53 @@ def test_enrich_position_engine_only(mock_popen, mock_exists, mock_user_dir, sam
     assert success is True
     assert mock_popen.called
 
+def test_order_positions_topologically_bfs(mock_user_dir, sample_repertoire):
+    from opening_fenix.core.services.analysis_service import order_positions_topologically
+
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    # Clear existing moves/positions for a clean test
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+
+    # Create root and branch positions
+    p_root = Position(id=1, fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+    p_e4 = Position(id=2, fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
+    p_d4 = Position(id=3, fen="rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 1")
+    p_e5 = Position(id=4, fen="rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6 0 2")
+    p_orphan = Position(id=5, fen="8/8/8/8/8/8/8/4K2k w - - 0 50")
+
+    session.add_all([p_root, p_e4, p_d4, p_e5, p_orphan])
+    session.flush()
+
+    # Moves: root -> e4, root -> d4, e4 -> e5
+    m1 = Move(id=1, from_position_id=1, to_position_id=2, uci="e2e4", san="e4")
+    m2 = Move(id=2, from_position_id=1, to_position_id=3, uci="d2d4", san="d4")
+    m3 = Move(id=3, from_position_id=2, to_position_id=4, uci="e7e5", san="e5")
+    session.add_all([m1, m2, m3])
+    session.commit()
+
+    # Pass in reversed / jumbled order
+    jumbled = [p_orphan, p_e5, p_d4, p_e4, p_root]
+    ordered = order_positions_topologically(session, jumbled)
+
+    ordered_ids = [p.id for p in ordered]
+    # Root (1) must be first
+    assert ordered_ids[0] == 1
+    # Depth 1 positions (2 and 3) must come before Depth 2 position (4)
+    assert set(ordered_ids[1:3]) == {2, 3}
+    assert ordered_ids[3] == 4
+    # Orphan (5) must come last
+    assert ordered_ids[4] == 5
+
+    # Trivial cases (<= 1 elements)
+    assert order_positions_topologically(session, []) == []
+    assert order_positions_topologically(session, [p_root]) == [p_root]
+
+    session.close()
+    db.close()
+
 

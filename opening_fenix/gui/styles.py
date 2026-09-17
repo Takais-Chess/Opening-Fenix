@@ -37,9 +37,14 @@ def setup_light_palette(app):
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, QColor(120, 120, 120))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, QColor(120, 120, 120))
     palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Highlight, QColor(200, 200, 200))
-    palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.HighlightedText, QColor(120, 120, 120))
-    
     app.setPalette(palette)
+    
+    # Baseline global tooltip styling to prevent OS dark mode bleed on unstyled dialogs/widgets
+    if hasattr(app, "styleSheet") and not app.styleSheet():
+        try:
+            app.setStyleSheet(get_tooltip_style())
+        except Exception as e:
+            logger.debug(f"Could not set baseline tooltip style: {e}")
 
 
 def set_consistent_icon(window):

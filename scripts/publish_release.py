@@ -37,7 +37,8 @@ def main():
 - **Lazy SAN Computation**: Transposition discovery runs on raw UCI/FEN representations, computing expensive SAN strings only for accepted candidates.
 - **Detailed Real-Time Logging**: Step-by-step evaluation feedback logged in real-time.
 
-### 🖥️ Transposition Scan System Responsiveness
+### 🖥️ Performance & UI Responsiveness
+- **Batch Maintenance & Trainer Fluidity**: Throttled high-frequency progress signals (250ms) during Lichess imports to prevent flooding the Qt event loop, released SQLite write transactions before network rate-limit waits, and introduced cooperative GIL yielding and low background thread priority to ensure butter-smooth Trainer board animations.
 - **CPU Core Reservation**: Automatically reserves at least 1 CPU core for the operating system and UI during deep multi-move scans.
 - **OS / GIL Yielding**: Yields GIL between position evaluations so Windows and the UI remain completely responsive.
 

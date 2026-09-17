@@ -85,3 +85,27 @@ def test_downloader_worker_run(tmp_path, monkeypatch):
         
     assert len(progress_updates) > 0
     assert progress_updates[-1] == (100, 100)
+
+def test_update_dialog_translations_and_no_double_arrows(qtbot, sample_release_info):
+    from opening_fenix.core.translation import translator
+
+    # Test German
+    translator.load_language("de")
+    dialog_de = UpdateDialog(sample_release_info)
+    qtbot.addWidget(dialog_de)
+    assert "▼" not in dialog_de.btn_snooze.text()
+    assert "Später erinnern" in dialog_de.btn_snooze.text()
+    assert "Jetzt herunterladen" in dialog_de.btn_download.text()
+
+    # Test English
+    translator.load_language("en")
+    dialog_en = UpdateDialog(sample_release_info)
+    qtbot.addWidget(dialog_en)
+    assert "▼" not in dialog_en.btn_snooze.text()
+    assert "Remind Later" in dialog_en.btn_snooze.text()
+    assert "Download && Install Now" in dialog_en.btn_download.text()
+    assert any("What's New" in w.text() for w in dialog_en.findChildren(object) if hasattr(w, "text"))
+
+    # Reset to default
+    translator.load_language("de")
+

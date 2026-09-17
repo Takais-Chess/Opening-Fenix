@@ -99,9 +99,21 @@ class MaintenanceOrchestrator:
             name = cfg['name']
             if self.repo_status_cb:
                 self.repo_status_cb(name, "engine", 0, "Analysiere...")
+
+            def on_engine_progress(pct, *args):
+                if not self.repo_status_cb: return
+                if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
+                    cur, total = args[0], args[1]
+                    status_text = f"{cur}/{total}"
+                elif len(args) == 1 and isinstance(args[0], str):
+                    status_text = args[0]
+                else:
+                    status_text = "Analysiere..."
+                self.repo_status_cb(name, "engine", pct, status_text)
+
             success, msg = run_db_analysis(
                 name, self.engine_settings.get('path', ''), self.engine_settings.get('depth', 18), self.engine_settings.get('threads', 1),
-                progress_callback=lambda p: self.repo_status_cb(name, "engine", p, "Analysiere...") if self.repo_status_cb else None,
+                progress_callback=on_engine_progress,
                 check_cancel=self.check_cancel
             )
             if self._is_aborted or (self.check_cancel and self.check_cancel()):
@@ -136,6 +148,7 @@ class MaintenanceOrchestrator:
                 if self.repo_status_cb:
                     self.repo_status_cb(name, "cleanup", 100, "Fertig" if success else "Fehler")
                 self._mark_task_finished(name, "cleanup")
+                time.sleep(0.01)  # Yield GIL between stages
 
             # 2. Lichess Import
             if self.tasks.get('lichess') and not self._is_aborted:
@@ -167,6 +180,7 @@ class MaintenanceOrchestrator:
                 if self.repo_status_cb:
                     self.repo_status_cb(name, "lichess", 100, "Fertig" if success else "Fehlgeschlagen")
                 self._mark_task_finished(name, "lichess")
+                time.sleep(0.01)  # Yield GIL between stages
 
             # 3. Stats & Prio (Runs strictly AFTER Lichess import for this course!)
             if self.tasks.get('stats') and not self._is_aborted:
@@ -184,6 +198,9 @@ class MaintenanceOrchestrator:
                     if self.repo_status_cb:
                         self.repo_status_cb(name, "stats", 100, "Fehler")
                 self._mark_task_finished(name, "stats")
+                time.sleep(0.01)  # Yield GIL between stages
+
+            time.sleep(0.01)  # Yield GIL between repertoires
 
     def run(self):
         if self.check_cancel and self.check_cancel():
@@ -210,7 +227,7 @@ class MaintenanceOrchestrator:
             time.sleep(0.1)
 
         for t in threads:
-            t.join(timeout=0.5)
+            t.join(timeout=3.0)
 
         if self._is_aborted or (self.check_cancel and self.check_cancel()):
             return False, "Abgebrochen durch Benutzer"

@@ -147,25 +147,37 @@ class DualModeCell(QWidget):
         self.progress_bar.setFixedHeight(scale(20))
         self.progress_bar.hide()
 
+        self._base_format = ""
+
         layout.addWidget(self.label)
         layout.addWidget(self.progress_bar)
 
     def show_text(self, text: str, tooltip: Optional[str] = None):
         self.progress_bar.hide()
+        self._base_format = ""
         self.label.setText(text)
         self.label.show()
         if tooltip is not None:
             self.setToolTip(tooltip)
             self.label.setToolTip(tooltip)
 
-    def show_progress(self, pct: int, tooltip: Optional[str] = None):
+    def show_progress(self, pct: int, tooltip: Optional[str] = None, format_str: Optional[str] = None):
         self.label.hide()
         self.progress_bar.setValue(max(0, min(100, pct)))
-        self.progress_bar.setFormat(f"{pct}%")
+        self._base_format = format_str if format_str is not None else f"{pct}%"
+        self.progress_bar.setFormat(self._base_format)
         self.progress_bar.show()
         if tooltip is not None:
             self.setToolTip(tooltip)
             self.progress_bar.setToolTip(tooltip)
+
+    def update_heartbeat(self, dots_str: str):
+        if not self.progress_bar.isHidden() and self._base_format:
+            self.progress_bar.setFormat(f"{self._base_format} {dots_str}".strip())
+
+    def update_loading_text(self, text: str):
+        if not self.label.isHidden() and "Laden" in self.label.text():
+            self.label.setText(text)
 
     def text(self) -> str:
         return self.label.text()
@@ -2254,6 +2266,15 @@ class UnifiedSettingsDialog(QDialog):
         self.loading_timer.start(500)
         self.loading_dots = 0
 
+    def _check_stop_loading_timer(self):
+        trainer_running = getattr(self, 'stats_loader', None) and self.stats_loader.isRunning()
+        maintenance_running = getattr(self, 'stats_worker', None) and self.stats_worker.isRunning()
+        m_thread_running = getattr(self, 'm_thread', None) and self.m_thread.isRunning()
+        if not trainer_running and not maintenance_running and not m_thread_running:
+            if hasattr(self, 'loading_timer') and self.loading_timer:
+                try: self.loading_timer.stop()
+                except Exception: pass
+
     def update_loading_dots(self):
         self.loading_dots = (getattr(self, 'loading_dots', 0) + 1) % 4
         dots = "." * self.loading_dots
@@ -2264,6 +2285,31 @@ class UnifiedSettingsDialog(QDialog):
         for lbl in labels:
             if lbl and not sip.isdeleted(lbl) and "Laden" in lbl.text():
                 lbl.setText(text)
+
+        if hasattr(self, 'lbl_m_overall') and self.lbl_m_overall and not sip.isdeleted(self.lbl_m_overall):
+            cur = self.lbl_m_overall.text()
+            if "Wartung wird gestoppt" in cur:
+                self.lbl_m_overall.setText(f"Wartung wird gestoppt{dots}")
+
+        if hasattr(self, 'main_table') and self.main_table and not sip.isdeleted(self.main_table):
+            for r in range(self.main_table.rowCount()):
+                it_elo = self.main_table.item(r, 2)
+                if it_elo and "Laden" in it_elo.text():
+                    it_elo.setText(text)
+
+                cell_a = self._get_row_dual_cell(r, 3)
+                if cell_a and not sip.isdeleted(cell_a):
+                    if not cell_a.label.isHidden() and "Laden" in cell_a.label.text():
+                        cell_a.update_loading_text(text)
+                    elif not cell_a.progress_bar.isHidden():
+                        cell_a.update_heartbeat(dots)
+
+                cell_c = self._get_row_dual_cell(r, 4)
+                if cell_c and not sip.isdeleted(cell_c):
+                    if not cell_c.label.isHidden() and "Laden" in cell_c.label.text():
+                        cell_c.update_loading_text(text)
+                    elif not cell_c.progress_bar.isHidden():
+                        cell_c.update_heartbeat(dots)
 
     def on_trainer_repo_selected(self, repo_name):
         self.selected_trainer_repo = repo_name
@@ -2339,7 +2385,7 @@ class UnifiedSettingsDialog(QDialog):
 
     def on_trainer_stats_loaded(self, info):
         if sip.isdeleted(self): return
-        if hasattr(self, 'loading_timer') and self.loading_timer: self.loading_timer.stop()
+        self._check_stop_loading_timer()
         
         # Update name if available
         if "name" in info and hasattr(self, 'lbl_trainer_repo_name'):
@@ -4136,7 +4182,7 @@ class UnifiedSettingsDialog(QDialog):
         self.main_table.setColumnWidth(3, scale(165))
 
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
-        self.main_table.setColumnWidth(4, scale(95))
+        self.main_table.setColumnWidth(4, scale(110))
 
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
         self.main_table.setColumnWidth(5, scale(140))
@@ -4318,7 +4364,7 @@ class UnifiedSettingsDialog(QDialog):
         self._update_maintenance_selection_count()
 
     def refresh_maintenance_table(self, start_stats_worker=True):
-        all_repos = list_all_repertoires(include_elo=True)
+        all_repos = list_all_repertoires(include_elo=False)
         self.main_table.setRowCount(len(all_repos))
         worker_data = []
         total_tasks = sum([
@@ -4360,7 +4406,7 @@ class UnifiedSettingsDialog(QDialog):
             self.main_table.setCellWidget(row, 3, cell_ana)
 
             # Column 4: Coverage (DualModeCell)
-            cell_cov = DualModeCell("-")
+            cell_cov = DualModeCell(tr_ui("analysis.loading", "Laden..."))
             self.main_table.setCellWidget(row, 4, cell_cov)
 
             # Column 5: Progress Bar (padded to keep clearance from scrollbar)
@@ -4383,32 +4429,47 @@ class UnifiedSettingsDialog(QDialog):
         self._update_maintenance_selection_count()
 
         if start_stats_worker:
+            if hasattr(self, 'stats_worker') and self.stats_worker and self.stats_worker.isRunning():
+                try: self.stats_worker.disconnect()
+                except Exception: pass
+                self.stats_worker.stop()
+                self.stats_worker.wait(200)
+
             self.stats_worker = RepertoireStatsWorker(worker_data)
             def _on_stats(row, status, cov, elo):
                 if row < self.main_table.rowCount():
                     cell_a = self._get_row_dual_cell(row, 3)
-                    if cell_a:
+                    if cell_a and "Laden" in cell_a.label.text():
                         status_str = str(status)
                         cell_a.show_text(status_str, f"Analyse: {status_str}")
                     cell_c = self._get_row_dual_cell(row, 4)
-                    if cell_c:
+                    if cell_c and "Laden" in cell_c.label.text():
                         cov_str = f"{cov:.1f}%"
                         cell_c.show_text(cov_str, f"Coverage: {cov_str}")
                     if elo:
                         item_e = self.main_table.item(row, 2)
-                        if item_e:
+                        if item_e and "Laden" in item_e.text():
                             disp = get_elo_display(elo)
                             item_e.setText(disp)
                             item_e.setToolTip(disp)
             self.stats_worker.stats_ready.connect(_on_stats)
+            self.stats_worker.finished.connect(self._check_stop_loading_timer)
+            self.start_loading_animation()
             self.stats_worker.start()
 
     def toggle_batch_maintenance(self):
         if hasattr(self, 'm_thread') and self.m_thread and self.m_thread.isRunning():
-            self.lbl_m_overall.setText("Wartung wird gestoppt...")
+            self.lbl_m_overall.setText(tr_ui("repo_settings.stopping_maintenance", "Wartung wird gestoppt..."))
             self.btn_start_batch.setEnabled(False)
+            self.start_loading_animation()
             self.m_thread.cancel()
             return
+
+        if hasattr(self, 'stats_worker') and self.stats_worker and self.stats_worker.isRunning():
+            try: self.stats_worker.disconnect()
+            except Exception: pass
+            self.stats_worker.stop()
+            self.stats_worker.wait(200)
 
         configs = []
         name_to_row = {}
@@ -4492,6 +4553,7 @@ class UnifiedSettingsDialog(QDialog):
         self.pb_m_overall.setValue(0)
         self.lbl_m_overall.setText(f"Starte parallele Wartung für {len(configs)} Repertoires...")
         self.btn_start_batch.setText(tr_ui("repo_settings.btn_stop_batch_run", "🛑 Wartungs-Batch stoppen"))
+        self.start_loading_animation()
 
         # Overall progress: (completed_count, total_repos, last_completed_name)
         self.m_thread.overall_progress_signal.connect(
@@ -4507,6 +4569,8 @@ class UnifiedSettingsDialog(QDialog):
                 return
 
             if name in task_status_map and task_type in task_status_map[name]:
+                if task_status_map[name].get(task_type) == (pct, status_text):
+                    return  # Redundant update, skip layout recalculation
                 task_status_map[name][task_type] = (pct, status_text)
 
             # 1. Engine Analysis column (Col 3)
@@ -4514,7 +4578,8 @@ class UnifiedSettingsDialog(QDialog):
                 cell_a = self._get_row_dual_cell(r, 3)
                 if cell_a:
                     if pct < 100:
-                        cell_a.show_progress(pct, f"{tr_ui('repo_settings.task_lbl_engine', 'Engine-Analyse')}: {pct}% ({status_text})")
+                        fmt = f"{pct}% ({status_text})" if status_text and status_text != "Analysiere..." else f"{pct}%"
+                        cell_a.show_progress(pct, f"{tr_ui('repo_settings.task_lbl_engine', 'Engine-Analyse')}: {pct}% ({status_text})", format_str=fmt)
                     else:
                         if status_text == "Fehlgeschlagen":
                             cell_a.show_text(f"{tr_ui('repo_settings.dlg_error', 'Fehler')} ⚠️", tr_ui("repo_settings.engine_failed", "Engine-Analyse fehlgeschlagen"))
@@ -4527,7 +4592,8 @@ class UnifiedSettingsDialog(QDialog):
                 cell_c = self._get_row_dual_cell(r, 4)
                 if cell_c:
                     if pct < 100:
-                        cell_c.show_progress(pct, f"Lichess-Import: {status_text} ({pct}%)")
+                        fmt = f"{pct}% ({status_text})" if status_text and not status_text.endswith("%") else f"{pct}%"
+                        cell_c.show_progress(pct, f"Lichess-Import: {status_text} ({pct}%)", format_str=fmt)
                     else:
                         if status_text == "Fehlgeschlagen":
                             cell_c.show_text("Fehler ⚠️", "Lichess-Import fehlgeschlagen")
@@ -4585,13 +4651,102 @@ class UnifiedSettingsDialog(QDialog):
             self.btn_start_batch.setEnabled(True)
             self.btn_start_batch.setText(tr_ui("repo_settings.btn_start_batch_run", "🚀 Wartungs-Batch starten"))
             if success:
-                self.lbl_m_overall.setText(f"Fertig: {message}")
+                self.lbl_m_overall.setText(f"{tr_ui('repo_settings.status_done', 'Fertig')}: {message}")
             else:
-                self.lbl_m_overall.setText(f"Abgebrochen: {message}")
+                self.lbl_m_overall.setText(f"{tr_ui('repo_settings.status_aborted', 'Abgebrochen')}: {message}")
             self.refresh_creator_info()
 
+            if not success:
+                # 1. Update Fortschritt column (Col 5) to cleanly reflect stopped state
+                for cfg in configs:
+                    name = cfg['name']
+                    r = name_to_row.get(name)
+                    if r is None or r >= self.main_table.rowCount():
+                        continue
+                    done_set = completed_tasks.get(name, set())
+                    done_count = len(done_set)
+                    pb = self._get_row_progressbar(r)
+                    if pb:
+                        pb.setValue(done_count)
+                        if done_count >= total_tasks_count:
+                            pb.setFormat(f"{total_tasks_count}/{total_tasks_count} Fertig ✓")
+                            pb.setProperty("class", "SuccessBar")
+                            pb.style().unpolish(pb)
+                            pb.style().polish(pb)
+                        else:
+                            stopped_str = tr_ui("repo_settings.progress_stopped_format", "{done}/{total} Gestoppt", done=done_count, total=total_tasks_count)
+                            pb.setFormat(stopped_str)
+                            pb.setProperty("class", "")
+                            pb.style().unpolish(pb)
+                            pb.style().polish(pb)
+
+                        tooltip_lines = [f"<b>{tr_ui('repo_settings.tasks_for', 'Aufgaben für {name}', name=name)} ({done_count}/{total_tasks_count}) - {tr_ui('repo_settings.status_aborted_short', 'Gestoppt')}:</b>"]
+                        for t in active_tasks:
+                            t_icon, t_name = task_labels[t]
+                            if t in done_set:
+                                badge = "✓ Fertig"
+                            else:
+                                badge = f"⏹ {tr_ui('repo_settings.status_aborted_short', 'Gestoppt')}"
+                            tooltip_lines.append(f"• {t_icon} {t_name}: <b>{badge}</b>")
+                        pb.setToolTip("<br>".join(tooltip_lines))
+
+                # 2. Put Col 3 and Col 4 in loading mode for incomplete tasks
+                repos_to_refresh = []
+                for cfg in configs:
+                    name = cfg['name']
+                    r = name_to_row.get(name)
+                    if r is None or r >= self.main_table.rowCount():
+                        continue
+                    done_set = completed_tasks.get(name, set())
+
+                    cell_a = self._get_row_dual_cell(r, 3)
+                    if cell_a and ('engine' not in done_set or cell_a.label.isHidden()):
+                        cell_a.show_text(tr_ui("analysis.loading", "Laden..."), tr_ui("analysis.loading", "Laden..."))
+
+                    cell_c = self._get_row_dual_cell(r, 4)
+                    if cell_c and ('lichess' not in done_set or cell_c.label.isHidden()):
+                        cell_c.show_text(tr_ui("analysis.loading", "Laden..."), tr_ui("analysis.loading", "Laden..."))
+
+                    repos_to_refresh.append({'row': r, 'name': name})
+
+                # 3. Reload stats in background via RepertoireStatsWorker without freezing
+                if repos_to_refresh:
+                    if hasattr(self, 'stats_worker') and self.stats_worker and self.stats_worker.isRunning():
+                        try: self.stats_worker.disconnect()
+                        except Exception: pass
+                        self.stats_worker.stop()
+                        self.stats_worker.wait(200)
+
+                    self.stats_worker = RepertoireStatsWorker(repos_to_refresh)
+
+                    def _on_stats_after_batch(row, status, cov, elo):
+                        if row < self.main_table.rowCount():
+                            cell_a = self._get_row_dual_cell(row, 3)
+                            if cell_a and "Laden" in cell_a.label.text():
+                                status_str = str(status)
+                                cell_a.show_text(status_str, f"Analyse: {status_str}")
+                            cell_c = self._get_row_dual_cell(row, 4)
+                            if cell_c and "Laden" in cell_c.label.text():
+                                cov_str = f"{cov:.1f}%"
+                                cell_c.show_text(cov_str, f"Coverage: {cov_str}")
+                            if elo:
+                                item_e = self.main_table.item(row, 2)
+                                if item_e and "Laden" in item_e.text():
+                                    disp = get_elo_display(elo)
+                                    item_e.setText(disp)
+                                    item_e.setToolTip(disp)
+
+                    self.stats_worker.stats_ready.connect(_on_stats_after_batch)
+                    self.stats_worker.finished.connect(self._check_stop_loading_timer)
+                    self.start_loading_animation()
+                    self.stats_worker.start()
+                else:
+                    self._check_stop_loading_timer()
+            else:
+                self._check_stop_loading_timer()
+
         self.m_thread.finished_signal.connect(on_batch_done)
-        self.m_thread.start()
+        self.m_thread.start(QThread.Priority.LowPriority)
 
     # ─── Cleanup ────────────────────────────────────────────────────────────
 

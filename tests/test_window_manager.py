@@ -164,3 +164,23 @@ def test_run_loop_auto_login_shows_loading_overlay(mock_event_loop_class, mock_l
         assert mock_dialog.show_loading_state.called
         mock_dialog.show_loading_state.assert_called_with("Felix")
         assert mock_loop.exec.called
+
+
+def test_run_loop_creator_returns_to_login(window_manager):
+    """Test that closing Creator after launching it from Login returns to the login screen."""
+    calls = []
+
+    def mock_show_login_side_effect():
+        if len(calls) == 0:
+            calls.append("creator")
+            window_manager.creator_returned_to_login = True
+            return False
+        else:
+            calls.append("login_cancel")
+            return False
+
+    with patch.object(window_manager, "show_login", side_effect=mock_show_login_side_effect):
+        window_manager.run_loop()
+
+    assert calls == ["creator", "login_cancel"]
+

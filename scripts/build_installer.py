@@ -48,6 +48,32 @@ def _sync_engines(dist_dir):
         print(f" -> Synced engines to {dst}")
 
 
+def _set_process_priority():
+    """Sets the build script process to BELOW_NORMAL_PRIORITY_CLASS on Windows.
+    This ensures that PyInstaller packaging and Inno Setup LZMA compression
+    run in the background without causing micro-stutters or frame drops in interactive apps."""
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+            kernel32.SetPriorityClass.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.SetPriorityClass.restype = wintypes.BOOL
+            BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            if kernel32.SetPriorityClass(kernel32.GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS):
+                print(" -> Build process priority set to BelowNormal (background-friendly mode).")
+        except Exception:
+            pass
+
+
+def _run_iscc(iscc_exe, iss_file, app_version, build_type):
+    """Run Inno Setup Compiler with BelowNormal priority to keep foreground apps responsive."""
+    cmd = [iscc_exe, f'/DMyAppVersion={app_version}', f'/DAppBuildType={build_type}', iss_file]
+    creationflags = getattr(subprocess, 'BELOW_NORMAL_PRIORITY_CLASS', 0) if sys.platform == 'win32' else 0
+    return subprocess.run(cmd, capture_output=False, creationflags=creationflags)
+
+
 def build_private(dist_dir, iscc_exe, iss_file, app_version):
     """Compile the PRIVATE installer (all profiles & repertoires included)."""
     print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires)...")
@@ -69,10 +95,7 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                     shutil.copytree(folder, dst)
                     print(f" -> Synced {folder} to {dst}")
 
-    res = subprocess.run(
-        [iscc_exe, f'/DMyAppVersion={app_version}', '/DAppBuildType=Private', iss_file],
-        capture_output=False
-    )
+    res = _run_iscc(iscc_exe, iss_file, app_version, 'Private')
     if res.returncode != 0:
         print("ERROR: Private Inno Setup compilation failed.")
         sys.exit(res.returncode)
@@ -120,10 +143,7 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                 safe_rmtree(e_dir)
                 print(f" -> Removed engines directory '{e_dir}' from public bundle")
 
-    res = subprocess.run(
-        [iscc_exe, f'/DMyAppVersion={app_version}', '/DAppBuildType=Public', iss_file],
-        capture_output=False
-    )
+    res = _run_iscc(iscc_exe, iss_file, app_version, 'Public')
     if res.returncode != 0:
         print("ERROR: Public Inno Setup compilation failed.")
         sys.exit(res.returncode)
@@ -135,6 +155,8 @@ def main():
     print("=" * 50)
     print("Usage: python scripts/build_installer.py [--public-only | --private-only]")
     print("       No flag = build both installers (default)")
+
+    _set_process_priority()
 
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
@@ -183,7 +205,12 @@ def main():
                     pass
 
         print("\n1. Building PyInstaller Application Bundle...")
-        PyInstaller.__main__.run(['--noconfirm', 'Opening Fenix.spec'])
+        PyInstaller.__main__.run([
+            '--noconfirm',
+            '--distpath', os.path.join(project_root, 'dist'),
+            '--workpath', os.path.join(project_root, 'build'),
+            os.path.join(project_root, 'Opening Fenix.spec')
+        ])
 
     dist_dir = os.path.join(project_root, 'dist', 'Opening Fenix')
     if not os.path.exists(dist_dir):

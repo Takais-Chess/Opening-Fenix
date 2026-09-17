@@ -574,6 +574,69 @@ class TestRepoSettingsMaintenancePage:
         settings_dialog._select_all_maintenance_repos(True)
         settings_dialog._select_all_maintenance_repos(False)
 
+    def test_loading_dots_animation_updates_table_cells(self, settings_dialog):
+        """update_loading_dots aktualisiert Zellen und Progress-Bars in der Wartungs-Tabelle."""
+        from opening_fenix.gui.dialogs.unified_settings_dialog import DualModeCell
+        from PyQt6.QtWidgets import QTableWidgetItem
+
+        settings_dialog.main_table.setRowCount(1)
+        item_elo = QTableWidgetItem("Laden...")
+        settings_dialog.main_table.setItem(0, 2, item_elo)
+
+        cell_a = DualModeCell("Laden...")
+        settings_dialog.main_table.setCellWidget(0, 3, cell_a)
+
+        cell_c = DualModeCell("-")
+        cell_c.show_progress(35, "Lichess...", format_str="35% (7/20)")
+        settings_dialog.main_table.setCellWidget(0, 4, cell_c)
+
+        settings_dialog.loading_dots = 0
+        settings_dialog.update_loading_dots()
+
+        assert item_elo.text() == "Laden."
+        assert cell_a.text() == "Laden."
+        assert cell_c.progress_bar.format() == "35% (7/20) ."
+
+    def test_batch_maintenance_stop_updates_table(self, settings_dialog):
+        """Wenn Batch-Wartung gestoppt wird, wird die Tabelle auf 'Gestoppt' und 'Laden...' aktualisiert."""
+        from opening_fenix.gui.dialogs.unified_settings_dialog import DualModeCell
+        from PyQt6.QtWidgets import QTableWidgetItem, QProgressBar, QWidget, QHBoxLayout
+
+        settings_dialog.main_table.setRowCount(1)
+        item_name = QTableWidgetItem("MyRepo")
+        settings_dialog.main_table.setItem(0, 1, item_name)
+
+        item_elo = QTableWidgetItem("Hoch")
+        settings_dialog.main_table.setItem(0, 2, item_elo)
+
+        cell_a = DualModeCell("-")
+        cell_a.show_progress(40, "Analysiere...", format_str="40% (8/20)")
+        settings_dialog.main_table.setCellWidget(0, 3, cell_a)
+
+        cell_c = DualModeCell("-")
+        settings_dialog.main_table.setCellWidget(0, 4, cell_c)
+
+        pb_container = QWidget()
+        h_pb = QHBoxLayout(pb_container)
+        pb = QProgressBar()
+        pb.setRange(0, 2)
+        pb.setValue(0)
+        h_pb.addWidget(pb)
+        pb_container.progress_bar = pb
+        settings_dialog.main_table.setCellWidget(0, 5, pb_container)
+
+        # Mock m_thread and trigger cancel / on_batch_done logic
+        with patch.object(settings_dialog, "refresh_creator_info"):
+            # Test stopping through the toggle handler
+            mock_thread = MagicMock()
+            mock_thread.isRunning.return_value = True
+            settings_dialog.m_thread = mock_thread
+
+            settings_dialog.toggle_batch_maintenance()
+            assert mock_thread.cancel.called
+            assert "Wartung wird gestoppt" in settings_dialog.lbl_m_overall.text()
+            assert not settings_dialog.btn_start_batch.isEnabled()
+
 
 # ─── Seite 7: Software-Updates ──────────────────────────────────────────────────
 

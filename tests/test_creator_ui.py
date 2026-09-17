@@ -299,7 +299,7 @@ def test_hole_finder_transposition_click_opens_tab(creator_window, qapp):
         it = creator_window.table_transpositions.item(r, 0)
         if it and "c5" in it.text() and "Nf3" in it.text():
             found_2move = True
-            qual_item = creator_window.table_transpositions.item(r, 1)
+            qual_item = creator_window.table_transpositions.item(r, 3)
             assert "Ausgezeichnet" in qual_item.text() or "🟢" in qual_item.text()
             break
     assert found_2move is True
@@ -488,8 +488,8 @@ def test_transposition_row_level_buttons(creator_window, qapp):
             break
     assert target_row != -1
 
-    # In col 2, there should be the cell widget containing level buttons
-    cell_widget = creator_window.table_transpositions.cellWidget(target_row, 2)
+    # In col 4, there should be the cell widget containing level buttons
+    cell_widget = creator_window.table_transpositions.cellWidget(target_row, 4)
     assert cell_widget is not None
 
 
@@ -651,8 +651,8 @@ def test_quality_column_hidden_for_1move_transpositions(creator_window, qapp):
     creator_window._populate_outgoing_table(direct_items)
     qapp.processEvents()
 
-    # Column 1 (Quality/Ranking) should be HIDDEN in table_transpositions
-    assert creator_window.table_transpositions.isColumnHidden(1) is True
+    # Column 3 (Quality/Ranking) should be HIDDEN in table_transpositions
+    assert creator_window.table_transpositions.isColumnHidden(3) is True
 
     # 4. Transposition Tab with deep BFS transpositions (depth 2+)
     deep_paths = [
@@ -668,8 +668,8 @@ def test_quality_column_hidden_for_1move_transpositions(creator_window, qapp):
     creator_window._populate_deep_table(deep_paths)
     qapp.processEvents()
 
-    # Column 1 (Quality/Ranking) should now be VISIBLE
-    assert creator_window.table_transpositions.isColumnHidden(1) is False
+    # Column 3 (Quality/Ranking) should now be VISIBLE
+    assert creator_window.table_transpositions.isColumnHidden(3) is False
 
 
 def test_clear_search_tab_on_repertoire_switch(creator_window, qapp):
@@ -745,30 +745,34 @@ def test_transposition_triggers_background_enrichment(creator_window, qapp, monk
     assert len(enriched_fens) == 2
 
 
-def test_transposition_tab_split_layout(creator_window, qapp):
-    """Test that the transpositions tab uses a QSplitter with top & bottom cards, 3-column top table, and 4-column global table."""
-    from PyQt6.QtWidgets import QSplitter
-    from PyQt6.QtCore import Qt
+def test_transposition_tab_unified_layout(creator_window, qapp):
+    """Test that the transpositions tab uses a single unified container with 5-column table and unified toolbar."""
+    # Verify main unified card
+    assert hasattr(creator_window, "card_transpos_main")
+    assert creator_window.card_transpos_main.objectName() == "TranspositionMainCard"
 
-    assert hasattr(creator_window, "transpos_splitter")
-    assert isinstance(creator_window.transpos_splitter, QSplitter)
-    assert creator_window.transpos_splitter.orientation() == Qt.Orientation.Vertical
-    assert creator_window.transpos_splitter.count() == 2
-
-    # Verify elements in top card
-    assert hasattr(creator_window, "table_transpositions")
+    # Verify toolbar elements
+    assert hasattr(creator_window, "btn_transpos_info")
     assert hasattr(creator_window, "btn_deep_transpos")
-    assert creator_window.table_transpositions.columnCount() == 3
-
-    # Verify elements in bottom card
-    assert hasattr(creator_window, "table_global_transpositions")
-    assert hasattr(creator_window, "btn_global_transpos_scan")
     assert hasattr(creator_window, "combo_transpos_depth")
-    assert creator_window.table_global_transpositions.columnCount() == 5
+    assert hasattr(creator_window, "btn_global_transpos_scan")
+
+    # Verify unified 5-column table
+    assert hasattr(creator_window, "table_transpositions")
+    assert creator_window.table_transpositions.columnCount() == 5
+    headers = [creator_window.table_transpositions.horizontalHeaderItem(i).text() for i in range(5)]
+    assert "Zug" in headers[0]
+    assert "Prio" in headers[1]
+    assert "Pos-Prio" in headers[2]
+    assert "Qualität" in headers[3]
+    assert "Level" in headers[4]
+
+    # Verify table_global_transpositions alias for backward compatibility
+    assert creator_window.table_global_transpositions is creator_window.table_transpositions
 
 
 def test_global_transposition_quality_column_hidden_until_2m(creator_window, qapp):
-    """Test that Quality column (index 3) is hidden in global transpositions table when only 1-move items exist, and shown when 2-move items exist."""
+    """Test that Quality column (index 3) is hidden in table when only 1-move items exist, and shown when 2-move items exist."""
     start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
     mock_1m_only = [
         {
@@ -789,7 +793,8 @@ def test_global_transposition_quality_column_hidden_until_2m(creator_window, qap
     creator_window._on_global_transpos_scan_finished(mock_1m_only, mode="transpositions")
     qapp.processEvents()
 
-    assert creator_window.table_global_transpositions.rowCount() == 1
+    # 1 separator row + 1 item row = 2 rows
+    assert creator_window.table_global_transpositions.rowCount() == 2
     # Quality column (column 3) is hidden when there are only 1-move transpositions
     assert creator_window.table_global_transpositions.isColumnHidden(3) is True
 
@@ -813,7 +818,8 @@ def test_global_transposition_quality_column_hidden_until_2m(creator_window, qap
     creator_window._on_global_transpos_scan_finished(mock_both, mode="transpositions")
     qapp.processEvents()
 
-    assert creator_window.table_global_transpositions.rowCount() == 2
+    # 1 separator row + 2 item rows = 3 rows
+    assert creator_window.table_global_transpositions.rowCount() == 3
     # Quality column (column 3) is visible when there are 2-move transpositions
     assert creator_window.table_global_transpositions.isColumnHidden(3) is False
 
@@ -840,11 +846,12 @@ def test_global_transposition_activation_and_level_add(creator_window, qapp):
 
     creator_window._on_global_transpos_scan_finished(mock_items, mode="transpositions")
     qapp.processEvents()
-    assert creator_window.table_global_transpositions.rowCount() == 1
+    # 1 separator row + 1 item row = 2 rows
+    assert creator_window.table_global_transpositions.rowCount() == 2
 
-    # Activate row
-    item0 = creator_window.table_global_transpositions.item(0, 0)
-    creator_window.on_global_transposition_activated(item0)
+    # Activate row 1 (row 0 is separator)
+    item1 = creator_window.table_global_transpositions.item(1, 0)
+    creator_window.on_global_transposition_activated(item1)
     qapp.processEvents()
 
     assert creator_window._preset_transposition is not None
@@ -862,8 +869,8 @@ def test_global_transposition_activation_and_level_add(creator_window, qapp):
     creator_window.add_transposition_to_level(data, level_order=1)
     qapp.processEvents()
 
-    # The row in table_global_transpositions should now be removed
-    assert creator_window.table_global_transpositions.rowCount() == 0
+    # The item should now be removed from global results
+    assert len(creator_window._global_transpos_results) == 0
 
 
 def test_search_mode_combo_does_not_contain_transpositions(creator_window):
@@ -888,7 +895,8 @@ def test_clear_search_tab_clears_global_transpositions(creator_window, qapp):
         }
     ]
     creator_window._on_global_transpos_scan_finished(mock_items, mode="transpositions")
-    assert creator_window.table_global_transpositions.rowCount() == 1
+    # 1 separator row + 1 item row = 2 rows
+    assert creator_window.table_global_transpositions.rowCount() == 2
 
     creator_window.clear_search_tab()
     assert creator_window.table_global_transpositions.rowCount() == 0
@@ -938,7 +946,7 @@ def test_transpos_depth_selector_and_move_number_formatting(creator_window, qapp
         "ply_depth": 1,
     }
     creator_window._add_global_transpos_row(mock_global_2m)
-    assert creator_window.table_global_transpositions.item(0, 0).text() == "1...c5  2.Nf3"
+    assert creator_window.table_global_transpositions.item(1, 0).text() == "1...c5  2.Nf3"
 
 
 def test_creator_window_set_repertoire_elo(creator_window, qapp):
@@ -974,8 +982,9 @@ def test_transposition_highlight_cleared_on_position_change(creator_window, qapp
     qapp.processEvents()
 
     # 1. Activate transposition -> last_move must be set to c7c5 (potential new move)
-    item0 = creator_window.table_global_transpositions.item(0, 0)
-    creator_window.on_global_transposition_activated(item0)
+    # Row 0 is separator, Row 1 is the item
+    item1 = creator_window.table_global_transpositions.item(1, 0)
+    creator_window.on_global_transposition_activated(item1)
     qapp.processEvents()
 
     assert creator_window._transposition_highlight_move == chess.Move.from_uci("c7c5")
@@ -1011,9 +1020,9 @@ def test_transposition_highlight_cleared_on_tab_switch(creator_window, qapp):
     creator_window.tabs.setCurrentWidget(creator_window.tab_transpositions)
     qapp.processEvents()
 
-    # Activate
-    item0 = creator_window.table_global_transpositions.item(0, 0)
-    creator_window.on_global_transposition_activated(item0)
+    # Activate (Row 0 is separator, Row 1 is the item)
+    item1 = creator_window.table_global_transpositions.item(1, 0)
+    creator_window.on_global_transposition_activated(item1)
     qapp.processEvents()
 
     assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
@@ -1048,6 +1057,284 @@ def test_table_transpositions_click_highlights_move(creator_window, qapp):
 
     assert creator_window._transposition_highlight_move == chess.Move.from_uci("c7c5")
     assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+
+
+def test_transposition_header_responsive_layout(creator_window, qapp):
+    """Verify that transpositions tab headers have word wrap enabled and compact layout."""
+    assert hasattr(creator_window, "lbl_transpos_status")
+    assert creator_window.lbl_transpos_status.wordWrap() is True
+
+    assert hasattr(creator_window, "lbl_global_transpos_status")
+    assert creator_window.lbl_global_transpos_status.wordWrap() is True
+
+    # Card bottom should have minimum width 0 to prevent pushing the splitter
+    card_bot = creator_window.table_global_transpositions.parentWidget()
+    assert card_bot is not None
+    assert card_bot.minimumWidth() == 0
+
+
+def test_board_auto_adjust_preserves_square_on_resize(creator_window, qapp):
+    """Verify that resizing to laptop dimensions keeps the board width matched to height."""
+    # Resize to simulated laptop window size
+    creator_window.resize(1000, 600)
+    qapp.processEvents()
+    creator_window.trigger_board_adjust()
+    qapp.processEvents()
+
+    sizes = creator_window.main_splitter.sizes()
+    splitter_h = creator_window.main_splitter.height()
+    # Board container width should match height
+    assert abs(sizes[0] - splitter_h) <= 1
+    # Total sizes plus handle width equals total splitter width
+    handle_w = creator_window.main_splitter.handleWidth()
+    assert abs(sum(sizes) + handle_w - creator_window.main_splitter.width()) <= 1
+
+
+def test_tab_switch_preserves_board_size(creator_window, qapp):
+    """Verify that switching to Transpositionen tab does not shrink the board."""
+    creator_window.resize(1000, 600)
+    qapp.processEvents()
+    creator_window.trigger_board_adjust()
+    qapp.processEvents()
+
+    initial_board_w = creator_window.main_splitter.sizes()[0]
+
+    # Find Transpositionen tab index and switch to it
+    for i in range(creator_window.tabs.count()):
+        if "Transposition" in creator_window.tabs.tabText(i):
+            creator_window.tabs.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+
+    # Board container should not be squeezed by the transpositions tab
+    current_board_w = creator_window.main_splitter.sizes()[0]
+    assert current_board_w == initial_board_w
+
+
+def test_splitter_resize_does_not_switch_tab(creator_window, qapp):
+    """Verify that resizing the chess board / splitter does not force-switch the tab to DETAILS."""
+    # Switch to Transpositions tab
+    transpos_idx = -1
+    for i in range(creator_window.tabs.count()):
+        if "Transposition" in creator_window.tabs.tabText(i):
+            transpos_idx = i
+            break
+    if transpos_idx == -1:
+        pytest.skip("Transpositions tab not present")
+
+    creator_window.tabs.setCurrentIndex(transpos_idx)
+    qapp.processEvents()
+    assert creator_window.tabs.currentIndex() == transpos_idx
+
+    # Simulate splitter movement (user resizing the board)
+    creator_window._on_splitter_moved(pos=450, index=1)
+    qapp.processEvents()
+
+    # Active tab must remain the Transpositions tab and NOT revert to DETAILS
+    assert creator_window.tabs.currentIndex() == transpos_idx
+
+
+def test_splitter_double_click_resets_auto_size(creator_window, qapp):
+    """Verify that double clicking the main splitter handle re-enables board auto-sizing."""
+    from PyQt6.QtCore import QPointF, QEvent
+    from PyQt6.QtGui import QMouseEvent
+
+    creator_window._auto_size_board = False
+    handle = creator_window.main_splitter.handle(1)
+    assert handle is not None
+
+    dbl_click_ev = QMouseEvent(
+        QEvent.Type.MouseButtonDblClick,
+        QPointF(5, 5),
+        QPointF(5, 5),
+        Qt.MouseButton.LeftButton,
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier
+    )
+    creator_window.eventFilter(handle, dbl_click_ev)
+    qapp.processEvents()
+
+    assert creator_window._auto_size_board is True
+
+
+def test_global_transposition_streaming_batching(creator_window, qapp):
+    """Verify that streamed transposition items are queued and flushed in batches without UI freeze."""
+    creator_window._global_transpos_results = []
+    creator_window._pending_global_transpos = []
+    creator_window.table_transpositions.clearSpans()
+    creator_window.table_transpositions.setRowCount(0)
+
+    item1 = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "move_san": "c5",
+        "path_sans": ["c5"],
+        "path_ucis": ["c7c5"],
+        "depth": 1,
+        "type": "transposition_1",
+        "turn": "opponent",
+        "quality": "",
+        "quality_label": "—",
+        "ply_depth": 1,
+    }
+    item2 = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "target_fen": "rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "move_san": "e6",
+        "path_sans": ["e6"],
+        "path_ucis": ["e7e6"],
+        "depth": 1,
+        "type": "transposition_1",
+        "turn": "opponent",
+        "quality": "",
+        "quality_label": "—",
+        "ply_depth": 1,
+    }
+
+    # Simulate arrival of 2 items
+    creator_window._on_global_transpos_item_found(item1, "transpositions")
+    creator_window._on_global_transpos_item_found(item2, "transpositions")
+
+    assert len(creator_window._global_transpos_results) == 2
+    assert len(creator_window._pending_global_transpos) == 2
+    assert "2 gefunden" in creator_window.lbl_global_transpos_status.text()
+
+    # Flush batch manually (simulating timer tick)
+    creator_window._flush_pending_global_transpositions()
+    qapp.processEvents()
+
+    assert len(creator_window._pending_global_transpos) == 0
+    # 1 separator row + 2 items = 3 rows
+    assert creator_window.table_transpositions.rowCount() == 3
+    sep_item = creator_window.table_transpositions.item(0, 0)
+    assert sep_item.data(Qt.ItemDataRole.UserRole) == "__separator__"
+    assert "2 Überleitungen gefunden" in sep_item.text()
+
+    # Finish scan
+    creator_window._on_global_transpos_scan_finished([item1, item2], "transpositions")
+    status_text = creator_window.lbl_global_transpos_status.text()
+    assert "2" in status_text and "gefunden" in status_text
+
+
+def test_backend_min_reachable_level_caching(creator_window):
+    """Verify that get_position_min_reachable_level computes once and caches all positions."""
+    backend = creator_window.backend
+    if not backend or not backend.session:
+        pytest.skip("No backend session available")
+
+    # Invalidate cache
+    backend.clear_cache()
+    assert backend._min_reachable_level_cache is None
+
+    # First call builds cache
+    lvl = backend.get_position_min_reachable_level(chess.STARTING_FEN)
+    assert lvl == 1
+    assert backend._min_reachable_level_cache is not None
+    assert isinstance(backend._min_reachable_level_cache, dict)
+
+    # Subsequent call hits cache
+    clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+    backend._min_reachable_level_cache[clean_root] = 42
+    assert backend.get_position_min_reachable_level(chess.STARTING_FEN) == 42
+
+    # clear_cache resets it
+    backend.clear_cache()
+    assert backend._min_reachable_level_cache is None
+
+
+def test_suggest_transposition_level_memoization(creator_window):
+    """Verify that suggest_transposition_level memoizes results in _transpos_suggestion_cache."""
+    creator_window._transpos_suggestion_cache = {}
+    data = {
+        "search_fen": chess.STARTING_FEN,
+        "target_fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "move_uci": "e2e4",
+        "move_san": "e4",
+        "type": "direct",
+    }
+
+    order, reason = creator_window.suggest_transposition_level(data)
+    assert order >= 1
+
+    clean_origin = " ".join(chess.STARTING_FEN.split()[:4])
+    clean_target = " ".join("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -".split()[:4])
+    cache_key = (clean_origin, clean_target, "e2e4")
+    assert cache_key in creator_window._transpos_suggestion_cache
+
+
+def test_incremental_transposition_rendering_and_disabled_1move_engine(creator_window, qapp):
+    """Verify that incremental rendering preserves global rows and engine is disabled for 1-move."""
+    # 1. Setup global transpositions
+    h1 = {
+        "fen": chess.STARTING_FEN,
+        "target_fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "move_san": "e4",
+        "depth": 1,
+        "priority_score": 0.5,
+        "pos_prio": 0.5,
+    }
+    h2 = {
+        "fen": chess.STARTING_FEN,
+        "target_fen": "rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -",
+        "move_san": "d4",
+        "depth": 2,
+        "priority_score": 0.3,
+        "pos_prio": 0.3,
+        "quality": "ausgezeichnet",
+    }
+    creator_window._global_transpos_results = [h1, h2]
+    creator_window._current_outgoing_items = []
+    creator_window._current_bfs_items = []
+    creator_window._render_transpositions_table(rebuild_global=True)
+
+    # Separator + 2 global rows = 3 rows
+    assert creator_window.table_transpositions.rowCount() == 3
+    sep_it = creator_window.table_transpositions.item(0, 0)
+    assert sep_it.data(Qt.ItemDataRole.UserRole) == "__separator__"
+    assert "2" in sep_it.text()
+
+    # 2. Simulate board position move with 1 direct outgoing transposition
+    outgoing_direct = [{
+        "move_san": "Nf3",
+        "move_uci": "g1f3",
+        "target_fen": "rnbqkbnr/pppppppp/8/8/8/5N2/PPPPPPPP/RNBQKB1R b KQkq -",
+        "variation_name": "Reti",
+    }]
+    creator_window.update_transpositions_tab(outgoing=outgoing_direct)
+
+    # Engine must NOT be running for 1-move transpositions
+    assert getattr(creator_window, "_instant_multipv_thread", None) is None
+
+    # Table should now have: 1 direct row + separator + 2 global rows = 4 rows
+    assert creator_window.table_transpositions.rowCount() == 4
+    row0_it = creator_window.table_transpositions.item(0, 0)
+    assert "Nf3" in row0_it.text()
+    # Quality for 1-move is neutral '—'
+    qual_it = creator_window.table_transpositions.item(0, 3)
+    assert qual_it.text() == "—"
+
+    # Separator is now at row 1
+    sep_it2 = creator_window.table_transpositions.item(1, 0)
+    assert sep_it2.data(Qt.ItemDataRole.UserRole) == "__separator__"
+    assert "2" in sep_it2.text()
+
+    # 3. Add one global transposition to level 1
+    creator_window.add_transposition_to_level(h1, level_order=1)
+
+    # Global items in list is now 1
+    assert len(creator_window._global_transpos_results) == 1
+    # Separator text updated to 1
+    sep_it3 = None
+    for r in range(creator_window.table_transpositions.rowCount()):
+        it = creator_window.table_transpositions.item(r, 0)
+        if it and it.data(Qt.ItemDataRole.UserRole) == "__separator__":
+            sep_it3 = it
+            break
+    assert sep_it3 is not None
+    assert "1" in sep_it3.text()
+
+
+
 
 
 

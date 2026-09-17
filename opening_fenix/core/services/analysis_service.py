@@ -15,8 +15,64 @@ from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
 from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
 from opening_fenix.core.translation import tr_ui
+import collections
 import urllib.request
 import urllib.parse
+
+def order_positions_topologically(session: Session, positions: list) -> list:
+    """
+    Sorts positions in Breadth-First Search (BFS) / topological order starting from the root position(s).
+    
+    Analyzing positions closer to the root first seeds Stockfish's in-memory Transposition Table (TT)
+    with evaluations of subtrees, maximizing hash hits and significantly speeding up subsequent searches
+    deeper down the tree.
+    """
+    if len(positions) <= 1:
+        return positions
+
+    # Fetch move graph (from_pos -> to_pos)
+    all_moves = session.query(Move.from_position_id, Move.to_position_id).all()
+    graph = collections.defaultdict(list)
+    has_incoming = set()
+    all_from_ids = set()
+
+    for f_id, t_id in all_moves:
+        graph[f_id].append(t_id)
+        has_incoming.add(t_id)
+        all_from_ids.add(f_id)
+
+    queue = collections.deque()
+    seen = set()
+
+    # 1. Look for standard starting FEN
+    start_pos = session.query(Position.id).filter(
+        Position.fen.startswith("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
+    ).first()
+
+    if start_pos:
+        start_id = start_pos[0]
+        queue.append(start_id)
+        seen.add(start_id)
+
+    # 2. Add any other root positions (in-degree 0) for non-standard or multi-root repertoires
+    for f_id in sorted(all_from_ids):
+        if f_id not in has_incoming and f_id not in seen:
+            queue.append(f_id)
+            seen.add(f_id)
+
+    pos_id_order = {}
+    order = 0
+    while queue:
+        curr = queue.popleft()
+        pos_id_order[curr] = order
+        order += 1
+        for nxt in graph.get(curr, []):
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append(nxt)
+
+    # Sort positions by BFS discovery order; unreached/orphan positions sort deterministically by id
+    return sorted(positions, key=lambda p: (pos_id_order.get(p.id, 999999999), p.id))
 
 def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None, hash_size: int = 256) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
@@ -37,6 +93,9 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         total_positions = len(positions_to_analyze)
         if total_positions == 0:
             return True, f"Alle Positionen sind bereits auf Tiefe {depth} oder tiefer analysiert."
+
+        # Order positions in BFS / topological order to maximize Stockfish hash hits
+        positions_to_analyze = order_positions_topologically(session, positions_to_analyze)
 
         creationflags = 0
         if sys.platform == "win32":
@@ -75,7 +134,11 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
             current_pos = session.get(Position, pos.id)
             if current_pos is None:
                 if progress_callback:
-                    progress_callback(int((i + 1) * 100 / total_positions))
+                    pct = int((i + 1) * 100 / total_positions)
+                    try:
+                        progress_callback(pct, i + 1, total_positions)
+                    except TypeError:
+                        progress_callback(pct)
                 continue
 
             board = chess.Board(current_pos.fen)
@@ -155,7 +218,11 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                     current_pos.good_moves = json.dumps([])
 
             if progress_callback:
-                progress_callback(int((i + 1) * 100 / total_positions))
+                pct = int((i + 1) * 100 / total_positions)
+                try:
+                    progress_callback(pct, i + 1, total_positions)
+                except TypeError:
+                    progress_callback(pct)
             
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
                 try:

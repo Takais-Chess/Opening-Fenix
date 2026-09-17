@@ -1008,7 +1008,6 @@ class MainWindow(QMainWindow):
                 is_test=is_test
             )
             self.creator_window.closed.connect(self.on_creator_closed)
-            self.creator_window.show()
             self.creator_window.showMaximized()
 
     def on_creator_closed(self):

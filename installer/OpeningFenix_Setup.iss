@@ -60,6 +60,9 @@ en.LichessSkipHint=Note: You can leave this blank (Skip) and enter your key late
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "..\dist\Opening Fenix\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 

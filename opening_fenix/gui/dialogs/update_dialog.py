@@ -113,7 +113,7 @@ class UpdateDialog(QDialog):
         btn_layout.setSpacing(scale(12))
 
         # Remind dropdown button
-        self.btn_snooze = QPushButton(tr_ui("update.btn_snooze", "⏳ Später erinnern ▼"))
+        self.btn_snooze = QPushButton(tr_widget("update.btn_snooze", "⏳ Später erinnern"))
         self.btn_snooze.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_snooze.setStyleSheet(f"""
             QPushButton {{
@@ -122,9 +122,14 @@ class UpdateDialog(QDialog):
                 border: 1px solid rgba(0,0,0,0.2);
                 border-radius: {scale(18)}px;
                 font-weight: bold;
-                padding: {scale(10)}px {scale(20)}px;
+                padding: {scale(10)}px {scale(32)}px {scale(10)}px {scale(20)}px;
             }}
             QPushButton:hover {{ background-color: #f5f5f5; border-color: #999; }}
+            QPushButton::menu-indicator {{
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+                right: {scale(14)}px;
+            }}
         """)
         self.setup_snooze_menu()
         btn_layout.addWidget(self.btn_snooze)
@@ -271,7 +276,7 @@ class UpdateDialog(QDialog):
         self.lbl_progress_status.setStyleSheet("color: #e74c3c; font-size: 13px; font-weight: bold;")
         self.btn_download.setEnabled(True)
         self.btn_snooze.setEnabled(True)
-        self.btn_download.setText(tr_ui("update.btn_retry_browser", "🌐 Im Browser herunterladen"))
+        self.btn_download.setText(tr_widget("update.btn_retry_browser", "🌐 Im Browser herunterladen"))
         # Switch fallback click behavior to browser link
         self.release_info["download_url"] = None
 

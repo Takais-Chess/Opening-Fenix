@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
 from opening_fenix.core.utils import get_base_path, get_user_dir
 # Import centralized styles
-from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon
+from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_tooltip_style
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
@@ -42,7 +42,7 @@ class RepertoireButton(QPushButton):
                     font-weight: bold;
                     padding: {scale(2)}px 0;
                 }}
-
+                {get_tooltip_style()}
             """)
         else:
             self.setStyleSheet(f"""
@@ -59,6 +59,7 @@ class RepertoireButton(QPushButton):
                 QPushButton:hover {{
                     background-color: rgba(255, 255, 255, 0.2);
                 }}
+                {get_tooltip_style()}
             """)
 
 class RepertoireSelectionDialog(QDialog):
@@ -98,10 +99,19 @@ class RepertoireSelectionDialog(QDialog):
         self.scroll_area = QScrollArea()
         self.scroll_area.setObjectName("RepoScrollArea")
         self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("QScrollArea#RepoScrollArea { background: transparent; border: none; }")
+        self.scroll_area.setStyleSheet("""
+            QScrollArea#RepoScrollArea {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#RepoScrollArea > QWidget > QWidget {
+                background: transparent;
+            }
+        """)
         
         scroll_widget = QWidget()
-        scroll_widget.setStyleSheet("background: transparent;")
+        scroll_widget.setObjectName("RepoScrollWidget")
+        scroll_widget.setStyleSheet("#RepoScrollWidget { background: transparent; }")
         self.grid_layout = QGridLayout(scroll_widget)
         self.grid_layout.setSpacing(scale(15))
 
@@ -354,7 +364,8 @@ class LoginDialog(QDialog):
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         self.scroll_content = QWidget()
-        self.scroll_content.setStyleSheet("background: transparent;")
+        self.scroll_content.setObjectName("ProfileScrollContent")
+        self.scroll_content.setStyleSheet("#ProfileScrollContent { background: transparent; }")
         self.profile_grid = QGridLayout(self.scroll_content)
         self.profile_grid.setSpacing(scale(15))
         self.profile_grid.setContentsMargins(0, 0, 0, 0)
