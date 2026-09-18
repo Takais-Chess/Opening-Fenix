@@ -1,11 +1,12 @@
 import os
 import json
 import time
+import datetime
 import http.client
 import urllib.request
 import urllib.parse
 import urllib.error
-from typing import Tuple, Callable, Optional, Dict, List
+from typing import Tuple, Callable, Optional, Dict, List, Set
 
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
 from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
@@ -123,6 +124,32 @@ def compute_position_bfs_depths(session) -> Dict[int, int]:
                 queue.append((next_id, d + 1))
 
     return pos_depths
+
+
+def compute_position_grandparents(session) -> Tuple[Dict[int, Set[int]], Dict[int, str]]:
+    """
+    Computes all grandparent position IDs for each position in the repertoire.
+    A grandparent is any position 2 plies back along any incoming move path (transposition-aware).
+    Also returns a mapping from position ID to FEN.
+    """
+    all_moves = session.query(Move.from_position_id, Move.to_position_id).all()
+    parents_map: Dict[int, Set[int]] = {}
+    for from_id, to_id in all_moves:
+        if to_id and from_id:
+            parents_map.setdefault(to_id, set()).add(from_id)
+
+    grandparents_map: Dict[int, Set[int]] = {}
+    for to_id, parents in parents_map.items():
+        gps: Set[int] = set()
+        for p in parents:
+            gps.update(parents_map.get(p, set()))
+        if gps:
+            grandparents_map[to_id] = gps
+
+    all_pos = session.query(Position.id, Position.fen).all()
+    id_to_fen = {p.id: p.fen for p in all_pos}
+
+    return grandparents_map, id_to_fen
 
 
 class AdaptiveSlidingWindowLimiter:
@@ -251,7 +278,153 @@ def clean_lichess_token(token: Optional[str]) -> str:
         return token.strip()
     return ""
 
-def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+def _parse_datetime_safe(val) -> Optional[datetime.datetime]:
+    if isinstance(val, datetime.datetime):
+        return val
+    if not val or not isinstance(val, str):
+        return None
+    s = val.strip().rstrip('Z')
+    try:
+        return datetime.datetime.fromisoformat(s)
+    except Exception:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(s, fmt)
+        except Exception:
+            pass
+    return None
+
+def sync_lichess_data_from_other_repertoires(
+    target_session,
+    current_repo_name: str,
+    elo_category: str,
+    max_age_days: Optional[int] = 180,
+    check_cancel: Optional[Callable[[], bool]] = None
+) -> int:
+    """
+    Copies already fetched Lichess data for the same Elo range from other local repertoires.
+    Applies an age/date filter to avoid pulling outdated statistics.
+    Returns the number of positions successfully copied.
+    """
+    import sqlite3
+    from opening_fenix.core.services.repertoire_service import RepertoireService
+
+    existing_fens_query = target_session.query(LichessData.fen).filter_by(elo_range=elo_category)
+    missing_fens = [
+        r[0] for r in target_session.query(Position.fen).filter(
+            ~Position.fen.in_(existing_fens_query)
+        ).distinct().all()
+    ]
+    if not missing_fens:
+        return 0
+
+    missing_fen_set = set(missing_fens)
+
+    try:
+        all_repos = RepertoireService().get_all_repertoires()
+    except Exception as e:
+        logger.warning(f"[Lichess Cross-Sync] Failed to list repertoires: {e}")
+        return 0
+
+    other_repos = [r for r in all_repos if r != current_repo_name]
+    if not other_repos:
+        return 0
+
+    cutoff_dt: Optional[datetime.datetime] = None
+    cutoff_ts: Optional[float] = None
+    if max_age_days is not None and max_age_days > 0:
+        cutoff_dt = datetime.datetime.now() - datetime.timedelta(days=max_age_days)
+        cutoff_ts = cutoff_dt.timestamp()
+
+    copied_count = 0
+
+    for other_repo in other_repos:
+        if check_cancel and check_cancel():
+            break
+        if not missing_fen_set:
+            break
+
+        other_db_path = get_repertoire_db_path(other_repo)
+        if not os.path.exists(other_db_path):
+            continue
+
+        mtime = os.path.getmtime(other_db_path)
+        # If max_age is set and the DB file itself is older than cutoff, all data inside is older
+        if cutoff_ts is not None and mtime < cutoff_ts:
+            continue
+
+        try:
+            conn = sqlite3.connect(other_db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lichess_data'")
+            if not cursor.fetchone():
+                conn.close()
+                continue
+
+            cursor.execute("PRAGMA table_info(lichess_data)")
+            cols = [row[1] for row in cursor.fetchall()]
+            has_fetched_at = 'fetched_at' in cols
+
+            if has_fetched_at:
+                cursor.execute("SELECT fen, moves_json, fetched_at FROM lichess_data WHERE elo_range = ?", (elo_category,))
+            else:
+                cursor.execute("SELECT fen, moves_json, NULL FROM lichess_data WHERE elo_range = ?", (elo_category,))
+
+            rows = cursor.fetchall()
+            conn.close()
+
+            for r_fen, r_moves_json, r_fetched_at in rows:
+                if r_fen not in missing_fen_set:
+                    continue
+
+                f_dt = _parse_datetime_safe(r_fetched_at)
+                # Apply date filter
+                if cutoff_dt is not None:
+                    if f_dt is not None:
+                        if f_dt < cutoff_dt:
+                            continue
+                    else:
+                        if mtime < cutoff_ts:
+                            continue
+
+                date_to_store = f_dt or datetime.datetime.fromtimestamp(mtime)
+                new_data = LichessData(
+                    fen=r_fen,
+                    elo_range=elo_category,
+                    moves_json=r_moves_json,
+                    fetched_at=date_to_store
+                )
+                target_session.add(new_data)
+                missing_fen_set.discard(r_fen)
+                copied_count += 1
+
+                if copied_count % 50 == 0:
+                    try:
+                        commit_with_retry(target_session)
+                    except Exception:
+                        pass
+
+        except Exception as e:
+            logger.debug(f"[Lichess Cross-Sync] Error reading repo '{other_repo}': {e}")
+            continue
+
+    if copied_count > 0:
+        try:
+            commit_with_retry(target_session)
+        except Exception:
+            pass
+
+    return copied_count
+
+def run_lichess_import(
+    repo_name: str,
+    elo_category: str,
+    progress_callback: Optional[Callable[..., None]] = None,
+    check_cancel: Optional[Callable[[], bool]] = None,
+    reuse_other_courses: bool = False,
+    max_data_age_days: Optional[int] = 180
+) -> Tuple[bool, str]:
     from opening_fenix.core.db.models import LichessData # local import if needed
     db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
@@ -273,6 +446,20 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
     client = LichessConnectionManager(timeout=15)
 
     try:
+        if reuse_other_courses:
+            if progress_callback:
+                try:
+                    progress_callback(0, "Prüfe Daten aus anderen Kursen...")
+                except TypeError:
+                    progress_callback(0)
+            reused_count = sync_lichess_data_from_other_repertoires(
+                session, repo_name, elo_category,
+                max_age_days=max_data_age_days,
+                check_cancel=check_cancel
+            )
+            if reused_count > 0:
+                logger.info(f"[Lichess Import] Reused {reused_count} positions from other courses (max age: {max_data_age_days} days).")
+
         existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
         
         # Query positions that don't have Lichess data yet
@@ -298,6 +485,16 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         # Breadth-First Prioritization: Sort by ply depth so lowest levels (plies 0, 1, 2...) are queried first
         pos_depths = compute_position_bfs_depths(session)
         positions_to_query.sort(key=lambda p: (pos_depths.get(p.id, 9999), p.id))
+
+        pos_grandparents, id_to_fen = compute_position_grandparents(session)
+        fen_games_count: Dict[str, int] = {}
+        all_existing_data = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
+        for f_val, mjson in all_existing_data:
+            try:
+                mdict = json.loads(mjson)
+                fen_games_count[f_val] = sum(m.get('total', 0) for m in mdict.values())
+            except Exception:
+                fen_games_count[f_val] = 0
 
         lichess_ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
 
@@ -336,6 +533,60 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                 commit_with_retry(session)
                 return False, "Import abgebrochen."
 
+            # Grandparent Skip Optimization (Transposition-Aware):
+            # If all grandparents (2 plies back) of this position have 0 games in the database for this Elo,
+            # then this position cannot have games. Skip network request and record empty LichessData.
+            gp_ids = pos_grandparents.get(pos.id)
+            if gp_ids:
+                all_gp_have_zero_games = True
+                for gp_id in gp_ids:
+                    gp_fen = id_to_fen.get(gp_id)
+                    if not gp_fen:
+                        all_gp_have_zero_games = False
+                        break
+                    gp_games = fen_games_count.get(gp_fen)
+                    # Grandparent must be already evaluated and have 0 games
+                    if gp_games is None or gp_games > 0:
+                        all_gp_have_zero_games = False
+                        break
+
+                if all_gp_have_zero_games:
+                    new_data = LichessData(
+                        fen=pos.fen,
+                        elo_range=elo_category,
+                        moves_json=json.dumps({}),
+                        fetched_at=datetime.datetime.now()
+                    )
+                    session.add(new_data)
+                    try:
+                        with session.begin_nested():
+                            session.flush()
+                        new_data_points_added += 1
+                        uncommitted_items += 1
+                        fen_games_count[pos.fen] = 0
+                    except Exception:
+                        pass
+
+                    i += 1
+                    if uncommitted_items >= 5:
+                        commit_with_retry(session)
+                        uncommitted_items = 0
+
+                    pct = int(i * 100 / total_pos) if total_pos > 0 else 0
+                    now_t = time.time()
+                    if progress_callback and (i == 1 or i == total_pos or (now_t - last_progress_emit_time) >= 0.25):
+                        last_progress_emit_time = now_t
+                        status_text = f"{i}/{total_pos} [Übersprungen: 0 Partien]"
+                        try:
+                            progress_callback(pct, i, total_pos)
+                        except TypeError:
+                            try:
+                                progress_callback(pct, status_text)
+                            except TypeError:
+                                progress_callback(pct)
+                    time.sleep(0.001)
+                    continue
+
             # Release SQLite write transaction before waiting for rate-limit slot (prevents 2-3s locks)
             if uncommitted_items > 0:
                 commit_with_retry(session)
@@ -353,7 +604,8 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
             if elo_category == 'masters':
                 params = {
                     'variant': 'standard',
-                    'fen': pos.fen
+                    'fen': pos.fen,
+                    'moves': 25
                 }
                 query_string = urllib.parse.urlencode(params)
                 url = f"https://explorer.lichess.org/masters?{query_string}"
@@ -362,7 +614,8 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                     'variant': 'standard',
                     'fen': pos.fen, 
                     'ratings': ",".join(lichess_ratings),
-                    'speeds': 'rapid,classical'
+                    'speeds': 'rapid,classical',
+                    'moves': 25
                 }
                 query_string = urllib.parse.urlencode(params)
                 url = f"https://explorer.lichess.org/lichess?{query_string}"
@@ -397,14 +650,18 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
                         new_data = LichessData(
                             fen=pos.fen,
                             elo_range=elo_category,
-                            moves_json=json.dumps(moves_dict)
+                            moves_json=json.dumps(moves_dict),
+                            fetched_at=datetime.datetime.now()
                         )
+                        fen_games_count[pos.fen] = sum(m.get('total', 0) for m in moves_dict.values())
                     else:
                         new_data = LichessData(
                             fen=pos.fen,
                             elo_range=elo_category,
-                            moves_json=json.dumps({})
+                            moves_json=json.dumps({}),
+                            fetched_at=datetime.datetime.now()
                         )
+                        fen_games_count[pos.fen] = 0
                     session.add(new_data)
                     try:
                         with session.begin_nested():
@@ -536,7 +793,14 @@ def run_lichess_import(repo_name: str, elo_category: str, progress_callback: Opt
         db.close()
 
 
-def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[..., None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+def run_lichess_import_and_calculate_scores(
+    repo_name: str,
+    elo_category: str,
+    progress_callback: Optional[Callable[..., None]] = None,
+    check_cancel: Optional[Callable[[], bool]] = None,
+    reuse_other_courses: bool = False,
+    max_data_age_days: Optional[int] = 180
+) -> Tuple[bool, str]:
     from opening_fenix.core.services.priority_service import calculate_priority_scores
 
     def import_progress_wrapper(percent, *args):
@@ -553,7 +817,9 @@ def run_lichess_import_and_calculate_scores(repo_name: str, elo_category: str, p
     import_success, import_msg = run_lichess_import(
         repo_name, elo_category,
         progress_callback=import_progress_wrapper,
-        check_cancel=check_cancel
+        check_cancel=check_cancel,
+        reuse_other_courses=reuse_other_courses,
+        max_data_age_days=max_data_age_days
     )
 
     if not import_success:

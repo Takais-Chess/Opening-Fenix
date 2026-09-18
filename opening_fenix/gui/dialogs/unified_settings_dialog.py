@@ -475,7 +475,7 @@ class DiagnosticDialog(QDialog):
         layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
 
         self.lbl_info = QLabel(tr_ui("repo_settings.diag_checking", "Überprüfe Repertoire-Struktur..."))
-        self.lbl_info.setStyleSheet("font-weight: bold; font-size: 16px;")
+        self.lbl_info.setStyleSheet(f"font-weight: bold; font-size: {scale(16)}px;")
         layout.addWidget(self.lbl_info)
         
         self.txt_results = QTextEdit()
@@ -1019,10 +1019,10 @@ class UnifiedSettingsDialog(QDialog):
             return
         if not is_valid_token_string(token):
             self.lbl_global_token_status.setText("⚠️ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
-            self.lbl_global_token_status.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self.lbl_global_token_status.setStyleSheet(f"color: #e67e22; font-size: {scale(12)}px;")
             return
         self.lbl_global_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
-        self.lbl_global_token_status.setStyleSheet("color: #2980b9; font-size: 12px;")
+        self.lbl_global_token_status.setStyleSheet(f"color: #2980b9; font-size: {scale(12)}px;")
         from PyQt6.QtCore import QThread, pyqtSignal as _pySig
 
         class _GlobalTestWorker(QThread):
@@ -1041,10 +1041,10 @@ class UnifiedSettingsDialog(QDialog):
                 return
             if success:
                 self.lbl_global_token_status.setText("✅ " + msg)
-                self.lbl_global_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                self.lbl_global_token_status.setStyleSheet(f"color: #27ae60; font-size: {scale(12)}px; font-weight: bold;")
             else:
                 self.lbl_global_token_status.setText("❌ " + msg)
-                self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                self.lbl_global_token_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(12)}px; font-weight: bold;")
 
         self._global_token_worker.done.connect(on_result)
         self._global_token_worker.start()
@@ -1199,7 +1199,7 @@ class UnifiedSettingsDialog(QDialog):
         h_cr_bar.setSpacing(scale(12))
 
         lbl_cr_prompt = QLabel(tr_ui("settings.editing_course_label", "📚 Kurs bearbeiten:"))
-        lbl_cr_prompt.setStyleSheet("font-weight: 700; font-size: 14px; color: #333;")
+        lbl_cr_prompt.setStyleSheet(f"font-weight: 700; font-size: {scale(14)}px; color: #333;")
         self.combo_active_repo = NoWheelComboBox()
         self.combo_active_repo.setMinimumWidth(scale(240))
         self.combo_active_repo.setFixedHeight(scale(34))
@@ -1543,7 +1543,7 @@ class UnifiedSettingsDialog(QDialog):
         v_tabs = QVBoxLayout(g_tabs)
         lbl_tab_info = QLabel(tr_ui("repo_settings.tab_info", "Wähle aus, welche Tabs in der Creator-Ansicht (unten rechts) angezeigt werden sollen:"))
         lbl_tab_info.setWordWrap(True)
-        lbl_tab_info.setStyleSheet("color: #666; font-size: 12px; margin-bottom: 6px;")
+        lbl_tab_info.setStyleSheet(f"color: #666; font-size: {scale(12)}px; margin-bottom: {scale(6)}px;")
         v_tabs.addWidget(lbl_tab_info)
 
         active_tabs = self.get_config().get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
@@ -1764,13 +1764,13 @@ class UnifiedSettingsDialog(QDialog):
 
         self.lbl_global_token_status = QLabel("")
         self.lbl_global_token_status.setWordWrap(True)
-        self.lbl_global_token_status.setStyleSheet("font-size: 12px; padding: 2px 0;")
+        self.lbl_global_token_status.setStyleSheet(f"font-size: {scale(12)}px; padding: {scale(2)}px 0;")
         v_lich.addWidget(self.lbl_global_token_status)
 
         # Fairplay Lockout
         lbl_fairplay = QLabel(tr_ui("settings.fairplay_desc", "<b>Lichess Fairplay Schutz:</b> Blockiert auf Wunsch den Zugriff auf Eröffnungsdaten während du ein gewertetes Spiel auf Lichess spielst, um versehentliche Account-Sperren zu verhindern."))
         lbl_fairplay.setWordWrap(True)
-        lbl_fairplay.setStyleSheet("color: #666; font-size: 12px;")
+        lbl_fairplay.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
         v_lich.addWidget(lbl_fairplay)
 
         self.chk_lockout_enabled = QCheckBox(tr_widget("settings.lockout_enabled", "Fairplay Lockout-Schutz aktivieren"))
@@ -1819,7 +1819,7 @@ class UnifiedSettingsDialog(QDialog):
 
         lbl_storage_desc = QLabel(tr_ui("settings.storage_desc", "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation)."))
         lbl_storage_desc.setWordWrap(True)
-        lbl_storage_desc.setStyleSheet("color: #666; font-size: 12px;")
+        lbl_storage_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
         v_storage.addWidget(lbl_storage_desc)
 
         h_path = QHBoxLayout()
@@ -1911,7 +1911,7 @@ class UnifiedSettingsDialog(QDialog):
         h_ver = QHBoxLayout()
         h_ver.addWidget(QLabel(tr_ui("settings.current_version_label", "Installierte Version:")))
         self.lbl_current_version = QLabel(f"v{APP_VERSION}")
-        self.lbl_current_version.setStyleSheet(f"font-weight: bold; font-size: 14px; color: {COLORS['burnt_orange']};")
+        self.lbl_current_version.setStyleSheet(f"font-weight: bold; font-size: {scale(14)}px; color: {COLORS['burnt_orange']};")
         h_ver.addWidget(self.lbl_current_version)
         h_ver.addStretch()
         v_updates.addLayout(h_ver)
@@ -1986,31 +1986,31 @@ class UnifiedSettingsDialog(QDialog):
         layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
 
         card = QFrame()
-        card.setStyleSheet("background: white; border: 1px solid rgba(0,0,0,0.1); border-radius: 12px; padding: 20px;")
+        card.setStyleSheet(f"background: white; border: 1px solid rgba(0,0,0,0.1); border-radius: {scale(12)}px; padding: {scale(20)}px;")
         v_card = QVBoxLayout(card)
         v_card.setSpacing(scale(12))
 
         lbl_h = QLabel(f"Opening Fenix v{APP_VERSION}")
-        lbl_h.setStyleSheet(f"font-size: 22px; font-weight: 900; color: {COLORS['burnt_orange']};")
+        lbl_h.setStyleSheet(f"font-size: {scale(22)}px; font-weight: 900; color: {COLORS['burnt_orange']};")
         v_card.addWidget(lbl_h)
 
         lbl_desc = QLabel("Schach-Eröffnungs-Trainer & Repertoire-Manager mit Leitner Spaced-Repetition System (SRS), Lichess Master-Datenbank und Stockfish-Integration.")
         lbl_desc.setWordWrap(True)
-        lbl_desc.setStyleSheet("font-size: 13px; color: #444;")
+        lbl_desc.setStyleSheet(f"font-size: {scale(13)}px; color: #444;")
         v_card.addWidget(lbl_desc)
 
         lbl_author = QLabel("Entwickelt von Felix. Open Source & frei für die Community.")
-        lbl_author.setStyleSheet("color: #777; font-size: 12px;")
+        lbl_author.setStyleSheet(f"color: #777; font-size: {scale(12)}px;")
         v_card.addWidget(lbl_author)
 
         lbl_notice = QLabel(
             "<b>Opening Fenix is free, open-source software available for free at "
             "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #c0392b;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
-            "<span style='color: #666; font-size: 12px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
+            f"<span style='color: #666; font-size: {scale(12)}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
         )
         lbl_notice.setOpenExternalLinks(True)
         lbl_notice.setWordWrap(True)
-        lbl_notice.setStyleSheet("font-size: 13px; margin-top: 6px;")
+        lbl_notice.setStyleSheet(f"font-size: {scale(13)}px; margin-top: {scale(6)}px;")
         v_card.addWidget(lbl_notice)
 
         layout.addWidget(card)
@@ -2070,7 +2070,7 @@ class UnifiedSettingsDialog(QDialog):
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_info_empty = QLabel(tr_ui("settings.select_repo_to_show_data", "Wähle ein Repertoire aus, um Daten anzuzeigen"))
         self.lbl_info_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_info_empty.setStyleSheet("color: #7f8c8d; font-size: 13px; font-weight: bold; font-style: italic; background: transparent;")
+        self.lbl_info_empty.setStyleSheet(f"color: #7f8c8d; font-size: {scale(13)}px; font-weight: bold; font-style: italic; background: transparent;")
         empty_layout.addWidget(self.lbl_info_empty)
         info_outer_layout.addWidget(self.info_empty_widget)
 
@@ -2096,7 +2096,7 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_trainer_repo_name = QLabel("-")
         self.lbl_trainer_repo_name.setWordWrap(True)
         self.lbl_trainer_repo_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_trainer_repo_name.setStyleSheet("font-weight: bold; font-size: 15px;")
+        self.lbl_trainer_repo_name.setStyleSheet(f"font-weight: bold; font-size: {scale(15)}px;")
         self.lbl_name = self.lbl_trainer_repo_name
         left_col.addWidget(self.lbl_trainer_repo_name)
 
@@ -2106,7 +2106,7 @@ class UnifiedSettingsDialog(QDialog):
         left_col.addWidget(self.lbl_color)
 
         self.meta_pill = QFrame()
-        self.meta_pill.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 12px;")
+        self.meta_pill.setStyleSheet(f"background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: {scale(12)}px;")
         meta_lay = QVBoxLayout(self.meta_pill)
         meta_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
         meta_lay.setSpacing(scale(4))
@@ -2114,12 +2114,12 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_db_info = QLabel("-")
         self.lbl_db_info.setWordWrap(True)
         self.lbl_db_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_db_info.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        self.lbl_db_info.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
 
         self.lbl_comment_stats = QLabel("-")
         self.lbl_comment_stats.setWordWrap(True)
         self.lbl_comment_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_comment_stats.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        self.lbl_comment_stats.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
 
         meta_lay.addWidget(self.lbl_db_info)
         meta_lay.addWidget(self.lbl_comment_stats)
@@ -2144,7 +2144,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_trainer_description.setReadOnly(True)
         self.txt_trainer_description.setPlaceholderText(tr_ui("settings.no_description", "Keine Beschreibung vorhanden."))
         self.txt_trainer_description.setStyleSheet(
-            "background: transparent; border: none; padding: 0px; font-size: 14px; color: #2c3e50; line-height: 1.4;"
+            f"background: transparent; border: none; padding: 0px; font-size: {scale(14)}px; color: #2c3e50; line-height: 1.4;"
         )
         self.txt_trainer_description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         info_main_layout.addWidget(self.txt_trainer_description, 1)
@@ -2157,7 +2157,7 @@ class UnifiedSettingsDialog(QDialog):
         v_danger = QVBoxLayout(g_danger)
         lbl_danger = QLabel(tr_ui("settings.danger_desc", "Das Zurücksetzen löscht deinen gesamten Trainingsfortschritt für dieses Repertoire."))
         lbl_danger.setWordWrap(True)
-        lbl_danger.setStyleSheet("color: #888; font-size: 12px; margin-bottom: 8px;")
+        lbl_danger.setStyleSheet(f"color: #888; font-size: {scale(12)}px; margin-bottom: {scale(8)}px;")
         v_danger.addWidget(lbl_danger)
 
         self.btn_reset_trainer_progress = QPushButton(tr_widget("settings.danger_btn", "🗑️ Trainingsfortschritt zurücksetzen"))
@@ -2374,7 +2374,7 @@ class UnifiedSettingsDialog(QDialog):
                 item = self.levels_layout.takeAt(0)
                 if item.widget(): item.widget().deleteLater()
             self.lbl_levels = QLabel(tr_ui("settings.loading_text", "Laden..."))
-            self.lbl_levels.setStyleSheet("color: #888; font-size: 12px;")
+            self.lbl_levels.setStyleSheet(f"color: #888; font-size: {scale(12)}px;")
             self.levels_layout.addWidget(self.lbl_levels)
 
         # Start animation and worker
@@ -2435,11 +2435,11 @@ class UnifiedSettingsDialog(QDialog):
             lvl_details = info.get("level_details", [])
             if not lvl_details:
                 lbl = QLabel("-")
-                lbl.setStyleSheet("color: #777; font-size: 13px;")
+                lbl.setStyleSheet(f"color: #777; font-size: {scale(13)}px;")
                 self.levels_layout.addWidget(lbl)
             else:
                 single_levels_pill = QFrame()
-                single_levels_pill.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: 12px;")
+                single_levels_pill.setStyleSheet(f"background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: {scale(12)}px;")
                 p_lay = QVBoxLayout(single_levels_pill)
                 p_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
                 p_lay.setSpacing(scale(6))
@@ -2454,7 +2454,7 @@ class UnifiedSettingsDialog(QDialog):
                     else:
                         moves_formatted = f"{moves_val:,}".replace(",", ".")
                     p_lbl = QLabel(tr_ui("settings.level_pill_format", "Lvl {order}: {name} ({target_elo} Elo) - {moves} Züge", order=ld['order'], name=ld['name'], target_elo=ld['target_elo'], moves=moves_formatted))
-                    p_lbl.setStyleSheet("color: #333333; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+                    p_lbl.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
                     p_lbl.setWordWrap(True)
                     p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     p_lay.addWidget(p_lbl)
@@ -2567,9 +2567,9 @@ class UnifiedSettingsDialog(QDialog):
         f_alt.addRow(tr_ui("settings.alt_moves_label", "Verhalten bei alternativen Zügen:"), self.combo_alt_policy)
 
         self.combo_prio_order = NoWheelComboBox()
-        self.combo_prio_order.addItem(tr_ui("settings.prio_box_first", "Niedrigste Box zuerst"), "box_first")
         self.combo_prio_order.addItem(tr_ui("settings.prio_priority_first", "Repertoire-Priorität zuerst"), "priority_first")
-        curr_prio = self.get_setting("queue_priority_order", "box_first")
+        self.combo_prio_order.addItem(tr_ui("settings.prio_box_first", "Niedrigste Box zuerst"), "box_first")
+        curr_prio = self.get_setting("queue_priority_order", "priority_first")
         idx_p = self.combo_prio_order.findData(curr_prio)
         if idx_p >= 0: self.combo_prio_order.setCurrentIndex(idx_p)
         self.combo_prio_order.currentIndexChanged.connect(lambda: self.set_setting("queue_priority_order", self.combo_prio_order.currentData()))
@@ -3316,7 +3316,7 @@ class UnifiedSettingsDialog(QDialog):
         v_eng = QVBoxLayout(g_eng)
         lbl_eng_desc = QLabel(tr_ui("repo_settings.engine_scan_desc", "Berechne alternativ spielbare Züge für das gesamte Repertoire mit Stockfish."))
         lbl_eng_desc.setWordWrap(True)
-        lbl_eng_desc.setStyleSheet("color: #666; font-size: 12px;")
+        lbl_eng_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
         v_eng.addWidget(lbl_eng_desc)
 
         f_eng = QFormLayout()
@@ -3343,13 +3343,13 @@ class UnifiedSettingsDialog(QDialog):
         v_lich = QVBoxLayout(g_lich)
         lbl_lich_desc = QLabel(tr_ui("repo_settings.lichess_scan_desc", "Lichess-Datenbank herunterladen und Popularitäts-/Prio-Scores berechnen lassen."))
         lbl_lich_desc.setWordWrap(True)
-        lbl_lich_desc.setStyleSheet("color: #666; font-size: 12px;")
+        lbl_lich_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
         v_lich.addWidget(lbl_lich_desc)
 
         # Token Status Card
         self.lbl_lich_token_status = QLabel()
         self.lbl_lich_token_status.setWordWrap(True)
-        self.lbl_lich_token_status.setStyleSheet("font-size: 12px; padding: 2px 0;")
+        self.lbl_lich_token_status.setStyleSheet(f"font-size: {scale(12)}px; padding: {scale(2)}px 0;")
         v_lich.addWidget(self.lbl_lich_token_status)
 
         h_token_btns = QHBoxLayout()
@@ -3373,6 +3373,32 @@ class UnifiedSettingsDialog(QDialog):
         line.setFrameShape(QFrame.Shape.HLine)
         line.setStyleSheet("color: rgba(0,0,0,0.1);")
         v_lich.addWidget(line)
+
+        # Reuse Lichess data from other courses
+        h_reuse = QHBoxLayout()
+        self.chk_lich_reuse_courses = QCheckBox(tr_ui("repo_settings.chk_reuse_courses", "⚡ Daten aus anderen Kursen nutzen"))
+        self.chk_lich_reuse_courses.setToolTip(tr_ui("repo_settings.chk_reuse_courses_tip", "Übernimmt bereits vorhandene Lichess-Daten aus anderen Kursen für dieselbe Elo, um den Download drastisch zu beschleunigen."))
+        cfg_dialog = self.get_config()
+        self.chk_lich_reuse_courses.setChecked(cfg_dialog.get("lichess_reuse_courses", True))
+
+        self.combo_lich_max_age = NoWheelComboBox()
+        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_90_days", "Max. 3 Monate alt"), 90)
+        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_180_days", "Max. 6 Monate alt (Empfohlen)"), 180)
+        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_365_days", "Max. 1 Jahr alt"), 365)
+        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_unlimited", "Keine Begrenzung"), None)
+
+        saved_age = cfg_dialog.get("lichess_max_age_days", 180)
+        idx_age = self.combo_lich_max_age.findData(saved_age)
+        if idx_age >= 0:
+            self.combo_lich_max_age.setCurrentIndex(idx_age)
+
+        self.combo_lich_max_age.setEnabled(self.chk_lich_reuse_courses.isChecked())
+        self.chk_lich_reuse_courses.toggled.connect(self.combo_lich_max_age.setEnabled)
+
+        h_reuse.addWidget(self.chk_lich_reuse_courses)
+        h_reuse.addWidget(self.combo_lich_max_age)
+        h_reuse.addStretch()
+        v_lich.addLayout(h_reuse)
 
         self.btn_start_lich_fetch = QPushButton(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
         self.btn_start_lich_fetch.clicked.connect(self.toggle_lichess_fetch)
@@ -3470,7 +3496,17 @@ class UnifiedSettingsDialog(QDialog):
         self._refresh_token_status_card()
 
         target_elo = get_elo_internal(self.combo_cr_elo.currentText())
-        self.w_lich = LichessImportThread(backend.active_repo_name, target_elo)
+        reuse_courses = self.chk_lich_reuse_courses.isChecked() if hasattr(self, 'chk_lich_reuse_courses') else True
+        max_age_days = self.combo_lich_max_age.currentData() if hasattr(self, 'combo_lich_max_age') else 180
+        # Persist preferences
+        self.set_setting("lichess_reuse_courses", reuse_courses)
+        self.set_setting("lichess_max_age_days", max_age_days)
+
+        self.w_lich = LichessImportThread(
+            backend.active_repo_name, target_elo,
+            reuse_other_courses=reuse_courses,
+            max_data_age_days=max_age_days
+        )
         self.pb_lich.setValue(0)
         self.btn_lich_fix_token.setVisible(False)
         self.lbl_lich_status.setStyleSheet("")
@@ -3613,7 +3649,7 @@ class UnifiedSettingsDialog(QDialog):
             self.lbl_lich_token_status.setText(
                 tr_ui("lichess_token.status_configured", "🔑 Lichess API-Token: Hinterlegt")
             )
-            self.lbl_lich_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: 500;")
+            self.lbl_lich_token_status.setStyleSheet(f"color: #27ae60; font-size: {scale(12)}px; font-weight: 500;")
             self.btn_token_setup.setVisible(False)
             self.btn_token_test.setVisible(True)
             self.btn_token_edit.setVisible(True)
@@ -3621,7 +3657,7 @@ class UnifiedSettingsDialog(QDialog):
             self.lbl_lich_token_status.setText(
                 tr_ui("lichess_token.status_missing_card", "Kein Lichess API-Token eingerichtet (Abfragen anonym mit strikten Limits)")
             )
-            self.lbl_lich_token_status.setStyleSheet("color: #e67e22; font-size: 12px; font-weight: 500;")
+            self.lbl_lich_token_status.setStyleSheet(f"color: #e67e22; font-size: {scale(12)}px; font-weight: 500;")
             self.btn_token_setup.setVisible(True)
             self.btn_token_test.setVisible(False)
             self.btn_token_edit.setVisible(False)
@@ -3647,11 +3683,11 @@ class UnifiedSettingsDialog(QDialog):
         if not is_valid_token_string(token):
             if hasattr(self, 'lbl_lich_token_status'):
                 self.lbl_lich_token_status.setText("❌ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
-                self.lbl_lich_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                self.lbl_lich_token_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(12)}px; font-weight: bold;")
             return
         if hasattr(self, 'lbl_lich_token_status'):
             self.lbl_lich_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
-            self.lbl_lich_token_status.setStyleSheet("color: #2980b9; font-size: 12px; font-weight: 500;")
+            self.lbl_lich_token_status.setStyleSheet(f"color: #2980b9; font-size: {scale(12)}px; font-weight: 500;")
         from opening_fenix.core.threads import QThread, pyqtSignal as _pySig
 
         class _TestWorker(QThread):
@@ -3670,10 +3706,10 @@ class UnifiedSettingsDialog(QDialog):
                 return
             if success:
                 self.lbl_lich_token_status.setText("✅ " + msg)
-                self.lbl_lich_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                self.lbl_lich_token_status.setStyleSheet(f"color: #27ae60; font-size: {scale(12)}px; font-weight: bold;")
             else:
                 self.lbl_lich_token_status.setText("❌ " + msg)
-                self.lbl_lich_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                self.lbl_lich_token_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(12)}px; font-weight: bold;")
 
         self._token_test_worker.done.connect(on_result)
         self._token_test_worker.start()
@@ -3686,10 +3722,10 @@ class UnifiedSettingsDialog(QDialog):
             return
         if not is_valid_token_string(token):
             self.lbl_global_token_status.setText("❌ " + tr_ui("lichess_token.status_none", "Noch kein Lichess-Token hinterlegt."))
-            self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+            self.lbl_global_token_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(12)}px; font-weight: bold;")
             return
         self.lbl_global_token_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
-        self.lbl_global_token_status.setStyleSheet("color: #2980b9; font-size: 12px; font-weight: 500;")
+        self.lbl_global_token_status.setStyleSheet(f"color: #2980b9; font-size: {scale(12)}px; font-weight: 500;")
         from opening_fenix.core.threads import QThread, pyqtSignal as _pySig
 
         class _GlobalTestWorker(QThread):
@@ -3708,10 +3744,10 @@ class UnifiedSettingsDialog(QDialog):
                 return
             if success:
                 self.lbl_global_token_status.setText("✅ " + msg)
-                self.lbl_global_token_status.setStyleSheet("color: #27ae60; font-size: 12px; font-weight: bold;")
+                self.lbl_global_token_status.setStyleSheet(f"color: #27ae60; font-size: {scale(12)}px; font-weight: bold;")
             else:
                 self.lbl_global_token_status.setText("❌ " + msg)
-                self.lbl_global_token_status.setStyleSheet("color: #e74c3c; font-size: 12px; font-weight: bold;")
+                self.lbl_global_token_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(12)}px; font-weight: bold;")
 
         self._global_token_test_worker.done.connect(on_result)
         self._global_token_test_worker.start()
@@ -3856,12 +3892,12 @@ class UnifiedSettingsDialog(QDialog):
         layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
 
         lbl_title = QLabel(tr_ui("repo_settings.backups_title", "⏮️ Repertoire-Backups & Wiederherstellung"))
-        lbl_title.setStyleSheet("font-size: 18px; font-weight: 800; color: #111111;")
+        lbl_title.setStyleSheet(f"font-size: {scale(18)}px; font-weight: 800; color: #111111;")
         layout.addWidget(lbl_title)
 
         lbl_sub = QLabel(tr_ui("repo_settings.backups_sub", "Automatische und manuelle Sicherungspunkte deines Repertoires inklusive aller Partien, Kommentare und PGN-Ressourcen (Typical Ideas, Model Games, Tactics)."))
         lbl_sub.setWordWrap(True)
-        lbl_sub.setStyleSheet("color: #666; font-size: 13px;")
+        lbl_sub.setStyleSheet(f"color: #666; font-size: {scale(13)}px;")
         layout.addWidget(lbl_sub)
 
         h_bar = QHBoxLayout()
@@ -3888,10 +3924,10 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_backups.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.tbl_backups.setColumnWidth(0, scale(155))
         self.tbl_backups.setColumnWidth(3, scale(180))
-        self.tbl_backups.setStyleSheet("""
-            QTableWidget { background-color: white; border-radius: 8px; border: 1px solid rgba(0,0,0,0.1); }
-            QTableWidget::item { padding: 6px 8px; }
-            QHeaderView::section { font-size: 13px; font-weight: 700; padding: 4px; }
+        self.tbl_backups.setStyleSheet(f"""
+            QTableWidget {{ background-color: white; border-radius: {scale(8)}px; border: 1px solid rgba(0,0,0,0.1); }}
+            QTableWidget::item {{ padding: {scale(6)}px {scale(8)}px; }}
+            QHeaderView::section {{ font-size: {scale(13)}px; font-weight: 700; padding: {scale(4)}px; }}
         """)
         layout.addWidget(self.tbl_backups)
 
@@ -3922,19 +3958,19 @@ class UnifiedSettingsDialog(QDialog):
             btn_restore = QPushButton(tr_ui("repo_settings.btn_restore", "⏮️ Wiederherstellen"))
             btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_restore.setFixedHeight(scale(28))
-            btn_restore.setStyleSheet("QPushButton { background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 2px 6px; } QPushButton:hover { background-color: #ebf5ff; }")
+            btn_restore.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #ebf5ff; }}")
             btn_restore.clicked.connect(lambda _, p=b["path"], d=dt_str: self.restore_backup(p, d))
 
             btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_backup", "🗑️ Löschen"))
             btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_delete.setFixedHeight(scale(28))
-            btn_delete.setStyleSheet("QPushButton { background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: 4px; font-size: 11px; font-weight: 600; padding: 2px 6px; } QPushButton:hover { background-color: #fadbd8; }")
+            btn_delete.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #fadbd8; }}")
             btn_delete.clicked.connect(lambda _, p=b["path"], d=dt_str: self.delete_backup_selected(p, d))
 
             cell_w = QWidget()
             cell_l = QVBoxLayout(cell_w)
-            cell_l.setContentsMargins(4, 4, 4, 4)
-            cell_l.setSpacing(4)
+            cell_l.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
+            cell_l.setSpacing(scale(4))
             cell_l.addWidget(btn_restore)
             cell_l.addWidget(btn_delete)
             self.tbl_backups.setCellWidget(row, 3, cell_w)
@@ -4203,6 +4239,35 @@ class UnifiedSettingsDialog(QDialog):
         self.chk_m_engine.setChecked(True)
         self.chk_m_lichess = QCheckBox(tr_widget("repo_settings.task_lichess", "Lichess Import (Trend-Daten)"))
         self.chk_m_lichess.setChecked(True)
+
+        # Cross-course Lichess options
+        cfg_m = self.get_config()
+        self.chk_batch_reuse_courses = QCheckBox(tr_ui("repo_settings.chk_batch_reuse_courses", "⚡ Daten aus anderen Kursen nutzen"))
+        self.chk_batch_reuse_courses.setToolTip(tr_ui("repo_settings.chk_batch_reuse_courses_tip", "Beschleunigt den Batch-Import massiv, indem vorhandene Lichess-Daten aus anderen Kursen übernommen werden."))
+        self.chk_batch_reuse_courses.setChecked(cfg_m.get("lichess_reuse_courses", True))
+
+        self.combo_batch_max_age = NoWheelComboBox()
+        self.combo_batch_max_age.addItem(tr_ui("repo_settings.age_90_days", "Max. 3 Monate"), 90)
+        self.combo_batch_max_age.addItem(tr_ui("repo_settings.age_180_days", "Max. 6 Monate (Empfohlen)"), 180)
+        self.combo_batch_max_age.addItem(tr_ui("repo_settings.age_365_days", "Max. 1 Jahr"), 365)
+        self.combo_batch_max_age.addItem(tr_ui("repo_settings.age_unlimited", "Beliebig"), None)
+
+        idx_b_age = self.combo_batch_max_age.findData(cfg_m.get("lichess_max_age_days", 180))
+        if idx_b_age >= 0:
+            self.combo_batch_max_age.setCurrentIndex(idx_b_age)
+
+        h_batch_reuse = QHBoxLayout()
+        h_batch_reuse.setContentsMargins(scale(22), 0, 0, 0)
+        h_batch_reuse.addWidget(self.chk_batch_reuse_courses)
+        h_batch_reuse.addWidget(self.combo_batch_max_age)
+        h_batch_reuse.addStretch()
+
+        self.combo_batch_max_age.setEnabled(self.chk_m_lichess.isChecked() and self.chk_batch_reuse_courses.isChecked())
+        self.chk_batch_reuse_courses.setEnabled(self.chk_m_lichess.isChecked())
+        self.chk_m_lichess.toggled.connect(lambda on: self.chk_batch_reuse_courses.setEnabled(on))
+        self.chk_m_lichess.toggled.connect(lambda on: self.combo_batch_max_age.setEnabled(on and self.chk_batch_reuse_courses.isChecked()))
+        self.chk_batch_reuse_courses.toggled.connect(lambda on: self.combo_batch_max_age.setEnabled(on and self.chk_m_lichess.isChecked()))
+
         self.chk_m_cleanup = QCheckBox(tr_widget("repo_settings.task_cleanup_lichess", "Verwaiste Lichess-Daten bereinigen"))
         self.chk_m_cleanup.setChecked(True)
         self.chk_m_stats = QCheckBox(tr_widget("repo_settings.task_stats", "Statistiken & Prioritäten berechnen"))
@@ -4215,6 +4280,7 @@ class UnifiedSettingsDialog(QDialog):
 
         v_tasks.addWidget(self.chk_m_engine)
         v_tasks.addWidget(self.chk_m_lichess)
+        v_tasks.addLayout(h_batch_reuse)
         v_tasks.addWidget(self.chk_m_cleanup)
         v_tasks.addWidget(self.chk_m_stats)
         v_tasks.addStretch()
@@ -4485,11 +4551,18 @@ class UnifiedSettingsDialog(QDialog):
             QMessageBox.warning(self, tr_ui("repo_settings.title", "Wartung"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
             return
 
+        batch_reuse = self.chk_batch_reuse_courses.isChecked() if hasattr(self, 'chk_batch_reuse_courses') else True
+        batch_max_age = self.combo_batch_max_age.currentData() if hasattr(self, 'combo_batch_max_age') else 180
+        self.set_setting("lichess_reuse_courses", batch_reuse)
+        self.set_setting("lichess_max_age_days", batch_max_age)
+
         tasks = {
             'engine': self.chk_m_engine.isChecked(),
             'lichess': self.chk_m_lichess.isChecked(),
             'cleanup': self.chk_m_cleanup.isChecked(),
-            'stats': self.chk_m_stats.isChecked()
+            'stats': self.chk_m_stats.isChecked(),
+            'lichess_reuse_courses': batch_reuse,
+            'lichess_max_age_days': batch_max_age
         }
 
         if not any(tasks.values()):

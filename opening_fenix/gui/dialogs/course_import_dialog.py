@@ -583,6 +583,7 @@ class CourseImportDialog(QDialog):
 
         lbl_title = QLabel(tr_ui("course_import.dialog_title", "⚡ Automatisierter Kurs-Import"))
         lbl_title.setObjectName("LoginTitle")
+        lbl_title.setStyleSheet(f"font-size: {scale(20)}px; font-weight: 900; letter-spacing: 0px;")
         title_row.addWidget(lbl_title)
 
         self.badge_experimental = QLabel(tr_ui("course_import.badge_experimental", "🧪 Experimentell"))

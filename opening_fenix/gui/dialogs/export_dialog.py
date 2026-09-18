@@ -20,7 +20,7 @@ class ExportDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("export.window_title", "Exportieren"))
-        self.setMinimumWidth(scale(350))
+        self.setMinimumWidth(scale(540))
         self.result_data = None
 
         self.backend = backend

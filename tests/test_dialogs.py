@@ -34,8 +34,25 @@ def test_faq_dialog_interaction(qtbot):
     # Check for FAQItem children
     from opening_fenix.gui.dialogs.faq_dialog import FAQItem
     items = dialog.findChildren(FAQItem)
-    assert len(items) >= 3
+    assert len(items) >= 4
     assert "training" in items[0].findChild(QLabel).text().lower() or "training" in items[1].findChild(QLabel).text().lower()
+    all_texts = [label.text().lower() for item in items for label in item.findChildren(QLabel)]
+    assert any("lichess" in t for t in all_texts)
+
+def test_faq_dialog_english(qtbot):
+    """Test FAQ items in English."""
+    from opening_fenix.core.translation import translator
+    old_lang = translator.current_lang
+    try:
+        translator.load_language("en")
+        dialog = FAQDialog()
+        qtbot.addWidget(dialog)
+        from opening_fenix.gui.dialogs.faq_dialog import FAQItem
+        items = dialog.findChildren(FAQItem)
+        all_texts = [label.text().lower() for item in items for label in item.findChildren(QLabel)]
+        assert any("will the lichess import for big courses ever get faster?" in t for t in all_texts)
+    finally:
+        translator.load_language(old_lang)
 
 def test_repertoire_selection_dialog(qtbot, mock_user_dir):
     """Test the repertoire selection flow for new profiles."""

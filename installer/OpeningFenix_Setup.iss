@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "0.9.13"
+#define MyAppVersion "1.0.0"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -343,6 +343,60 @@ begin
   end;
 end;
 
+procedure MigrateOldInstalledProfiles();
+var
+  FindRec: TFindRec;
+  SrcDirs: array[0..1] of String;
+  DestDir: String;
+  SrcDir: String;
+  I: Integer;
+  SrcFile, DestFile: String;
+begin
+  DestDir := ExpandConstant('{userappdata}') + '\Opening Fenix\profiles';
+  ForceDirectories(DestDir);
+
+  SrcDirs[0] := ExpandConstant('{app}') + '\profiles';
+  SrcDirs[1] := ExpandConstant('{app}') + '\_internal\profiles';
+
+  for I := 0 to 1 do
+  begin
+    SrcDir := SrcDirs[I];
+    if DirExists(SrcDir) then
+    begin
+      if FindFirst(SrcDir + '\*.db', FindRec) then
+      begin
+        try
+          repeat
+            SrcFile := SrcDir + '\' + FindRec.Name;
+            DestFile := DestDir + '\' + FindRec.Name;
+            if not FileExists(DestFile) then
+            begin
+              CopyFile(SrcFile, DestFile, False);
+            end;
+          until not FindNext(FindRec);
+        finally
+          FindClose(FindRec);
+        end;
+      end;
+      if FindFirst(SrcDir + '\*_settings.json', FindRec) then
+      begin
+        try
+          repeat
+            SrcFile := SrcDir + '\' + FindRec.Name;
+            DestFile := DestDir + '\' + FindRec.Name;
+            if not FileExists(DestFile) then
+            begin
+              CopyFile(SrcFile, DestFile, False);
+            end;
+          until not FindNext(FindRec);
+        finally
+          FindClose(FindRec);
+        end;
+      end;
+    end;
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ConfigPath: String;
@@ -356,8 +410,13 @@ var
   TargetPaths: array[0..1] of String;
   I: Integer;
 begin
-  if CurStep = ssPostInstall then
+  if CurStep = ssInstall then
   begin
+    MigrateOldInstalledProfiles();
+  end
+  else if CurStep = ssPostInstall then
+  begin
+    MigrateOldInstalledProfiles();
     LichessKey := Trim(LichessEdit.Text);
     if (LichessKey = '') and (ExistingLichessToken <> '') then
       LichessKey := ExistingLichessToken;

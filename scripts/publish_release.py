@@ -5,6 +5,11 @@ import urllib.request
 import urllib.parse
 import json
 
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+from opening_fenix.core.version import APP_VERSION
+
 def get_github_token():
     p = subprocess.Popen(['git', 'credential', 'fill'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     out, _ = p.communicate('protocol=https\nhost=github.com\n')
@@ -18,32 +23,41 @@ def main():
         sys.exit(1)
 
     repo = "Takais-Chess/Opening-Fenix"
-    tag_name = "v0.9.13"
-    release_name = "Opening Fenix v0.9.13"
+    tag_name = f"v{APP_VERSION}"
+    release_name = f"Opening Fenix v{APP_VERSION}"
     
-    release_body = """## What's New in v0.9.13
+    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Official Release
 
-### 📊 Repertoire Statistics & Insights
-- **Dedicated Insights Modal**: Accessible directly from the Creator toolbar (right of the Resources button).
-- **Opening Scope Detection**: Smart root branch detection (`Gegen 1.e4`, `1.d4 Repertoire`) that scopes coverage curves and expected win rates specifically within the course's focus, eliminating false alerts for out-of-scope openings.
-- **3 Core Metric Badges**: Real-world Lichess expected win rate (Effectiveness), Stockfish path evaluation score (Soundness), and memory load categorization (Learnability).
-- **1-Step Move Coverage Curve**: Dynamic step-by-step opponent coverage curve tracking book survival rate per move with colored visual indicators.
-- **Clean Level Sizing Breakdown**: Non-cluttered text breakdown of unique positions across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
+Opening Fenix 1.0 is here! A comprehensive, high-performance chess opening repertoire manager and active recall training system built with PyQt6, Stockfish, and Lichess database integration.
 
-### ⚡ 2-Move Transposition Scanner Speed & Quality Overhaul
-- **Fixed Depth Variable Shadowing**: Eliminated engine depth runaway bug that caused runaway engine analysis on deep lines.
-- **Tuned Engine Tolerance (10 cp)**: Practical moves within 10 centipawns of the engine's #1 move are recognized as `🟡 Solide (-X cp)`.
-- **Pure Depth Search**: Engine evaluation runs strictly according to the configured search depth (e.g. depth 25) without artificial timeouts.
-- **Lazy SAN Computation**: Transposition discovery runs on raw UCI/FEN representations, computing expensive SAN strings only for accepted candidates.
-- **Detailed Real-Time Logging**: Step-by-step evaluation feedback logged in real-time.
+### 🌟 Release Highlights
 
-### 🖥️ Performance & UI Responsiveness
-- **Batch Maintenance & Trainer Fluidity**: Throttled high-frequency progress signals (250ms) during Lichess imports to prevent flooding the Qt event loop, released SQLite write transactions before network rate-limit waits, and introduced cooperative GIL yielding and low background thread priority to ensure butter-smooth Trainer board animations.
-- **CPU Core Reservation**: Automatically reserves at least 1 CPU core for the operating system and UI during deep multi-move scans.
-- **OS / GIL Yielding**: Yields GIL between position evaluations so Windows and the UI remain completely responsive.
+#### 🖥️ High-DPI & Multi-Resolution Display Polish
+- Full visual audit and layout optimization across all 12 core windows and modals on high-DPI scaling (125%, 150%, 200%).
+- Full typography scaling audit: 100% of labels, dialogs, tables, and settings now scale dynamically with `scale(...)` across High-DPI and custom display resolutions.
+- Polished dialog layouts including Engine Action, Course Import, Statistics Insights, Repertoire Selection, and Export dialogs to prevent clipping or scrollbar truncation.
+- Dynamic responsive table columns in Creator Analysis and Transposition tabs with intelligent font scaling and smart percentage formatting.
 
-### 🎨 UI Polish
-- Fixed column-span clearing issue in the Transpositions tab so the "No direct transpositions" message is properly cleared when navigating to a 2-move transposition.
+#### 📊 Repertoire Statistics & Advanced Insights
+- Dedicated Insights modal with intelligent opening scope detection (`Gegen 1.e4`, `1.d4 Repertoire`) eliminating false out-of-scope alerts.
+- 3 Core Metric Badges: Real-world Lichess expected win rate (Effectiveness), Stockfish path evaluation score (Soundness), and memory load categorization (Learnability).
+- Step-by-step opponent move coverage curve tracking book survival rate per move with color-coded visual indicators.
+- Position sizing breakdown across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
+
+#### ⚡ High-Speed 2-Move Transposition Scanner
+- Tuned engine tolerance (10 cp) recognizing practical moves alongside top engine moves.
+- Pure search depth evaluation without artificial cutoffs, reserving CPU cores for OS responsiveness and UI fluidity.
+- Lazy SAN computation with real-time progress feedback.
+
+#### 🧩 Course Import & Profile Synchronization
+- Streamlined PGN course import service with interactive chapter preview.
+- Multi-profile repertoire management with automated background backup deduplication.
+
+#### 🌍 100% Bilingual Localization Parity
+- Complete parity between German and English across all 1,166 translation keys.
+
+#### 🛡️ Stability & Test Coverage
+- Over 700 passing automated unit and integration tests verifying database integrity, UI event handling, and engine synchronization.
 """
 
     headers = {
@@ -85,7 +99,7 @@ def main():
     upload_url_base = upload_url_tmpl.split("{")[0]
 
     # 2. Check if asset already exists and delete if so
-    asset_file_path = os.path.join("Output", "OpeningFenix_Setup_v0.9.13_Public.exe")
+    asset_file_path = os.path.join("Output", f"OpeningFenix_Setup_v{APP_VERSION}_Public.exe")
     if not os.path.exists(asset_file_path):
         print(f"ERROR: Asset file not found at {asset_file_path}")
         sys.exit(1)
@@ -120,7 +134,7 @@ def main():
         print(f"Failed to upload asset: {e.code} - {e.read().decode('utf-8')}")
         sys.exit(1)
 
-    print("\nRelease v0.9.13 successfully published!")
+    print(f"\nRelease v{APP_VERSION} successfully published!")
     print(f"View release: https://github.com/{repo}/releases/tag/{tag_name}")
 
 if __name__ == "__main__":

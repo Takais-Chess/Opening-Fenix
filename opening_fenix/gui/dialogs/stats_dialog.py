@@ -43,8 +43,8 @@ class RepertoireStatisticsDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("stats.window_title", "Repertoire-Statistiken & Insights"))
-        self.setMinimumSize(scale(660), scale(540))
-        self.resize(scale(700), scale(580))
+        self.setMinimumSize(scale(740), scale(680))
+        self.resize(scale(760), scale(710))
 
         self.repo_name = repo_name
         self.is_test = is_test
@@ -154,7 +154,7 @@ class RepertoireStatisticsDialog(QDialog):
 
         main_layout.addWidget(header_widget)
 
-        # --- 2. THE 3 TOP METRIC CARDS ---
+        # --- 2. TOP METRIC SECTION ---
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(scale(12))
 
@@ -165,25 +165,49 @@ class RepertoireStatisticsDialog(QDialog):
             default_sub=tr_ui("stats.card_eff_sub", "Erwartete Punktzahl"),
             accent_color="#3b82f6"
         )
-        cards_layout.addWidget(self.card_eff)
+        cards_layout.addWidget(self.card_eff, 1)
 
-        # 2. Soundness Card (Green accent)
-        self.card_snd, self.lbl_snd_val, self.lbl_snd_sub = self._create_metric_card(
-            title=tr_ui("stats.card_snd_title", "SOLIDITÄT").upper(),
-            default_val="-- / 100",
-            default_sub=tr_ui("stats.card_snd_sub", "Stockfish-Qualität"),
-            accent_color="#10b981"
-        )
-        cards_layout.addWidget(self.card_snd)
+        # 2. In-Progress / Placeholder Card (replaces Solidität & Lernaufwand)
+        self.card_wip = QFrame()
+        self.card_wip.setObjectName("WipCard")
+        self.card_wip.setFixedHeight(scale(115))
+        self.card_wip.setStyleSheet(f"""
+            QFrame#WipCard {{
+                background-color: #f8fafc;
+                border: 1px dashed #cbd5e1;
+                border-radius: {scale(10)}px;
+                padding: {scale(12)}px;
+            }}
+            QFrame#WipCard QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+        wip_layout = QVBoxLayout(self.card_wip)
+        wip_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        wip_layout.setSpacing(scale(6))
 
-        # 3. Learnability Card (Purple accent)
-        self.card_lrn, self.lbl_lrn_val, self.lbl_lrn_sub = self._create_metric_card(
-            title=tr_ui("stats.card_lrn_title", "LERNAUFWAND").upper(),
-            default_val="--",
-            default_sub=tr_ui("stats.card_lrn_sub", "Speicherumfang"),
-            accent_color="#8b5cf6"
+        lbl_wip_icon = QLabel("🚧")
+        lbl_wip_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_wip_icon.setStyleSheet(f"font-size: {scale(22)}px; border: none; background: transparent;")
+        wip_layout.addWidget(lbl_wip_icon)
+
+        lbl_wip_text = QLabel(
+            tr_ui(
+                "stats.wip_notice",
+                "(Diese Seite ist noch nicht vollständig und folgt in einem späteren Update)"
+            )
         )
-        cards_layout.addWidget(self.card_lrn)
+        lbl_wip_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl_wip_text.setWordWrap(True)
+        lbl_wip_text.setStyleSheet(f"""
+            font-size: {scale(12)}px;
+            font-weight: 600;
+            color: #64748b;
+        """)
+        wip_layout.addWidget(lbl_wip_text)
+
+        cards_layout.addWidget(self.card_wip, 2)
 
         main_layout.addLayout(cards_layout)
 
@@ -224,8 +248,8 @@ class RepertoireStatisticsDialog(QDialog):
         # --- 4. PRACTICAL REPERTOIRE COVERAGE PLACEHOLDER ---
         grp_cov = QGroupBox(f"📊  {tr_ui('stats.coverage_group', 'Repertoire-Abdeckung in der Praxis')}")
         layout_cov = QVBoxLayout(grp_cov)
-        layout_cov.setContentsMargins(scale(16), scale(16), scale(16), scale(16))
-        layout_cov.setSpacing(scale(8))
+        layout_cov.setContentsMargins(scale(16), scale(12), scale(16), scale(12))
+        layout_cov.setSpacing(scale(6))
 
         card_placeholder = QFrame()
         card_placeholder.setObjectName("PlaceholderCard")
@@ -234,7 +258,7 @@ class RepertoireStatisticsDialog(QDialog):
                 background-color: #f8fafc;
                 border: 1px dashed #cbd5e1;
                 border-radius: {scale(8)}px;
-                padding: {scale(16)}px;
+                padding: {scale(10)}px {scale(14)}px;
             }}
             QFrame#PlaceholderCard QLabel {{
                 border: none;
@@ -379,6 +403,7 @@ class RepertoireStatisticsDialog(QDialog):
         """Creates a clean sub-tile for a level without charts."""
         tile = QFrame()
         tile.setObjectName("LevelTile")
+        tile.setMinimumHeight(scale(56))
         tile.setStyleSheet(f"""
             QFrame#LevelTile {{
                 background-color: #f8fafc;
@@ -436,18 +461,6 @@ class RepertoireStatisticsDialog(QDialog):
         win_rate = eff.get("win_rate", 50.0)
         self.lbl_eff_val.setText(f"{win_rate:.1f}%")
         self.lbl_eff_sub.setText(f"{tr_ui('stats.expected_score', 'Erwartete Punktzahl')} (Lichess)")
-
-        snd = data.get("soundness", {})
-        score = snd.get("score", 90)
-        self.lbl_snd_val.setText(f"{score} / 100")
-        eval_count = snd.get("evaluated_count", 0)
-        self.lbl_snd_sub.setText(f"{eval_count} {tr_ui('stats.positions_evaluated', 'Stellungen bewertet')}")
-
-        lrn = data.get("learnability", {})
-        tier = lrn.get("tier", tr_ui("stats.learn_moderate", "Moderat"))
-        self.lbl_lrn_val.setText(tier)
-        total_p = data.get("levels", {}).get("total_positions", 0)
-        self.lbl_lrn_sub.setText(f"{total_p:,} {tr_ui('stats.total_pos_sub', 'Repertoire-Stellungen')}")
 
         # 3. Levels Breakdown (Dynamic Tiles + Summary footer)
         lvls = data.get("levels", {})

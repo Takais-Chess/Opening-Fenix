@@ -83,6 +83,7 @@ class LichessData(Base):
     fen = Column(String, nullable=False, index=True)
     elo_range = Column(String, nullable=False)
     moves_json = Column(String, nullable=False) 
+    fetched_at = Column(DateTime, nullable=True, default=datetime.datetime.now)
 
     __table_args__ = (UniqueConstraint('fen', 'elo_range', name='_fen_elo_uc'),)
 

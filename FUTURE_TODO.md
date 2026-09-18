@@ -25,6 +25,14 @@ Re-translate all course comments marked with `(translated)` or `(übersetzt)` us
 2. **Chess Terminology Mapping**: Enforce proper chess terms (*Knight* -> *Springer*, *Bishop* -> *Läufer*, *Rook* -> *Turm*, *Pawn* -> *Bauer*, *Pin* -> *Fesselung*, *Fork* -> *Gabel*, *Castling* -> *Rochade*).
 3. **Targeted Replacement**: Query only position comments where `comment` contains `(translated)` or `(übersetzt)` to replace automated machine translations with high-context, natural chess annotations.
 
+### 🔍 29. Overthink how to add moves based from the search mode
+**Concept:**
+Re-evaluate and streamline how users add moves based on the search feature of finding unanalyzed popular moves ("Such Modus"):
+1. **Seamless Evaluation**: Avoid clunky roundtrips between tabs; allow users to inspect candidate move evaluations, engine lines, and database stats directly in context.
+2. **1-Click Level Assignment**: Allow quick addition of candidate moves directly to targeted levels (`+ L1`, `+ L2`, `+ L3`) with intelligent level suggestions.
+3. **Fast-Review Workflow**: Provide a rapid step-through queue (e.g., keyboard shortcuts, add & next, skip/ignore) to efficiently process dozens of repertoire holes.
+
+
 
 ---
 

@@ -167,6 +167,13 @@ class DatabaseManager:
                     if rm_columns and 'is_active' not in rm_columns:
                         conn.execute(text("ALTER TABLE repertoire_moves ADD COLUMN is_active BOOLEAN DEFAULT 1"))
                         conn.commit()
+
+                    # Check for new LichessData columns
+                    result = conn.execute(text("PRAGMA table_info(lichess_data)"))
+                    ld_columns = [row[1] for row in result.fetchall()]
+                    if ld_columns and 'fetched_at' not in ld_columns:
+                        conn.execute(text("ALTER TABLE lichess_data ADD COLUMN fetched_at DATETIME"))
+                        conn.commit()
                 
                 elif base is UserBase:
                     result = conn.execute(text("PRAGMA table_info(user_repertoire_settings)"))

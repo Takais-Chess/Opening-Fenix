@@ -78,7 +78,7 @@ class TrainingManager:
                 "7": {"value": 180, "unit": "days"}
             },
             "alternate_move_policy": "no_penalty",
-            "queue_priority_order": "box_first",
+            "queue_priority_order": "priority_first",
             "max_new_cards_per_day": 0,
             "max_reviews_per_session": 0,
             "enforce_limit_after_variation": True
@@ -565,7 +565,7 @@ class TrainingManager:
             due_items = [td for td in due_items if td.next_due <= lookahead]
             
             # Sort based on queue_priority_order setting
-            sort_order = self.get_setting("queue_priority_order") or "box_first"
+            sort_order = self.get_setting("queue_priority_order") or "priority_first"
             if sort_order == "priority_first":
                 due_items.sort(key=lambda x: (-(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0), x.box))
             else:

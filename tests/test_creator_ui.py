@@ -1083,8 +1083,10 @@ def test_board_auto_adjust_preserves_square_on_resize(creator_window, qapp):
 
     sizes = creator_window.main_splitter.sizes()
     splitter_h = creator_window.main_splitter.height()
-    # Board container width should match height
-    assert abs(sizes[0] - splitter_h) <= 1
+    margins = creator_window.board_container.layout().contentsMargins()
+    margin_x = margins.left() + margins.right()
+    # Board width (container minus layout margins) should match splitter height
+    assert abs((sizes[0] - margin_x) - splitter_h) <= 1
     # Total sizes plus handle width equals total splitter width
     handle_w = creator_window.main_splitter.handleWidth()
     assert abs(sum(sizes) + handle_w - creator_window.main_splitter.width()) <= 1
@@ -1334,10 +1336,98 @@ def test_incremental_transposition_rendering_and_disabled_1move_engine(creator_w
     assert "1" in sep_it3.text()
 
 
+def test_transposition_styling_and_pct_formatting(creator_window):
+    """Verifies that:
+    1. _format_transpos_pct never returns raw '0.0%' and correctly handles edge cases.
+    2. Table selection uses soft translucent tint without cell border-radius.
+    3. Toolbar status label has proper sizing and does not dominate the bar as an input box.
+    """
+    # 1. Percentage formatting
+    fmt = creator_window._format_transpos_pct
+    assert fmt(16.0) == "16%"
+    assert fmt(3.6) == "3.6%"
+    assert fmt(0.05) == "0.05%"
+    assert fmt(0.03) == "0.03%"
+    assert fmt(0.005) == "<0.01%"
+    assert fmt(0.0) == "—"
+    assert fmt(-1.0) == "—"
+    assert fmt(None) == "—"
+
+    # 2. Table selection stylesheet
+    style = creator_window.table_transpositions.styleSheet()
+    assert "rgba(211, 84, 0, 0.15)" in style
+    assert "border-radius: 0px" in style
+
+    # 3. Status box does not have expanding stretch and has compact styling
+    assert hasattr(creator_window, "lbl_transpos_status")
+    status_style = creator_window.lbl_transpos_status.styleSheet()
+    assert "background: transparent" in status_style or "border-radius" in status_style
 
 
+def test_creator_back_button_tooltip_style(creator_window, qtbot):
+    from PyQt6.QtWidgets import QToolTip, QApplication
+    from PyQt6.QtCore import QPoint
+    from opening_fenix.gui.styles import scale
+
+    btn = creator_window.btn_back
+    assert btn is not None
+    assert btn.toolTip() != ""
+
+    # Ensure button has scoped stylesheet so QToolTip does not inherit button font-size or height
+    assert "QPushButton#BtnBack" in btn.styleSheet()
+
+    # Trigger tooltip
+    pos = btn.mapToGlobal(QPoint(5, 5))
+    QToolTip.showText(pos, btn.toolTip(), btn)
+    app = QApplication.instance()
+    app.processEvents()
+
+    for w in app.topLevelWidgets():
+        if "Tip" in w.metaObject().className():
+            # Tooltip font size should not be bloated by button's 24px/36px font
+            assert w.font().pixelSize() <= scale(16)
+            # Tooltip maxHeight should not be constrained by button's max-height: 32px
+            assert w.maximumHeight() > scale(32)
 
 
+def test_hole_item_click_switches_to_analysis_and_highlights_move(creator_window, qapp):
+    """Verify that clicking a move in search/hole finder jumps to ANALYSIS tab and highlights candidate move."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_item = {
+        "fen": start_fen,
+        "move_san": "c5",
+        "move_uci": "c7c5",
+        "type": "opponent",
+        "popularity": 45.0,
+    }
+    creator_window.table_holes.setRowCount(0)
+    creator_window._on_hole_scan_finished([mock_item], mode="holes")
+    qapp.processEvents()
 
+    assert creator_window.table_holes.rowCount() == 1
 
+    # Ensure we start in HOLES tab
+    idx_holes = creator_window.tabs.indexOf(creator_window.tab_holes)
+    if idx_holes != -1:
+        creator_window.tabs.setCurrentIndex(idx_holes)
+        qapp.processEvents()
+
+    # Click on the unanalyzed popular move
+    item = creator_window.table_holes.item(0, 0)
+    creator_window.on_hole_click(item)
+    qapp.processEvents()
+
+    # Must jump to ANALYSIS tab
+    assert creator_window.tabs.currentWidget() == creator_window.tab_analysis
+
+    # Board must be at the position and highlight the candidate move
+    assert creator_window.board_widget.board.fen().startswith("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR")
+    assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+    assert creator_window._search_highlight_move == chess.Move.from_uci("c7c5")
+
+    # When switching position (e.g. going to start fen), search highlight should be cleared
+    creator_window.set_board_to_fen(chess.STARTING_FEN)
+    qapp.processEvents()
+    assert creator_window._search_highlight_move is None
+    assert creator_window.board_widget.last_move != chess.Move.from_uci("c7c5")
 

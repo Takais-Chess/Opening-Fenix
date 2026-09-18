@@ -574,7 +574,7 @@ class ChessBoardWidget(QWidget):
             text = f"LAST MOVE: {s['fps']:.1f} FPS ({self.target_fps}Hz Display) | {s['frames']} Frames in {s['ms']:.0f} ms | Mode: {lift_str}"
 
         font = painter.font()
-        font.setPointSize(9)
+        font.setPixelSize(scale(12))
         font.setBold(True)
         painter.setFont(font)
         

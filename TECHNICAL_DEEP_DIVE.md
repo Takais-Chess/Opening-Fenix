@@ -62,9 +62,9 @@ If the user correctly answered move $M_{last}$:
 ### 2.2 Due Mode (SRS Reviews)
 1. **Time Window**: Finds all moves in `TrainingData` scheduled for review where:
    $$\text{next\_due} \le \text{Now} + 5 \text{ minutes}$$
-2. **Prioritized Sorting**: Candidate due items are sorted by:
-   $$\text{Sort Key} = \Big(\text{SRS Box (ASC)}, -\text{Priority Score (DESC)}\Big)$$
-   *(Lower Leitner boxes are reviewed first; within the same box, higher-priority/more common lines take precedence).*
+2. **Prioritized Sorting**: Candidate due items are sorted by default using:
+   $$\text{Sort Key} = \Big(-\text{Priority Score (DESC)}, \text{SRS Box (ASC)}\Big)$$
+   *(Higher-priority/more common opening lines take precedence by default; within the same priority score, lower Leitner boxes are reviewed first. This can be switched in settings to "Lowest Box first").*
 3. **Reachability & Level Validation**: Verifies that the move is reachable within the active level limit ($\text{Level}_{\text{move}} \le \text{Active Level}$).
 4. **Ancestor Entry Point Resolution**: Resolves the sequence leading to the move using `_get_ancestor()` so the user is prompted from the appropriate variation boundary.
 

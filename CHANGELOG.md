@@ -2,6 +2,20 @@
  
 All notable changes to this project will be documented in this file.
  
+## [1.0.0] - 2026-09-18
+ 
+### Added & Improved
+- **Official 1.0 Production Release**: Comprehensive chess opening repertoire manager and active recall training system.
+- **High-DPI Scaling Polish**: Conducted an end-to-end visual audit and layout optimization across all 12 core application windows and dialogs under high-DPI scaling (125%, 150%, 200%).
+- **Engine Action Dialog**: Fixed fixed-width layout clipping by adopting dynamic DPI scaling (`scale()`) and minimum size constraints (`SetMinimumSize`), ensuring full visibility for action buttons.
+- **Course Import Dialog**: Optimized headline typography, letter-spacing, and dialog dimensions to prevent button bar and header text overlap.
+- **Repertoire Selection Modal**: Scaled dimensions to `800x640`, refined button typography and padding, and removed horizontal scrollbar clutter.
+- **Creator Window Layout Hardening**: Polished Analysis tab with adaptive column sizing, smart percentage formatting, compact engine configuration, and streamlined Transposition tab toolbar.
+- **Repertoire Statistics & Insights**: Refined modal dimensions and level card padding to prevent description text clipping under 1.5x scaling.
+- **Export Dialog**: Enhanced minimum width to prevent truncation of export format descriptions and button rows.
+- **Localization Parity**: 100% German and English key parity across all 1,166 translation keys.
+- **Quality Assurance**: 704 automated test cases passing across database operations, UI flows, and transposition scanners.
+
 ## [0.9.13] - 2026-09-16
  
 ### Added & Improved

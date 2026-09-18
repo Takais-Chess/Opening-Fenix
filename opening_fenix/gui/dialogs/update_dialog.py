@@ -53,12 +53,12 @@ class UpdateDialog(QDialog):
             tr_ui("update.version_sub", "Eine neue Version ist verfügbar. (Deine Version: {current_v} ➔ Neu: {remote_v})", 
                   current_v=APP_VERSION, remote_v=remote_v)
         )
-        lbl_sub.setStyleSheet("color: #666; font-size: 14px; font-weight: bold;")
+        lbl_sub.setStyleSheet(f"color: #666; font-size: {scale(14)}px; font-weight: bold;")
         layout.addWidget(lbl_sub)
 
         # Release Notes Display Box
         lbl_notes_hdr = QLabel(tr_ui("update.release_notes_hdr", "📋 Neuerungen & Änderungen:"))
-        lbl_notes_hdr.setStyleSheet(f"color: {COLORS['brown_text']}; font-weight: bold; font-size: 14px;")
+        lbl_notes_hdr.setStyleSheet(f"color: {COLORS['brown_text']}; font-weight: bold; font-size: {scale(14)}px;")
         layout.addWidget(lbl_notes_hdr)
 
         self.txt_notes = QTextEdit()
@@ -85,7 +85,7 @@ class UpdateDialog(QDialog):
         v_prog.setSpacing(scale(6))
 
         self.lbl_progress_status = QLabel(tr_ui("update.downloading", "Wird heruntergeladen..."))
-        self.lbl_progress_status.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: 13px; font-weight: bold;")
+        self.lbl_progress_status.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(13)}px; font-weight: bold;")
         v_prog.addWidget(self.lbl_progress_status)
 
         self.progress_bar = QProgressBar()
@@ -273,7 +273,7 @@ class UpdateDialog(QDialog):
 
     def on_download_error(self, err_msg: str):
         self.lbl_progress_status.setText(tr_ui("update.download_failed", "Download fehlgeschlagen: {err}", err=err_msg))
-        self.lbl_progress_status.setStyleSheet("color: #e74c3c; font-size: 13px; font-weight: bold;")
+        self.lbl_progress_status.setStyleSheet(f"color: #e74c3c; font-size: {scale(13)}px; font-weight: bold;")
         self.btn_download.setEnabled(True)
         self.btn_snooze.setEnabled(True)
         self.btn_download.setText(tr_widget("update.btn_retry_browser", "🌐 Im Browser herunterladen"))

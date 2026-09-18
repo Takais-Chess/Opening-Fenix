@@ -25,6 +25,10 @@ def get_faq_items() -> list[tuple[str, str]]:
         (
             tr_ui("faq.q3", "Wie ändere ich das Trainingslevel und wann soll ich das machen?"),
             tr_ui("faq.a3", "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.")
+        ),
+        (
+            tr_ui("faq.q6", "Wird der Lichess-Import für große Kurse jemals schneller werden?"),
+            tr_ui("faq.a6", "Wir sind durch die Lichess-Server limitiert (die absolute Helden dafür sind, dass sie die Daten kostenlos bereitstellen), da es ein Limit dafür gibt, wie viele Stellungen wir pro Minute abfragen dürfen.\n\nFalls das Programm jemals richtig groß wird, könnte ich einen Server aufsetzen und die gesamte Lichess-Datenbank dorthin herunterladen – dann würde der Import nur noch Sekunden statt Stunden dauern. Allerdings würde das dauerhaft Geld kosten und ich müsste über eine Monetarisierung oder ein Abonnement nachdenken, woran ich aktuell kein Interesse habe.\n\nVorerst müssen wir uns also damit begnügen, das Programm nach dem Import eines großen Kurses eine Weile im Hintergrund laufen zu lassen.")
         )
     ]
 

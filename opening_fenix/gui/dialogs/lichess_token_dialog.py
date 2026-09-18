@@ -112,7 +112,7 @@ class LichessTokenDialog(QDialog):
             )
         )
         lbl_hint.setWordWrap(True)
-        lbl_hint.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        lbl_hint.setStyleSheet(f"color: #7f8c8d; font-size: {scale(12)}px;")
         v_desc.addWidget(lbl_hint)
 
         layout.addWidget(desc_card)
@@ -182,7 +182,7 @@ class LichessTokenDialog(QDialog):
         # Status feedback label
         self.lbl_status = QLabel("")
         self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("font-size: 12px; padding: 4px 0;")
+        self.lbl_status.setStyleSheet(f"font-size: {scale(12)}px; padding: {scale(4)}px 0;")
         layout.addWidget(self.lbl_status)
 
         layout.addSpacing(scale(8))
@@ -235,22 +235,22 @@ class LichessTokenDialog(QDialog):
             self.lbl_status.setText(
                 tr_ui("lichess_token.status_none", "⚠️ Noch kein Lichess-Token hinterlegt.")
             )
-            self.lbl_status.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #e67e22; font-size: {scale(12)}px;")
         else:
             self.lbl_status.setText(
                 tr_ui("lichess_token.status_ready_to_test", "Klicke auf 'Verbindung testen', um dieses Token zu prüfen.")
             )
-            self.lbl_status.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #7f8c8d; font-size: {scale(12)}px;")
 
     def _on_token_text_changed(self, text: str):
         self.verified_username = None
         cleaned = text.strip()
         if not cleaned:
             self.lbl_status.setText(tr_ui("lichess_token.status_none", "⚠️ Noch kein Lichess-Token hinterlegt."))
-            self.lbl_status.setStyleSheet("color: #e67e22; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #e67e22; font-size: {scale(12)}px;")
         else:
             self.lbl_status.setText(tr_ui("lichess_token.status_ready_to_test", "Klicke auf 'Verbindung testen', um dieses Token zu prüfen."))
-            self.lbl_status.setStyleSheet("color: #7f8c8d; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #7f8c8d; font-size: {scale(12)}px;")
 
     def open_lichess_token_page(self):
         QDesktopServices.openUrl(QUrl("https://lichess.org/account/oauth/token"))
@@ -259,12 +259,12 @@ class LichessTokenDialog(QDialog):
         token = self.txt_token.text().strip()
         if not token:
             self.lbl_status.setText("❌ " + tr_ui("lichess_token.err_empty", "Bitte gib zuerst ein Token ein."))
-            self.lbl_status.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #e74c3c; font-weight: bold; font-size: {scale(12)}px;")
             return
 
         self.btn_test.setEnabled(False)
         self.lbl_status.setText("⏳ " + tr_ui("lichess_token.checking", "Prüfe Token bei Lichess..."))
-        self.lbl_status.setStyleSheet("color: #2980b9; font-weight: 500; font-size: 12px;")
+        self.lbl_status.setStyleSheet(f"color: #2980b9; font-weight: 500; font-size: {scale(12)}px;")
 
         self._worker = TokenVerificationWorker(token)
         self._worker.finished_signal.connect(self._on_verification_done)
@@ -274,10 +274,10 @@ class LichessTokenDialog(QDialog):
         self.btn_test.setEnabled(True)
         if success:
             self.lbl_status.setText("✅ " + msg)
-            self.lbl_status.setStyleSheet("color: #27ae60; font-weight: bold; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #27ae60; font-weight: bold; font-size: {scale(12)}px;")
         else:
             self.lbl_status.setText("❌ " + msg)
-            self.lbl_status.setStyleSheet("color: #e74c3c; font-weight: bold; font-size: 12px;")
+            self.lbl_status.setStyleSheet(f"color: #e74c3c; font-weight: bold; font-size: {scale(12)}px;")
 
     def _on_skip_clicked(self):
         self.skip_chosen = True
@@ -349,7 +349,7 @@ class MissingTokenPromptDialog(QDialog):
         layout.addWidget(lbl_desc)
 
         self.chk_dont_ask = QCheckBox(tr_ui("lichess_token.dont_ask_again", "Diese Warnung nicht mehr anzeigen"))
-        self.chk_dont_ask.setStyleSheet("font-size: 12px; color: #555;")
+        self.chk_dont_ask.setStyleSheet(f"font-size: {scale(12)}px; color: #555;")
         layout.addWidget(self.chk_dont_ask)
 
         layout.addSpacing(scale(6))

@@ -756,13 +756,14 @@ class CreatorBackend:
         self._ui_cache[cache_key] = results
         return results
 
-    def get_lichess_common_moves(self, fen, elo_category):
+    def get_lichess_common_moves(self, fen, elo_category, limit=None):
         if not self.session: return []
         
         # Check cache
         cache_key = f"lichess_{fen}_{elo_category}"
         if cache_key in self._ui_cache:
-            return self._ui_cache[cache_key]
+            results = self._ui_cache[cache_key]
+            return results[:limit] if limit is not None else results
             
         clean_fen = " ".join(fen.split(" ")[:4])
         data = self.session.query(LichessData).filter_by(fen=clean_fen, elo_range=elo_category).first()
@@ -804,9 +805,8 @@ class CreatorBackend:
             })
         
         results.sort(key=lambda x: x['total'], reverse=True)
-        final_results = results[:10]
-        self._ui_cache[cache_key] = final_results
-        return final_results
+        self._ui_cache[cache_key] = results
+        return results[:limit] if limit is not None else results
 
     def get_repertoire_levels(self):
         if not self.session: return []
@@ -824,8 +824,6 @@ class CreatorBackend:
 
         clean_target = " ".join(fen.strip().split()[:4])
         clean_root = " ".join(chess.STARTING_FEN.split()[:4])
-        if clean_target == clean_root:
-            return 1
 
         if self._min_reachable_level_cache is not None:
             return self._min_reachable_level_cache.get(clean_target, 1)
@@ -1520,8 +1518,10 @@ class CreatorBackend:
         return res
 
     def _get_pos_prio(self, pid):
-        inc = self.session.query(Move).filter_by(to_position_id=pid).order_by(Move.priority_score.desc()).first()
-        return inc.priority_score if inc else 0.0
+        if not self.session or not pid: return 0.0
+        moves = self.session.query(Move.priority_score).filter_by(to_position_id=pid).all()
+        if not moves: return 0.0
+        return min(1.0, sum(m[0] or 0.0 for m in moves))
 
     def get_repertoire_info(self, fast_only=False):
         if not self.session: return {"name": self.active_repo_name, "levels": [], "depth": "N/A", "elo": "N/A", "moves": "N/A", "description": "", "coverage_pct": 0}
@@ -2550,7 +2550,7 @@ class CreatorBackend:
 class SortableTreeWidgetItem(QTreeWidgetItem):
     def __lt__(self, other):
         col = self.treeWidget().sortColumn()
-        if col == 1: # Priority column (0-indexed)
+        if col in (1, 2): # Priority column (1) or Pos-Prio column (2)
             v1 = self.data(col, Qt.ItemDataRole.UserRole)
             v2 = other.data(col, Qt.ItemDataRole.UserRole)
             if v1 is None: v1 = -1.0
@@ -2616,7 +2616,8 @@ class ActiveRepoButton(QPushButton):
         self.lbl_name = QLabel()
         self.lbl_name.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.lbl_name.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        f_name = QFont("Segoe UI", 10)
+        f_name = QFont("Segoe UI")
+        f_name.setPixelSize(scale(13))
         f_name.setBold(True)
         self.lbl_name.setFont(f_name)
         self.lbl_name.setStyleSheet(f"font-weight: bold; font-size: {scale(13)}px; color: {COLORS['brown_text']}; border: none; background: transparent; padding: 0px;")
@@ -2633,7 +2634,8 @@ class ActiveRepoButton(QPushButton):
         self.lbl_load = QLabel(tr_ui("creator.toolbar_load", "📂 Laden"))
         self.lbl_load.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self.lbl_load.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        f_load = QFont("Segoe UI", 10)
+        f_load = QFont("Segoe UI")
+        f_load.setPixelSize(scale(13))
         f_load.setBold(True)
         self.lbl_load.setFont(f_load)
         self.lbl_load.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(13)}px; font-weight: bold; border: none; background: transparent; padding: 0px;")
@@ -2778,6 +2780,8 @@ class CreatorWindow(QMainWindow):
         self._preset_transposition = None
         self._transposition_highlight_fen = None
         self._transposition_highlight_move = None
+        self._search_highlight_fen = None
+        self._search_highlight_move = None
 
 
         cp = os.path.join(get_user_dir(), "config.json")
@@ -3066,17 +3070,20 @@ class CreatorWindow(QMainWindow):
         self.chk_a.toggled.connect(self.update_board_arrows)
         
         self.btn_back = QPushButton("←")
+        self.btn_back.setObjectName("BtnBack")
         self.btn_back.setProperty("class", "GlassPill")
         self.repolish(self.btn_back)
         self.btn_back.setStyleSheet(f"""
-            font-size: {scale(24)}px;
-            font-weight: bold;
-            padding-top: 0px;
-            padding-bottom: {scale(6)}px;
-            padding-left: {scale(15)}px;
-            padding-right: {scale(15)}px;
-            min-height: {scale(32)}px;
-            max-height: {scale(32)}px;
+            QPushButton#BtnBack {{
+                font-size: {scale(24)}px;
+                font-weight: bold;
+                padding-top: 0px;
+                padding-bottom: {scale(6)}px;
+                padding-left: {scale(15)}px;
+                padding-right: {scale(15)}px;
+                min-height: {scale(32)}px;
+                max-height: {scale(32)}px;
+            }}
         """)
         self.btn_back.setToolTip(tr_ui("creator.btn_back_tooltip", "Einen Zug zurück"))
         self.btn_back.clicked.connect(self.on_back_button_clicked)
@@ -3091,6 +3098,7 @@ class CreatorWindow(QMainWindow):
         self.tree_widget.setHeaderLabels([
             tr_ui("creator.tree_col_move", "Zug"),
             tr_ui("creator.tree_col_prio", "Prio"),
+            tr_ui("creator.tree_col_pos_prio", "Pos-Prio"),
             tr_ui("creator.tree_col_comment", "Kommentar"),
             tr_ui("creator.tree_col_level", "Level"),
             tr_ui("creator.tree_col_active", "Aktiv")
@@ -3100,9 +3108,10 @@ class CreatorWindow(QMainWindow):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)  # Kommentar
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Pos-Prio
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Kommentar
         header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
         self.tree_widget.itemClicked.connect(self.on_tree_click)
         self.tree_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree_widget.customContextMenuRequested.connect(self.show_tree_context_menu)
@@ -3222,8 +3231,8 @@ class CreatorWindow(QMainWindow):
         
         # Engine Settings (Dropdowns)
         h_eng_settings = QHBoxLayout()
-        h_eng_settings.setSpacing(scale(5))
-        h_eng_settings.addStretch() # Center alignment
+        h_eng_settings.setSpacing(scale(4))
+        h_eng_settings.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
         self.combo_depth = QComboBox()
         self.combo_depth.setEditable(True)
@@ -3231,7 +3240,7 @@ class CreatorWindow(QMainWindow):
         self.combo_depth.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combo_depth.addItems([str(i) for i in range(10, 51, 2)])
         self.combo_depth.setCurrentText("20")
-        self.combo_depth.setFixedWidth(scale(48))
+        self.combo_depth.setFixedWidth(scale(34))
         self.combo_depth.setProperty("class", "SmallCombo")
         self.repolish(self.combo_depth)
         self.combo_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3245,7 +3254,7 @@ class CreatorWindow(QMainWindow):
         max_threads = multiprocessing.cpu_count()
         self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
         self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
-        self.combo_threads.setFixedWidth(scale(55))
+        self.combo_threads.setFixedWidth(scale(34))
         self.combo_threads.setProperty("class", "SmallCombo")
         self.repolish(self.combo_threads)
         self.combo_threads.lineEdit().installEventFilter(self)
@@ -3270,17 +3279,17 @@ class CreatorWindow(QMainWindow):
         self.combo_lines.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_lines.addItems([str(i) for i in range(1, 11)])
         self.combo_lines.setCurrentText("3")
-        self.combo_lines.setFixedWidth(scale(48))
+        self.combo_lines.setFixedWidth(scale(34))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
         
         lbl_depth = QLabel(tr_ui("creator.engine_depth_label", "Tiefe:"))
-        lbl_depth.setWordWrap(True)
+        lbl_depth.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']};")
         lbl_threads = QLabel(tr_ui("creator.engine_cores_label", "Kerne:"))
-        lbl_threads.setWordWrap(True)
+        lbl_threads.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(6)}px;")
         lbl_lines = QLabel(tr_ui("creator.engine_lines_label", "Züge:"))
-        lbl_lines.setWordWrap(True)
+        lbl_lines.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(6)}px;")
         
         h_eng_settings.addWidget(lbl_depth)
         h_eng_settings.addWidget(self.combo_depth)
@@ -3288,7 +3297,6 @@ class CreatorWindow(QMainWindow):
         h_eng_settings.addWidget(self.combo_threads)
         h_eng_settings.addWidget(lbl_lines)
         h_eng_settings.addWidget(self.combo_lines)
-        h_eng_settings.addStretch() # Center alignment
         evl.addLayout(h_eng_settings)
         
         self.btn_engine_toggle = QPushButton(tr_ui("creator.btn_engine_start", "▶ Analyse Starten"))
@@ -3324,7 +3332,7 @@ class CreatorWindow(QMainWindow):
         # Right Column: Common Moves (GlassPill)
         common_container = QFrame()
         common_container.setObjectName("CommonMovesPill")
-        common_container.setMinimumWidth(scale(160)) # Flexible min width to allow narrower panels on laptops
+        common_container.setMinimumWidth(scale(210)) # Ensure sufficient width for 5 columns
         self.repolish(common_container)
         cvl = QVBoxLayout(common_container)
         cvl.setContentsMargins(scale(4), scale(12), scale(4), scale(12))
@@ -3333,7 +3341,7 @@ class CreatorWindow(QMainWindow):
         # Database Label centered at top
         self.lbl_lichess_cat_display = QLabel(tr_ui("creator.db_label", "Datenbank: {elo}", elo=get_elo_display('high')))
         self.lbl_lichess_cat_display.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_lichess_cat_display.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['light_text']};")
+        self.lbl_lichess_cat_display.setStyleSheet(f"font-size: {scale(14)}px; font-weight: bold; color: {COLORS['light_text']};")
         self.lbl_lichess_cat_display.setWordWrap(True)
         cvl.addWidget(self.lbl_lichess_cat_display)
         
@@ -3360,6 +3368,7 @@ class CreatorWindow(QMainWindow):
         self.table_common_moves.cellDoubleClicked.connect(self.on_common_move_double_click)
         header_cm = self.table_common_moves.horizontalHeader()
         header_cm.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_cm.setMinimumSectionSize(scale(20))
         self.table_common_moves.setShowGrid(False)
         self.table_common_moves.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         
@@ -3377,8 +3386,8 @@ class CreatorWindow(QMainWindow):
             QHeaderView::section {{
                 background-color: transparent;
                 color: {COLORS['brown_text']};
-                padding-left: {scale(2)}px;
-                padding-right: {scale(2)}px;
+                padding-left: 0px;
+                padding-right: 0px;
                 padding-top: {scale(4)}px;
                 padding-bottom: {scale(4)}px;
                 font-weight: bold;
@@ -3386,30 +3395,28 @@ class CreatorWindow(QMainWindow):
                 border-bottom: {scale(2)}px solid {COLORS['glass_border']};
             }}
             QTableWidget::item {{
-                padding-left: {scale(2)}px;
-                padding-right: {scale(2)}px;
+                padding-left: 0px;
+                padding-right: 0px;
                 padding-top: {scale(4)}px;
                 padding-bottom: {scale(4)}px;
                 border-bottom: 1px solid rgba(62, 39, 35, 0.08);
             }}
             QTableWidget::item:hover {{
-                background-color: rgba(211, 84, 0, 0.15);
-                border-radius: {scale(4)}px;
+                background-color: rgba(211, 84, 0, 0.08);
             }}
             QTableWidget::item:selected {{
-                background-color: {COLORS['burnt_orange']};
-                color: white;
-                border-radius: {scale(4)}px;
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['brown_text']};
             }}
         """)
         
-        for i in range(5):
-            header_cm.setSectionResizeMode(i, QHeaderView.ResizeMode.Fixed)
         self.table_common_moves.installEventFilter(self)
             
         cvl.addWidget(self.table_common_moves)
         self.analysis_splitter.addWidget(common_container)
-        self.analysis_splitter.setSizes([300, 300]) # Equal default horizontal split
+        self.analysis_splitter.setStretchFactor(0, 1)
+        self.analysis_splitter.setStretchFactor(1, 1)
+        self.analysis_splitter.setSizes([scale(180), scale(260)])
         al.addWidget(self.analysis_splitter)
         
         # Rep. Loch Finder Tab
@@ -3460,8 +3467,8 @@ class CreatorWindow(QMainWindow):
         # Pre-calculate initial splitter sizes to prevent startup resize snapping
         init_total_w = self.width() if self.width() > 100 else scale(1400)
         init_total_h = self.height() if self.height() > 100 else scale(900)
-        init_board_w = max(scale(300), min(init_total_h - scale(70), init_total_w - scale(280)))
-        init_tools_w = max(scale(280), init_total_w - init_board_w)
+        init_board_w = max(scale(300), min(init_total_h - scale(70), init_total_w - scale(480)))
+        init_tools_w = max(scale(480), init_total_w - init_board_w)
         self.main_splitter.setSizes([int(init_board_w), int(init_tools_w)])
 
         l.addWidget(self.main_splitter)
@@ -3475,7 +3482,7 @@ class CreatorWindow(QMainWindow):
         self.init_management_slots()
 
         header_font = QFont()
-        header_font.setPointSize(16)
+        header_font.setPixelSize(scale(16))
         self.tree_widget.header().setFont(header_font)
 
     def _on_tab_changed(self, index):
@@ -3502,11 +3509,17 @@ class CreatorWindow(QMainWindow):
                 self._transposition_highlight_fen = None
                 self._transposition_highlight_move = None
                 if hasattr(self, "board_widget") and self.board_widget:
-                    if len(self.board_widget.board.move_stack) > 0:
+                    s_move = getattr(self, "_search_highlight_move", None)
+                    if s_move:
+                        self.board_widget.last_move = s_move
+                    elif len(self.board_widget.board.move_stack) > 0:
                         self.board_widget.last_move = self.board_widget.board.peek()
                     else:
                         self.board_widget.last_move = None
                     self.board_widget.update()
+        if widget == self.tab_analysis:
+            self.resize_common_moves_columns()
+            QTimer.singleShot(0, self.resize_common_moves_columns)
         if widget == self.tab_kontrolle:
             self.update_overhaul_progress()
 
@@ -3865,33 +3878,29 @@ class CreatorWindow(QMainWindow):
             return
             
         # Determine dynamic font size based on width
-        if total_width < scale(200):
+        if total_width < scale(220):
             fs = 8
-        elif total_width < scale(240):
+        elif total_width < scale(260):
+            fs = 8.5
+        elif total_width < scale(300):
             fs = 9
-        elif total_width < scale(280):
+        elif total_width < scale(340):
             fs = 10
-        elif total_width < scale(320):
+        elif total_width < scale(380):
             fs = 11
-        elif total_width < scale(360):
-            fs = 12
         else:
-            fs = 13
+            fs = 12
             
-        scaled_fs = scale(fs)
-        
         # Apply font size to the table
         font = self.table_common_moves.font()
-        if font.pointSize() != scaled_fs:
-            font.setPointSize(scaled_fs)
-            self.table_common_moves.setFont(font)
+        font.setPointSizeF(float(fs))
+        self.table_common_moves.setFont(font)
             
         # Apply font size to horizontal header
         header = self.table_common_moves.horizontalHeader()
         header_font = header.font()
-        if header_font.pointSize() != scaled_fs:
-            header_font.setPointSize(scaled_fs)
-            header.setFont(header_font)
+        header_font.setPointSizeF(float(fs))
+        header.setFont(header_font)
             
         # Dynamic labels to save space when narrow
         if total_width < scale(280):
@@ -3914,6 +3923,18 @@ class CreatorWindow(QMainWindow):
         current_labels = [self.table_common_moves.horizontalHeaderItem(i).text() for i in range(5) if self.table_common_moves.horizontalHeaderItem(i)]
         if current_labels != labels:
             self.table_common_moves.setHorizontalHeaderLabels(labels)
+
+        # Smart percentage suffix: omit % when narrow to prevent ellipsis truncation (e.g. 42% -> 42)
+        suffix = "%" if total_width >= scale(230) else ""
+        for r in range(self.table_common_moves.rowCount()):
+            for c in (2, 3, 4):
+                it = self.table_common_moves.item(r, c)
+                if it and it.text():
+                    raw = it.text().rstrip('%')
+                    if raw.isdigit():
+                        new_txt = f"{raw}{suffix}"
+                        if it.text() != new_txt:
+                            it.setText(new_txt)
             
         # Proportions: Move and Played columns fit content exactly.
         # White %, Black %, Draw % columns share remaining space equally, avoiding text dots.
@@ -4095,17 +4116,23 @@ class CreatorWindow(QMainWindow):
             
         f = self.board_widget.board.fen()
         
-        # Board highlight: maintain transposition preview if still on that position,
-        # otherwise clear transposition preview and show standard last move (or None if starting pos)
+        # Board highlight: maintain transposition preview or search highlight if still on that position,
+        # otherwise clear preview and show standard last move (or None if starting pos)
         curr_fen_4 = " ".join(f.strip().split()[:4])
         t_fen = getattr(self, "_transposition_highlight_fen", None)
         t_move = getattr(self, "_transposition_highlight_move", None)
+        s_fen = getattr(self, "_search_highlight_fen", None)
+        s_move = getattr(self, "_search_highlight_move", None)
 
-        if t_fen and t_move and curr_fen_4 == t_fen:
+        if s_fen and s_move and curr_fen_4 == s_fen:
+            self.board_widget.last_move = s_move
+        elif t_fen and t_move and curr_fen_4 == t_fen:
             self.board_widget.last_move = t_move
         else:
             self._transposition_highlight_fen = None
             self._transposition_highlight_move = None
+            self._search_highlight_fen = None
+            self._search_highlight_move = None
             if len(self.board_widget.board.move_stack) > 0:
                 self.board_widget.last_move = self.board_widget.board.peek()
             else:
@@ -4174,14 +4201,30 @@ class CreatorWindow(QMainWindow):
             repo_color = self.backend.get_repertoire_color()
             is_my_turn = True if repo_color not in ['w', 'b'] else (self.board_widget.board.turn == (repo_color == 'w'))
             if is_my_turn and len(cs) > 1:
-                self.tree_widget.showColumn(4)
+                self.tree_widget.showColumn(5)
             else:
-                self.tree_widget.hideColumn(4)
+                self.tree_widget.hideColumn(5)
             
+            cat = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
+            common_moves = self.backend.get_lichess_common_moves(f, cat) if (f and self.backend) else []
+            total_games = sum(m.get('total', 0) for m in common_moves)
+
+            # Reach probability of the current position in the repertoire
+            p_reach = 1.0
+            clean_f = " ".join(f.strip().split()[:4])
+            clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+            if clean_f != clean_root and self.backend and self.backend.session:
+                from opening_fenix.core.db.models import Position as DbPos
+                db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_f + "*")).first()
+                if db_p:
+                    p = self.backend._get_pos_prio(db_p.id)
+                    if p > 0:
+                        p_reach = p
+
             lvls = self.backend.get_repertoire_levels()
             l_map = {l['order']: l['name'] for l in lvls}
             large_font = QFont()
-            large_font.setPointSize(16)
+            large_font.setPixelSize(scale(16))
             board = self.board_widget.board
             move_num = board.fullmove_number
             prefix = f"{move_num}. " if board.turn == chess.WHITE else f"{move_num}... "
@@ -4207,38 +4250,54 @@ class CreatorWindow(QMainWindow):
                 else:
                     comment_disp = cdict.get(self.active_comment_lang, "")
 
+                pos_prio_num, pos_prio_str = self._compute_pos_prio(common_moves, total_games, c['uci'], c['san'])
+
+                # If move is not in Lichess common moves, use Child Back-Propagation via candidate priority
+                if pos_prio_num is None and not is_my_turn and p_reach > 0:
+                    prio_val = c.get('priority')
+                    if prio_val is not None and prio_val > 0:
+                        pos_prio_num = min(1.0, prio_val / p_reach)
+                        pos_prio_str = self._format_transpos_pct(pos_prio_num * 100.0)
+
+                prio_num = c.get('priority')
+                prio_str = self._format_transpos_pct(prio_num * 100.0) if prio_num is not None else "—"
+
                 it = SortableTreeWidgetItem([
                     san_text, 
-                    f"{c['priority']*100:.2f}%", 
+                    prio_str, 
+                    pos_prio_str, 
                     comment_disp, 
                     l_map.get(c['level'], str(c['level'])) if c['level'] > 0 else "",
                     "" 
                 ])
                 it.setTextAlignment(0, Qt.AlignmentFlag.AlignCenter)
                 it.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-                it.setTextAlignment(3, Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(2, Qt.AlignmentFlag.AlignCenter)
                 it.setTextAlignment(4, Qt.AlignmentFlag.AlignCenter)
+                it.setTextAlignment(5, Qt.AlignmentFlag.AlignCenter)
                 it.setData(0, Qt.ItemDataRole.UserRole, c['uci'])
                 it.setData(1, Qt.ItemDataRole.UserRole, c['priority'])
+                it.setData(2, Qt.ItemDataRole.UserRole, pos_prio_num)
                 it.setData(0, Qt.ItemDataRole.UserRole + 1, c['id'])
                 
                 if c['is_repo']:
-                    it.setCheckState(4, Qt.CheckState.Checked if c['is_active'] else Qt.CheckState.Unchecked)
+                    it.setCheckState(5, Qt.CheckState.Checked if c['is_active'] else Qt.CheckState.Unchecked)
                     it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
                 
                 it.setFont(0, large_font)
                 it.setFont(1, large_font)
-                it.setFont(3, large_font)
+                it.setFont(2, large_font)
+                it.setFont(4, large_font)
                 it.setTextAlignment(0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 
                 if c['is_repo']:
-                    for i in range(5):
+                    for i in range(6):
                         fnt = it.font(i)
                         fnt.setBold(True)
                         it.setFont(i, fnt)
                 
                 if not c['is_active']:
-                    for i in range(5):
+                    for i in range(6):
                         it.setForeground(i, QBrush(QColor("gray")))
                         
                 self.tree_widget.addTopLevelItem(it)
@@ -4247,12 +4306,11 @@ class CreatorWindow(QMainWindow):
             self.tree_widget.setUpdatesEnabled(True)
         
         # Update Common Moves Table
-        cat = self.combo_lichess_cat.currentText()
-        common_moves = self.backend.get_lichess_common_moves(f, cat)
         self.table_common_moves.setUpdatesEnabled(False)
         try:
-            self.table_common_moves.setRowCount(len(common_moves))
-            for r, mv in enumerate(common_moves):
+            display_moves = common_moves[:10]
+            self.table_common_moves.setRowCount(len(display_moves))
+            for r, mv in enumerate(display_moves):
                 lang = self.get_notation_lang()
                 item_san = QTableWidgetItem(localize_san(mv['san'], lang))
                 item_san.setData(Qt.ItemDataRole.UserRole, mv['uci']) # Store UCI for double click
@@ -4271,15 +4329,18 @@ class CreatorWindow(QMainWindow):
                 item_games.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_common_moves.setItem(r, 1, item_games)
                 
-                item_white = QTableWidgetItem(f"{mv['white_pct']:.1f}%")
+                total_w = self.table_common_moves.viewport().width()
+                suffix = "%" if (total_w <= 0 or total_w >= scale(230)) else ""
+                
+                item_white = QTableWidgetItem(f"{round(mv['white_pct'])}{suffix}")
                 item_white.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_common_moves.setItem(r, 2, item_white)
                 
-                item_black = QTableWidgetItem(f"{mv['black_pct']:.1f}%")
+                item_black = QTableWidgetItem(f"{round(mv['black_pct'])}{suffix}")
                 item_black.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_common_moves.setItem(r, 3, item_black)
                 
-                item_draw = QTableWidgetItem(f"{mv['draw_pct']:.1f}%")
+                item_draw = QTableWidgetItem(f"{round(mv['draw_pct'])}{suffix}")
                 item_draw.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 self.table_common_moves.setItem(r, 4, item_draw)
 
@@ -4297,12 +4358,8 @@ class CreatorWindow(QMainWindow):
             if total_transpos > 0:
                 # Vibrant Gold badge
                 self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
-                icon_path = os.path.join(get_base_path(), "assets", "Icons", "sync.png")
-                if os.path.exists(icon_path):
-                    self.tabs.setTabIcon(idx, QIcon(icon_path))
             else:
                 self.tabs.tabBar().setTabTextColor(idx, QColor())  # Reset to palette default
-                self.tabs.setTabIcon(idx, QIcon())
             
             # If current tab is Transpositionen, refresh it
             if self.tabs.currentIndex() == idx:
@@ -4375,7 +4432,7 @@ class CreatorWindow(QMainWindow):
         self.on_details_changed()
 
     def on_tree_click(self, it, col):
-        if col == 4:
+        if col == 5:
             mid = it.data(0, Qt.ItemDataRole.UserRole + 1)
             # Toggle in backend
             self.backend.toggle_move_active(mid)
@@ -4414,7 +4471,7 @@ class CreatorWindow(QMainWindow):
         
         if mid:
             act_active = QAction(tr_ui("creator.act_toggle_active", "Aktiv / Inaktiv umschalten"), self)
-            act_active.triggered.connect(lambda: self.on_tree_click(it, 4))
+            act_active.triggered.connect(lambda: self.on_tree_click(it, 5))
             menu.addAction(act_active)
 
         menu.addSeparator()
@@ -5574,6 +5631,8 @@ class CreatorWindow(QMainWindow):
         self._preset_transposition = None
         self._transposition_highlight_fen = None
         self._transposition_highlight_move = None
+        self._search_highlight_fen = None
+        self._search_highlight_move = None
         if hasattr(self, "board_widget") and self.board_widget:
             if len(self.board_widget.board.move_stack) > 0:
                 self.board_widget.last_move = self.board_widget.board.peek()
@@ -5598,7 +5657,7 @@ class CreatorWindow(QMainWindow):
         # HEADER
         header_layout = QHBoxLayout()
         lbl_title = QLabel(tr_ui("creator.overhaul_title", "Repertoire Kontrolle"))
-        lbl_title.setStyleSheet(f"font-size: 20px; font-weight: bold; color: {COLORS['brown_text']};")
+        lbl_title.setStyleSheet(f"font-size: {scale(20)}px; font-weight: bold; color: {COLORS['brown_text']};")
         lbl_title.setWordWrap(True)
         header_layout.addWidget(lbl_title)
         
@@ -5661,20 +5720,20 @@ class CreatorWindow(QMainWindow):
         
         self.btn_overhaul_start = QPushButton(tr_ui("creator.overhaul_btn_start", "▶ Session Starten"))
         self.btn_overhaul_start.setMinimumHeight(scale(50))
-        self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
+        self.btn_overhaul_start.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: {scale(14)}px;")
         self.btn_overhaul_start.clicked.connect(self.toggle_overhaul_session)
         h_btns.addWidget(self.btn_overhaul_start, 2)
         
         self.btn_overhaul_pause = QPushButton(tr_ui("creator.overhaul_btn_pause", "⏸ Pause"))
         self.btn_overhaul_pause.setMinimumHeight(scale(50))
-        self.btn_overhaul_pause.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
+        self.btn_overhaul_pause.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: {scale(14)}px;")
         self.btn_overhaul_pause.clicked.connect(self.toggle_overhaul_pause)
         self.btn_overhaul_pause.setVisible(False)
         h_btns.addWidget(self.btn_overhaul_pause, 1)
         
         self.btn_overhaul_reset = QPushButton(tr_ui("creator.overhaul_btn_reset", "🔄 Reset"))
         self.btn_overhaul_reset.setMinimumHeight(scale(50))
-        self.btn_overhaul_reset.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: 14px;")
+        self.btn_overhaul_reset.setStyleSheet(f"background-color: rgba(0, 0, 0, 0.2); color: white; font-weight: bold; border-radius: {scale(25)}px; font-size: {scale(14)}px;")
         self.btn_overhaul_reset.clicked.connect(self.reset_overhaul_session)
         h_btns.addWidget(self.btn_overhaul_reset, 1)
         
@@ -5687,7 +5746,7 @@ class CreatorWindow(QMainWindow):
         self.btn_overhaul_next.clicked.connect(self.jump_to_next_unchecked)
         self.btn_overhaul_next.setEnabled(False)
         self.btn_overhaul_next.setMinimumHeight(scale(55))
-        self.btn_overhaul_next.setStyleSheet(f"background-color: rgba(20, 60, 150, 0.8); color: white; font-weight: bold; font-size: 16px; border-radius: {scale(27)}px;")
+        self.btn_overhaul_next.setStyleSheet(f"background-color: rgba(20, 60, 150, 0.8); color: white; font-weight: bold; font-size: {scale(16)}px; border-radius: {scale(27)}px;")
         main_layout.addWidget(self.btn_overhaul_next)
         
         main_layout.addStretch()
@@ -5719,12 +5778,7 @@ class CreatorWindow(QMainWindow):
         h_toolbar = QHBoxLayout()
         h_toolbar.setSpacing(scale(8))
 
-        # Left: Title + Info Button + Status
-        lbl_title = QLabel(tr_ui("creator.tab_transpositions", "Überleitungen"))
-        lbl_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {COLORS['dark_accent']};")
-        lbl_title.setWordWrap(False)
-        h_toolbar.addWidget(lbl_title)
-
+        # Left: Info Button + Status
         self.btn_transpos_info = QPushButton("ℹ️")
         self.btn_transpos_info.setFixedSize(scale(26), scale(26))
         self.btn_transpos_info.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -5734,7 +5788,7 @@ class CreatorWindow(QMainWindow):
                 background-color: {COLORS['white']};
                 border: 1px solid {COLORS['glass_border']};
                 border-radius: {scale(13)}px;
-                font-size: 12px;
+                font-size: {scale(12)}px;
                 padding: 0px;
             }}
             QPushButton:hover {{
@@ -5746,20 +5800,22 @@ class CreatorWindow(QMainWindow):
         h_toolbar.addWidget(self.btn_transpos_info)
 
         self.lbl_transpos_status = QLabel("")
-        self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: 11px;")
+        self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(12)}px; background: transparent; border: none;")
         self.lbl_transpos_status.setWordWrap(True)
-        h_toolbar.addWidget(self.lbl_transpos_status, 1)
+        self.lbl_transpos_status.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        h_toolbar.addWidget(self.lbl_transpos_status)
+        h_toolbar.addStretch(1)
         self.lbl_global_transpos_status = self.lbl_transpos_status
 
         # Right: Local action (Deep Search) + Global action (Engine Depth & Scan Repertoire)
-        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
+        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefensuche"))
         self.btn_deep_transpos.setMinimumHeight(scale(28))
         self.btn_deep_transpos.setProperty("class", "GlassPill")
         self.btn_deep_transpos.setToolTip(tr_ui("creator.transpositions_btn_start_tooltip", "Sucht nach 3-, 4- und mehrzügigen Zugfolgen, die aus dieser Stellung zurück ins Repertoire führen."))
         self.btn_deep_transpos.setStyleSheet(f"""
             QPushButton {{
                 padding: {scale(4)}px {scale(8)}px;
-                font-size: 11px;
+                font-size: {scale(12)}px;
                 font-weight: 600;
             }}
         """)
@@ -5775,8 +5831,8 @@ class CreatorWindow(QMainWindow):
         h_toolbar.addWidget(sep_line)
 
         depth_tooltip = tr_ui("creator.transpos_engine_depth_tooltip", "Stockfish-Rechentiefe: Bestimmt, wie gründlich die Engine prüft, ob 2-zügige Überleitungen taktisch solide sind.")
-        lbl_transpos_depth = QLabel(tr_ui("creator.transpos_engine_depth_label", "⚙️ Engine-Tiefe:"))
-        lbl_transpos_depth.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: 11px; font-weight: 600;")
+        lbl_transpos_depth = QLabel(tr_ui("creator.transpos_engine_depth_label", "⚙️ Tiefe:"))
+        lbl_transpos_depth.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(13)}px; font-weight: 600;")
         lbl_transpos_depth.setToolTip(depth_tooltip)
         h_toolbar.addWidget(lbl_transpos_depth)
 
@@ -5803,7 +5859,7 @@ class CreatorWindow(QMainWindow):
                 padding-left: {scale(4)}px;
                 padding-right: {scale(16)}px;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: {scale(12)}px;
                 min-height: {scale(26)}px;
             }}
             QComboBox#TransposDepthCombo:hover {{
@@ -5825,13 +5881,13 @@ class CreatorWindow(QMainWindow):
         self.combo_transpos_depth.currentTextChanged.connect(self._on_transpos_depth_changed)
         h_toolbar.addWidget(self.combo_transpos_depth)
 
-        self.btn_global_transpos_scan = QPushButton(tr_ui("creator.transpos_btn_scan", "🔎 Repertoire scannen"))
+        self.btn_global_transpos_scan = QPushButton(tr_ui("creator.transpos_btn_scan", "🔎 Alles scannen"))
         self.btn_global_transpos_scan.setMinimumHeight(scale(28))
         self.btn_global_transpos_scan.setProperty("class", "GlassPill")
         self.btn_global_transpos_scan.setStyleSheet(f"""
             QPushButton {{
                 padding: {scale(4)}px {scale(8)}px;
-                font-size: 11px;
+                font-size: {scale(12)}px;
                 font-weight: 600;
             }}
         """)
@@ -5861,6 +5917,28 @@ class CreatorWindow(QMainWindow):
         self.table_transpositions.itemClicked.connect(self.on_transposition_clicked)
         self.table_transpositions.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_transpositions.customContextMenuRequested.connect(self.on_transposition_context_menu)
+        self.table_transpositions.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: transparent;
+                border: none;
+                outline: none;
+                selection-background-color: rgba(211, 84, 0, 0.15);
+                selection-color: {COLORS['brown_text']};
+            }}
+            QTableWidget::item {{
+                border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+                padding: {scale(4)}px;
+                border-radius: 0px;
+            }}
+            QTableWidget::item:hover {{
+                background-color: rgba(211, 84, 0, 0.08);
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['brown_text']};
+                border-radius: 0px;
+            }}
+        """)
 
         hdr = self.table_transpositions.horizontalHeader()
         hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -5927,7 +6005,7 @@ class CreatorWindow(QMainWindow):
             "<p>• <b>Tiefe Suche:</b><br>Sucht ab der aktuellen Brettstellung nach 3- und mehrzügigen Wegen zurück ins Repertoire.</p>"
             "<p>• <b>Repertoire scannen:</b><br>Durchsucht dein gesamtes Repertoire nach allen 1- und 2-Zug Überleitungen und listet sie nach Häufigkeit auf.</p>"
         ))
-        lbl.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: 13px; line-height: 1.4;")
+        lbl.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(13)}px; line-height: 1.4;")
         layout.addWidget(lbl)
 
         bbox = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
@@ -6107,6 +6185,37 @@ class CreatorWindow(QMainWindow):
         self._current_bfs_items = classified_paths or []
         self._render_transpositions_table(rebuild_global=False)
 
+    @staticmethod
+    def _format_transpos_pct(val_pct) -> str:
+        """Formats priority or popularity percentage cleanly with 2 significant digits:
+        - >= 10%: whole numbers (e.g. 14%, 85%)
+        - 1.0% - 9.9%: 1 decimal place (e.g. 3.5%, 7.1%)
+        - 0.01% - 0.99%: 2 decimal places (e.g. 0.45%, 0.04%)
+        - < 0.01%: '<0.01%'
+        - 0 or None: '—'
+        """
+        if val_pct is None or val_pct <= 0:
+            return "—"
+        if val_pct >= 9.95:
+            return f"{round(val_pct):.0f}%"
+        elif val_pct >= 0.995:
+            return f"{val_pct:.1f}%"
+        elif val_pct >= 0.0095:
+            return f"{val_pct:.2f}%"
+        else:
+            return "<0.01%"
+
+    @staticmethod
+    def _compute_pos_prio(common_moves, total_games, move_uci, move_san):
+        """Calculates (pos_share, pos_prio_str) matching transposition tab logic."""
+        m_stat = next((m for m in common_moves if m.get('uci') == move_uci or m.get('san') == move_san), None)
+        if m_stat and total_games > 0:
+            pos_share = m_stat.get('total', 0) / total_games
+            pos_share_pct = pos_share * 100.0
+            pos_prio_str = CreatorWindow._format_transpos_pct(pos_share_pct)
+            return pos_share, pos_prio_str
+        return None, "—"
+
     def _insert_direct_transpos_row(self, r: int, it: dict):
         """Inserts a single 1-move outgoing transposition row into the table."""
         self.table_transpositions.insertRow(r)
@@ -6117,31 +6226,29 @@ class CreatorWindow(QMainWindow):
         p_reach = 1.0
         if curr_fen and self.backend and self.backend.session:
             clean_fen = " ".join(curr_fen.strip().split()[:4])
-            from opening_fenix.core.db.models import Position as DbPos
-            db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_fen + "*")).first()
-            if db_p:
-                p_reach = self.backend._get_pos_prio(db_p.id)
-            elif clean_fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
-                p_reach = 0.0
+            clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+            if clean_fen == clean_root:
+                p_reach = 1.0
+            else:
+                from opening_fenix.core.db.models import Position as DbPos
+                db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_fen + "*")).first()
+                if db_p:
+                    p_reach = self.backend._get_pos_prio(db_p.id)
+                else:
+                    p_reach = 0.0
 
         disp_move = format_move_notation(self.board_widget.board, it['move_san'])
         move_item = QTableWidgetItem(disp_move)
         move_item.setToolTip(f"{disp_move}\n" + tr_ui("creator.tooltip_click_play_move", "Klicken, um Zug auf dem Brett auszuführen."))
 
         # Calculate Prio and Pos-Prio
-        m_stat = next((m for m in common_moves if m.get('uci') == it['move_uci'] or m.get('san') == it['move_san']), None)
-        pos_prio_num = None
-        if m_stat and total_games > 0:
-            pos_share = m_stat.get('total', 0) / total_games
-            pos_prio_num = pos_share
-            prio_val = (p_reach or 1.0) * pos_share
+        pos_prio_num, pos_prio_str = self._compute_pos_prio(common_moves, total_games, it['move_uci'], it['move_san'])
+        if pos_prio_num is not None:
+            prio_val = (p_reach or 1.0) * pos_prio_num
             prio_pct = prio_val * 100.0
-            prio_str = f"{prio_pct:.1f}%" if prio_pct >= 0.1 else (f"{prio_pct:.2f}%" if prio_pct > 0 else "0.0%")
-            pos_share_pct = pos_share * 100.0
-            pos_prio_str = f"{pos_share_pct:.1f}%" if pos_share_pct >= 0.1 else (f"{pos_share_pct:.2f}%" if pos_share_pct > 0 else "0.0%")
+            prio_str = self._format_transpos_pct(prio_pct)
         else:
             prio_str = "—"
-            pos_prio_str = "—"
 
         data = {
             "type": "direct",
@@ -6335,7 +6442,7 @@ class CreatorWindow(QMainWindow):
                 sep_item.setForeground(QColor(COLORS['dark_accent']))
                 f = sep_item.font()
                 f.setBold(True)
-                f.setPointSize(11)
+                f.setPixelSize(scale(13))
                 sep_item.setFont(f)
                 sep_item.setBackground(QColor(238, 234, 228))
                 sep_item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -6372,7 +6479,7 @@ class CreatorWindow(QMainWindow):
         # Col 1: Prio
         prio_val = h.get('priority_score', 0.0)
         prio_pct = (prio_val or 0.0) * 100.0
-        prio_str = f"{prio_pct:.1f}%" if prio_pct >= 0.1 else (f"{prio_pct:.2f}%" if prio_pct > 0 else "0.0%")
+        prio_str = self._format_transpos_pct(prio_pct)
         it_prio = QTableWidgetItem(prio_str)
         it_prio.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_transpositions.setItem(r, 1, it_prio)
@@ -6383,7 +6490,7 @@ class CreatorWindow(QMainWindow):
             pop = h.get('popularity', 0)
             pos_prio_val = pop / 100.0 if pop > 0 else 0.0
         pos_prio_pct = (pos_prio_val or 0.0) * 100.0
-        pos_prio_str = f"{pos_prio_pct:.1f}%" if pos_prio_pct >= 0.1 else (f"{pos_prio_pct:.2f}%" if pos_prio_pct > 0 else "0.0%")
+        pos_prio_str = self._format_transpos_pct(pos_prio_pct)
         it_pos_prio = QTableWidgetItem(pos_prio_str)
         it_pos_prio.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_transpositions.setItem(r, 2, it_pos_prio)
@@ -6448,7 +6555,7 @@ class CreatorWindow(QMainWindow):
                 sep_item.setForeground(QColor(COLORS['dark_accent']))
                 f = sep_item.font()
                 f.setBold(True)
-                f.setPointSize(11)
+                f.setPixelSize(scale(13))
                 sep_item.setFont(f)
                 sep_item.setBackground(QColor(238, 234, 228))
                 sep_item.setFlags(Qt.ItemFlag.NoItemFlags)
@@ -6508,6 +6615,7 @@ class CreatorWindow(QMainWindow):
 
         if self.lbl_transpos_status.text() == tr_ui("creator.transpositions_indexing_status", "FEN-Index wird aufgebaut…"):
             self.lbl_transpos_status.setText("")
+            self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(12)}px; background: transparent; border: none;")
 
         if self._bfs_running:
             depth = self._bfs_next_depth  # depth currently being searched
@@ -6534,6 +6642,10 @@ class CreatorWindow(QMainWindow):
             self._bfs_running = False
             self._update_deep_button_state()
             self.lbl_transpos_status.setText(tr_ui("creator.transpositions_status_stopped", "Suche gestoppt."))
+            self.lbl_transpos_status.setStyleSheet(
+                f"background-color: rgba(0, 0, 0, 0.05); color: {COLORS['light_text']}; "
+                f"font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.08);"
+            )
             return
 
         fen = self.board_widget.board.fen()
@@ -7239,7 +7351,7 @@ class CreatorWindow(QMainWindow):
                         background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f39c12, stop:1 #e67e22);
                         color: #111111;
                         font-weight: bold;
-                        font-size: 10px;
+                        font-size: {scale(10)}px;
                         border-radius: {scale(11)}px;
                         padding: 0 {scale(4)}px;
                         border: 1px solid #f1c40f;
@@ -7268,7 +7380,7 @@ class CreatorWindow(QMainWindow):
                         background-color: rgba(0, 0, 0, 0.07);
                         color: {COLORS['brown_text']};
                         font-weight: bold;
-                        font-size: 10px;
+                        font-size: {scale(10)}px;
                         border-radius: {scale(11)}px;
                         padding: 0 {scale(4)}px;
                         border: 1px solid rgba(0, 0, 0, 0.18);
@@ -7355,7 +7467,7 @@ class CreatorWindow(QMainWindow):
                         background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f39c12, stop:1 #e67e22);
                         color: #111111;
                         font-weight: bold;
-                        font-size: 12px;
+                        font-size: {scale(12)}px;
                         border-radius: {scale(14)}px;
                         padding: 0 {scale(10)}px;
                         border: 1px solid #f1c40f;
@@ -7384,7 +7496,7 @@ class CreatorWindow(QMainWindow):
                         background-color: rgba(0, 0, 0, 0.07);
                         color: {COLORS['brown_text']};
                         font-weight: bold;
-                        font-size: 12px;
+                        font-size: {scale(12)}px;
                         border-radius: {scale(14)}px;
                         padding: 0 {scale(10)}px;
                         border: 1px solid rgba(0, 0, 0, 0.18);
@@ -7477,8 +7589,8 @@ class CreatorWindow(QMainWindow):
             self.btn_global_transpos_scan.setEnabled(True)
             self.lbl_global_transpos_status.setText(tr_ui("creator.transpositions_status_stopped", "Scan gestoppt."))
             self.lbl_global_transpos_status.setStyleSheet(
-                f"background-color: rgba(0, 0, 0, 0.06); color: {COLORS['light_text']}; "
-                f"font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+                f"background-color: rgba(0, 0, 0, 0.05); color: {COLORS['light_text']}; "
+                f"font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.08);"
             )
             return
 
@@ -7494,8 +7606,8 @@ class CreatorWindow(QMainWindow):
             tr_ui("creator.transpositions_scan_running_depth", f"Scan läuft... (Tiefe {depth_val})", depth=depth_val)
         )
         self.lbl_global_transpos_status.setStyleSheet(
-            f"background-color: rgba(211, 84, 0, 0.12); color: #d35400; "
-            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+            f"background-color: rgba(0, 0, 0, 0.05); color: #555555; "
+            f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.14);"
         )
         if hasattr(self, "_global_transpos_batch_timer"):
             self._global_transpos_batch_timer.stop()
@@ -7543,8 +7655,8 @@ class CreatorWindow(QMainWindow):
             tr_ui("creator.transpositions_scan_running_count", f"Scan läuft... {count} gefunden", count=count)
         )
         self.lbl_global_transpos_status.setStyleSheet(
-            f"background-color: rgba(211, 84, 0, 0.12); color: #d35400; "
-            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+            f"background-color: rgba(0, 0, 0, 0.05); color: #555555; "
+            f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.14);"
         )
 
         if hasattr(self, "_global_transpos_batch_timer"):
@@ -7576,7 +7688,7 @@ class CreatorWindow(QMainWindow):
         )
         self.lbl_global_transpos_status.setStyleSheet(
             f"background-color: rgba(46, 125, 50, 0.12); color: #2e7d32; "
-            f"font-weight: bold; font-size: 11px; padding: {scale(2)}px {scale(8)}px; border-radius: {scale(8)}px;"
+            f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(46, 125, 50, 0.25);"
         )
 
     def on_global_transposition_activated(self, item):
@@ -8031,8 +8143,77 @@ class CreatorWindow(QMainWindow):
         else:
             self._transposition_highlight_fen = None
             self._transposition_highlight_move = None
+
+            # Resolve candidate move to highlight on the board
+            move_uci = None
+            if h_data and isinstance(h_data, dict):
+                move_uci = h_data.get('move_uci')
+                if not move_uci and h_data.get('path_ucis'):
+                    move_uci = h_data['path_ucis'][0]
+                if not move_uci and h_data.get('move_san'):
+                    san_clean = str(h_data['move_san']).split("(")[0].strip()
+                    if san_clean and san_clean != "—":
+                        import chess
+                        try:
+                            tb = chess.Board(fen)
+                            san_token = san_clean.split()[-1]
+                            m = tb.parse_san(san_token)
+                            move_uci = m.uci()
+                        except Exception:
+                            try:
+                                m = tb.parse_san(san_clean)
+                                move_uci = m.uci()
+                            except Exception:
+                                pass
+            if not move_uci:
+                move_san_val = item0.data(Qt.ItemDataRole.UserRole + 1)
+                if not move_san_val and self.table_holes.item(row, 2):
+                    move_san_val = self.table_holes.item(row, 2).text()
+                if move_san_val:
+                    san_clean = str(move_san_val).split("(")[0].strip()
+                    if san_clean and san_clean != "—":
+                        import chess
+                        try:
+                            tb = chess.Board(fen)
+                            san_token = san_clean.split()[-1]
+                            m = tb.parse_san(san_token)
+                            move_uci = m.uci()
+                        except Exception:
+                            try:
+                                m = tb.parse_san(san_clean)
+                                move_uci = m.uci()
+                            except Exception:
+                                pass
+
+            if move_uci and len(move_uci) >= 4:
+                import chess
+                try:
+                    self._search_highlight_fen = " ".join(fen.strip().split()[:4])
+                    self._search_highlight_move = chess.Move.from_uci(move_uci[:4])
+                except Exception:
+                    self._search_highlight_fen = None
+                    self._search_highlight_move = None
+            else:
+                self._search_highlight_fen = None
+                self._search_highlight_move = None
+
             self.set_board_to_fen(fen)
-            self.tabs.setCurrentIndex(0) # Switch to DETAILS to add the move
+
+            if self._search_highlight_move:
+                self.board_widget.last_move = self._search_highlight_move
+                self.board_widget.update()
+
+            active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+            if "ANALYSIS" not in active_tabs:
+                active_tabs.append("ANALYSIS")
+                self.set_setting("creator_active_tabs", active_tabs)
+                self.apply_tab_visibility()
+
+            idx = self.tabs.indexOf(self.tab_analysis)
+            if idx != -1:
+                self.tabs.setCurrentIndex(idx)
+            else:
+                self.tabs.setCurrentWidget(self.tab_analysis)
 
     def exempt_selected_hole(self):
         row = self.table_holes.currentRow()

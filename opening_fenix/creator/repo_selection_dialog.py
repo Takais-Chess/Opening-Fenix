@@ -248,7 +248,7 @@ class RepoSelectionButton(QPushButton):
                 border: 1px dashed rgba(211, 84, 0, 0.3);
             """)
             self.lbl_image.setText("♟")
-            self.lbl_image.setFont(QFont("Segoe UI", 36))
+            self.lbl_image.setFont(QFont("Segoe UI", scale(36)))
             
         layout.addWidget(self.lbl_image)
         

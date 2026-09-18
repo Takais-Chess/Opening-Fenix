@@ -30,7 +30,7 @@ class EngineActionDialog(QDialog):
         self.selected_action = self.ACTION_CANCEL
 
         self.setWindowTitle(tr_ui("engine_setup.dialog_title", "🤖 Schach-Engine einrichten"))
-        self.setFixedWidth(scale(540))
+        self.setMinimumSize(scale(560), scale(460))
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
 
@@ -38,6 +38,7 @@ class EngineActionDialog(QDialog):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
+        layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
         layout.setContentsMargins(scale(24), scale(24), scale(24), scale(20))
         layout.setSpacing(scale(16))
 
@@ -66,6 +67,7 @@ class EngineActionDialog(QDialog):
 
         btn_download = QPushButton(tr_ui("engine_setup.btn_download", "⚡ Stockfish automatisch herunterladen (Empfohlen)"))
         btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_download.setMinimumHeight(scale(48))
         btn_download.setStyleSheet(f"""
             QPushButton {{
                 background-color: {COLORS['burnt_orange']};
@@ -95,6 +97,7 @@ class EngineActionDialog(QDialog):
 
         btn_browse = QPushButton(tr_ui("engine_setup.btn_browse", "📁 Vorhandene lokale Engine auswählen (.exe)"))
         btn_browse.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_browse.setMinimumHeight(scale(48))
         btn_browse.setStyleSheet(f"""
             QPushButton {{
                 background-color: white;

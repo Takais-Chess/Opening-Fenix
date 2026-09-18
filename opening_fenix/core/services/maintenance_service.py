@@ -169,10 +169,15 @@ class MaintenanceOrchestrator:
                         status_text = f"{pct}%"
                     self.repo_status_cb(name, "lichess", pct, status_text)
 
+                reuse_courses = bool(self.tasks.get('lichess_reuse_courses', False))
+                max_age = self.tasks.get('lichess_max_age_days', 180)
+
                 success, msg = run_lichess_import(
                     name, elo,
                     progress_callback=on_lichess_progress,
-                    check_cancel=self.check_cancel
+                    check_cancel=self.check_cancel,
+                    reuse_other_courses=reuse_courses,
+                    max_data_age_days=max_age
                 )
                 if self.check_cancel and self.check_cancel():
                     self._is_aborted = True

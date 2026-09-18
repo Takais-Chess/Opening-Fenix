@@ -30,7 +30,7 @@ def test_analysis_thread_success(qtbot):
 
 @pytest.mark.qt
 def test_lichess_import_thread_success(qtbot):
-    def fake_run(repo, elo, progress_callback=None, check_cancel=None):
+    def fake_run(repo, elo, progress_callback=None, check_cancel=None, **kwargs):
         if progress_callback:
             progress_callback(25, 21, 4970)
             progress_callback(50, 50, 100, "1h 20m")

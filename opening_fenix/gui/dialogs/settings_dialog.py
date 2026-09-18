@@ -56,11 +56,11 @@ class LoadRepertoireDialog(QDialog):
         layout.setContentsMargins(scale(30), scale(30), scale(30), scale(30))
 
         lbl_title = QLabel(tr_ui("settings.select_repertoire_label", "Repertoire auswählen"))
-        lbl_title.setStyleSheet("font-size: 22px; font-weight: 800; color: #111111; margin-bottom: 5px;")
+        lbl_title.setStyleSheet(f"font-size: {scale(22)}px; font-weight: 800; color: #111111; margin-bottom: {scale(5)}px;")
         layout.addWidget(lbl_title)
 
         lbl_sub = QLabel(tr_ui("settings.select_repertoire_sub", "Klicke auf ein Repertoire, um es zu laden."))
-        lbl_sub.setStyleSheet("color: #666; font-size: 13px; margin-bottom: 10px;")
+        lbl_sub.setStyleSheet(f"color: #666; font-size: {scale(13)}px; margin-bottom: {scale(10)}px;")
         layout.addWidget(lbl_sub)
 
         self.scroll_area = QScrollArea()

@@ -259,17 +259,32 @@ def get_default_user_dir():
     """Returns the default local directory where user data (profiles, config, repertoires) is stored."""
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
+        # Never store user data inside Program Files even if elevated/writable!
+        is_program_files = False
         try:
-            test_file = os.path.join(exe_dir, ".perm_test")
-            with open(test_file, "w") as f:
-                f.write("1")
-            os.remove(test_file)
-            return exe_dir
+            exe_norm = os.path.normcase(os.path.abspath(exe_dir))
+            for pf_env in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"]:
+                pf_val = os.environ.get(pf_env)
+                if pf_val and exe_norm.startswith(os.path.normcase(os.path.abspath(pf_val))):
+                    is_program_files = True
+                    break
         except Exception:
-            appdata = os.getenv("APPDATA") or os.path.expanduser("~")
-            user_dir = os.path.join(appdata, "Opening Fenix")
-            os.makedirs(user_dir, exist_ok=True)
-            return user_dir
+            pass
+
+        if not is_program_files:
+            try:
+                test_file = os.path.join(exe_dir, ".perm_test")
+                with open(test_file, "w") as f:
+                    f.write("1")
+                os.remove(test_file)
+                return exe_dir
+            except Exception:
+                pass
+
+        appdata = os.getenv("APPDATA") or os.path.expanduser("~")
+        user_dir = os.path.join(appdata, "Opening Fenix")
+        os.makedirs(user_dir, exist_ok=True)
+        return user_dir
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
@@ -431,7 +446,41 @@ def ensure_user_data_seeded():
         except Exception as e:
             print(f"Warning: Could not save build type to user config: {e}")
 
-    # 2. Seed profiles and repertoires
+    # 2. Preserve and migrate existing user profiles from older installations or default AppData
+    dest_profiles = os.path.join(user_dir, "profiles")
+    os.makedirs(dest_profiles, exist_ok=True)
+
+    legacy_profile_sources = []
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        legacy_profile_sources.append(exe_dir)
+        legacy_profile_sources.append(os.path.join(exe_dir, "_internal"))
+        appdata_dir = os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"), "Opening Fenix")
+        if os.path.exists(appdata_dir) and os.path.abspath(appdata_dir) != os.path.abspath(user_dir):
+            legacy_profile_sources.append(appdata_dir)
+
+    for l_src in legacy_profile_sources:
+        l_prof = os.path.join(l_src, "profiles")
+        if os.path.exists(l_prof) and os.path.isdir(l_prof) and os.path.abspath(l_prof) != os.path.abspath(dest_profiles):
+            for item in os.listdir(l_prof):
+                if item.endswith(".db") or item.endswith("_settings.json") or (item.endswith(".json") and not item == "config.json"):
+                    s_file = os.path.join(l_prof, item)
+                    d_file = os.path.join(dest_profiles, item)
+                    if os.path.isfile(s_file):
+                        should_migrate = not os.path.exists(d_file)
+                        if not should_migrate and item.endswith(".db"):
+                            try:
+                                if os.path.getsize(d_file) <= 36864 and os.path.getsize(s_file) > 36864:
+                                    should_migrate = True
+                            except Exception:
+                                pass
+                        if should_migrate:
+                            try:
+                                shutil.copy2(s_file, d_file)
+                            except Exception as e:
+                                print(f"Warning: Could not preserve legacy profile {s_file} to {d_file}: {e}")
+
+    # 3. Seed profiles and repertoires
     is_pub = is_public_version()
 
     profiles_seeded = False
@@ -480,10 +529,9 @@ def ensure_user_data_seeded():
             # Do NOT re-seed profiles once initial seeding is complete;
             # otherwise user-deleted profiles will reappear on restart.
             continue
-        if folder == "repertoires" and repertoires_seeded:
-            # Do NOT re-seed repertoires once initial seeding is complete;
-            # otherwise user-deleted/renamed repertoires will reappear on restart.
-            continue
+        # For repertoires: We do NOT skip based on repertoires_seeded flag.
+        # Any missing repertoire in user_dir will be copied, but existing repertoires
+        # are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
 
         dest_folder = os.path.join(user_dir, folder)
         if not os.path.exists(dest_folder):

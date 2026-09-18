@@ -169,6 +169,10 @@ def test_statistics_dialog_ui(qtbot, mock_user_dir, sample_repertoire):
     qtbot.addWidget(dlg)
     assert "Statistiken" in dlg.windowTitle() or "Statistics" in dlg.windowTitle()
     assert dlg.repo_name == sample_repertoire
+    assert hasattr(dlg, "card_eff")
+    assert hasattr(dlg, "card_wip")
+    assert not hasattr(dlg, "card_snd")
+    assert not hasattr(dlg, "card_lrn")
     # Wait briefly for worker to complete
     if dlg.worker:
         dlg.worker.wait(2000)

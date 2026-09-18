@@ -282,6 +282,13 @@ def test_queue_priority_order_priority_first(mock_user_dir):
     assert due_items[2] == td2 # prio 0.50 (Box 1)
 
 
+def test_default_queue_priority_order_is_priority_first(mock_user_dir):
+    """Verify that a newly created profile defaults to 'priority_first'."""
+    repo_mgr = MockRepertoireManager()
+    tm = TrainingManager("new_profile_default", repo_mgr)
+    assert tm.get_setting("queue_priority_order") == "priority_first"
+
+
 # ========================================================================
 # 4. DAILY & SESSION LIMITS UNIT TESTS
 # ========================================================================

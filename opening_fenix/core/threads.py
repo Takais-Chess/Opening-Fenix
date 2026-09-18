@@ -1,4 +1,5 @@
 from PyQt6.QtCore import QThread, pyqtSignal
+from typing import Optional
 import time
 import sys
 from opening_fenix.core.services.analysis_service import run_db_analysis, enrich_position
@@ -40,10 +41,12 @@ class LichessImportThread(QThread):
     status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, repo_name, elo_category):
+    def __init__(self, repo_name, elo_category, reuse_other_courses: bool = False, max_data_age_days: Optional[int] = 180):
         super().__init__()
         self.repo_name = repo_name
         self.elo_category = elo_category
+        self.reuse_other_courses = reuse_other_courses
+        self.max_data_age_days = max_data_age_days
         self._is_canceled = False
 
     def run(self):
@@ -59,7 +62,9 @@ class LichessImportThread(QThread):
             self.repo_name, 
             self.elo_category, 
             progress_callback=on_progress,
-            check_cancel=lambda: self._is_canceled
+            check_cancel=lambda: self._is_canceled,
+            reuse_other_courses=self.reuse_other_courses,
+            max_data_age_days=self.max_data_age_days
         )
         self.finished_signal.emit(success, msg)
 

@@ -496,17 +496,35 @@ def get_creator_window_style():
         border: none;
         outline: none;
     }}
-    QTreeWidget::item, QTableWidget::item {{
+    QTreeWidget::item {{
         border-bottom: 1px solid rgba(0, 0, 0, 0.05);
         padding: {scale(4)}px;
     }}
-    QTreeWidget::item:hover, QTableWidget::item:hover {{
+    QTreeWidget::item:hover {{
         background-color: rgba(211, 84, 0, 0.2);
     }}
-    QTreeWidget::item:selected, QTableWidget::item:selected {{
+    QTreeWidget::item:selected {{
         background-color: {COLORS['burnt_orange']};
         color: white;
         border-radius: {scale(4)}px;
+    }}
+    
+    QTableWidget {{
+        selection-background-color: rgba(211, 84, 0, 0.15);
+        selection-color: {COLORS['brown_text']};
+    }}
+    QTableWidget::item {{
+        border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+        padding: {scale(4)}px;
+        border-radius: 0px;
+    }}
+    QTableWidget::item:hover {{
+        background-color: rgba(211, 84, 0, 0.08);
+    }}
+    QTableWidget::item:selected {{
+        background-color: rgba(211, 84, 0, 0.15);
+        color: {COLORS['brown_text']};
+        border-radius: 0px;
     }}
     
     /* Indicator Styling for Candidate Moves & Checkboxes */
@@ -559,7 +577,7 @@ def get_creator_window_style():
         border: none;
         border-bottom: {scale(2)}px solid {COLORS['glass_border']};
     }}
-    QTreeWidget::item:selected, QTableWidget::item:selected {{
+    QTreeWidget::item:selected {{
         background-color: {COLORS['burnt_orange']};
         color: {COLORS['white']};
     }}

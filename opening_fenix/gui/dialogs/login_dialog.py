@@ -38,9 +38,9 @@ class RepertoireButton(QPushButton):
                     color: white;
                     border: 2px solid #e67e22;
                     border-radius: {scale(12)}px;
-                    font-size: {scale(16)}px;
+                    font-size: {scale(13)}px;
                     font-weight: bold;
-                    padding: {scale(2)}px 0;
+                    padding: {scale(2)}px {scale(8)}px;
                 }}
                 {get_tooltip_style()}
             """)
@@ -51,9 +51,9 @@ class RepertoireButton(QPushButton):
                     color: black;
                     border: 1px solid rgba(255, 255, 255, 0.2);
                     border-radius: {scale(12)}px;
-                    font-size: {scale(16)}px;
+                    font-size: {scale(13)}px;
                     font-weight: bold;
-                    padding: {scale(2)}px 0;
+                    padding: {scale(2)}px {scale(8)}px;
                 }}
 
                 QPushButton:hover {{
@@ -67,7 +67,7 @@ class RepertoireSelectionDialog(QDialog):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("login.repertoire_selection_title", "Repertoires wählen"))
-        self.setMinimumSize(scale(560), scale(600))
+        self.setMinimumSize(scale(800), scale(640))
         self.selected_repos = []
         self.selected_language = None
 
@@ -99,6 +99,7 @@ class RepertoireSelectionDialog(QDialog):
         self.scroll_area = QScrollArea()
         self.scroll_area.setObjectName("RepoScrollArea")
         self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll_area.setStyleSheet("""
             QScrollArea#RepoScrollArea {
                 background: transparent;
