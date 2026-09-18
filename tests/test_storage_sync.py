@@ -6,7 +6,7 @@ import pytest
 from PyQt6.QtWidgets import QApplication
 from opening_fenix.core.utils import (
     get_default_user_dir, get_custom_data_dir, set_custom_data_dir, 
-    get_user_dir, migrate_user_data
+    get_user_dir, migrate_user_data, ensure_user_data_seeded
 )
 
 def test_default_user_dir():
@@ -70,3 +70,19 @@ def test_migrate_same_dir(temp_dir):
     os.makedirs(source_dir, exist_ok=True)
     summary = migrate_user_data(source_dir, source_dir)
     assert summary == {'repertoires': 0, 'profiles': 0, 'backups': 0}
+
+def test_ensure_user_data_seeded_respects_custom_dir(temp_dir, monkeypatch):
+    custom_dir = os.path.join(temp_dir, 'custom_dir')
+    os.makedirs(os.path.join(custom_dir, 'repertoires', 'MyRepertoire'), exist_ok=True)
+    with open(os.path.join(custom_dir, 'repertoires', 'MyRepertoire', 'MyRepertoire.db'), 'w') as f:
+        f.write('data')
+
+    monkeypatch.setattr('opening_fenix.core.utils.get_user_dir', lambda: custom_dir)
+    monkeypatch.setattr('opening_fenix.core.utils.get_custom_data_dir', lambda: custom_dir)
+
+    ensure_user_data_seeded()
+
+    # Verify no other default repertoires were injected into custom_dir
+    rep_list = os.listdir(os.path.join(custom_dir, 'repertoires'))
+    assert rep_list == ['MyRepertoire']
+

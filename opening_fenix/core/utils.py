@@ -522,6 +522,13 @@ def ensure_user_data_seeded():
             except Exception:
                 pass
 
+    has_custom_dir = bool(get_custom_data_dir())
+    custom_has_repertoires = False
+    if has_custom_dir:
+        cust_repo_dir = os.path.join(user_dir, "repertoires")
+        if os.path.exists(cust_repo_dir) and any(os.path.isdir(os.path.join(cust_repo_dir, d)) for d in os.listdir(cust_repo_dir)):
+            custom_has_repertoires = True
+
     for folder in ["profiles", "repertoires"]:
         if is_pub and folder == "profiles":
             continue
@@ -529,7 +536,12 @@ def ensure_user_data_seeded():
             # Do NOT re-seed profiles once initial seeding is complete;
             # otherwise user-deleted profiles will reappear on restart.
             continue
-        # For repertoires: We do NOT skip based on repertoires_seeded flag.
+        if folder == "repertoires" and custom_has_repertoires:
+            # When a custom storage directory (e.g. Google Drive / OneDrive) is configured and
+            # already populated with user repertoires, it serves as the single source of truth.
+            # Do not pull/seed repertoires from local bundled or legacy source folders.
+            continue
+        # For repertoires without a custom dir: We do NOT skip based on repertoires_seeded flag.
         # Any missing repertoire in user_dir will be copied, but existing repertoires
         # are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
 
