@@ -276,3 +276,57 @@ def test_candidate_moves_past_10_pos_prio_and_backprop(creator_window, monkeypat
     # Verify bottom common moves table is limited to exactly 10 rows
     assert creator_window.table_common_moves.rowCount() == 10
 
+def test_candidate_moves_deep_line_pos_prio_normalization(creator_window, monkeypatch):
+    """
+    Verify that in a deep position on the opponent's turn:
+    If one move is in Lichess with 1 game and another is a rare candidate move with 0 games,
+    and both have equal backend priority (e.g. 50% split),
+    both display 50% Pos-Prio (rather than 100% and 50%).
+    """
+    board = chess.Board()
+    board.push_san("e4")  # Black's turn (opponent)
+    e4_fen = board.fen()
+    creator_window.backend.add_move(chess.STARTING_FEN, "e2e4", "e4", level_order=1)
+    creator_window.set_board_to_fen(e4_fen)
+
+    # User is White
+    monkeypatch.setattr(creator_window.backend, "get_repertoire_color", lambda: "w")
+
+    # Lichess only has 1 game for Ba6
+    mock_common = [
+        {"uci": "c8a6", "san": "Ba6", "total": 1, "white_pct": 0, "draw_pct": 0, "black_pct": 100}
+    ]
+    monkeypatch.setattr(creator_window.backend, "get_lichess_common_moves", lambda fen, cat, limit=None: mock_common)
+
+    # Parent reach probability = 0.0001 (0.01%)
+    p_reach = 0.0001
+    monkeypatch.setattr(creator_window.backend, "_get_pos_prio", lambda pid: p_reach)
+
+    # Both moves have priority = p_reach * 0.5 = 0.00005 (50% local share each)
+    cand_moves = [
+        {
+            "id": 1, "uci": "c8a6", "san": "Ba6", "is_repo": True, "level": 1, "is_active": True,
+            "comment": "", "priority": 0.00005,
+            "nag": 0, "eval": None, "to_pos_id": 101
+        },
+        {
+            "id": 2, "uci": "b7c3", "san": "bxc3", "is_repo": True, "level": 1, "is_active": True,
+            "comment": "", "priority": 0.00005,
+            "nag": 0, "eval": None, "to_pos_id": 102
+        }
+    ]
+    monkeypatch.setattr(creator_window.backend, "get_candidate_moves", lambda fen: cand_moves)
+
+    creator_window.refresh_candidate_moves_table()
+
+    tree = creator_window.tree_widget
+    items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    ba6_item = next(it for it in items if "Ba6" in it.text(0))
+    bxc3_item = next(it for it in items if "bxc3" in it.text(0))
+
+    # Both must show 50% Pos-Prio (Col 2)
+    assert ba6_item.text(2) == "50%"
+    assert bxc3_item.text(2) == "50%"
+    assert pytest.approx(ba6_item.data(2, Qt.ItemDataRole.UserRole), 0.001) == 0.5
+    assert pytest.approx(bxc3_item.data(2, Qt.ItemDataRole.UserRole), 0.001) == 0.5
+

@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -464,7 +464,8 @@ begin
         if LoadStringFromFile(ConfigPath, JsonContentAnsi) then
         begin
           JsonContentStr := String(JsonContentAnsi);
-          JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'engine_path', EscapedEnginePath, True);
+          if EscapedEnginePath <> '' then
+            JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'engine_path', EscapedEnginePath, True);
           if LichessKey <> '' then
             JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'lichess_token', LichessKey, True);
           JsonContentStr := UpdateOrAddJsonKey(JsonContentStr, 'ui_language', LangCode, True);

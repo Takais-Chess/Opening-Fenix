@@ -84,6 +84,8 @@ class CourseImportPlan:
     target_lang: str = "de"
     game_targets: Dict[int, str] = field(default_factory=dict)
     elo: str = "high"
+    archive_original_pgns: bool = True
+    subvariations_as_comments: bool = True
 
     def __post_init__(self):
         if not self.pgn_paths and self.pgn_path:
@@ -107,9 +109,16 @@ class CourseImportResult:
     embedded_puzzles: int = 0
     embedded_models: int = 0
     embedded_intros: int = 0
+    original_pgns_archived: int = 0
 
 class SanitizedPGNReader:
-    """Wrapper around a file object to strip empty [FEN \"\"] tags that crash python-chess."""
+    """
+    Wrapper around a file object to:
+    1. Strip empty [FEN ""] tags that crash python-chess.
+    2. Normalize header lines with leading whitespace (e.g. ' [ChessableColor "black"]')
+       which would otherwise cause python-chess to prematurely terminate the header block
+       and split games into an empty header dummy game and a headerless move game.
+    """
     def __init__(self, fp):
         self.fp = fp
     
@@ -118,8 +127,10 @@ class SanitizedPGNReader:
         if not line:
             return line
         s = line.strip()
-        if s.startswith('[FEN ""') or s.startswith("[FEN ''"):
+        if s.startswith('[FEN ""') or s.startswith("[FEN ''") or s == '[FEN]':
             return "\n"
+        if line.startswith((' ', '\t')) and line.lstrip().startswith('['):
+            return line.lstrip()
         return line
         
     def tell(self):
@@ -238,6 +249,21 @@ def is_game_intro(game: chess.pgn.Game) -> bool:
     Checks whether a specific individual game is an introduction or informational text,
     even if it appears inside a regular opening chapter (e.g. starting with [%info]).
     """
+    first_comment = (game.comment or "").strip().lower()
+    headers_str = " ".join(str(v) for v in game.headers.values()).lower()
+    has_info_tag = "[%info]" in first_comment or "[info]" in first_comment or "[%info]" in headers_str or "[info]" in headers_str
+
+    if not has_info_tag:
+        plies = 0
+        curr = game
+        while curr.variations and plies < 8:
+            curr = curr.variations[0]
+            plies += 1
+        if plies >= 6:
+            white = game.headers.get("White", "").strip()
+            if not re.search(r'(?i)^\s*(info\b|intro\b|introduction\b|einleitung\b|overview\b|about the author|preface|vorwort)', white):
+                return False
+
     if is_header_intro(game.headers):
         return True
 
@@ -281,6 +307,69 @@ def is_game_puzzle(game: chess.pgn.Game) -> bool:
         return True
 
     return False
+
+def format_variation_tree_as_text(var_node: chess.pgn.GameNode, board: chess.Board) -> str:
+    """
+    Recursively serializes a PGN variation tree into readable chess notation text,
+    including starting comments, move numbers, SAN moves, NAGs, comments, and nested sub-variations.
+    """
+    parts = []
+    curr = var_node
+    b = board.copy()
+    has_any_comment = False
+
+    while curr is not None:
+        if curr.starting_comment:
+            sc = curr.starting_comment.strip()
+            if sc:
+                has_any_comment = True
+                parts.append(sc)
+
+        move_num = b.fullmove_number
+        is_white = b.turn == chess.WHITE
+        if is_white:
+            prefix = f"{move_num}."
+        else:
+            if not parts or parts[-1].endswith(".") or parts[-1].endswith("}") or parts[-1].endswith("(") or curr == var_node:
+                prefix = f"{move_num}..."
+            else:
+                prefix = ""
+
+        san = curr.san()
+        move_str = f"{prefix} {san}".strip()
+        parts.append(move_str)
+
+        try:
+            b.push(curr.move)
+        except Exception:
+            break
+
+        if curr.comment:
+            c = curr.comment.strip()
+            if c:
+                has_any_comment = True
+                parts.append(c)
+
+        if len(curr.variations) > 1:
+            for sub_v in curr.variations[1:]:
+                nested_text = format_variation_tree_as_text(sub_v, b)
+                if nested_text:
+                    has_any_comment = True
+                    parts.append(f"({nested_text})")
+
+        curr = curr.variations[0] if curr.variations else None
+
+    text = " ".join(parts)
+    if not has_any_comment and text:
+        text = f"({text})"
+
+    text = re.sub(r"\s*\(\s*", " ( ", text)
+    text = re.sub(r"\s*\)\s*", " ) ", text)
+    text = re.sub(r"\s*,\s*", ", ", text)
+    text = re.sub(r"\s*\.\s*", ". ", text)
+    text = re.sub(r"\.\s*\.\s*\.", "...", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 def is_game_model(game: chess.pgn.Game) -> bool:
     """Checks whether a specific game is a model/reference game."""
@@ -513,6 +602,25 @@ def execute_course_import(
         except Exception as e:
             logger.warning(f"CourseImport: Could not copy cover image: {e}")
 
+    # 2b. Archive original PGNs in 'Original PGNs' subfolder if requested
+    original_pgns_archived = 0
+    if plan.archive_original_pgns and paths_to_import:
+        orig_dir = os.path.join(repo_dir, "Original PGNs")
+        os.makedirs(orig_dir, exist_ok=True)
+        for src_path in paths_to_import:
+            if not src_path or not os.path.exists(src_path):
+                continue
+            src_abs = os.path.abspath(src_path)
+            dest_file = os.path.join(orig_dir, os.path.basename(src_path))
+            dest_abs = os.path.abspath(dest_file)
+            if src_abs != dest_abs:
+                try:
+                    shutil.copy2(src_abs, dest_abs)
+                    original_pgns_archived += 1
+                    logger.info(f"CourseImport: Copied original PGN to {dest_abs}")
+                except Exception as e:
+                    logger.warning(f"CourseImport: Could not archive original PGN {src_path}: {e}")
+
     # 3. Setup Database and Metadata
     db = DatabaseManager(db_path)
     session = db.get_session()
@@ -657,82 +765,171 @@ def execute_course_import(
                     # Must be LEVEL_1 or LEVEL_2
                     level_order = 1 if target == CATEGORY_LEVEL_1 else 2
 
-                    # Parse game tree into moves & positions
-                    node_stack = []
-                    initial_board = game.board()
-                    for node in reversed(game.variations):
-                        node_stack.append((node, initial_board.copy()))
+                    if plan.subvariations_as_comments:
+                        c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
+                        board = game.board()
+                        for current_node in game.mainline():
+                            move = current_node.move
+                            from_fen = " ".join(board.fen().split(" ")[:4])
 
-                    while node_stack:
-                        current_node, board = node_stack.pop()
-                        move = current_node.move
-                        from_fen = " ".join(board.fen().split(" ")[:4])
+                            try:
+                                board.push(move)
+                            except Exception:
+                                continue
 
-                        try:
-                            board.push(move)
-                        except Exception:
-                            continue
+                            to_fen = " ".join(board.fen().split(" ")[:4])
 
-                        to_fen = " ".join(board.fen().split(" ")[:4])
+                            from_pos_id = pos_cache.get(from_fen)
+                            if not from_pos_id:
+                                max_pos_id += 1
+                                from_pos_id = max_pos_id
+                                pos_cache[from_fen] = from_pos_id
+                                new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
 
-                        from_pos_id = pos_cache.get(from_fen)
-                        if not from_pos_id:
-                            max_pos_id += 1
-                            from_pos_id = max_pos_id
-                            pos_cache[from_fen] = from_pos_id
-                            new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+                            to_pos_id = pos_cache.get(to_fen)
+                            if not to_pos_id:
+                                max_pos_id += 1
+                                to_pos_id = max_pos_id
+                                pos_cache[to_fen] = to_pos_id
+                                new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
 
-                        to_pos_id = pos_cache.get(to_fen)
-                        if not to_pos_id:
-                            max_pos_id += 1
-                            to_pos_id = max_pos_id
-                            pos_cache[to_fen] = to_pos_id
-                            new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
+                            # 1. Mainline node comment
+                            combined_node_comment = ""
+                            if current_node.starting_comment:
+                                combined_node_comment = current_node.starting_comment.strip()
+                            if current_node.comment:
+                                c = current_node.comment.strip()
+                                combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
 
-                        if current_node.comment:
-                            c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
-                            if to_fen in comments_to_append:
-                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=c_lang)
-                            else:
-                                comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=c_lang)
+                            if combined_node_comment:
+                                if to_fen in comments_to_append:
+                                    comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=c_lang)
+                                else:
+                                    comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=c_lang)
 
-                        incoming_nag = next(iter(current_node.nags), 0)
-                        move_san = current_node.san()
-                        uci_str = normalize_castling_uci(move.uci(), move_san)
-                        move_entry = move_cache.get((from_pos_id, uci_str))
+                            # 2. Sibling subvariations on parent
+                            parent = current_node.parent
+                            if parent and len(parent.variations) > 1:
+                                for v in parent.variations:
+                                    if v != current_node:
+                                        sub_text = format_variation_tree_as_text(v, parent.board())
+                                        if sub_text:
+                                            if to_fen in comments_to_append:
+                                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], sub_text, default_lang=c_lang)
+                                            else:
+                                                comments_to_append[to_fen] = combine_comments("", sub_text, default_lang=c_lang)
 
-                        if not move_entry:
-                            max_move_id += 1
-                            move_id = max_move_id
-                            move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                            new_moves_to_insert.append(
-                                Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                            )
-                        else:
-                            move_id, existing_nag = move_entry
-                            if incoming_nag != 0 and existing_nag != incoming_nag:
-                                moves_to_update_nag[move_id] = incoming_nag
+                            incoming_nag = next(iter(current_node.nags), 0)
+                            move_san = current_node.san()
+                            uci_str = normalize_castling_uci(move.uci(), move_san)
+                            move_entry = move_cache.get((from_pos_id, uci_str))
+
+                            if not move_entry:
+                                max_move_id += 1
+                                move_id = max_move_id
                                 move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-
-                        # Level priority: Level 1 has higher priority than Level 2
-                        if move_id not in rep_move_cache:
-                            rep_move_cache[move_id] = level_order
-                            new_rep_moves_to_insert.append(RepertoireMove(move_id=move_id, level=level_order))
-                            if level_order == 1:
-                                level_1_moves_count += 1
+                                new_moves_to_insert.append(
+                                    Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                                )
                             else:
-                                level_2_moves_count += 1
-                        elif level_order < rep_move_cache[move_id]:
-                            rep_move_cache[move_id] = level_order
-                            existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                            if existing_rm:
-                                existing_rm.level = level_order
-                                level_1_moves_count += 1
-                                if level_2_moves_count > 0:
-                                    level_2_moves_count -= 1
+                                move_id, existing_nag = move_entry
+                                if incoming_nag != 0 and existing_nag != incoming_nag:
+                                    moves_to_update_nag[move_id] = incoming_nag
+                                    move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
 
-                        for var in reversed(current_node.variations):
-                            node_stack.append((var, board.copy()))
+                            # Level priority: Level 1 has higher priority than Level 2
+                            if move_id not in rep_move_cache:
+                                rep_move_cache[move_id] = level_order
+                                new_rep_moves_to_insert.append(RepertoireMove(move_id=move_id, level=level_order))
+                                if level_order == 1:
+                                    level_1_moves_count += 1
+                                else:
+                                    level_2_moves_count += 1
+                            elif level_order < rep_move_cache[move_id]:
+                                rep_move_cache[move_id] = level_order
+                                existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
+                                if existing_rm:
+                                    existing_rm.level = level_order
+                                    level_1_moves_count += 1
+                                    if level_2_moves_count > 0:
+                                        level_2_moves_count -= 1
+                    else:
+                        # Parse game tree into moves & positions
+                        node_stack = []
+                        initial_board = game.board()
+                        for node in reversed(game.variations):
+                            node_stack.append((node, initial_board.copy()))
+
+                        while node_stack:
+                            current_node, board = node_stack.pop()
+                            move = current_node.move
+                            from_fen = " ".join(board.fen().split(" ")[:4])
+
+                            try:
+                                board.push(move)
+                            except Exception:
+                                continue
+
+                            to_fen = " ".join(board.fen().split(" ")[:4])
+
+                            from_pos_id = pos_cache.get(from_fen)
+                            if not from_pos_id:
+                                max_pos_id += 1
+                                from_pos_id = max_pos_id
+                                pos_cache[from_fen] = from_pos_id
+                                new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+
+                            to_pos_id = pos_cache.get(to_fen)
+                            if not to_pos_id:
+                                max_pos_id += 1
+                                to_pos_id = max_pos_id
+                                pos_cache[to_fen] = to_pos_id
+                                new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
+
+                            if current_node.comment:
+                                c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
+                                if to_fen in comments_to_append:
+                                    comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=c_lang)
+                                else:
+                                    comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=c_lang)
+
+                            incoming_nag = next(iter(current_node.nags), 0)
+                            move_san = current_node.san()
+                            uci_str = normalize_castling_uci(move.uci(), move_san)
+                            move_entry = move_cache.get((from_pos_id, uci_str))
+
+                            if not move_entry:
+                                max_move_id += 1
+                                move_id = max_move_id
+                                move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                                new_moves_to_insert.append(
+                                    Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                                )
+                            else:
+                                move_id, existing_nag = move_entry
+                                if incoming_nag != 0 and existing_nag != incoming_nag:
+                                    moves_to_update_nag[move_id] = incoming_nag
+                                    move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+
+                            # Level priority: Level 1 has higher priority than Level 2
+                            if move_id not in rep_move_cache:
+                                rep_move_cache[move_id] = level_order
+                                new_rep_moves_to_insert.append(RepertoireMove(move_id=move_id, level=level_order))
+                                if level_order == 1:
+                                    level_1_moves_count += 1
+                                else:
+                                    level_2_moves_count += 1
+                            elif level_order < rep_move_cache[move_id]:
+                                rep_move_cache[move_id] = level_order
+                                existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
+                                if existing_rm:
+                                    existing_rm.level = level_order
+                                    level_1_moves_count += 1
+                                    if level_2_moves_count > 0:
+                                        level_2_moves_count -= 1
+
+                            for var in reversed(current_node.variations):
+                                node_stack.append((var, board.copy()))
 
             processed_bytes += file_size
 
@@ -822,6 +1019,13 @@ def execute_course_import(
             intro=intro_text
         )
 
+        if original_pgns_archived > 0:
+            msg += "\n" + tr_ui(
+                "course_import.success_archived_pgns",
+                "• Original-PGNs: {count} Datei(en) in 'Original PGNs/' archiviert",
+                count=original_pgns_archived
+            )
+
         return CourseImportResult(
             success=True,
             message=msg,
@@ -836,7 +1040,8 @@ def execute_course_import(
             ignored_games=ignored_games_count,
             embedded_puzzles=embedded_puzzles_count,
             embedded_models=embedded_models_count,
-            embedded_intros=embedded_intros_count
+            embedded_intros=embedded_intros_count,
+            original_pgns_archived=original_pgns_archived
         )
 
     except Exception as e:

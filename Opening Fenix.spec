@@ -4,14 +4,25 @@ import os
 is_share = os.environ.get('FENIX_SHARE_BUILD') == '1' or os.environ.get('FENIX_PUBLIC_BUILD') == '1' or os.environ.get('APP_BUILD_TYPE', '').lower() == 'public'
 app_name = 'Opening Fenix Public' if is_share else 'Opening Fenix'
 
+def get_safe_tree_datas(src_dir):
+    datas = []
+    if not os.path.exists(src_dir):
+        return datas
+    for root, dirs, files in os.walk(src_dir):
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in ['.pgi', '.tmp', '.lock']:
+                continue
+            full_path = os.path.join(root, f)
+            rel_dir = os.path.relpath(root, '.')
+            datas.append((full_path, rel_dir))
+    return datas
+
 datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
 if not is_share and os.path.exists('profiles'):
-    datas_list.append(('profiles', 'profiles'))
+    datas_list.extend(get_safe_tree_datas('profiles'))
 if os.path.exists('repertoires'):
-    datas_list.append(('repertoires', 'repertoires'))
-if not is_share:
-    if os.path.exists('engines'):
-        datas_list.append(('engines', 'engines'))
+    datas_list.extend(get_safe_tree_datas('repertoires'))
 
 a = Analysis(
     ['main.py'],

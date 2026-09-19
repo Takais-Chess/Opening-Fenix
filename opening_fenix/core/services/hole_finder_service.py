@@ -14,7 +14,7 @@ from opening_fenix.core.logger import logger
 
 def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                         engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
-                        depth=25):
+                        depth=25, progress_callback=None):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -37,7 +37,8 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 item_callback=item_callback,
                 cancel_check=cancel_check,
                 engine=engine,
-                depth=depth
+                depth=depth,
+                progress_callback=progress_callback
             )
         else:
             return find_priority_mismatches(session, level, threshold, find_rare=find_rare)
@@ -426,7 +427,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                    engine_path: str = None, threads_count: int = 1,
                                    item_callback = None, cancel_check = None,
                                    engine = None, max_transpositions: int = None,
-                                   cache_service = None, depth: int = 25):
+                                   cache_service = None, depth: int = 25,
+                                   progress_callback = None):
     """
     Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
     Filters strictly for sound/good lines:
@@ -608,7 +610,11 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             if stats and stats.get('total', 0) > 0:
                 share = stats.get('total', 0) / total_games
                 return p_reach * share, share
-        return 0.0, 0.0
+            else:
+                share = min(1.0 / (total_games + 1), 0.00005)
+                return p_reach * share, share
+        min_share = 0.00005
+        return p_reach * min_share, min_share
 
     # 4. Helpers to evaluate move soundness when offline / without live engine
     def evaluate_user_move(from_pos, from_fen, move_uci, target_pos, covered_from_inter=None):
@@ -637,13 +643,32 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
     results = []
     seen_keys = set()
 
+    # Fast bitboard transposition keys for 5x-6x faster lookups
+    all_rep_keys = {}
+    for clean_f in fen_to_pos:
+        try:
+            b = chess.Board(clean_f + " 0 1")
+            all_rep_keys[b._transposition_key()] = clean_f
+        except Exception:
+            pass
+
+    reachable_keys = set()
+    for clean_f in reachable_fens:
+        try:
+            b = chess.Board(clean_f + " 0 1")
+            reachable_keys.add(b._transposition_key())
+        except Exception:
+            pass
+
     # We only scan from positions where it is the OPPONENT's turn
     opponent_reachable_fens = [
         f for f in reachable_fens
         if len(f.split()) > 1 and f.split()[1] != player_color and f not in exempt_fens
     ]
+    total_opp = len(opponent_reachable_fens)
+
     # Pass 1: 1-Move Opponent Transpositions (Opponent plays m1 directly into our repertoire, no badge)
-    for f_orig in opponent_reachable_fens:
+    for idx1, f_orig in enumerate(opponent_reachable_fens):
         if max_transpositions is not None and len(results) >= max_transpositions:
             break
         if cancel_check and cancel_check():
@@ -676,44 +701,46 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                 continue
 
             board_1.push(m1)
-            t1_fen = clean_fen(board_1.fen())
+            k1 = board_1._transposition_key()
             board_1.pop()
 
-            if t1_fen in fen_to_pos and t1_fen != f_orig:
-                t1_depth = reachable_depths.get(t1_fen)
-                if orig_depth is not None and t1_depth is not None and t1_depth < orig_depth:
-                    continue
+            if k1 in all_rep_keys:
+                t1_fen = all_rep_keys[k1]
+                if t1_fen != f_orig:
+                    t1_depth = reachable_depths.get(t1_fen)
+                    if orig_depth is not None and t1_depth is not None and t1_depth < orig_depth:
+                        continue
 
-                p_target = fen_to_pos.get(t1_fen)
-                key = (f_orig, t1_fen, u1)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    try:
-                        s1 = board_1.san(m1)
-                    except Exception:
-                        s1 = u1
+                    p_target = fen_to_pos.get(t1_fen)
+                    key = (f_orig, t1_fen, u1)
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        try:
+                            s1 = board_1.san(m1)
+                        except Exception:
+                            s1 = u1
 
-                    prio_score, pos_prio = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
-                    res_item = {
-                        "fen": f_orig,
-                        "target_fen": t1_fen,
-                        "move_san": s1,
-                        "path_sans": [s1],
-                        "path_ucis": [u1],
-                        "depth": 1,
-                        "type": "transposition_1",
-                        "turn": "opponent",
-                        "quality": "",
-                        "quality_label": "—",
-                        "priority_score": prio_score,
-                        "pos_prio": pos_prio,
-                        "popularity": prio_score * 100.0,
-                        "ply_depth": orig_depth,
-                    }
-                    results.append(res_item)
-                    if item_callback:
-                        item_callback(res_item)
-                        time.sleep(0.001)
+                        prio_score, pos_prio = calculate_potential_prio(p_orig.id, f_orig, u1, s1)
+                        res_item = {
+                            "fen": f_orig,
+                            "target_fen": t1_fen,
+                            "move_san": s1,
+                            "path_sans": [s1],
+                            "path_ucis": [u1],
+                            "depth": 1,
+                            "type": "transposition_1",
+                            "turn": "opponent",
+                            "quality": "",
+                            "quality_label": "—",
+                            "priority_score": prio_score,
+                            "pos_prio": pos_prio,
+                            "popularity": prio_score * 100.0,
+                            "ply_depth": orig_depth,
+                        }
+                        results.append(res_item)
+                        if item_callback:
+                            item_callback(res_item)
+                            time.sleep(0.001)
 
     # Pass 2: 2-Move Transpositions (Opponent plays m1, then WE play m2 to get back into repertoire)
     if max_transpositions is None or len(results) < max_transpositions:
@@ -740,11 +767,14 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
         engine_eval_cache = {}
 
         try:
-            for f_orig in opponent_reachable_fens:
+            for idx2, f_orig in enumerate(opponent_reachable_fens):
                 if max_transpositions is not None and len(results) >= max_transpositions:
                     break
                 if cancel_check and cancel_check():
                     break
+
+                if progress_callback:
+                    progress_callback(idx2 + 1, total_opp, f"Pass 2: {idx2 + 1}/{total_opp}")
 
                 p_orig = fen_to_pos.get(f_orig)
                 if not p_orig:
@@ -773,15 +803,16 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                         continue
 
                     board_1.push(m1)
-                    inter_fen = clean_fen(board_1.fen())
+                    k_inter = board_1._transposition_key()
 
                     # If m1 already lands on an active repertoire position, this was already
                     # detected as a 1-move transposition in Pass 1. Suggesting m1 + m2 from here
                     # would re-suggest our own move m2 that is already part of the repertoire.
-                    if inter_fen in reachable_fens:
+                    if k_inter in reachable_keys:
                         board_1.pop()
                         continue
 
+                    inter_fen = clean_fen(board_1.fen())
                     p_inter = fen_to_pos.get(inter_fen)
                     covered_from_inter = rep_adj_fen.get(inter_fen, set())
                     inactive_from_inter = inactive_adj_fen.get(inter_fen, set())
@@ -806,20 +837,22 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                 continue
 
                             board_1.push(m2)
-                            t2_fen = clean_fen(board_1.fen())
+                            k2 = board_1._transposition_key()
                             board_1.pop()
 
-                            if t2_fen in fen_to_pos and t2_fen != f_orig and t2_fen != inter_fen:
-                                # Forward-only check (eliminate backward cycles / shallower depth)
-                                t2_depth = reachable_depths.get(t2_fen)
-                                if orig_depth is not None and t2_depth is not None and t2_depth < orig_depth:
-                                    continue
+                            if k2 in all_rep_keys:
+                                t2_fen = all_rep_keys[k2]
+                                if t2_fen != f_orig and t2_fen != inter_fen:
+                                    # Forward-only check (eliminate backward cycles / shallower depth)
+                                    t2_depth = reachable_depths.get(t2_fen)
+                                    if orig_depth is not None and t2_depth is not None and t2_depth < orig_depth:
+                                        continue
 
-                                p_target = fen_to_pos.get(t2_fen)
-                                key = (f_orig, t2_fen, f"{u1}_{u2}")
-                                if key not in seen_keys:
-                                    seen_keys.add(key)
-                                    logger.info(f"[Transpos-2M] Candidate: from {f_orig} -> m1: {u1} -> m2: {u2} -> reaches {t2_fen}")
+                                    p_target = fen_to_pos.get(t2_fen)
+                                    key = (f_orig, t2_fen, f"{u1}_{u2}")
+                                    if key not in seen_keys:
+                                        seen_keys.add(key)
+                                        logger.info(f"[Transpos-2M] Candidate: from {f_orig} -> m1: {u1} -> m2: {u2} -> reaches {t2_fen}")
 
                                     # User plays m2: evaluate if user move is sound (within 15 cp of best move)
                                     is_best = False

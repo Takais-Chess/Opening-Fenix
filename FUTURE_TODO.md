@@ -32,6 +32,17 @@ Re-evaluate and streamline how users add moves based on the search feature of fi
 2. **1-Click Level Assignment**: Allow quick addition of candidate moves directly to targeted levels (`+ L1`, `+ L2`, `+ L3`) with intelligent level suggestions.
 3. **Fast-Review Workflow**: Provide a rapid step-through queue (e.g., keyboard shortcuts, add & next, skip/ignore) to efficiently process dozens of repertoire holes.
 
+### 📊 30. Low Sample Size Indicator for Deep Lines (< 100 Games)
+**Concept:**
+When navigating deep into opening theory, the active database (especially Lichess Master Elo) often contains very few games (e.g., 1 to 99 games), making raw percentage frequencies statistically volatile:
+1. **Header Indicator**: Place a compact `GlassPill` status badge in the Candidate Moves header between the back button (`←`) and `Show Move Arrows`.
+2. **Visual States**:
+   - `< 10 Games` (Critical sample): `[ 🟡 1 Game in DB ]` or `[ ⚠️ 1 Game in DB ]` with an amber accent.
+   - `10 – 99 Games` (Low sample): `[ 📊 42 Games in DB ]` with a subtle warm neutral tone.
+   - `≥ 100 Games`: Automatically hidden so the interface remains clean when sample size is sufficient.
+3. **Contextual Tooltip**: On hover, inform the user that statistics are based on a limited game count in the active database.
+
+
 
 
 ---

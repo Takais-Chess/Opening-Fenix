@@ -72,12 +72,14 @@ def test_sanitize_repertoire_name():
 
 def test_sanitized_pgn_reader():
     import io
-    bad_pgn = '[Event "Test"]\n[White "A"]\n[Black "B"]\n[FEN ""]\n[Result "*"]\n\n1. e4 e5 *\n'
+    bad_pgn = '[Event "Test"]\n[White "A"]\n[Black "B"]\n[FEN ""]\n [ChessableColor "black"]\n[Result "*"]\n\n1. e4 e5 { intro text } *\n'
     reader = SanitizedPGNReader(io.StringIO(bad_pgn))
     game = chess.pgn.read_game(reader)
     assert game is not None
     assert game.headers["White"] == "A"
+    assert game.headers["ChessableColor"] == "black"
     assert len(list(game.mainline_moves())) == 2
+    assert "intro text" in list(game.mainline())[-1].comment
 
 @pytest.fixture
 def temp_course_env(tmp_path, monkeypatch):
@@ -541,6 +543,60 @@ def test_embedded_intro_extraction_in_course_import(temp_course_env):
         content = f.read()
     assert "1.e4 e5 Overview" in content
     assert "This line provides an overview" in content
+
+
+def test_course_import_archive_original_pgns(temp_course_env):
+    from opening_fenix.core.utils import get_repertoire_dir
+
+    pgn_content = """
+[Event "Archive Test"]
+[White "Basics"]
+[Black "Chapter 1"]
+[Result "*"]
+1. d4 d5 *
+"""
+    p1 = os.path.join(temp_course_env, "Source_Part1.pgn")
+    p2 = os.path.join(temp_course_env, "Source_Part2.pgn")
+    with open(p1, "w", encoding="utf-8") as f:
+        f.write(pgn_content)
+    with open(p2, "w", encoding="utf-8") as f:
+        f.write(pgn_content)
+
+    # 1. Test with archive_original_pgns=True (default)
+    plan_arch = CourseImportPlan(
+        pgn_paths=[p1, p2],
+        repo_name="Archived Repo",
+        side="w",
+        chapter_targets={"Chapter 1": CATEGORY_LEVEL_1},
+        archive_original_pgns=True
+    )
+    res_arch = execute_course_import(plan_arch)
+    assert res_arch.success is True
+    assert res_arch.original_pgns_archived == 2
+    assert "Original PGNs/" in res_arch.message
+
+    repo_dir_arch = get_repertoire_dir("Archived Repo")
+    orig_dir = os.path.join(repo_dir_arch, "Original PGNs")
+    assert os.path.isdir(orig_dir)
+    assert os.path.exists(os.path.join(orig_dir, "Source_Part1.pgn"))
+    assert os.path.exists(os.path.join(orig_dir, "Source_Part2.pgn"))
+
+    # 2. Test with archive_original_pgns=False
+    plan_no_arch = CourseImportPlan(
+        pgn_paths=[p1],
+        repo_name="No Archive Repo",
+        side="w",
+        chapter_targets={"Chapter 1": CATEGORY_LEVEL_1},
+        archive_original_pgns=False
+    )
+    res_no_arch = execute_course_import(plan_no_arch)
+    assert res_no_arch.success is True
+    assert res_no_arch.original_pgns_archived == 0
+
+    repo_dir_no_arch = get_repertoire_dir("No Archive Repo")
+    orig_dir_no_arch = os.path.join(repo_dir_no_arch, "Original PGNs")
+    assert not os.path.exists(orig_dir_no_arch)
+
 
 
 

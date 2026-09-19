@@ -3,6 +3,7 @@ import sys
 import json
 import re
 import difflib
+import chess
 from typing import Any
 
 ELO_DISPLAY_MAP = {
@@ -900,6 +901,200 @@ def parse_pgn_tagged_comment(comment_text: str) -> dict:
     return {}
 
 
+# --- CHESSBASE PGN ANNOTATIONS ([%csl ...] & [%cal ...]) ---
+
+CHESSBASE_COLOR_MAP = {
+    'G': 'green',
+    'R': 'red',
+    'Y': 'yellow',
+    'B': 'blue',
+    'O': 'orange',
+}
+
+COLOR_TO_CHESSBASE_CODE = {
+    'green': 'G',
+    'red': 'R',
+    'yellow': 'Y',
+    'blue': 'B',
+    'orange': 'O',
+}
+
+
+def parse_chessbase_annotations(text: str) -> dict:
+    """
+    Parses ChessBase / PGN standard colored square ([%csl ...]) and colored arrow ([%cal ...]) tags.
+    Example: "[%csl Re5,Gd4] [%cal Ge2e4] Good move!"
+    Returns:
+        {
+            "clean_text": "Good move!",
+            "highlights": [(chess.E5, "red"), (chess.D4, "green")],
+            "arrows": [(chess.E2, chess.E4, "green")]
+        }
+    """
+    if not text or not isinstance(text, str):
+        return {"clean_text": "", "highlights": [], "arrows": []}
+
+    highlights = []
+    arrows = []
+
+    # 1. Parse [%csl ...] tags (Colored Squares List)
+    csl_matches = re.findall(r'\[%(?:csl|CSL)\s+([^\]]+)\]', text)
+    for block in csl_matches:
+        for item in block.split(','):
+            item = item.strip()
+            if len(item) >= 3:
+                color_char = item[0].upper()
+                sq_str = item[1:].strip().lower()
+                color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
+                try:
+                    sq = chess.parse_square(sq_str)
+                    highlights.append((sq, color_name))
+                except (ValueError, IndexError):
+                    pass
+
+    # 2. Parse [%cal ...] tags (Colored Arrows List)
+    cal_matches = re.findall(r'\[%(?:cal|CAL)\s+([^\]]+)\]', text)
+    for block in cal_matches:
+        for item in block.split(','):
+            item = item.strip()
+            if len(item) >= 5:
+                color_char = item[0].upper()
+                from_str = item[1:3].strip().lower()
+                to_str = item[3:5].strip().lower()
+                color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
+                try:
+                    from_sq = chess.parse_square(from_str)
+                    to_sq = chess.parse_square(to_str)
+                    arrows.append((from_sq, to_sq, color_name))
+                except (ValueError, IndexError):
+                    pass
+
+    # 3. Clean text of all [%csl ...] and [%cal ...] tags
+    clean = clean_chessbase_annotations(text)
+
+    return {
+        "clean_text": clean,
+        "highlights": highlights,
+        "arrows": arrows,
+    }
+
+
+def clean_chessbase_annotations(text: str) -> str:
+    """Removes [%csl ...] and [%cal ...] tags from comment text for clean UI presentation."""
+    if not text or not isinstance(text, str):
+        return ""
+    cleaned = re.sub(r'\[%(?:csl|cal|CSL|CAL)\s+[^\]]+\]', '', text)
+    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in cleaned.split('\n')]
+    # Remove empty lines at beginning and end, collapse 3+ newlines to 2
+    res = '\n'.join(lines).strip()
+    return re.sub(r'\n{3,}', '\n\n', res)
+
+
+def _resolve_chessbase_color_code(col) -> str:
+    """Converts QColor, hex string, or color name to ChessBase 1-character code (G, R, Y, B, O)."""
+    if isinstance(col, str):
+        c_lower = col.lower()
+        if c_lower in COLOR_TO_CHESSBASE_CODE:
+            return COLOR_TO_CHESSBASE_CODE[c_lower]
+        if c_lower in ['g', 'r', 'y', 'b', 'o']:
+            return c_lower.upper()
+
+    if hasattr(col, 'red') and hasattr(col, 'green') and hasattr(col, 'blue'):
+        r, g, b = col.red(), col.green(), col.blue()
+        if r > 180 and g > 140 and b < 80:
+            return 'Y'  # Yellow
+        elif r > 180 and g > 80 and b < 80:
+            return 'O'  # Orange
+        elif r > 180 and g < 100 and b < 100:
+            return 'R'  # Red
+        elif b > 180 and r < 120:
+            return 'B'  # Blue
+        elif g > 150 and r < 120:
+            return 'G'  # Green
+
+    return 'G'
+
+
+def serialize_chessbase_annotations(arrows=None, highlights=None, clean_text: str = "") -> str:
+    """
+    Serializes arrows and square highlights into standard ChessBase PGN tags [%csl ...] and [%cal ...].
+    Optionally prepends them to clean_text.
+    """
+    tags = []
+
+    # 1. Highlights [%csl ...]
+    if highlights:
+        hl_items = highlights.items() if isinstance(highlights, dict) else highlights
+        entries = []
+        for item in hl_items:
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                sq, col = item[0], item[1]
+                code = _resolve_chessbase_color_code(col)
+                sq_name = chess.square_name(sq)
+                entries.append(f"{code}{sq_name}")
+        if entries:
+            entries.sort()
+            tags.append(f"[%csl {','.join(entries)}]")
+
+    # 2. Arrows [%cal ...]
+    if arrows:
+        arrow_items = arrows.items() if isinstance(arrows, dict) else arrows
+        entries = []
+        for item in arrow_items:
+            if isinstance(item, (tuple, list)):
+                if len(item) == 2 and isinstance(item[0], (tuple, list)):
+                    (from_sq, to_sq), col = item
+                elif len(item) == 3:
+                    from_sq, to_sq, col = item[0], item[1], item[2]
+                elif len(item) == 2:
+                    (from_sq, to_sq), col = item[0], item[1]
+                else:
+                    continue
+                code = _resolve_chessbase_color_code(col)
+                arrow_name = f"{chess.square_name(from_sq)}{chess.square_name(to_sq)}"
+                entries.append(f"{code}{arrow_name}")
+        if entries:
+            entries.sort()
+            tags.append(f"[%cal {','.join(entries)}]")
+
+    tag_str = " ".join(tags).strip()
+    clean = clean_chessbase_annotations(clean_text).strip() if clean_text else ""
+    if tag_str and clean:
+        return f"{tag_str} {clean}".strip()
+    return tag_str or clean
+
+
+def update_comment_with_annotations(comment_data, arrows=None, highlights=None) -> str:
+    """
+    Given a raw comment (plain string or JSON multilingual string) and board arrows/highlights,
+    updates the comment to include the serialized [%csl ...] and [%cal ...] tags.
+    """
+    tag_str = serialize_chessbase_annotations(arrows, highlights, clean_text="")
+
+    if not comment_data:
+        return tag_str
+
+    if isinstance(comment_data, str) and comment_data.strip().startswith("{") and comment_data.strip().endswith("}"):
+        comment_dict = get_multilingual_comment_dict(comment_data)
+        updated = {}
+        for lang, text in comment_dict.items():
+            clean = clean_chessbase_annotations(text)
+            if tag_str and clean:
+                updated[lang] = f"{tag_str} {clean}".strip()
+            elif tag_str:
+                updated[lang] = tag_str
+            else:
+                updated[lang] = clean
+        return format_multilingual_comment(updated)
+    else:
+        clean = clean_chessbase_annotations(str(comment_data))
+        if tag_str and clean:
+            return f"{tag_str} {clean}".strip()
+        elif tag_str:
+            return tag_str
+        return clean
+
+
 def clean_comment_text(text: str) -> str:
     """
     Cleans hard-wrapped line breaks and isolated move/punctuation tokens
@@ -999,8 +1194,8 @@ def combine_comments(existing_comment: str, new_comment: str, default_lang: str 
                 is_dup = False
                 for p_idx, part in enumerate(parts):
                     if len(part) > 80:
-                        ratio = difflib.SequenceMatcher(None, val, part).quick_ratio()
-                        if ratio >= 0.75:
+                        matcher = difflib.SequenceMatcher(None, val, part)
+                        if matcher.quick_ratio() >= 0.75 and matcher.ratio() >= 0.75:
                             # Keep the longer or more detailed version
                             if len(val) > len(part):
                                 parts[p_idx] = val

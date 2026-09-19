@@ -845,6 +845,20 @@ class MainWindow(QMainWindow):
                     return True
         return False
 
+    def _reveal_variation_end_drawings(self, last_move):
+        """Displays user drawings (arrows/circles) from the concluding position of a variation."""
+        if not last_move:
+            return
+        final_comment = ""
+        if getattr(last_move, 'to_position', None):
+            final_comment = getattr(last_move.to_position, 'comment', '') or ''
+        if not final_comment and getattr(last_move, 'comment', None):
+            final_comment = getattr(last_move, 'comment', '') or ''
+        
+        if final_comment:
+            self.board_widget.load_user_drawings_from_comment(final_comment)
+            self.board_widget.update()
+
     def load_next_challenge(self, last_success=False, last_move=None):
         self.waiting_for_next = False
         if not self.repertoire_manager.active_repertoire_name: return
@@ -874,6 +888,7 @@ class MainWindow(QMainWindow):
                     self._load_new_challenge_sequence(pre['path'])
                     return
                 elif pre['type'] in ('stop_at_end', 'auto_continue'):
+                    self._reveal_variation_end_drawings(last_move)
                     if limit_reached:
                         self.current_move_obj = last_move
                         self.update_notation_display(reveal_move=True)
@@ -915,6 +930,7 @@ class MainWindow(QMainWindow):
                 self.current_move_obj = next_move
                 path_to_animate = path
             else:
+                self._reveal_variation_end_drawings(last_move)
                 if limit_reached:
                     self.current_move_obj = last_move
                     self.update_notation_display(reveal_move=True)
@@ -948,6 +964,7 @@ class MainWindow(QMainWindow):
 
     def _load_new_challenge_sequence(self, path_to_animate=None):
         self._had_alternate_attempt = False
+        self.board_widget.clear_user_drawings()
         if not self.current_move_obj:
             if self._is_training_limit_reached():
                 self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
@@ -1188,7 +1205,10 @@ class MainWindow(QMainWindow):
             if item.get('comment'):
                 comment_text = parse_comment(item['comment'], comment_lang)
                 if comment_text:
-                    html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{comment_text}</p>"
+                    from opening_fenix.core.utils import clean_chessbase_annotations
+                    clean_text = clean_chessbase_annotations(comment_text)
+                    if clean_text:
+                        html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{clean_text}</p>"
         html += "</body>"
         self.txt_notation.setHtml(html)
         # Use a singleShot timer to ensure the layout is complete before scrolling.
@@ -1417,6 +1437,9 @@ class MainWindow(QMainWindow):
             self.board_widget.solution_arrow = chess.Move.from_uci(self.current_move_obj.uci)
         else:
             self.board_widget.solution_arrow = None
+
+        # Keep board clean during intermediate solving challenges (drawings shown only at variation end)
+        self.board_widget.clear_user_drawings()
             
         self.board_widget.update()
         self.update_notation_display(reveal_move=(self.training_mode == 'new'))

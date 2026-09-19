@@ -107,11 +107,29 @@ HIGHLIGHT_COLOR_FALLBACKS = {
     "T\u00c3\u00bcrkis": "Türkis",
 }
 
+# ChessBase standard arrow and highlight colors
+USER_ARROW_COLORS = {
+    "green": QColor(34, 197, 94, 210),   # Default RMB
+    "red": QColor(239, 68, 68, 210),     # Alt + RMB
+    "yellow": QColor(245, 158, 11, 220), # Ctrl + RMB
+    "blue": QColor(59, 130, 246, 210),   # Shift + RMB
+    "orange": QColor(249, 115, 22, 210), # Ctrl+Alt / Shift+Alt + RMB
+}
+
+USER_HIGHLIGHT_COLORS = {
+    "green": QColor(34, 197, 94, 220),
+    "red": QColor(239, 68, 68, 220),
+    "yellow": QColor(245, 158, 11, 230),
+    "blue": QColor(59, 130, 246, 220),
+    "orange": QColor(249, 115, 22, 220),
+}
+
 
 class ChessBoardWidget(QWidget):
     move_executed = pyqtSignal(chess.Move)
     piece_slide_finished = pyqtSignal()
     skip_all_animations_requested = pyqtSignal()
+    drawings_changed = pyqtSignal()
     def __init__(self, main_window=None, parent=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -139,7 +157,16 @@ class ChessBoardWidget(QWidget):
         self.hint_arrow = None
         self.solution_arrow = None
         self.explorer_arrows = [] 
-        self.animating_piece_data = None  
+        self.animating_piece_data = None
+
+        # ChessBase-style user drawings (interactive arrows & square highlights)
+        self.user_arrows = {}       # (from_sq, to_sq) -> QColor
+        self.user_highlights = {}   # sq -> QColor
+        self.is_drawing = False
+        self.drawing_start_sq = None
+        self.drawing_current_sq = None
+        self.drawing_color = None
+        self.drawing_highlight_color = None  
         
         # New QVariantAnimation for premium, smooth piece slides
         self.move_anim = QVariantAnimation(self)
@@ -277,6 +304,7 @@ class ChessBoardWidget(QWidget):
         self.hint_arrow = None
         self.solution_arrow = None
         self.explorer_arrows = []
+        self.clear_user_drawings()
         self.update() 
 
     def get_square_from_pos(self, pos):
@@ -289,6 +317,97 @@ class ChessBoardWidget(QWidget):
         rank = row if self.flipped else 7 - row
         file = 7 - col if self.flipped else col
         return chess.square(file, rank)
+
+    def _get_draw_color_name(self, modifiers):
+        """Maps keyboard modifiers to ChessBase standard arrow/highlight colors."""
+        has_ctrl = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        has_alt = bool(modifiers & Qt.KeyboardModifier.AltModifier)
+        has_shift = bool(modifiers & Qt.KeyboardModifier.ShiftModifier)
+        if (has_ctrl and has_alt) or (has_shift and has_alt):
+            return "orange"
+        if has_alt:
+            return "red"
+        if has_ctrl:
+            return "yellow"
+        if has_shift:
+            return "blue"
+        return "green"
+
+    def clear_user_drawings(self, emit_signal=True):
+        """Clears all user-drawn arrows and square highlights."""
+        had_drawings = bool(self.user_arrows or self.user_highlights)
+        self.user_arrows.clear()
+        self.user_highlights.clear()
+        self.is_drawing = False
+        self.drawing_start_sq = None
+        self.drawing_current_sq = None
+        self.drawing_color = None
+        self.drawing_highlight_color = None
+        if had_drawings and emit_signal:
+            self.drawings_changed.emit()
+
+    def clear_user_arrows(self):
+        """Clears all user-drawn arrows."""
+        if self.user_arrows:
+            self.user_arrows.clear()
+            self.update()
+            self.drawings_changed.emit()
+
+    def clear_user_highlights(self):
+        """Clears all user-drawn square highlights."""
+        if self.user_highlights:
+            self.user_highlights.clear()
+            self.update()
+            self.drawings_changed.emit()
+
+    def add_user_arrow(self, start_sq, end_sq, color="green"):
+        """Programmatically adds or updates an arrow between two squares."""
+        col = USER_ARROW_COLORS.get(color, color) if isinstance(color, str) else color
+        self.user_arrows[(start_sq, end_sq)] = col
+        self.update()
+        self.drawings_changed.emit()
+
+    def remove_user_arrow(self, start_sq, end_sq):
+        """Removes a user-drawn arrow."""
+        if (start_sq, end_sq) in self.user_arrows:
+            del self.user_arrows[(start_sq, end_sq)]
+            self.update()
+            self.drawings_changed.emit()
+
+    def add_user_highlight(self, sq, color="green"):
+        """Programmatically adds or updates a square highlight."""
+        col = USER_HIGHLIGHT_COLORS.get(color, color) if isinstance(color, str) else color
+        self.user_highlights[sq] = col
+        self.update()
+        self.drawings_changed.emit()
+
+    def remove_user_highlight(self, sq):
+        """Removes a user-drawn square highlight."""
+        if sq in self.user_highlights:
+            del self.user_highlights[sq]
+            self.update()
+            self.drawings_changed.emit()
+
+    def load_user_drawings_from_comment(self, comment_text: str):
+        """
+        Retroactively extracts [%csl ...] and [%cal ...] tags from a comment string
+        (or multilingual JSON string) and displays the arrows and highlights on the board.
+        """
+        from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment
+        resolved = parse_comment(comment_text) if comment_text else ""
+        parsed = parse_chessbase_annotations(resolved or comment_text)
+        self.user_arrows.clear()
+        self.user_highlights.clear()
+        for sq, col_name in parsed["highlights"]:
+            self.user_highlights[sq] = USER_HIGHLIGHT_COLORS.get(col_name, USER_HIGHLIGHT_COLORS["green"])
+        for from_sq, to_sq, col_name in parsed["arrows"]:
+            self.user_arrows[(from_sq, to_sq)] = USER_ARROW_COLORS.get(col_name, USER_ARROW_COLORS["green"])
+        self.update()
+
+    def get_chessbase_annotation_tags(self) -> str:
+        """Serializes the current board arrows and highlights into standard [%csl ...] and [%cal ...] tags."""
+        from opening_fenix.core.utils import serialize_chessbase_annotations
+        return serialize_chessbase_annotations(self.user_arrows, self.user_highlights)
 
     def mousePressEvent(self, event):
         if self.is_animating:
@@ -308,8 +427,28 @@ class ChessBoardWidget(QWidget):
                     self.update()
             # Allow the click to proceed to pick up a piece
 
+        # Right-click: Start drawing arrow / highlight (ChessBase style)
+        if event.button() == Qt.MouseButton.RightButton:
+            square = self.get_square_from_pos(event.position())
+            if square is not None:
+                self.is_drawing = True
+                self.drawing_start_sq = square
+                self.drawing_current_sq = square
+                mods = event.modifiers() if hasattr(event, 'modifiers') else Qt.KeyboardModifier.NoModifier
+                color_name = self._get_draw_color_name(mods)
+                self.drawing_color = USER_ARROW_COLORS[color_name]
+                self.drawing_highlight_color = USER_HIGHLIGHT_COLORS[color_name]
+                self.update()
+            return
+
+        # Left-click: Make move or clear existing drawings
         if event.button() == Qt.MouseButton.LeftButton:
             square = self.get_square_from_pos(event.position())
+            # In ChessBase/Lichess: Left-clicking on an empty square or outside clears user drawings
+            if self.user_arrows or self.user_highlights:
+                if square is None or self.board.piece_at(square) is None:
+                    self.clear_user_drawings()
+                    self.update()
             if square is not None:
                 piece = self.board.piece_at(square)
                 if piece and piece.color == self.board.turn:
@@ -319,11 +458,50 @@ class ChessBoardWidget(QWidget):
                     self.update()
 
     def mouseMoveEvent(self, event):
+        if self.is_drawing:
+            square = self.get_square_from_pos(event.position())
+            if square != self.drawing_current_sq:
+                self.drawing_current_sq = square
+                self.update()
+            return
+
         if self.dragging_piece:
             self.mouse_pos = event.position()
             self.update()
 
     def mouseReleaseEvent(self, event):
+        # Right-click release: Finalize arrow or square highlight
+        if event.button() == Qt.MouseButton.RightButton and self.is_drawing:
+            end_square = self.get_square_from_pos(event.position())
+            start_square = self.drawing_start_sq
+            changed = False
+            if start_square is not None and end_square is not None:
+                changed = True
+                if start_square == end_square:
+                    # Toggle or update square highlight
+                    h_col = self.drawing_highlight_color
+                    if start_square in self.user_highlights and self.user_highlights[start_square] == h_col:
+                        del self.user_highlights[start_square]
+                    else:
+                        self.user_highlights[start_square] = h_col
+                else:
+                    # Toggle or update arrow
+                    a_col = self.drawing_color
+                    arrow_key = (start_square, end_square)
+                    if arrow_key in self.user_arrows and self.user_arrows[arrow_key] == a_col:
+                        del self.user_arrows[arrow_key]
+                    else:
+                        self.user_arrows[arrow_key] = a_col
+            self.is_drawing = False
+            self.drawing_start_sq = None
+            self.drawing_current_sq = None
+            self.drawing_color = None
+            self.drawing_highlight_color = None
+            self.update()
+            if changed:
+                self.drawings_changed.emit()
+            return
+
         if self.dragging_piece:
             end_square = self.get_square_from_pos(event.position())
             drag_start = self.drag_start_square
@@ -349,6 +527,7 @@ class ChessBoardWidget(QWidget):
                     promotion = chess.QUEEN if is_promo else None
                     move = chess.Move(drag_start, end_square, promotion=promotion)
                 if move in self.board.legal_moves: 
+                    self.clear_user_drawings()
                     self.move_executed.emit(move)
             self.update()
 
@@ -457,6 +636,34 @@ class ChessBoardWidget(QWidget):
                 rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
                 painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
 
+    def _draw_circle(self, painter, square, color, square_size):
+        """Draws a clean, crisp hollow circle around the square/piece (ChessBase style)."""
+        f, r = chess.square_file(square), chess.square_rank(square)
+        rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+        center_x = (cd + 0.5) * square_size
+        center_y = (rd + 0.5) * square_size
+        radius = square_size * 0.41
+        pen_width = max(2.5, square_size * 0.055)
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(color, pen_width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
+        painter.restore()
+
+    def _paint_circles(self, painter, square_size):
+        """Draws circle highlights on marked squares."""
+        for sq, color in self.user_highlights.items():
+            self._draw_circle(painter, sq, color, square_size)
+
+        # Live preview circle while holding right-click without drag
+        if (self.is_drawing and self.drawing_start_sq is not None 
+                and self.drawing_current_sq == self.drawing_start_sq 
+                and self.drawing_highlight_color is not None):
+            self._draw_circle(painter, self.drawing_start_sq, self.drawing_highlight_color, square_size)
+
     def _paint_pieces(self, painter, square_size, skip_square=None):
         """Draws all pieces, optionally skipping one square (the animating piece's origin)."""
         for row in range(8):
@@ -469,13 +676,41 @@ class ChessBoardWidget(QWidget):
                 if piece: self.draw_piece(painter, piece, col, row, square_size)
 
     def _paint_arrows(self, painter, square_size):
-        """Draws all arrows (hint, solution, explorer)."""
+        """Draws all arrows (hint, solution, explorer, user)."""
         if self.hint_arrow:
-            self._draw_arrow(painter, self.hint_arrow.from_square, self.hint_arrow.to_square, QColor(20, 60, 150, 120), square_size)
+            if isinstance(self.hint_arrow, chess.Move):
+                self._draw_arrow(painter, self.hint_arrow.from_square, self.hint_arrow.to_square, QColor(20, 60, 150, 120), square_size)
+            elif isinstance(self.hint_arrow, (tuple, list)) and len(self.hint_arrow) >= 2:
+                self._draw_arrow(painter, self.hint_arrow[0], self.hint_arrow[1], QColor(20, 60, 150, 120), square_size)
         if self.solution_arrow:
-            self._draw_arrow(painter, self.solution_arrow.from_square, self.solution_arrow.to_square, QColor(20, 60, 150, 120), square_size)
-        for move, color in self.explorer_arrows:
-            self._draw_arrow(painter, move.from_square, move.to_square, color, square_size)
+            if isinstance(self.solution_arrow, chess.Move):
+                self._draw_arrow(painter, self.solution_arrow.from_square, self.solution_arrow.to_square, QColor(20, 60, 150, 120), square_size)
+            elif isinstance(self.solution_arrow, (tuple, list)) and len(self.solution_arrow) >= 2:
+                self._draw_arrow(painter, self.solution_arrow[0], self.solution_arrow[1], QColor(20, 60, 150, 120), square_size)
+        for item in self.explorer_arrows:
+            if isinstance(item, (tuple, list)):
+                if len(item) == 2:
+                    move_or_from, color_or_to = item
+                    if isinstance(move_or_from, chess.Move):
+                        c = color_or_to if isinstance(color_or_to, QColor) else QColor(color_or_to)
+                        self._draw_arrow(painter, move_or_from.from_square, move_or_from.to_square, c, square_size)
+                    else:
+                        self._draw_arrow(painter, move_or_from, color_or_to, QColor(59, 130, 246, 180), square_size)
+                elif len(item) >= 3:
+                    f_sq, t_sq = item[0], item[1]
+                    c = item[2] if isinstance(item[2], QColor) else QColor(59, 130, 246, 180)
+                    self._draw_arrow(painter, f_sq, t_sq, c, square_size)
+
+        # 4. User-drawn arrows (ChessBase style)
+        for (from_sq, to_sq), color in self.user_arrows.items():
+            self._draw_arrow(painter, from_sq, to_sq, color, square_size)
+
+        # 5. Live preview arrow while dragging
+        if (self.is_drawing and self.drawing_start_sq is not None 
+                and self.drawing_current_sq is not None 
+                and self.drawing_start_sq != self.drawing_current_sq 
+                and self.drawing_color is not None):
+            self._draw_arrow(painter, self.drawing_start_sq, self.drawing_current_sq, self.drawing_color, square_size)
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -499,6 +734,7 @@ class ChessBoardWidget(QWidget):
         painter.translate(x_offset, y_offset)
         self._paint_board_base(painter, square_size)
         self._paint_pieces(painter, square_size, skip_square=skip_square)
+        self._paint_circles(painter, square_size)
         self._paint_arrows(painter, square_size)
 
         if is_anim:
@@ -698,6 +934,7 @@ class ChessBoardWidget(QWidget):
         self.last_move = move
         self.last_move_was_capture = is_cap
         self.animating_piece_data = None
+        self.clear_user_drawings()
         self.piece_slide_finished.emit()
         self.update()
 

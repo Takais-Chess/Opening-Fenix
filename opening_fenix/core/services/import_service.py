@@ -7,6 +7,7 @@ from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments, normalize_castling_uci
 from opening_fenix.core.services.repair_service import repair_repertoire_health
+from opening_fenix.core.services.course_import_service import SanitizedPGNReader
 from opening_fenix.core.translation import tr_ui
 
 def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None, target_lang: str = "de") -> Tuple[bool, str]:
@@ -66,8 +67,9 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         # 3. FAST STREAMING PGN PARSING
         total_file_size = os.path.getsize(pgn_path) if os.path.exists(pgn_path) else 0
         with open(pgn_path, "r", encoding="utf-8", errors="ignore") as f_pgn:
+            reader = SanitizedPGNReader(f_pgn)
             while True:
-                game = chess.pgn.read_game(f_pgn)
+                game = chess.pgn.read_game(reader)
                 if game is None:
                     break
                 

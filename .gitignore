@@ -122,6 +122,9 @@ config.json
 
 # Allow public example courses in git
 !repertoires/*Example Course*/**
+*.db-shm
+*.db-wal
+repertoires/Lifetime_Repertoires_*
 
 # IDEs
 .idea/

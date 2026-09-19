@@ -229,6 +229,7 @@ class RepertoireStatsWorker(QThread):
 class HoleFinderThread(QThread):
     finished_signal = pyqtSignal(list, str)
     item_found_signal = pyqtSignal(dict, str)
+    progress_signal = pyqtSignal(int, int, str)
     
     def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                  engine_path=None, threads_count=1, engine=None, depth=25):
@@ -256,6 +257,10 @@ class HoleFinderThread(QThread):
                 if not self.isInterruptionRequested() and not self._stop_requested:
                     self.item_found_signal.emit(item, self.mode)
 
+            def on_progress(current, total, msg):
+                if not self.isInterruptionRequested() and not self._stop_requested:
+                    self.progress_signal.emit(current, total, msg)
+
             def check_cancel():
                 return self.isInterruptionRequested() or self._stop_requested
 
@@ -273,6 +278,7 @@ class HoleFinderThread(QThread):
                 cancel_check=check_cancel,
                 engine=self.engine,
                 depth=self.depth,
+                progress_callback=on_progress,
             )
             if not self.isInterruptionRequested() and not self._stop_requested:
                 self.finished_signal.emit(results, self.mode)

@@ -26,38 +26,30 @@ def main():
     tag_name = f"v{APP_VERSION}"
     release_name = f"Opening Fenix v{APP_VERSION}"
     
-    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Official Release
+    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Feature Release: ChessBase Annotations & Visual Polish
 
-Opening Fenix 1.0 is here! A comprehensive, high-performance chess opening repertoire manager and active recall training system built with PyQt6, Stockfish, and Lichess database integration.
+Opening Fenix v{APP_VERSION} introduces rich ChessBase-compatible interactive board annotations (arrows and circle highlights), bidirectional PGN tag synchronization (`[%cal ...]` and `[%csl ...]`), clean notation rendering, and intelligent Trainer variation conclusion display.
 
-### 🌟 Release Highlights
+### 🌟 What's New in v{APP_VERSION}
 
-#### 🖥️ High-DPI & Multi-Resolution Display Polish
-- Full visual audit and layout optimization across all 12 core windows and modals on high-DPI scaling (125%, 150%, 200%).
-- Full typography scaling audit: 100% of labels, dialogs, tables, and settings now scale dynamically with `scale(...)` across High-DPI and custom display resolutions.
-- Polished dialog layouts including Engine Action, Course Import, Statistics Insights, Repertoire Selection, and Export dialogs to prevent clipping or scrollbar truncation.
-- Dynamic responsive table columns in Creator Analysis and Transposition tabs with intelligent font scaling and smart percentage formatting.
+#### 🎯 ChessBase-Style Interactive Board Annotations
+- **Right-Click Drag**: Draw directional arrows with live preview (Green by default).
+- **Alt + Right-Click Drag**: Red directional arrows.
+- **Ctrl + Right-Click Drag**: Yellow directional arrows.
+- **Shift + Right-Click Drag**: Blue directional arrows.
+- **Ctrl + Alt + Right-Click Drag**: Orange directional arrows.
+- **Right-Click Single Square**: Toggle crisp hollow circular rings framing squares/pieces with matching color modifiers.
+- **Left-Click (or Move Play)**: Clears drawings immediately.
+- **Smart Toggling**: Redrawing an existing arrow or circle toggles it off or updates its color.
 
-#### 📊 Repertoire Statistics & Advanced Insights
-- Dedicated Insights modal with intelligent opening scope detection (`Gegen 1.e4`, `1.d4 Repertoire`) eliminating false out-of-scope alerts.
-- 3 Core Metric Badges: Real-world Lichess expected win rate (Effectiveness), Stockfish path evaluation score (Soundness), and memory load categorization (Learnability).
-- Step-by-step opponent move coverage curve tracking book survival rate per move with color-coded visual indicators.
-- Position sizing breakdown across Level 1 (Core), Level 2 (Expanded), and Level 3 (Deep).
+#### 🔄 Bidirectional ChessBase PGN Compatibility (`[%cal]` & `[%csl]`)
+- **Retroactive Loading**: Repertoires and PGNs with standard ChessBase commentary tags automatically display their arrows and circle markings on the board.
+- **Clean Notation Display**: Commentary text boxes and notation views cleanly strip raw `[%cal ...]` and `[%csl ...]` tags, preventing bracket clutter.
+- **Export Compatibility**: Exported PGN games contain all standard tags, perfectly reproducible when opened in ChessBase, Lichess, or Chess.com.
 
-#### ⚡ High-Speed 2-Move Transposition Scanner
-- Tuned engine tolerance (10 cp) recognizing practical moves alongside top engine moves.
-- Pure search depth evaluation without artificial cutoffs, reserving CPU cores for OS responsiveness and UI fluidity.
-- Lazy SAN computation with real-time progress feedback.
-
-#### 🧩 Course Import & Profile Synchronization
-- Streamlined PGN course import service with interactive chapter preview.
-- Multi-profile repertoire management with automated background backup deduplication.
-
-#### 🌍 100% Bilingual Localization Parity
-- Complete parity between German and English across all 1,166 translation keys.
-
-#### 🛡️ Stability & Test Coverage
-- Over 700 passing automated unit and integration tests verifying database integrity, UI event handling, and engine synchronization.
+#### 🧠 Intelligent Trainer Display
+- **Clean Focus During Training**: Intermediate move challenges keep the board completely clean so annotations never spoil the solution.
+- **Variation End Reveal**: Summary arrows and circled target squares are automatically revealed when the variation finishes, highlighting the author's strategic conclusions before moving to the next line.
 """
 
     headers = {

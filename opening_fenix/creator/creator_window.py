@@ -3040,6 +3040,7 @@ class CreatorWindow(QMainWindow):
         board_layout.setContentsMargins(0, 0, 0, 0)
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.on_board_move)
+        self.board_widget.drawings_changed.connect(self.on_board_drawings_changed)
         board_layout.addWidget(self.board_widget)
         
         # Symmetrical vertical layout - board maximized
@@ -3658,18 +3659,46 @@ class CreatorWindow(QMainWindow):
         self.active_comment_lang = lang_code.lower()
         
         self.block_signals_details(True)
+        from opening_fenix.core.utils import clean_chessbase_annotations
         if self.active_comment_lang == "all":
             if self.current_position_comments:
-                formatted_all = "\n".join([f"[:{k}] {v}" for k, v in self.current_position_comments.items()])
-                self.txt_c.setPlainText(formatted_all)
+                formatted_all = "\n".join([f"[:{k}] {clean_chessbase_annotations(v)}" for k, v in self.current_position_comments.items()])
+                self.txt_c.setPlainText(formatted_all.strip())
             else:
                 self.txt_c.setPlainText("")
         else:
-            self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
+            c_text = self.current_position_comments.get(self.active_comment_lang, "")
+            self.txt_c.setPlainText(clean_chessbase_annotations(c_text))
         self.block_signals_details(False)
         
         self.update_comment_lang_button_style()
         self.refresh_candidate_moves_table()
+
+    def on_board_drawings_changed(self):
+        """Automatically saves arrows and square highlights drawn on the board to the position comment."""
+        if getattr(self, '_loading_details', False):
+            return
+        if not self._is_ui_valid() or not self.backend or not self.backend.active_repo_name:
+            return
+
+        tag_str = self.board_widget.get_chessbase_annotation_tags()
+        from opening_fenix.core.utils import clean_chessbase_annotations
+
+        if not self.current_position_comments:
+            if tag_str:
+                self.current_position_comments = {self.active_comment_lang if self.active_comment_lang != "all" else "de": tag_str}
+        else:
+            for lang in list(self.current_position_comments.keys()):
+                clean = clean_chessbase_annotations(self.current_position_comments[lang])
+                if tag_str and clean:
+                    self.current_position_comments[lang] = f"{tag_str} {clean}".strip()
+                elif tag_str:
+                    self.current_position_comments[lang] = tag_str
+                else:
+                    self.current_position_comments[lang] = clean
+
+        self.details_changed = True
+        self.save_timer.start()
 
     def add_custom_comment_lang(self):
         code, ok = QInputDialog.getText(
@@ -4152,29 +4181,40 @@ class CreatorWindow(QMainWindow):
         # Only update details if not currently being edited by the user to avoid overwriting typing
         if not self.details_changed or force_details:
             self.block_signals_details(True)
-            if d and isinstance(d, dict):
-                self.i_v1.setText(str(d.get('variation_1','')) if not d.get('v1_inherited') else "")
-                self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else tr_ui("creator.variant_placeholder_1", "Variante 1"))
-                self.i_v2.setText(str(d.get('variation_2','')) if not d.get('v2_inherited') else "")
-                self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else tr_ui("creator.variant_placeholder_2", "Variante 2"))
-                self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
-                self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
-                raw_c = str(d.get('comment',''))
-                self.current_position_comments = get_multilingual_comment_dict(raw_c)
-                if self.active_comment_lang == "all":
-                    if self.current_position_comments:
-                        formatted_all = "\n".join([f"[:{k}] {v}" for k, v in self.current_position_comments.items()])
-                        self.txt_c.setPlainText(formatted_all)
+            self._loading_details = True
+            try:
+                from opening_fenix.core.utils import clean_chessbase_annotations
+                if d and isinstance(d, dict):
+                    self.i_v1.setText(str(d.get('variation_1','')) if not d.get('v1_inherited') else "")
+                    self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else tr_ui("creator.variant_placeholder_1", "Variante 1"))
+                    self.i_v2.setText(str(d.get('variation_2','')) if not d.get('v2_inherited') else "")
+                    self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else tr_ui("creator.variant_placeholder_2", "Variante 2"))
+                    self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
+                    self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
+                    raw_c = str(d.get('comment',''))
+                    self.current_position_comments = get_multilingual_comment_dict(raw_c)
+
+                    # Retroactively load and display [%csl ...] and [%cal ...] tags on the chessboard!
+                    self.board_widget.load_user_drawings_from_comment(raw_c)
+
+                    if self.active_comment_lang == "all":
+                        if self.current_position_comments:
+                            formatted_all = "\n".join([f"[:{k}] {clean_chessbase_annotations(v)}" for k, v in self.current_position_comments.items()])
+                            self.txt_c.setPlainText(formatted_all.strip())
+                        else:
+                            self.txt_c.setPlainText("")
                     else:
-                        self.txt_c.setPlainText("")
+                        c_text = self.current_position_comments.get(self.active_comment_lang, "")
+                        self.txt_c.setPlainText(clean_chessbase_annotations(c_text))
                 else:
-                    self.txt_c.setPlainText(self.current_position_comments.get(self.active_comment_lang, ""))
-            else:
-                self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
-                self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
-                self.i_v3.setText(""); self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
-                self.current_position_comments = {}
-                self.txt_c.setPlainText("")
+                    self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
+                    self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
+                    self.i_v3.setText(""); self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
+                    self.current_position_comments = {}
+                    self.board_widget.clear_user_drawings(emit_signal=False)
+                    self.txt_c.setPlainText("")
+            finally:
+                self._loading_details = False
             
             self.update_comment_lang_button_style()
             
@@ -4250,14 +4290,23 @@ class CreatorWindow(QMainWindow):
                 else:
                     comment_disp = cdict.get(self.active_comment_lang, "")
 
-                pos_prio_num, pos_prio_str = self._compute_pos_prio(common_moves, total_games, c['uci'], c['san'])
+                pos_prio_num = None
+                pos_prio_str = "—"
 
-                # If move is not in Lichess common moves, use Child Back-Propagation via candidate priority
-                if pos_prio_num is None and not is_my_turn and p_reach > 0:
+                # 1. On opponent's turn, if priority is computed in the repertoire, use
+                # normalized local conditional probability (priority / p_reach).
+                # This properly accounts for rare candidate moves and back-propagation,
+                # ensuring candidate moves sum consistently (e.g. 50% / 50% instead of 100% / 50%).
+                if not is_my_turn and p_reach > 0:
                     prio_val = c.get('priority')
                     if prio_val is not None and prio_val > 0:
                         pos_prio_num = min(1.0, prio_val / p_reach)
                         pos_prio_str = self._format_transpos_pct(pos_prio_num * 100.0)
+
+                # 2. Fallback: if not determined via candidate priority (e.g. player's turn,
+                # or priorities not yet calculated/cached), calculate directly from Lichess common moves.
+                if pos_prio_num is None:
+                    pos_prio_num, pos_prio_str = self._compute_pos_prio(common_moves, total_games, c['uci'], c['san'])
 
                 prio_num = c.get('priority')
                 prio_str = self._format_transpos_pct(prio_num * 100.0) if prio_num is not None else "—"
@@ -4378,18 +4427,28 @@ class CreatorWindow(QMainWindow):
         if not self._is_ui_valid(): return
         
         txt = self.txt_c.toPlainText().strip()
+        tag_str = self.board_widget.get_chessbase_annotation_tags()
+        from opening_fenix.core.utils import clean_chessbase_annotations, parse_pgn_tagged_comment, get_multilingual_comment_dict
+
+        def attach_tags(val: str) -> str:
+            clean = clean_chessbase_annotations(val)
+            if tag_str and clean:
+                return f"{tag_str} {clean}".strip()
+            elif tag_str:
+                return tag_str
+            return clean
+
         if self.active_comment_lang == "all":
-            from opening_fenix.core.utils import parse_pgn_tagged_comment, get_multilingual_comment_dict
             tagged = parse_pgn_tagged_comment(txt)
             if tagged:
-                self.current_position_comments = tagged
+                self.current_position_comments = {k: attach_tags(v) for k, v in tagged.items()}
             elif txt:
-                self.current_position_comments = get_multilingual_comment_dict(txt, default_lang="de")
+                self.current_position_comments = {k: attach_tags(v) for k, v in get_multilingual_comment_dict(txt, default_lang="de").items()}
             else:
-                self.current_position_comments = {}
+                self.current_position_comments = {"de": tag_str} if tag_str else {}
         else:
-            if txt:
-                self.current_position_comments[self.active_comment_lang] = txt
+            if txt or tag_str:
+                self.current_position_comments[self.active_comment_lang] = attach_tags(txt)
             elif self.active_comment_lang in self.current_position_comments:
                 del self.current_position_comments[self.active_comment_lang]
         
@@ -4400,6 +4459,20 @@ class CreatorWindow(QMainWindow):
     def save_current_details_now(self):
         if self.save_timer.isActive(): self.save_timer.stop()
         if self.details_changed and self.backend.active_repo_name:
+            tag_str = self.board_widget.get_chessbase_annotation_tags()
+            from opening_fenix.core.utils import clean_chessbase_annotations, format_multilingual_comment
+            if self.current_position_comments:
+                for lang in list(self.current_position_comments.keys()):
+                    clean = clean_chessbase_annotations(self.current_position_comments[lang])
+                    if tag_str and clean:
+                        self.current_position_comments[lang] = f"{tag_str} {clean}".strip()
+                    elif tag_str:
+                        self.current_position_comments[lang] = tag_str
+                    else:
+                        self.current_position_comments[lang] = clean
+            elif tag_str:
+                self.current_position_comments = {"de": tag_str}
+
             full_comment = format_multilingual_comment(self.current_position_comments)
             self.backend.update_position_data(
                 self.board_widget.board.fen(), 
@@ -5946,7 +6019,7 @@ class CreatorWindow(QMainWindow):
         hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Interactive)
         self.table_transpositions.setShowGrid(False)
         self.table_transpositions.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_transpositions.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
@@ -6044,24 +6117,61 @@ class CreatorWindow(QMainWindow):
                 p_qual = preset.get('quality', '')
                 p_qual_label = preset.get('quality_label', '')
 
-                if p_depth == 1:
-                    u1 = p_ucis[0] if p_ucis else None
-                    found_row = -1
+                u1 = p_ucis[0] if p_ucis else None
+                found_row = -1
+                for r in range(self.table_transpositions.rowCount()):
+                    it0 = self.table_transpositions.item(r, 0)
+                    if not it0:
+                        continue
+                    data = it0.data(Qt.ItemDataRole.UserRole)
+                    if data and isinstance(data, dict):
+                        if p_depth == 1:
+                            if (u1 and data.get('move_uci') == u1) or data.get('move_san') == p_move_san:
+                                found_row = r
+                                break
+                        else:
+                            if data.get('path_ucis') == p_ucis or (p_sans and data.get('path_sans') == p_sans):
+                                found_row = r
+                                break
+                    h_data = it0.data(Qt.ItemDataRole.UserRole + 10)
+                    if h_data and isinstance(h_data, dict):
+                        if p_depth == 1:
+                            h_u = h_data.get('move_uci') or (h_data.get('path_ucis') and h_data.get('path_ucis')[0])
+                            if (u1 and h_u == u1) or h_data.get('move_san') == p_move_san:
+                                found_row = r
+                                break
+                        else:
+                            if h_data.get('path_ucis') == p_ucis or (p_sans and h_data.get('path_sans') == p_sans) or h_data.get('move_san') == p_move_san:
+                                found_row = r
+                                break
+
+                if found_row == -1:
+                    if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
+                        self.table_transpositions.clearSpans()
+                        self.table_transpositions.setRowCount(0)
+
+                    # Insert before the global separator so it remains in the current position section
+                    sep_row = -1
                     for r in range(self.table_transpositions.rowCount()):
-                        it0 = self.table_transpositions.item(r, 0)
-                        if it0:
-                            data = it0.data(Qt.ItemDataRole.UserRole)
-                            if data and isinstance(data, dict):
-                                if (u1 and data.get('move_uci') == u1) or data.get('move_san') == p_move_san:
-                                    found_row = r
-                                    break
-                    if found_row == -1:
-                        if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
-                            self.table_transpositions.clearSpans()
-                            self.table_transpositions.setRowCount(0)
-                        
-                        r = self.table_transpositions.rowCount()
-                        self.table_transpositions.insertRow(r)
+                        it_s = self.table_transpositions.item(r, 0)
+                        if it_s and it_s.data(Qt.ItemDataRole.UserRole) == "__separator__":
+                            sep_row = r
+                            break
+                    insert_r = sep_row if sep_row != -1 else self.table_transpositions.rowCount()
+                    self.table_transpositions.insertRow(insert_r)
+
+                    prio_val = preset.get('priority_score', 0.0)
+                    pos_prio_val = preset.get('pos_prio', None)
+                    if pos_prio_val is None:
+                        pop = preset.get('popularity', 0)
+                        pos_prio_val = pop / 100.0 if pop > 0 else 0.0
+
+                    prio_pct = (prio_val or 0.0) * 100.0
+                    prio_str = self._format_transpos_pct(prio_pct) if (prio_val and prio_val > 0) else "<0.01%"
+                    pos_prio_pct = (pos_prio_val or 0.0) * 100.0
+                    pos_prio_str = self._format_transpos_pct(pos_prio_pct) if (pos_prio_val and pos_prio_val > 0) else "<0.01%"
+
+                    if p_depth == 1:
                         disp_move = format_move_notation(self.board_widget.board, p_move_san)
                         m_item = QTableWidgetItem(disp_move)
                         row_data = {
@@ -6070,49 +6180,29 @@ class CreatorWindow(QMainWindow):
                             "move_uci": u1,
                             "move_san": p_move_san,
                             "depth": 1,
+                            "pos_prio": pos_prio_val,
+                            "priority_score": prio_val,
                         }
                         m_item.setData(Qt.ItemDataRole.UserRole, row_data)
                         m_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 0, m_item)
-                        
-                        prio_item = QTableWidgetItem("—")
-                        prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 1, prio_item)
+                        self.table_transpositions.setItem(insert_r, 0, m_item)
 
-                        pos_prio_item = QTableWidgetItem("—")
+                        prio_item = QTableWidgetItem(prio_str)
+                        prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                        self.table_transpositions.setItem(insert_r, 1, prio_item)
+
+                        pos_prio_item = QTableWidgetItem(pos_prio_str)
                         pos_prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 2, pos_prio_item)
+                        self.table_transpositions.setItem(insert_r, 2, pos_prio_item)
 
                         q_item = QTableWidgetItem(p_qual_label if p_qual_label else "—")
                         q_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                         q_item.setForeground(QColor(COLORS['light_text']))
-                        self.table_transpositions.setItem(r, 3, q_item)
+                        self.table_transpositions.setItem(insert_r, 3, q_item)
 
                         lvl_cell = self._create_transposition_level_cell(row_data)
-                        self.table_transpositions.setCellWidget(r, 4, lvl_cell)
-                        found_row = r
-
-                    if found_row >= 0:
-                        self.table_transpositions.selectRow(found_row)
-
-                elif p_depth == 2:
-                    if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
-                        self.table_transpositions.clearSpans()
-                        self.table_transpositions.setRowCount(0)
-
-                    found_row = -1
-                    for r in range(self.table_transpositions.rowCount()):
-                        it0 = self.table_transpositions.item(r, 0)
-                        if it0:
-                            data = it0.data(Qt.ItemDataRole.UserRole)
-                            if data and isinstance(data, dict) and data.get('path_ucis') == p_ucis:
-                                found_row = r
-                                break
-
-                    if found_row == -1:
-                        r = self.table_transpositions.rowCount()
-                        self.table_transpositions.insertRow(r)
-                        
+                        self.table_transpositions.setCellWidget(insert_r, 4, lvl_cell)
+                    else:
                         seq_str = "  ".join(p_sans) if p_sans else p_move_san
                         disp_seq = format_move_notation(self.board_widget.board, seq_str)
                         seq_item = QTableWidgetItem(disp_seq)
@@ -6125,19 +6215,21 @@ class CreatorWindow(QMainWindow):
                             "depth": 2,
                             "quality": p_qual,
                             "quality_label": p_qual_label,
+                            "pos_prio": pos_prio_val,
+                            "priority_score": prio_val,
                         }
                         seq_item.setData(Qt.ItemDataRole.UserRole, row_data)
                         seq_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 0, seq_item)
+                        self.table_transpositions.setItem(insert_r, 0, seq_item)
 
-                        prio_item = QTableWidgetItem("—")
+                        prio_item = QTableWidgetItem(prio_str)
                         prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 1, prio_item)
+                        self.table_transpositions.setItem(insert_r, 1, prio_item)
 
-                        pos_prio_item = QTableWidgetItem("—")
+                        pos_prio_item = QTableWidgetItem(pos_prio_str)
                         pos_prio_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        self.table_transpositions.setItem(r, 2, pos_prio_item)
-                        
+                        self.table_transpositions.setItem(insert_r, 2, pos_prio_item)
+
                         if not p_qual_label:
                             p_qual_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if p_qual == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
                         qual_item = QTableWidgetItem(p_qual_label)
@@ -6148,14 +6240,15 @@ class CreatorWindow(QMainWindow):
                             qual_item.setForeground(QColor("#f1c40f"))
                         else:
                             qual_item.setForeground(QColor(COLORS['light_text']))
-                        self.table_transpositions.setItem(r, 3, qual_item)
+                        self.table_transpositions.setItem(insert_r, 3, qual_item)
 
                         lvl_cell = self._create_transposition_level_cell(row_data)
-                        self.table_transpositions.setCellWidget(r, 4, lvl_cell)
-                        found_row = r
+                        self.table_transpositions.setCellWidget(insert_r, 4, lvl_cell)
 
-                    if found_row >= 0:
-                        self.table_transpositions.selectRow(found_row)
+                    found_row = insert_r
+
+                if found_row >= 0:
+                    self.table_transpositions.selectRow(found_row)
             else:
                 self._preset_transposition = None
         
@@ -6243,12 +6336,13 @@ class CreatorWindow(QMainWindow):
 
         # Calculate Prio and Pos-Prio
         pos_prio_num, pos_prio_str = self._compute_pos_prio(common_moves, total_games, it['move_uci'], it['move_san'])
-        if pos_prio_num is not None:
+        if pos_prio_num is not None and pos_prio_num > 0:
             prio_val = (p_reach or 1.0) * pos_prio_num
             prio_pct = prio_val * 100.0
             prio_str = self._format_transpos_pct(prio_pct)
         else:
-            prio_str = "—"
+            prio_str = "<0.01%"
+            pos_prio_str = "<0.01%"
 
         data = {
             "type": "direct",
@@ -6456,9 +6550,8 @@ class CreatorWindow(QMainWindow):
         finally:
             self.table_transpositions.setUpdatesEnabled(True)
 
-    def _add_single_global_transpos_row(self, h):
-        """Appends a single global transposition item to the transpositions table."""
-        r = self.table_transpositions.rowCount()
+    def _insert_global_transpos_row_at(self, r: int, h: dict):
+        """Inserts a single global transposition item at row r in the transpositions table."""
         self.table_transpositions.insertRow(r)
 
         d = h.get('depth', 1)
@@ -6480,6 +6573,8 @@ class CreatorWindow(QMainWindow):
         prio_val = h.get('priority_score', 0.0)
         prio_pct = (prio_val or 0.0) * 100.0
         prio_str = self._format_transpos_pct(prio_pct)
+        if prio_str == "—":
+            prio_str = "<0.01%"
         it_prio = QTableWidgetItem(prio_str)
         it_prio.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_transpositions.setItem(r, 1, it_prio)
@@ -6491,6 +6586,8 @@ class CreatorWindow(QMainWindow):
             pos_prio_val = pop / 100.0 if pop > 0 else 0.0
         pos_prio_pct = (pos_prio_val or 0.0) * 100.0
         pos_prio_str = self._format_transpos_pct(pos_prio_pct)
+        if pos_prio_str == "—":
+            pos_prio_str = "<0.01%"
         it_pos_prio = QTableWidgetItem(pos_prio_str)
         it_pos_prio.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_transpositions.setItem(r, 2, it_pos_prio)
@@ -6512,6 +6609,10 @@ class CreatorWindow(QMainWindow):
         h_copy["search_fen"] = h.get("fen")
         lvl_cell = self._create_transposition_level_cell(h_copy)
         self.table_transpositions.setCellWidget(r, 4, lvl_cell)
+
+    def _add_single_global_transpos_row(self, h):
+        """Appends a single global transposition item to the transpositions table."""
+        self._insert_global_transpos_row_at(self.table_transpositions.rowCount(), h)
 
     def _flush_pending_global_transpositions(self):
         """Flushes buffered global transposition search results into the table incrementally."""
@@ -6833,6 +6934,13 @@ class CreatorWindow(QMainWindow):
                 except Exception:
                     pass
         elif data.get("type") == "bfs":
+            search_fen = data.get("search_fen")
+            if search_fen:
+                curr_fen_4 = " ".join(self.board_widget.board.fen().strip().split()[:4])
+                target_fen_4 = " ".join(search_fen.strip().split()[:4])
+                if curr_fen_4 != target_fen_4:
+                    self.set_board_to_fen(search_fen)
+
             path_ucis = data.get("path_ucis", [])
             if path_ucis:
                 move_uci = path_ucis[0]
@@ -7294,8 +7402,8 @@ class CreatorWindow(QMainWindow):
         levels = self.backend.get_repertoire_levels() if self.backend else []
         levels_count = max(1, len(levels))
         
-        # Suggested button width (~72px) + (N-1) standard buttons (~50px each) + spacing + cell padding
-        needed_buttons_w = scale(72) + (levels_count - 1) * scale(50) + (levels_count - 1) * scale(4) + scale(24)
+        # Suggested button width (~90px) + (N-1) standard buttons (~58px each) + spacing + cell padding
+        needed_buttons_w = scale(90) + (levels_count - 1) * scale(58) + (levels_count - 1) * scale(6) + scale(36)
         
         hdr_item = self.table_transpositions.horizontalHeaderItem(4)
         hdr_text = hdr_item.text() if hdr_item else "Zu Level"
@@ -7396,6 +7504,8 @@ class CreatorWindow(QMainWindow):
                     """
                 )
 
+            btn_min_w = btn.fontMetrics().horizontalAdvance(btn.text()) + scale(18)
+            btn.setMinimumWidth(btn_min_w)
             btn.clicked.connect(lambda checked, d=data, o=order: self.add_transposition_to_level(d, o))
             layout.addWidget(btn)
 
@@ -7630,8 +7740,29 @@ class CreatorWindow(QMainWindow):
             depth=depth_val,
         )
         self.global_transpos_thread.item_found_signal.connect(self._on_global_transpos_item_found)
+        self.global_transpos_thread.progress_signal.connect(self._on_global_transpos_progress)
         self.global_transpos_thread.finished_signal.connect(self._on_global_transpos_scan_finished)
         self.global_transpos_thread.start(QThread.Priority.LowPriority)
+
+    def _on_global_transpos_progress(self, current: int, total: int, msg: str):
+        if total <= 0:
+            return
+        pct = max(0, min(100, int(current / total * 100)))
+        count = len(getattr(self, "_global_transpos_results", []))
+        self.lbl_global_transpos_status.setText(
+            tr_ui(
+                "creator.transpositions_scan_progress",
+                f"Scan läuft... [{pct}%] {current}/{total} ({count} gefunden)",
+                pct=pct,
+                current=current,
+                total=total,
+                count=count,
+            )
+        )
+        self.lbl_global_transpos_status.setStyleSheet(
+            f"background-color: rgba(0, 0, 0, 0.05); color: #555555; "
+            f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.14);"
+        )
 
     def _add_global_transpos_row(self, h):
         if not hasattr(self, "_global_transpos_results"):
@@ -7696,10 +7827,18 @@ class CreatorWindow(QMainWindow):
         item0 = self.table_global_transpositions.item(row, 0)
         if not item0:
             return
-        fen = item0.data(Qt.ItemDataRole.UserRole)
+        h_data = item0.data(Qt.ItemDataRole.UserRole + 10)
+        fen = None
+        if h_data and isinstance(h_data, dict):
+            fen = h_data.get('fen') or h_data.get('search_fen')
+        if not fen:
+            u_data = item0.data(Qt.ItemDataRole.UserRole)
+            if isinstance(u_data, str) and u_data != "__separator__":
+                fen = u_data
+            elif isinstance(u_data, dict):
+                fen = u_data.get('fen') or u_data.get('search_fen')
         if not fen or fen == "__separator__":
             return
-        h_data = item0.data(Qt.ItemDataRole.UserRole + 10)
         if h_data and isinstance(h_data, dict):
             self._preset_transposition = h_data
             path_ucis = h_data.get('path_ucis', [])

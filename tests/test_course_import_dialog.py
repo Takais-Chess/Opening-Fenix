@@ -315,5 +315,34 @@ def test_course_import_dialog_taskbar_close_handling(qtbot):
     assert dlg.result() == 0  # Rejected
 
 
+def test_course_import_dialog_archive_original_checkbox(qtbot, temp_pgn):
+    dlg = CourseImportDialog(initial_pgn_path=temp_pgn)
+    qtbot.addWidget(dlg)
+
+    assert hasattr(dlg, "chk_archive_original")
+    assert dlg.chk_archive_original.isChecked() is True
+
+    # Test toggling
+    dlg.chk_archive_original.setChecked(False)
+    assert dlg.chk_archive_original.isChecked() is False
+    dlg.chk_archive_original.setChecked(True)
+    assert dlg.chk_archive_original.isChecked() is True
+
+
+def test_course_import_dialog_subvariations_checkbox(qtbot, temp_pgn):
+    dlg = CourseImportDialog(initial_pgn_path=temp_pgn)
+    qtbot.addWidget(dlg)
+
+    assert hasattr(dlg, "chk_subvariations_to_comments")
+    assert dlg.chk_subvariations_to_comments.isChecked() is True
+
+    # Test toggling
+    dlg.chk_subvariations_to_comments.setChecked(False)
+    assert dlg.chk_subvariations_to_comments.isChecked() is False
+    dlg.chk_subvariations_to_comments.setChecked(True)
+    assert dlg.chk_subvariations_to_comments.isChecked() is True
+
+
+
 
 

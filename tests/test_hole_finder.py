@@ -1280,6 +1280,22 @@ def test_2move_transposition_within_10cp_accepted(backend):
     assert '🟡' in match[0]['quality_label']
 
 
+def test_find_repertoire_transpositions_progress_callback(backend):
+    """Verify that find_repertoire_transpositions invokes progress_callback with (curr, total, msg)."""
+    session = backend.session
+    progress_calls = []
+    def on_progress(curr, total, msg):
+        progress_calls.append((curr, total, msg))
+
+    results = find_repertoire_transpositions(session, progress_callback=on_progress)
+    assert len(progress_calls) > 0
+    curr, total, msg = progress_calls[-1]
+    assert total > 0
+    assert curr == total
+    assert "Pass 2" in msg
+
+
+
 
 
 

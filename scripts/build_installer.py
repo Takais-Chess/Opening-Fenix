@@ -39,13 +39,14 @@ def safe_rmtree(path):
             pass
 
 
-def _sync_engines(dist_dir):
-    if os.path.exists('engines'):
-        dst = os.path.join(dist_dir, 'engines')
-        if os.path.exists(dst):
-            safe_rmtree(dst)
-        shutil.copytree('engines', dst)
-        print(f" -> Synced engines to {dst}")
+def _clean_engines(dist_dir):
+    """Ensure engines directory is not bundled in installer packages (private or public)."""
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'engines':
+                e_dir = os.path.join(root_dir_path, d)
+                safe_rmtree(e_dir)
+                print(f" -> Removed engines directory '{e_dir}' from bundle")
 
 
 def _set_process_priority():
@@ -76,9 +77,9 @@ def _run_iscc(iscc_exe, iss_file, app_version, build_type):
 
 def build_private(dist_dir, iscc_exe, iss_file, app_version):
     """Compile the PRIVATE installer (all profiles & repertoires included)."""
-    print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires)...")
+    print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires, engines excluded)...")
 
-    _sync_engines(dist_dir)
+    _clean_engines(dist_dir)
 
     for marker_dir in [dist_dir, os.path.join(dist_dir, '_internal')]:
         pub_marker = os.path.join(marker_dir, 'PUBLIC_VERSION')
@@ -92,7 +93,7 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                     dst = os.path.join(target_base, folder)
                     if os.path.exists(dst):
                         safe_rmtree(dst)
-                    shutil.copytree(folder, dst)
+                    shutil.copytree(folder, dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock'))
                     print(f" -> Synced {folder} to {dst}")
 
     res = _run_iscc(iscc_exe, iss_file, app_version, 'Private')
@@ -136,12 +137,7 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
     print(" -> Synced example repertoires to public bundle")
 
     # Remove engines from public bundle (users download Stockfish on-demand to maintain 0 GPL overhead)
-    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
-        for d in dirs:
-            if d.lower() == 'engines':
-                e_dir = os.path.join(root_dir_path, d)
-                safe_rmtree(e_dir)
-                print(f" -> Removed engines directory '{e_dir}' from public bundle")
+    _clean_engines(dist_dir)
 
     res = _run_iscc(iscc_exe, iss_file, app_version, 'Public')
     if res.returncode != 0:
@@ -219,9 +215,9 @@ def main():
     print(" -> PyInstaller base bundle ready.")
 
     # --------------------------------------------------------
-    # Step 2: Sync engines
+    # Step 2: Clean engines (engines excluded from bundles)
     # --------------------------------------------------------
-    _sync_engines(dist_dir)
+    _clean_engines(dist_dir)
 
     # --------------------------------------------------------
     # Step 3: Locate Inno Setup Compiler

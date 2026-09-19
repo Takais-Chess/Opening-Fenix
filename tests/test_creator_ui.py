@@ -1431,3 +1431,102 @@ def test_hole_item_click_switches_to_analysis_and_highlights_move(creator_window
     assert creator_window._search_highlight_move is None
     assert creator_window.board_widget.last_move != chess.Move.from_uci("c7c5")
 
+
+def test_transposition_prio_pos_prio_displays_less_than_001_for_zero_games(creator_window, qapp):
+    """Verify that transpositions with 0 games or unplayed opponent moves display '<0.01%'."""
+    item = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "move_san": "f5  exf6",
+        "path_sans": ["f5", "exf6"],
+        "path_ucis": ["f7f5", "e4f6"],
+        "depth": 2,
+        "type": "transposition_2",
+        "turn": "user",
+        "quality": "ausgezeichnet",
+        "quality_label": "🟢 Ausgezeichnet",
+        "priority_score": 0.0,
+        "pos_prio": 0.0,
+    }
+    creator_window.table_transpositions.setRowCount(0)
+    creator_window._add_single_global_transpos_row(item)
+    qapp.processEvents()
+
+    assert creator_window.table_transpositions.rowCount() == 1
+    prio_item = creator_window.table_transpositions.item(0, 1)
+    pos_prio_item = creator_window.table_transpositions.item(0, 2)
+    assert prio_item.text() == "<0.01%"
+    assert pos_prio_item.text() == "<0.01%"
+
+
+def test_preset_transposition_deduplication_and_no_under_separator(creator_window, qapp):
+    """Verify clicking an existing global transposition row does not duplicate it under the separator."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    item = {
+        "fen": start_fen,
+        "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "move_san": "13...f5  14.exf6",
+        "path_sans": ["f5", "exf6"],
+        "path_ucis": ["f7f5", "e4f6"],
+        "depth": 2,
+        "type": "transposition_2",
+        "turn": "user",
+        "quality": "ausgezeichnet",
+        "quality_label": "🟢 Ausgezeichnet",
+        "priority_score": 0.0,
+        "pos_prio": 0.0,
+    }
+    creator_window._on_global_transpos_scan_finished([item], mode="transpositions")
+    qapp.processEvents()
+
+    # 1 separator + 1 item = 2 rows
+    assert creator_window.table_transpositions.rowCount() == 2
+
+    # Activate the global row
+    it0 = creator_window.table_transpositions.item(1, 0)
+    creator_window.on_global_transposition_activated(it0)
+    qapp.processEvents()
+
+    # Must NOT have inserted a duplicate 3rd row under the separator!
+    assert creator_window.table_transpositions.rowCount() == 2
+
+
+def test_level_buttons_not_squished_and_column_interactive(creator_window, qapp):
+    """Verify Column 4 header is Interactive and buttons have minimum width to prevent squishing."""
+    hdr = creator_window.table_transpositions.horizontalHeader()
+    from PyQt6.QtWidgets import QHeaderView
+    assert hdr.sectionResizeMode(4) == QHeaderView.ResizeMode.Interactive
+
+    item = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "target_fen": "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "move_san": "c5  Nf3",
+        "path_sans": ["c5", "Nf3"],
+        "path_ucis": ["c7c5", "g1f3"],
+        "depth": 2,
+        "type": "transposition_2",
+        "priority_score": 0.5,
+    }
+    cell = creator_window._create_transposition_level_cell(item)
+    buttons = cell.findChildren(QPushButton)
+    assert len(buttons) >= 1
+    for btn in buttons:
+        text_adv = btn.fontMetrics().horizontalAdvance(btn.text())
+        assert btn.minimumWidth() >= text_adv + 10
+
+    # Column 4 width must be ample (>= 200px)
+    creator_window._adjust_transposition_table_columns()
+    assert creator_window.table_transpositions.columnWidth(4) >= 200
+
+
+def test_global_transposition_progress_updates_status(creator_window, qapp):
+    """Verify that _on_global_transpos_progress updates lbl_global_transpos_status with percentage."""
+    creator_window._global_transpos_results = [{"some": "item"}]
+    creator_window._on_global_transpos_progress(current=50, total=100, msg="Pass 2: 50/100")
+    text = creator_window.lbl_global_transpos_status.text()
+    assert "50%" in text
+    assert "50/100" in text
+    assert "1 gefunden" in text
+
+
+

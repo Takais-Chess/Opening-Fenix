@@ -833,6 +833,36 @@ class CourseImportDialog(QDialog):
         self.lbl_cover_status.setStyleSheet(f"font-size: {scale(11)}px; color: #555; border: none; background: transparent; padding-top: {scale(2)}px;")
         cfg_layout.addWidget(self.lbl_cover_status)
 
+        # Archive original PGNs checkbox
+        self.chk_archive_original = QCheckBox(tr_ui("course_import.chk_archive_original", "Original-PGN(s) im Ordner 'Original PGNs' archivieren"))
+        self.chk_archive_original.setChecked(True)
+        self.chk_archive_original.setToolTip(tr_ui("course_import.chk_archive_original_tooltip", "Kopiert die Quell-PGN-Dateien in den Unterordner 'Original PGNs' des Repertoires, sodass sie im Ressourcen-Ordner griffbereit sind und bei Backups mitgesichert werden."))
+        self.chk_archive_original.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: {scale(12)}px;
+                color: {COLORS['brown_text']};
+                background: transparent;
+                border: none;
+                padding-top: {scale(2)}px;
+            }}
+        """)
+        cfg_layout.addWidget(self.chk_archive_original)
+
+        # Sub-variations to comments checkbox
+        self.chk_subvariations_to_comments = QCheckBox(tr_ui("course_import.chk_subvariations_to_comments", "Untervarianten als Text in Kommentare übernehmen"))
+        self.chk_subvariations_to_comments.setChecked(True)
+        self.chk_subvariations_to_comments.setToolTip(tr_ui("course_import.chk_subvariations_to_comments_tooltip", "Verhindert, dass Nebenvarianten separate Züge im Trainingsbaum erzeugen. Stattdessen werden die Varianten und Notizen formatiert als Text in den Kommentar des Hauptzugs eingefügt."))
+        self.chk_subvariations_to_comments.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: {scale(12)}px;
+                color: {COLORS['brown_text']};
+                background: transparent;
+                border: none;
+                padding-top: {scale(2)}px;
+            }}
+        """)
+        cfg_layout.addWidget(self.chk_subvariations_to_comments)
+
         bottom_layout.addWidget(self.config_box)
 
         # 3. Overview Badges
@@ -1616,7 +1646,9 @@ class CourseImportDialog(QDialog):
             cover_image_path=self.analysis_result.cover_image_path,
             target_lang=self.lang_combo.currentData() or "de",
             game_targets=self.custom_game_targets,
-            elo=self.elo_combo.currentData() or "high"
+            elo=self.elo_combo.currentData() or "high",
+            archive_original_pgns=self.chk_archive_original.isChecked(),
+            subvariations_as_comments=self.chk_subvariations_to_comments.isChecked()
         )
 
         # Disable inputs & show progress
@@ -1625,6 +1657,8 @@ class CourseImportDialog(QDialog):
         self.color_combo.setEnabled(False)
         self.elo_combo.setEnabled(False)
         self.lang_combo.setEnabled(False)
+        self.chk_archive_original.setEnabled(False)
+        self.chk_subvariations_to_comments.setEnabled(False)
         self.btn_import.setEnabled(False)
         self.btn_cancel.setEnabled(False)
 
@@ -1648,6 +1682,8 @@ class CourseImportDialog(QDialog):
         self.color_combo.setEnabled(True)
         self.elo_combo.setEnabled(True)
         self.lang_combo.setEnabled(True)
+        self.chk_archive_original.setEnabled(True)
+        self.chk_subvariations_to_comments.setEnabled(True)
         self.btn_import.setEnabled(True)
         self.btn_cancel.setEnabled(True)
         self.progress_container.setVisible(False)
