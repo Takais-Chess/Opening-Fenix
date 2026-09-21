@@ -1253,9 +1253,8 @@ def test_2move_transposition_within_10cp_accepted(backend):
         session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
     session.commit()
 
-    # Mock engine:
-    # 1. Main analysis returns best_uci = "d2d4" with score = 40 cp
-    # 2. root_moves analysis for g1f3 returns score = 32 cp (loss = 8 cp <= 10 cp)
+    # Mock engine: MultiPV analysis returns d2d4 (40 cp) as best, g1f3 (32 cp) as #2
+    # Loss = 8 cp <= 10 cp threshold → should be accepted as 'solide'
     mock_engine = MagicMock()
     class MockScore:
         def __init__(self, cp):
@@ -1266,10 +1265,13 @@ def test_2move_transposition_within_10cp_accepted(backend):
         def score(self, mate_score=10000):
             return self.cp
 
-    def fake_analyse(board, limit, root_moves=None, **kwargs):
-        if root_moves and any(m.uci() == "g1f3" for m in root_moves):
-            return {"score": MockScore(32), "pv": [chess.Move.from_uci("g1f3")]}
-        return {"score": MockScore(40), "pv": [chess.Move.from_uci("d2d4")]}
+    def fake_analyse(board, limit, multipv=1, **kwargs):
+        results = [
+            {"score": MockScore(40), "pv": [chess.Move.from_uci("d2d4")]},
+            {"score": MockScore(32), "pv": [chess.Move.from_uci("g1f3")]},
+            {"score": MockScore(25), "pv": [chess.Move.from_uci("d2d3")]},
+        ]
+        return results[:multipv]
 
     mock_engine.analyse.side_effect = fake_analyse
 

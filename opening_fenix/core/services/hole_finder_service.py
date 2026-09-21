@@ -854,7 +854,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                         seen_keys.add(key)
                                         logger.info(f"[Transpos-2M] Candidate: from {f_orig} -> m1: {u1} -> m2: {u2} -> reaches {t2_fen}")
 
-                                    # User plays m2: evaluate if user move is sound (within 15 cp of best move)
+                                    # User plays m2: evaluate if user move is sound (within 10 cp of best move)
                                     is_best = False
                                     quality = "ausgezeichnet"
                                     quality_label = "🟢 Ausgezeichnet"
@@ -873,34 +873,73 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                         elif active_engine is not None:
                                             if cancel_check and cancel_check():
                                                 break
-                                            try:
-                                                eval_board = chess.Board(inter_fen + " 0 1")
-                                                info = active_engine.analyse(
-                                                    eval_board,
-                                                    chess.engine.Limit(depth=target_engine_depth)
-                                                )
-                                                pv = info.get("pv", []) if isinstance(info, dict) else (info[0].get("pv", []) if info else [])
-                                                best_uci = pv[0].uci().lower() if pv else None
-                                                score_obj = info.get("score") if isinstance(info, dict) else (info[0].get("score") if info else None)
-                                                best_score = score_obj.relative.score(mate_score=10000) if score_obj else None
+                                            # Incremental MultiPV: start small, increase only if needed.
+                                            # This ensures all move scores come from the same search context
+                                            # (avoids root_moves hash-table interference that can misreport cp loss).
+                                            eval_data = None
+                                            for mpv_count in (3, 6, 10):
+                                                if cancel_check and cancel_check():
+                                                    break
+                                                try:
+                                                    eval_board = chess.Board(inter_fen + " 0 1")
+                                                    mpv_infos = active_engine.analyse(
+                                                        eval_board,
+                                                        chess.engine.Limit(depth=target_engine_depth),
+                                                        multipv=mpv_count
+                                                    )
+                                                    if not isinstance(mpv_infos, list):
+                                                        mpv_infos = [mpv_infos]
 
-                                                eval_data = {
-                                                    "best_uci": best_uci,
-                                                    "best_score": best_score,
-                                                    "moves": {}
-                                                }
-                                                if best_uci and best_score is not None:
-                                                    eval_data["moves"][best_uci] = best_score
-                                                engine_eval_cache[inter_fen] = eval_data
+                                                    best_uci = None
+                                                    best_score = None
+                                                    move_scores = {}
+                                                    worst_score = None
+                                                    for info_item in mpv_infos:
+                                                        pv = info_item.get("pv", [])
+                                                        if pv:
+                                                            m_uci = pv[0].uci().lower()
+                                                            s_obj = info_item.get("score")
+                                                            s = s_obj.relative.score(mate_score=10000) if s_obj else None
+                                                            # Always track the move; first PV = best by rank order
+                                                            move_scores[m_uci] = s
+                                                            if best_uci is None:
+                                                                best_uci = m_uci
+                                                            if s is not None:
+                                                                if best_score is None or s > best_score:
+                                                                    best_score = s
+                                                                    best_uci = m_uci
+                                                                worst_score = s  # last scored item is lowest-ranked
 
-                                                if best_uci and cache_service:
-                                                    cache_service.set_best_move(inter_fen, target_engine_depth, best_uci)
+                                                    eval_data = {
+                                                        "best_uci": best_uci,
+                                                        "best_score": best_score,
+                                                        "moves": move_scores,
+                                                    }
 
-                                                # Yield to OS so the PC stays responsive between engine calls.
-                                                time.sleep(0)
-                                            except Exception as e:
-                                                logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen}: {e}")
-                                                engine_eval_cache[inter_fen] = None
+                                                    if best_uci and cache_service:
+                                                        cache_service.set_best_move(inter_fen, target_engine_depth, best_uci)
+
+                                                    # Early exit conditions:
+                                                    # 1) Our move u2 is already in the scored moves → done
+                                                    if u2 in move_scores:
+                                                        logger.info(f"[Transpos-2M] MultiPV={mpv_count}: found u2={u2} at score {move_scores[u2]} cp (best={best_score} cp)")
+                                                        break
+                                                    # 2) The worst-ranked move in this batch is already >10 cp
+                                                    #    below best → u2 (ranked even lower) must be worse → done
+                                                    if best_score is not None and worst_score is not None and (best_score - worst_score) > 10:
+                                                        logger.info(f"[Transpos-2M] MultiPV={mpv_count}: spread {best_score - worst_score} cp > 10 cp, u2={u2} not in top {mpv_count} → rejected")
+                                                        break
+                                                    # Otherwise: u2 might still be within 10 cp → widen search
+                                                    logger.info(f"[Transpos-2M] MultiPV={mpv_count}: u2={u2} not found, spread {best_score - worst_score if (best_score is not None and worst_score is not None) else '?'} cp ≤ 10 cp → widening")
+
+                                                    # Yield to OS so the PC stays responsive between engine calls.
+                                                    time.sleep(0)
+                                                except Exception as e:
+                                                    logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen} (MultiPV={mpv_count}): {e}")
+                                                    eval_data = None
+                                                    break
+
+                                            engine_eval_cache[inter_fen] = eval_data
 
                                     if eval_data:
                                         best_uci = eval_data.get("best_uci")
@@ -911,27 +950,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                             quality = "ausgezeichnet"
                                             quality_label = "🟢 Ausgezeichnet"
                                             logger.info(f"[Transpos-2M] ✓ m2={u2} is the #1 engine move from {inter_fen}")
-                                        elif best_score is not None and active_engine is not None:
-                                            # Check if u2 was already scored for this inter_fen
-                                            if u2 in eval_data["moves"]:
-                                                u2_score = eval_data["moves"][u2]
-                                            else:
-                                                if cancel_check and cancel_check():
-                                                    break
-                                                try:
-                                                    eval_board = chess.Board(inter_fen + " 0 1")
-                                                    u2_info = active_engine.analyse(
-                                                        eval_board,
-                                                        chess.engine.Limit(depth=target_engine_depth),
-                                                        root_moves=[chess.Move.from_uci(u2)]
-                                                    )
-                                                    u2_score_obj = u2_info.get("score") if isinstance(u2_info, dict) else (u2_info[0].get("score") if u2_info else None)
-                                                    u2_score = u2_score_obj.relative.score(mate_score=10000) if u2_score_obj else None
-                                                    eval_data["moves"][u2] = u2_score
-                                                except Exception as ex:
-                                                    logger.warning(f"[Transpos-2M] Engine root_move eval error for {u2}: {ex}")
-                                                    u2_score = None
-
+                                        elif best_score is not None and u2 in eval_data.get("moves", {}):
+                                            u2_score = eval_data["moves"][u2]
                                             if u2_score is not None:
                                                 cp_loss = best_score - u2_score
                                                 if cp_loss <= 10:
@@ -943,6 +963,9 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                     logger.info(f"[Transpos-2M] ✗ m2={u2} rejected: loss {cp_loss} cp > 10 cp (best={best_uci} [{best_score} cp], m2=[{u2_score} cp])")
                                             else:
                                                 logger.info(f"[Transpos-2M] ✗ m2={u2} could not be evaluated by engine")
+                                        elif best_score is not None:
+                                            # u2 was not found in any MultiPV tier → it's worse than the spread threshold
+                                            logger.info(f"[Transpos-2M] ✗ m2={u2} not in MultiPV results, beyond threshold (best={best_uci} [{best_score} cp])")
                                         else:
                                             # Fallback if best_score is None (e.g. mock engine or cached move without score)
                                             is_best = (u2 == best_uci)
