@@ -109,25 +109,12 @@ profiles/**/*.db
 profiles/**/*.json
 profiles/**/*.db-shm
 profiles/**/*.db-wal
-repertoires/**/*.db
-repertoires/**/*.db-shm
-repertoires/**/*.db-wal
-repertoires/**/*.pgn
-repertoires/**/*.jpg
-repertoires/**/*.jpeg
-repertoires/**/*.png
-repertoires/**/*.webp
-repertoires/**/*.ini
-repertoires/**/*.pgi
-repertoires/**/manifest.json
+repertoires/*
+!repertoires/.gitkeep
 config.json
 
-# Allow public example courses in git
-!repertoires/*Example Course*/**
 *.db-shm
 *.db-wal
-repertoires/Lifetime_Repertoires_*
-repertoires/Lifetime Repertoires*
 
 # IDEs
 .idea/
