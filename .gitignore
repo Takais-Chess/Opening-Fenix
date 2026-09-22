@@ -118,6 +118,8 @@ repertoires/**/*.jpeg
 repertoires/**/*.png
 repertoires/**/*.webp
 repertoires/**/*.ini
+repertoires/**/*.pgi
+repertoires/**/manifest.json
 config.json
 
 # Allow public example courses in git
@@ -125,6 +127,7 @@ config.json
 *.db-shm
 *.db-wal
 repertoires/Lifetime_Repertoires_*
+repertoires/Lifetime Repertoires*
 
 # IDEs
 .idea/
@@ -162,6 +165,10 @@ SmallRepo/
 TestRepo/
 LangImportRepo/
 Test Course/
+Test_PGN_Subvar_Disabled/
+Test_PGN_Subvar_Enabled/
+Test_Torre_3/
+tmp_orig_pgns_restore/
 
 # Coverage & Reports
 coverage.json
@@ -179,5 +186,6 @@ scripts/recover_db.py
 scripts/replace_db.py
 scripts/scan_all_dbs.py
 parse_test.py
+tests/inspect_*.py
 opening_fenix/gui/scratch/
 pytest_out*.txt

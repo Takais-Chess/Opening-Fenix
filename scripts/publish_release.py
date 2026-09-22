@@ -11,10 +11,53 @@ if project_root not in sys.path:
 from opening_fenix.core.version import APP_VERSION
 
 def get_github_token():
-    p = subprocess.Popen(['git', 'credential', 'fill'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    out, _ = p.communicate('protocol=https\nhost=github.com\n')
-    creds = dict(line.split('=', 1) for line in out.strip().splitlines() if '=' in line)
-    return creds.get('password')
+    # 1. Environment variables
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        return token
+
+    # 2. Windows Credential Manager
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            advapi32 = ctypes.windll.advapi32
+            class CREDENTIAL(ctypes.Structure):
+                _fields_ = [
+                    ('Flags', wintypes.DWORD), ('Type', wintypes.DWORD),
+                    ('TargetName', wintypes.LPWSTR), ('Comment', wintypes.LPWSTR),
+                    ('LastWritten', wintypes.FILETIME), ('CredentialBlobSize', wintypes.DWORD),
+                    ('CredentialBlob', ctypes.POINTER(ctypes.c_byte)), ('Persist', wintypes.DWORD),
+                    ('AttributeCount', wintypes.DWORD), ('Attributes', ctypes.c_void_p),
+                    ('TargetAlias', wintypes.LPWSTR), ('UserName', wintypes.LPWSTR)
+                ]
+            CredReadW = advapi32.CredReadW
+            CredReadW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CREDENTIAL))]
+            CredReadW.restype = wintypes.BOOL
+            CredFree = advapi32.CredFree
+            CredFree.argtypes = [ctypes.c_void_p]
+
+            targets = ['git:https://Takais-Chess@github.com', 'git:https://github.com', 'GitHub for Visual Studio - https://Takais-Chess@github.com/']
+            for t in targets:
+                pcred = ctypes.POINTER(CREDENTIAL)()
+                if CredReadW(t, 1, 0, ctypes.byref(pcred)):
+                    blob = ctypes.string_at(pcred.contents.CredentialBlob, pcred.contents.CredentialBlobSize)
+                    CredFree(pcred)
+                    try:
+                        return blob.decode('utf-16le')
+                    except Exception:
+                        return blob.decode('utf-8', errors='replace')
+        except Exception:
+            pass
+
+    # 3. Git Credential Manager subprocess fallback
+    try:
+        p = subprocess.Popen(['git', 'credential', 'fill'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, _ = p.communicate('protocol=https\nhost=github.com\n\n', timeout=5)
+        creds = dict(line.split('=', 1) for line in out.strip().splitlines() if '=' in line)
+        return creds.get('password')
+    except Exception:
+        return None
 
 def main():
     token = get_github_token()
@@ -26,30 +69,29 @@ def main():
     tag_name = f"v{APP_VERSION}"
     release_name = f"Opening Fenix v{APP_VERSION}"
     
-    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Feature Release: ChessBase Annotations & Visual Polish
+    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Feature Release: PGN Subvariations & Modernized Login UI
 
-Opening Fenix v{APP_VERSION} introduces rich ChessBase-compatible interactive board annotations (arrows and circle highlights), bidirectional PGN tag synchronization (`[%cal ...]` and `[%csl ...]`), clean notation rendering, and intelligent Trainer variation conclusion display.
+Opening Fenix v{APP_VERSION} introduces granular PGN subvariation import controls, a completely modernized Chessable/Lichess login interface, enhanced Hole Finder MultiPV evaluation, and responsive board auto-fit geometry.
 
 ### 🌟 What's New in v{APP_VERSION}
 
-#### 🎯 ChessBase-Style Interactive Board Annotations
-- **Right-Click Drag**: Draw directional arrows with live preview (Green by default).
-- **Alt + Right-Click Drag**: Red directional arrows.
-- **Ctrl + Right-Click Drag**: Yellow directional arrows.
-- **Shift + Right-Click Drag**: Blue directional arrows.
-- **Ctrl + Alt + Right-Click Drag**: Orange directional arrows.
-- **Right-Click Single Square**: Toggle crisp hollow circular rings framing squares/pieces with matching color modifiers.
-- **Left-Click (or Move Play)**: Clears drawings immediately.
-- **Smart Toggling**: Redrawing an existing arrow or circle toggles it off or updates its color.
+#### 🔀 PGN Subvariation Import Controls
+- **Toggle Subvariation Import**: Users can now choose whether to include full tree subvariations or focus solely on main course lines.
+- **Tree Depth Limits**: Option to limit imported subvariation ply depth to keep repertoires concise and memory-friendly.
+- **Clean Structure Preservation**: Preserves variations without cluttering the candidate moves database.
 
-#### 🔄 Bidirectional ChessBase PGN Compatibility (`[%cal]` & `[%csl]`)
-- **Retroactive Loading**: Repertoires and PGNs with standard ChessBase commentary tags automatically display their arrows and circle markings on the board.
-- **Clean Notation Display**: Commentary text boxes and notation views cleanly strip raw `[%cal ...]` and `[%csl ...]` tags, preventing bracket clutter.
-- **Export Compatibility**: Exported PGN games contain all standard tags, perfectly reproducible when opened in ChessBase, Lichess, or Chess.com.
+#### 🔐 Modernized Authentication & Login Interface
+- **Revamped Login Flow**: Sleek glassmorphism dialog for Chessable and Lichess authentication.
+- **Secure Token Storage & Validation**: Real-time token validation and seamless account switching.
+- **Visual Polish**: Full translation parity across German and English login elements with consistent error feedback.
 
-#### 🧠 Intelligent Trainer Display
-- **Clean Focus During Training**: Intermediate move challenges keep the board completely clean so annotations never spoil the solution.
-- **Variation End Reveal**: Summary arrows and circled target squares are automatically revealed when the variation finishes, highlighting the author's strategic conclusions before moving to the next line.
+#### ♟️ Hole Finder & Transposition Polish
+- **Incremental MultiPV Evaluation**: Accurate centipawn loss display across alternative candidate lines.
+- **Transposition Move Prioritization**: Improved ordering of candidate moves based on real-world transposition frequency.
+
+#### 📐 Responsive Board Geometry & Build Packaging
+- **Square Aspect Ratio Guarantee**: Auto-fitting board geometry respects container margins across all screen resolutions.
+- **Streamlined Public Installer**: Bundles only public example courses and excludes personal user profiles and private databases.
 """
 
     headers = {

@@ -111,6 +111,53 @@ class CourseImportResult:
     embedded_intros: int = 0
     original_pgns_archived: int = 0
 
+def sanitize_comment_variations(text: str) -> str:
+    """
+    Sanitizes commentary notes wrapped in parentheses that start with comments,
+    such as `({Kamsky's approach...} 4...O-O 5.Nbd2 {.})` or `({Let's be consistent.} 8.O-O)`.
+    These are textual explanations with continuation examples rather than valid PGN branching
+    variations. If treated as branching variations, their move numbers cause IllegalMoveError
+    in python-chess and abort the remainder of the game.
+    Converting them to standard comment blocks `{ (...) }` safely preserves all commentary
+    while allowing python-chess to parse the full mainline to completion.
+    """
+    if '(' not in text or '{' not in text:
+        return text
+    
+    result = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == '(' and i + 1 < n:
+            j = i + 1
+            while j < n and text[j] in ' \t\r\n':
+                j += 1
+            if j < n and text[j] == '{':
+                depth = 1
+                k = i + 1
+                in_brace = False
+                while k < n and depth > 0:
+                    if text[k] == '{':
+                        in_brace = True
+                    elif text[k] == '}':
+                        in_brace = False
+                    elif text[k] == '(' and not in_brace:
+                        depth += 1
+                    elif text[k] == ')' and not in_brace:
+                        depth -= 1
+                    k += 1
+                
+                if depth == 0:
+                    inner_chunk = text[i+1:k-1]
+                    clean = inner_chunk.replace('{', ' ').replace('}', ' ')
+                    clean = re.sub(r'\s+', ' ', clean).strip()
+                    result.append(f" {{ ({clean}) }} ")
+                    i = k
+                    continue
+        result.append(text[i])
+        i += 1
+    return "".join(result)
+
 class SanitizedPGNReader:
     """
     Wrapper around a file object to:
@@ -118,6 +165,8 @@ class SanitizedPGNReader:
     2. Normalize header lines with leading whitespace (e.g. ' [ChessableColor "black"]')
        which would otherwise cause python-chess to prematurely terminate the header block
        and split games into an empty header dummy game and a headerless move game.
+    3. Sanitize commentary notes in parentheses starting with braces `({comment...})`
+       to prevent python-chess IllegalMoveError aborts.
     """
     def __init__(self, fp):
         self.fp = fp
@@ -131,6 +180,8 @@ class SanitizedPGNReader:
             return "\n"
         if line.startswith((' ', '\t')) and line.lstrip().startswith('['):
             return line.lstrip()
+        if '(' in line and '{' in line:
+            line = sanitize_comment_variations(line)
         return line
         
     def tell(self):
@@ -158,6 +209,12 @@ def suggest_course_name_from_paths(paths: List[str]) -> str:
     name = re.sub(r'[\s\-–—]+(Part|Teil|Volume|Vol)(\b|\s*\d+.*)$', '', name, flags=re.IGNORECASE).rstrip(" -_–—")
     return sanitize_repertoire_name(name)
 
+INTRO_KEYWORDS = (
+    r'(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|'
+    r'informational|informationen|information|infos|info|intro|'
+    r'instructions|instruction|anleitungen|anleitung|hinweise|hinweis|guidelines|guide|leitfaden)'
+)
+
 def classify_chapter(name: str) -> str:
     """
     Classifies a chapter/section name into:
@@ -174,12 +231,12 @@ def classify_chapter(name: str) -> str:
     if re.search(r'(quickstarter|schnellstarter)', n):
         return CATEGORY_LEVEL_1
 
-    # 2. Introduction / Einleitung / Overview / Info
+    # 2. Introduction / Einleitung / Overview / Info / Instructions / Guide
     if "[%info]" in n or "[info]" in n:
         return CATEGORY_INTRO
-    if re.search(r'\b(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|intro|infos|information|informationen)\b', n):
+    if re.search(rf'\b{INTRO_KEYWORDS}\b', n, re.IGNORECASE):
         return CATEGORY_INTRO
-    if re.search(r'^\s*(info\b|intro\b)', n):
+    if re.search(r'^\s*(info\b|intro\b|guide\b|anleitung\b|hinweis\b|instruction\b)', n, re.IGNORECASE):
         return CATEGORY_INTRO
 
     # 3. Motives / Typische Motive
@@ -213,10 +270,10 @@ def is_header_intro(headers: Any) -> bool:
         h_lower = h_val.lower()
         if "[%info]" in h_lower or "[info]" in h_lower:
             return True
-        if re.search(r'(?i)^\s*(\[%info\]|\[info\]|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', h_val):
+        if re.search(r'(?i)^\s*(\[%info\]|\[info\]|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b|instruction\b|anleitung\b|hinweis\b|guide\b|leitfaden\b)', h_val):
             return True
 
-    intro_keywords = r'(?i)\b(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|informational)\b'
+    intro_keywords = rf'(?i)\b{INTRO_KEYWORDS}\b'
     if re.search(intro_keywords, white) or re.search(intro_keywords, event) or re.search(intro_keywords, section):
         return True
         
@@ -247,36 +304,22 @@ def is_header_model(headers: Any) -> bool:
 def is_game_intro(game: chess.pgn.Game) -> bool:
     """
     Checks whether a specific individual game is an introduction or informational text,
-    even if it appears inside a regular opening chapter (e.g. starting with [%info]).
+    even if it appears inside a regular opening chapter (e.g. starting with [%info] or matching intro keywords).
     """
-    first_comment = (game.comment or "").strip().lower()
-    headers_str = " ".join(str(v) for v in game.headers.values()).lower()
-    has_info_tag = "[%info]" in first_comment or "[info]" in first_comment or "[%info]" in headers_str or "[info]" in headers_str
-
-    if not has_info_tag:
-        plies = 0
-        curr = game
-        while curr.variations and plies < 8:
-            curr = curr.variations[0]
-            plies += 1
-        if plies >= 6:
-            white = game.headers.get("White", "").strip()
-            if not re.search(r'(?i)^\s*(info\b|intro\b|introduction\b|einleitung\b|overview\b|about the author|preface|vorwort)', white):
-                return False
-
+    # 1. Header checks (including White tag, Event, Section, etc.)
     if is_header_intro(game.headers):
         return True
 
-    # Check root comment (before move 1)
+    # 2. Check root comment (before move 1)
     first_comment = (game.comment or "").strip()
     if first_comment:
         f_lower = first_comment.lower()
         if "[%info]" in f_lower or "[info]" in f_lower:
             return True
-        if re.search(r'(?i)^\s*(\[%info\]?|\[info\]?|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', first_comment):
+        if re.search(rf'(?i)^\s*(\[%info\]?|\[info\]?|{INTRO_KEYWORDS})', first_comment):
             return True
 
-    # Check first move comment (e.g. 1. e4 { [%info] ... })
+    # 3. Check first move comment (e.g. 1. e4 { [%info] ... })
     if game.variations:
         first_node = game.variations[0]
         node_comment = (first_node.comment or "").strip()
@@ -284,10 +327,10 @@ def is_game_intro(game: chess.pgn.Game) -> bool:
             n_lower = node_comment.lower()
             if "[%info]" in n_lower or "[info]" in n_lower:
                 return True
-            if re.search(r'(?i)^\s*(\[%info\]?|\[info\]?|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b)', node_comment):
+            if re.search(rf'(?i)^\s*(\[%info\]?|\[info\]?|{INTRO_KEYWORDS})', node_comment):
                 return True
 
-    # Check text-only games (0 moves with comment)
+    # 4. Check text-only games (0 moves with comment)
     if not game.variations and first_comment:
         return True
 

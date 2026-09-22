@@ -410,6 +410,7 @@ class ChapterLinesDialog(QDialog):
                 margin-right: {scale(6)}px;
             }}
             QComboBox QAbstractItemView {{
+                min-width: {scale(75)}px;
                 background-color: {COLORS['beige']};
                 color: {COLORS['brown_text']};
                 border: 1px solid {COLORS['glass_border']};
@@ -772,6 +773,7 @@ class CourseImportDialog(QDialog):
                 margin-right: {scale(6)}px;
             }}
             QComboBox QAbstractItemView {{
+                min-width: {scale(75)}px;
                 background-color: {COLORS['beige']};
                 color: {COLORS['brown_text']};
                 border: 1px solid {COLORS['glass_border']};
@@ -1314,6 +1316,7 @@ class CourseImportDialog(QDialog):
                 margin-right: {scale(6)}px;
             }}
             QComboBox QAbstractItemView {{
+                min-width: {scale(75)}px;
                 background-color: {COLORS['beige']};
                 color: {COLORS['brown_text']};
                 border: 1px solid {COLORS['glass_border']};

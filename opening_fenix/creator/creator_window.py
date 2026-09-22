@@ -3242,6 +3242,7 @@ class CreatorWindow(QMainWindow):
         self.combo_depth.addItems([str(i) for i in range(10, 51, 2)])
         self.combo_depth.setCurrentText("20")
         self.combo_depth.setFixedWidth(scale(34))
+        self.combo_depth.view().setMinimumWidth(scale(75))
         self.combo_depth.setProperty("class", "SmallCombo")
         self.repolish(self.combo_depth)
         self.combo_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
@@ -3256,6 +3257,7 @@ class CreatorWindow(QMainWindow):
         self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
         self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
         self.combo_threads.setFixedWidth(scale(34))
+        self.combo_threads.view().setMinimumWidth(scale(75))
         self.combo_threads.setProperty("class", "SmallCombo")
         self.repolish(self.combo_threads)
         self.combo_threads.lineEdit().installEventFilter(self)
@@ -3269,6 +3271,7 @@ class CreatorWindow(QMainWindow):
         self.combo_hash.addItems(["16", "64", "128", "256", "512", "1024", "2048"])
         self.combo_hash.setCurrentText(self.config.get("engine_hash", "256"))
         self.combo_hash.setFixedWidth(scale(65))
+        self.combo_hash.view().setMinimumWidth(scale(75))
         self.combo_hash.setProperty("class", "SmallCombo")
         self.repolish(self.combo_hash)
         self.combo_hash.lineEdit().installEventFilter(self)
@@ -3281,6 +3284,7 @@ class CreatorWindow(QMainWindow):
         self.combo_lines.addItems([str(i) for i in range(1, 11)])
         self.combo_lines.setCurrentText("3")
         self.combo_lines.setFixedWidth(scale(34))
+        self.combo_lines.view().setMinimumWidth(scale(75))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
@@ -5087,6 +5091,22 @@ class CreatorWindow(QMainWindow):
         f_layout.addRow(tr_ui("creator.dlg_import_comment_lang", "Kommentar-Sprache:"), c_lang)
         v.addLayout(f_layout)
         
+        chk_subvariations = QCheckBox(tr_ui("creator.chk_subvariations_to_comments", "Untervarianten als Text in Kommentare übernehmen"))
+        chk_subvariations.setChecked(True)
+        chk_subvariations.setToolTip(tr_ui("creator.chk_subvariations_to_comments_tooltip", "Verhindert, dass Nebenvarianten separate Züge im Trainingsbaum erzeugen. Stattdessen werden die Varianten und Notizen formatiert als Text in den Kommentar des Hauptzugs eingefügt."))
+        chk_subvariations.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: {scale(12)}px;
+                color: {COLORS['brown_text']};
+                background: transparent;
+                border: none;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+            }}
+        """)
+        v.addWidget(chk_subvariations)
+        dlg.chk_subvariations = chk_subvariations
+        
         h_btns = QHBoxLayout()
         h_btns.addStretch()
         
@@ -5106,6 +5126,7 @@ class CreatorWindow(QMainWindow):
             
         target_lvl = c_level.currentData()
         target_lang = c_lang.currentData()
+        subvariations_as_comments = chk_subvariations.isChecked()
         
         self.p_pgn = QProgressDialog(
             tr_ui("creator.dlg_import_progress_text", "Importiere PGN..."),
@@ -5122,7 +5143,8 @@ class CreatorWindow(QMainWindow):
             side, 
             target_lvl['name'], 
             target_lvl['order'],
-            target_lang=target_lang
+            target_lang=target_lang,
+            subvariations_as_comments=subvariations_as_comments
         )
         self.w_pgn.progress_signal.connect(self.p_pgn.setValue)
         self.w_pgn.finished_signal.connect(self._on_pgn_import_finished)
@@ -5347,7 +5369,11 @@ class CreatorWindow(QMainWindow):
             h = self.main_splitter.height()
             total_w = self.main_splitter.width()
             if h > 50 and total_w > 100:
-                desired_board_w = h
+                margin_x = 0
+                if hasattr(self, 'board_container') and self.board_container.layout():
+                    m = self.board_container.layout().contentsMargins()
+                    margin_x = m.left() + m.right()
+                desired_board_w = h + margin_x
                 min_tools_w = scale(280)
                 handle_w = self.main_splitter.handle(1).width() if self.main_splitter.count() > 1 and self.main_splitter.handle(1) else scale(5)
                 avail_w = max(0, total_w - handle_w)
@@ -5920,6 +5946,7 @@ class CreatorWindow(QMainWindow):
         else:
             self.combo_transpos_depth.setCurrentText("25")
         self.combo_transpos_depth.setFixedWidth(scale(52))
+        self.combo_transpos_depth.view().setMinimumWidth(scale(75))
         self.combo_transpos_depth.setMinimumHeight(scale(28))
         self.combo_transpos_depth.setToolTip(depth_tooltip)
         self.combo_transpos_depth.setObjectName("TransposDepthCombo")

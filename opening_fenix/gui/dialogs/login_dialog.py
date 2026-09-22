@@ -10,7 +10,7 @@ from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
-from opening_fenix.core.utils import get_base_path, get_user_dir
+from opening_fenix.core.utils import get_base_path, get_user_dir, is_free_training_profile
 # Import centralized styles
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_tooltip_style
 from opening_fenix.gui.scaling import scale
@@ -669,13 +669,47 @@ class LoginDialog(QDialog):
         sender = self.sender()
         
         menu = QMenu(self)
-        menu.setStyleSheet("QMenu { background-color: #2c3e50; color: white; border: 1px solid rgba(255,255,255,0.2); } QMenu::item:selected { background-color: rgba(255,255,255,0.1); }")
+        menu.setStyleSheet(f"""
+            QMenu {{
+                background-color: {COLORS['beige']};
+                color: {COLORS['brown_text']};
+                border: 1px solid {COLORS['border']};
+                border-radius: {scale(8)}px;
+                padding: {scale(4)}px 0px;
+            }}
+            QMenu::item {{
+                padding: {scale(8)}px {scale(20)}px;
+                color: {COLORS['brown_text']};
+                font-size: {scale(14)}px;
+                font-weight: 500;
+            }}
+            QMenu::item:selected {{
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['burnt_orange']};
+                border-radius: {scale(4)}px;
+                margin: 0px {scale(4)}px;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background-color: rgba(62, 39, 35, 0.15);
+                margin: {scale(4)}px {scale(8)}px;
+            }}
+        """)
         
+        rename_action = QAction(tr_ui("login.rename_profile_action", "'{name}' umbenennen", name=name), self)
+        rename_action.triggered.connect(lambda: self.rename_profile(name))
+        menu.addAction(rename_action)
+
+        menu.addSeparator()
+
         delete_action = QAction(tr_ui("login.delete_profile_action", "'{name}' löschen", name=name), self)
         delete_action.triggered.connect(lambda: self.delete_profile(name))
         menu.addAction(delete_action)
         
-        menu.exec(sender.mapToGlobal(pos))
+        if sender:
+            menu.exec(sender.mapToGlobal(pos))
+        else:
+            menu.exec(pos)
 
     def delete_profile(self, name):
         reply = QMessageBox.question(
@@ -734,6 +768,200 @@ class LoginDialog(QDialog):
                 logger.warning(f"Error cleaning up deleted profile from config.json: {e}")
             
             self.load_profiles()
+
+    def _ask_rename_profile(self, current_name):
+        """Custom profile-rename input dialog."""
+        dlg = QDialog(self, Qt.WindowType.Dialog)  # explicit non-frameless flags
+        dlg.setWindowTitle(tr_ui("login.rename_profile_title", "Profil umbenennen"))
+        dlg.setMinimumWidth(scale(360))
+        dlg.setStyleSheet(self.styleSheet())
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        layout.setSpacing(scale(12))
+
+        lbl = QLabel(tr_ui("login.rename_profile_prompt_label", "Neuer Name für das Profil:"))
+        lbl.setStyleSheet(f"font-size: {scale(14)}px; font-weight: bold; color: {COLORS['brown_text']};")
+        layout.addWidget(lbl)
+
+        line_edit = QLineEdit()
+        line_edit.setText(current_name)
+        line_edit.selectAll()
+        line_edit.setFixedHeight(scale(40))
+        line_edit.setStyleSheet(
+            f"QLineEdit {{ border: 1px solid rgba(0,0,0,0.3); border-radius: {scale(8)}px;"
+            f" padding: 0 {scale(8)}px; font-size: {scale(14)}px; background: white; color: black; }}"
+        )
+        layout.addWidget(line_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(scale(10))
+
+        btn_cancel = QPushButton(tr_ui("login.cancel", "Abbrechen"))
+        btn_cancel.setFixedHeight(scale(40))
+        btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_cancel.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(255, 255, 255, 0.4);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(16)}px;
+                color: {COLORS['brown_text']};
+                font-size: {scale(14)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.8);
+                border-color: {COLORS['burnt_orange']};
+            }}
+        """)
+
+        btn_ok = QPushButton(tr_ui("login.rename_save", "Umbenennen"))
+        btn_ok.setObjectName("PrimaryAction")
+        btn_ok.setFixedHeight(scale(40))
+        btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_ok.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {COLORS['burnt_orange']};
+                border: none;
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(16)}px;
+                color: white;
+                font-size: {scale(14)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #e67e22;
+            }}
+        """)
+
+        btn_row.addWidget(btn_cancel)
+        btn_row.addWidget(btn_ok)
+        layout.addLayout(btn_row)
+
+        btn_ok.clicked.connect(dlg.accept)
+        btn_cancel.clicked.connect(dlg.reject)
+        line_edit.returnPressed.connect(dlg.accept)
+
+        result = dlg.exec()
+        return line_edit.text(), result == QDialog.DialogCode.Accepted
+
+    def rename_profile(self, old_name):
+        from opening_fenix.core.logger import logger
+        try:
+            new_name, ok = self._ask_rename_profile(old_name)
+            if not ok:
+                return
+
+            new_name = new_name.strip()
+            if not new_name:
+                QMessageBox.warning(
+                    self,
+                    tr_ui("login.invalid_name_error", "Ungültiger Name"),
+                    tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
+                )
+                return
+
+            # If name is unchanged, do nothing
+            if new_name == old_name:
+                return
+
+            # Check forbidden filename characters
+            if any(c in new_name for c in '/\\:*?"<>|'):
+                QMessageBox.warning(
+                    self,
+                    tr_ui("login.invalid_name_error", "Ungültiger Name"),
+                    tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
+                )
+                return
+
+            # Check reserved system names
+            if is_free_training_profile(new_name):
+                QMessageBox.warning(
+                    self,
+                    tr_ui("login.reserved_name_error", "Reservierter Name"),
+                    tr_ui("login.reserved_name_error_msg", "Dieser Name ist vom System reserviert und kann nicht verwendet werden.")
+                )
+                return
+
+            # Check if profile already exists in user_dir or base_path
+            dirs_to_check = [os.path.join(get_user_dir(), "profiles")]
+            base_profiles = os.path.join(get_base_path(), "profiles")
+            if os.path.exists(base_profiles) and base_profiles not in dirs_to_check:
+                dirs_to_check.append(base_profiles)
+
+            for p_dir in dirs_to_check:
+                if os.path.exists(p_dir):
+                    for ext in [".db", ".json", "_settings.json"]:
+                        target_file = os.path.join(p_dir, f"{new_name}{ext}")
+                        if os.path.exists(target_file):
+                            QMessageBox.warning(
+                                self,
+                                tr_ui("login.profile_exists_error", "Profil existiert bereits!"),
+                                tr_ui("login.profile_exists_error_msg", "Ein Profil mit dem Namen '{name}' existiert bereits. Wähle einen anderen Namen.", name=new_name)
+                            )
+                            return
+
+            # Rename files in profile directories
+            for p_dir in dirs_to_check:
+                if os.path.exists(p_dir):
+                    # Rename settings first
+                    old_settings = os.path.join(p_dir, f"{old_name}_settings.json")
+                    new_settings = os.path.join(p_dir, f"{new_name}_settings.json")
+                    if os.path.exists(old_settings):
+                        try:
+                            os.replace(old_settings, new_settings)
+                        except Exception as e:
+                            logger.error(f"Failed to rename {old_settings} to {new_settings}: {e}")
+
+                    # Rename DB, JSON, and WAL/SHM
+                    for ext in [".db", ".json", ".db-wal", ".db-shm"]:
+                        old_file = os.path.join(p_dir, f"{old_name}{ext}")
+                        new_file = os.path.join(p_dir, f"{new_name}{ext}")
+                        if os.path.exists(old_file):
+                            try:
+                                os.replace(old_file, new_file)
+                            except Exception as e:
+                                logger.error(f"Failed to rename {old_file} to {new_file}: {e}")
+
+            # Update config.json references
+            try:
+                config_path = os.path.join(get_user_dir(), "config.json")
+                if os.path.exists(config_path):
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = json.load(f)
+                    changed = False
+                    if config.get("last_profile") == old_name:
+                        config["last_profile"] = new_name
+                        changed = True
+                    if config.get("auto_login_profile") == old_name:
+                        config["auto_login_profile"] = new_name
+                        changed = True
+                    if "profile_last_used" in config and isinstance(config["profile_last_used"], dict):
+                        if old_name in config["profile_last_used"]:
+                            ts = config["profile_last_used"].pop(old_name)
+                            config["profile_last_used"][new_name] = ts
+                            changed = True
+                    if changed:
+                        with open(config_path, "w", encoding="utf-8") as f:
+                            json.dump(config, f, indent=4, ensure_ascii=False)
+            except Exception as e:
+                logger.warning(f"Error updating config.json for renamed profile: {e}")
+
+            if self.selected_profile == old_name:
+                self.selected_profile = new_name
+
+            logger.info(f"Profile successfully renamed from '{old_name}' to '{new_name}'")
+            self.load_profiles()
+
+        except Exception as e:
+            import traceback
+            logger.critical(f"Crash in rename_profile: {traceback.format_exc()}")
+            QMessageBox.critical(
+                self,
+                tr_ui("common.error", "Fehler"),
+                f"Profil konnte nicht umbenannt werden:\n{e}"
+            )
 
     def _ask_profile_name(self):
         """Custom profile-name input dialog that avoids Qt crashes caused by

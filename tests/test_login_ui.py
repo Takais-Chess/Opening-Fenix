@@ -260,3 +260,175 @@ def test_ask_profile_name_button_styling(qapp, mock_user_dir, monkeypatch):
         assert "padding: 0" in data["styleSheet"]
 
 
+def test_context_menu_styling_and_actions(qapp, mock_user_dir, monkeypatch):
+    """Test that right-clicking a profile button creates a cleanly styled context menu with rename and delete actions."""
+    from PyQt6.QtWidgets import QMenu
+    from PyQt6.QtCore import QPoint
+
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+
+    profile_name = "UserForMenu"
+    profile_path = os.path.join(mock_user_dir, "profiles", f"{profile_name}.db")
+    with open(profile_path, "w") as f:
+        f.write("dummy")
+
+    login = LoginDialog()
+    login.load_profiles()
+
+    captured_menu = None
+    original_exec = QMenu.exec
+
+    def mock_exec(self, *args, **kwargs):
+        nonlocal captured_menu
+        captured_menu = self
+        return None
+
+    monkeypatch.setattr(QMenu, "exec", mock_exec)
+
+    login.show_context_menu(QPoint(10, 10), profile_name)
+
+    assert captured_menu is not None
+    # Verify stylesheet is not the blacked-out #2c3e50
+    assert "#2c3e50" not in captured_menu.styleSheet()
+    assert "background-color" in captured_menu.styleSheet()
+    assert "QMenu::item" in captured_menu.styleSheet()
+    assert "QMenu::separator" in captured_menu.styleSheet()
+
+    actions = [a.text() for a in captured_menu.actions() if not a.isSeparator()]
+    assert any("umbenennen" in a or "Rename" in a for a in actions)
+    assert any("löschen" in a or "Delete" in a for a in actions)
+    # Verify separator exists between actions
+    assert any(a.isSeparator() for a in captured_menu.actions())
+
+
+def test_rename_profile_success(qapp, mock_user_dir, monkeypatch):
+    """Test renaming a profile renames all associated files and updates config.json."""
+    import json
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+
+    old_name = "OldName"
+    new_name = "NewName"
+    profiles_dir = os.path.join(mock_user_dir, "profiles")
+    db_path = os.path.join(profiles_dir, f"{old_name}.db")
+    settings_path = os.path.join(profiles_dir, f"{old_name}_settings.json")
+    wal_path = os.path.join(profiles_dir, f"{old_name}.db-wal")
+    with open(db_path, "w") as f: f.write("dummy-db")
+    with open(settings_path, "w") as f: f.write('{"notation_language": "de"}')
+    with open(wal_path, "w") as f: f.write("wal-data")
+
+    config_path = os.path.join(mock_user_dir, "config.json")
+    with open(config_path, "w") as f:
+        json.dump({
+            "last_profile": old_name,
+            "auto_login_profile": old_name,
+            "profile_last_used": {old_name: "2026-09-22T10:00:00"}
+        }, f)
+
+    login = LoginDialog()
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: (new_name, True))
+
+    login.rename_profile(old_name)
+
+    # Old files should not exist
+    assert not os.path.exists(db_path)
+    assert not os.path.exists(settings_path)
+    assert not os.path.exists(wal_path)
+
+    # New files must exist
+    new_db = os.path.join(profiles_dir, f"{new_name}.db")
+    new_settings = os.path.join(profiles_dir, f"{new_name}_settings.json")
+    new_wal = os.path.join(profiles_dir, f"{new_name}.db-wal")
+    assert os.path.exists(new_db)
+    assert os.path.exists(new_settings)
+    assert os.path.exists(new_wal)
+
+    # Config must be updated
+    with open(config_path, "r") as f:
+        cfg = json.load(f)
+    assert cfg.get("last_profile") == new_name
+    assert cfg.get("auto_login_profile") == new_name
+    assert new_name in cfg.get("profile_last_used", {})
+    assert cfg["profile_last_used"][new_name] == "2026-09-22T10:00:00"
+    assert old_name not in cfg["profile_last_used"]
+
+    # Verify buttons updated
+    buttons = login.findChildren(ProfileGridButton)
+    names = [b.text() for b in buttons]
+    assert new_name in names
+    assert old_name not in names
+
+
+def test_rename_profile_validation(qapp, mock_user_dir, monkeypatch):
+    """Test validation cases: empty name, invalid chars, reserved names, existing names."""
+    from PyQt6.QtWidgets import QMessageBox
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+
+    old_name = "UserOriginal"
+    existing_name = "UserExisting"
+    profiles_dir = os.path.join(mock_user_dir, "profiles")
+    with open(os.path.join(profiles_dir, f"{old_name}.db"), "w") as f: f.write("1")
+    with open(os.path.join(profiles_dir, f"{existing_name}.db"), "w") as f: f.write("2")
+
+    login = LoginDialog()
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args: warnings.append(args[2]))
+
+    # 1. Unchanged name (no warning, no change)
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: (old_name, True))
+    login.rename_profile(old_name)
+    assert len(warnings) == 0
+
+    # 2. Empty name
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: ("   ", True))
+    login.rename_profile(old_name)
+    assert len(warnings) == 1
+
+    # 3. Invalid characters
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: ("Invalid/Name", True))
+    login.rename_profile(old_name)
+    assert len(warnings) == 2
+
+    # 4. Reserved name
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: ("Freies Training", True))
+    login.rename_profile(old_name)
+    assert len(warnings) == 3
+
+    # 5. Name already exists
+    monkeypatch.setattr(login, "_ask_rename_profile", lambda curr: (existing_name, True))
+    login.rename_profile(old_name)
+    assert len(warnings) == 4
+
+    # Ensure old file was never modified or renamed
+    assert os.path.exists(os.path.join(profiles_dir, f"{old_name}.db"))
+
+
+def test_ask_rename_profile_dialog(qapp, mock_user_dir, monkeypatch):
+    """Test that _ask_rename_profile pre-fills the current name and can accept changes."""
+    from PyQt6.QtWidgets import QDialog, QLineEdit
+
+    monkeypatch.setattr("opening_fenix.gui.dialogs.login_dialog.get_user_dir", lambda: mock_user_dir)
+    login = LoginDialog()
+
+    original_exec = QDialog.exec
+    inspected_text = None
+
+    def mock_exec(self):
+        nonlocal inspected_text
+        if isinstance(self, QDialog) and ("umbenennen" in self.windowTitle().lower() or "rename" in self.windowTitle().lower()):
+            line_edit = self.findChild(QLineEdit)
+            inspected_text = line_edit.text()
+            line_edit.setText("UpdatedName")
+            return QDialog.DialogCode.Accepted
+        return original_exec(self)
+
+    monkeypatch.setattr(QDialog, "exec", mock_exec)
+
+    new_name, ok = login._ask_rename_profile("InitialName")
+    assert ok is True
+    assert inspected_text == "InitialName"
+    assert new_name == "UpdatedName"
+
+
+
+

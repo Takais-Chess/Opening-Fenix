@@ -7,10 +7,10 @@ from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments, normalize_castling_uci
 from opening_fenix.core.services.repair_service import repair_repertoire_health
-from opening_fenix.core.services.course_import_service import SanitizedPGNReader
+from opening_fenix.core.services.course_import_service import SanitizedPGNReader, format_variation_tree_as_text
 from opening_fenix.core.translation import tr_ui
 
-def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None, target_lang: str = "de") -> Tuple[bool, str]:
+def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None, target_lang: str = "de", subvariations_as_comments: bool = False) -> Tuple[bool, str]:
     """Imports a PGN file into a new or existing repertoire database using bulk operations."""
     db_path = get_repertoire_db_path(repo_name)
     is_new_db = not os.path.exists(db_path)
@@ -78,77 +78,169 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                     processed_bytes = f_pgn.tell()
                     progress_callback(min(100, int((processed_bytes / total_file_size) * 100)))
             
-                node_stack = []
-                initial_board = game.board()
-                for node in reversed(game.variations):
-                    node_stack.append((node, initial_board.copy()))
+                if subvariations_as_comments:
+                    c_lang = target_lang if target_lang and target_lang != "auto" else "de"
+                    board = game.board()
+                    for current_node in game.mainline():
+                        move = current_node.move
+                        from_fen = " ".join(board.fen().split(" ")[:4])
 
-                while node_stack:
-                    current_node, board = node_stack.pop()
-                    move = current_node.move
-                    from_fen = " ".join(board.fen().split(" ")[:4])
+                        try:
+                            board.push(move)
+                        except Exception:
+                            continue
 
-                    try:
-                        board.push(move)
-                    except Exception as e:
-                        continue
+                        to_fen = " ".join(board.fen().split(" ")[:4])
 
-                    to_fen = " ".join(board.fen().split(" ")[:4])
-                    
-                    from_pos_id = pos_cache.get(from_fen)
-                    if not from_pos_id:
-                        max_pos_id += 1
-                        from_pos_id = max_pos_id
-                        pos_cache[from_fen] = from_pos_id
-                        new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+                        from_pos_id = pos_cache.get(from_fen)
+                        if not from_pos_id:
+                            max_pos_id += 1
+                            from_pos_id = max_pos_id
+                            pos_cache[from_fen] = from_pos_id
+                            new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
 
-                    to_pos_id = pos_cache.get(to_fen)
-                    if not to_pos_id:
-                        max_pos_id += 1
-                        to_pos_id = max_pos_id
-                        pos_cache[to_fen] = to_pos_id
-                        new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
-                    
-                    if current_node.comment:
-                        lang = target_lang if target_lang and target_lang != "auto" else "de"
-                        if to_fen in comments_to_append:
-                            comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=lang)
-                        else:
-                            comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=lang)
+                        to_pos_id = pos_cache.get(to_fen)
+                        if not to_pos_id:
+                            max_pos_id += 1
+                            to_pos_id = max_pos_id
+                            pos_cache[to_fen] = to_pos_id
+                            new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
 
-                    incoming_nag = next(iter(current_node.nags), 0)
-                    move_san = current_node.san()
-                    uci_str = normalize_castling_uci(move.uci(), move_san)
-                    move_entry = move_cache.get((from_pos_id, uci_str))
-                    
-                    if not move_entry:
-                        max_move_id += 1
-                        move_id = max_move_id
-                        move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                        new_moves_to_insert.append(
-                            Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                        )
-                    else:
-                        move_id, existing_nag = move_entry
-                        if incoming_nag != 0 and existing_nag != incoming_nag:
-                            moves_to_update_nag[move_id] = incoming_nag
+                        # 1. Mainline node comment
+                        combined_node_comment = ""
+                        if current_node.starting_comment:
+                            combined_node_comment = current_node.starting_comment.strip()
+                        if current_node.comment:
+                            c = current_node.comment.strip()
+                            combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
+
+                        if combined_node_comment:
+                            if to_fen in comments_to_append:
+                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=c_lang)
+                            else:
+                                comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=c_lang)
+
+                        # 2. Sibling subvariations on parent
+                        parent = current_node.parent
+                        if parent and len(parent.variations) > 1:
+                            for v in parent.variations:
+                                if v != current_node:
+                                    sub_text = format_variation_tree_as_text(v, parent.board())
+                                    if sub_text:
+                                        if to_fen in comments_to_append:
+                                            comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], sub_text, default_lang=c_lang)
+                                        else:
+                                            comments_to_append[to_fen] = combine_comments("", sub_text, default_lang=c_lang)
+
+                        incoming_nag = next(iter(current_node.nags), 0)
+                        move_san = current_node.san()
+                        uci_str = normalize_castling_uci(move.uci(), move_san)
+                        move_entry = move_cache.get((from_pos_id, uci_str))
+
+                        if not move_entry:
+                            max_move_id += 1
+                            move_id = max_move_id
                             move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                    
-                    # REPERTOIRE MOVE LOGIC
-                    if move_id not in rep_move_cache:
-                        rep_move_cache[move_id] = level_order
-                        new_rep_moves_to_insert.append(
-                            RepertoireMove(move_id=move_id, level=level_order)
-                        )
-                        new_moves_count += 1
-                    elif level_order < rep_move_cache[move_id]:
-                        rep_move_cache[move_id] = level_order
-                        existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                        if existing_rm:
-                            existing_rm.level = level_order
-                    
-                    for var in reversed(current_node.variations):
-                        node_stack.append((var, board.copy()))
+                            new_moves_to_insert.append(
+                                Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                            )
+                        else:
+                            move_id, existing_nag = move_entry
+                            if incoming_nag != 0 and existing_nag != incoming_nag:
+                                moves_to_update_nag[move_id] = incoming_nag
+                                move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+
+                        # REPERTOIRE MOVE LOGIC
+                        if move_id not in rep_move_cache:
+                            rep_move_cache[move_id] = level_order
+                            new_rep_moves_to_insert.append(
+                                RepertoireMove(move_id=move_id, level=level_order)
+                            )
+                            new_moves_count += 1
+                        elif level_order < rep_move_cache[move_id]:
+                            rep_move_cache[move_id] = level_order
+                            existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
+                            if existing_rm:
+                                existing_rm.level = level_order
+                else:
+                    node_stack = []
+                    initial_board = game.board()
+                    for node in reversed(game.variations):
+                        node_stack.append((node, initial_board.copy()))
+
+                    while node_stack:
+                        current_node, board = node_stack.pop()
+                        move = current_node.move
+                        from_fen = " ".join(board.fen().split(" ")[:4])
+
+                        try:
+                            board.push(move)
+                        except Exception as e:
+                            continue
+
+                        to_fen = " ".join(board.fen().split(" ")[:4])
+                        
+                        from_pos_id = pos_cache.get(from_fen)
+                        if not from_pos_id:
+                            max_pos_id += 1
+                            from_pos_id = max_pos_id
+                            pos_cache[from_fen] = from_pos_id
+                            new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+
+                        to_pos_id = pos_cache.get(to_fen)
+                        if not to_pos_id:
+                            max_pos_id += 1
+                            to_pos_id = max_pos_id
+                            pos_cache[to_fen] = to_pos_id
+                            new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
+                        
+                        combined_node_comment = ""
+                        if current_node.starting_comment:
+                            combined_node_comment = current_node.starting_comment.strip()
+                        if current_node.comment:
+                            c = current_node.comment.strip()
+                            combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
+
+                        if combined_node_comment:
+                            lang = target_lang if target_lang and target_lang != "auto" else "de"
+                            if to_fen in comments_to_append:
+                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=lang)
+                            else:
+                                comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=lang)
+
+                        incoming_nag = next(iter(current_node.nags), 0)
+                        move_san = current_node.san()
+                        uci_str = normalize_castling_uci(move.uci(), move_san)
+                        move_entry = move_cache.get((from_pos_id, uci_str))
+                        
+                        if not move_entry:
+                            max_move_id += 1
+                            move_id = max_move_id
+                            move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                            new_moves_to_insert.append(
+                                Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                            )
+                        else:
+                            move_id, existing_nag = move_entry
+                            if incoming_nag != 0 and existing_nag != incoming_nag:
+                                moves_to_update_nag[move_id] = incoming_nag
+                                move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                        
+                        # REPERTOIRE MOVE LOGIC
+                        if move_id not in rep_move_cache:
+                            rep_move_cache[move_id] = level_order
+                            new_rep_moves_to_insert.append(
+                                RepertoireMove(move_id=move_id, level=level_order)
+                            )
+                            new_moves_count += 1
+                        elif level_order < rep_move_cache[move_id]:
+                            rep_move_cache[move_id] = level_order
+                            existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
+                            if existing_rm:
+                                existing_rm.level = level_order
+                        
+                        for var in reversed(current_node.variations):
+                            node_stack.append((var, board.copy()))
         
         # 4. BULK DB EXECUTION
         if new_positions_to_insert:

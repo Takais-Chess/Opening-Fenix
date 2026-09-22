@@ -447,67 +447,21 @@ def ensure_user_data_seeded():
         except Exception as e:
             print(f"Warning: Could not save build type to user config: {e}")
 
-    # 2. Preserve and migrate existing user profiles from older installations or default AppData
+    # 2. Ensure profiles directory exists (profiles are user-created only, never bundled)
     dest_profiles = os.path.join(user_dir, "profiles")
     os.makedirs(dest_profiles, exist_ok=True)
 
-    legacy_profile_sources = []
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        legacy_profile_sources.append(exe_dir)
-        legacy_profile_sources.append(os.path.join(exe_dir, "_internal"))
-        appdata_dir = os.path.join(os.getenv("APPDATA") or os.path.expanduser("~"), "Opening Fenix")
-        if os.path.exists(appdata_dir) and os.path.abspath(appdata_dir) != os.path.abspath(user_dir):
-            legacy_profile_sources.append(appdata_dir)
-
-    for l_src in legacy_profile_sources:
-        l_prof = os.path.join(l_src, "profiles")
-        if os.path.exists(l_prof) and os.path.isdir(l_prof) and os.path.abspath(l_prof) != os.path.abspath(dest_profiles):
-            for item in os.listdir(l_prof):
-                if item.endswith(".db") or item.endswith("_settings.json") or (item.endswith(".json") and not item == "config.json"):
-                    s_file = os.path.join(l_prof, item)
-                    d_file = os.path.join(dest_profiles, item)
-                    if os.path.isfile(s_file):
-                        should_migrate = not os.path.exists(d_file)
-                        if not should_migrate and item.endswith(".db"):
-                            try:
-                                if os.path.getsize(d_file) <= 36864 and os.path.getsize(s_file) > 36864:
-                                    should_migrate = True
-                            except Exception:
-                                pass
-                        if should_migrate:
-                            try:
-                                shutil.copy2(s_file, d_file)
-                            except Exception as e:
-                                print(f"Warning: Could not preserve legacy profile {s_file} to {d_file}: {e}")
-
-    # 3. Seed profiles and repertoires
+    # 3. Seed repertoires
     is_pub = is_public_version()
 
-    profiles_seeded = False
     repertoires_seeded = False
     if os.path.exists(user_config):
         try:
             with open(user_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            profiles_seeded = cfg.get("profiles_seeded", False)
             repertoires_seeded = cfg.get("repertoires_seeded", False)
         except Exception:
             pass
-
-    # If profiles_seeded is not yet recorded, check if profiles already exist in user_dir
-    dest_profiles = os.path.join(user_dir, "profiles")
-    if not profiles_seeded and os.path.exists(dest_profiles) and os.listdir(dest_profiles):
-        profiles_seeded = True
-        if os.path.exists(user_config):
-            try:
-                with open(user_config, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                cfg["profiles_seeded"] = True
-                with open(user_config, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, indent=4, ensure_ascii=False)
-            except Exception:
-                pass
 
     # If repertoires_seeded is not yet recorded, check if repertoires already exist in user_dir
     dest_repertoires = os.path.join(user_dir, "repertoires")
@@ -530,39 +484,26 @@ def ensure_user_data_seeded():
         if os.path.exists(cust_repo_dir) and any(os.path.isdir(os.path.join(cust_repo_dir, d)) for d in os.listdir(cust_repo_dir)):
             custom_has_repertoires = True
 
-    for folder in ["profiles", "repertoires"]:
-        if is_pub and folder == "profiles":
-            continue
-        if folder == "profiles" and profiles_seeded:
-            # Do NOT re-seed profiles once initial seeding is complete;
-            # otherwise user-deleted profiles will reappear on restart.
-            continue
-        if folder == "repertoires" and custom_has_repertoires:
-            # When a custom storage directory (e.g. Google Drive / OneDrive) is configured and
-            # already populated with user repertoires, it serves as the single source of truth.
-            # Do not pull/seed repertoires from local bundled or legacy source folders.
-            continue
+    if not custom_has_repertoires:
         # For repertoires without a custom dir: We do NOT skip based on repertoires_seeded flag.
         # Any missing repertoire in user_dir will be copied, but existing repertoires
         # are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
-
-        dest_folder = os.path.join(user_dir, folder)
+        dest_folder = os.path.join(user_dir, "repertoires")
         if not os.path.exists(dest_folder):
             os.makedirs(dest_folder, exist_ok=True)
             
         for src in sources:
-            src_folder = os.path.join(src, folder)
+            src_folder = os.path.join(src, "repertoires")
             if os.path.exists(src_folder) and os.path.isdir(src_folder):
                 for item in os.listdir(src_folder):
                     s_path = os.path.join(src_folder, item)
                     d_path = os.path.join(dest_folder, item)
                     
-                    if folder == "repertoires":
-                        is_ex = is_example_repertoire(item)
-                        if is_pub and not is_ex:
-                            continue
-                        if not is_pub and is_ex:
-                            continue
+                    is_ex = is_example_repertoire(item)
+                    if is_pub and not is_ex:
+                        continue
+                    if not is_pub and is_ex:
+                        continue
 
                     if not os.path.exists(d_path):
                         try:
@@ -573,12 +514,11 @@ def ensure_user_data_seeded():
                         except Exception as e:
                             print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
 
-    # Mark profiles and repertoires as seeded in config.json after seeding
-    if (not profiles_seeded or not repertoires_seeded) and os.path.exists(user_config):
+    # Mark repertoires as seeded in config.json after seeding
+    if not repertoires_seeded and os.path.exists(user_config):
         try:
             with open(user_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            cfg["profiles_seeded"] = True
             cfg["repertoires_seeded"] = True
             with open(user_config, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=4, ensure_ascii=False)
@@ -765,8 +705,9 @@ def is_public_version() -> bool:
     Returns True if running the public release/version, False if private.
     Checks:
     1. Environment variable FENIX_SHARE_BUILD == '1', FENIX_PUBLIC_BUILD == '1', or APP_BUILD_TYPE == 'Public'
-    2. config.json 'is_public' setting (explicitly True/False)
-    3. Bundled 'PUBLIC_VERSION' or 'public.flag' file in base path or user path
+    2. Bundled 'PUBLIC_VERSION' or 'public.flag' file in base path or exe path
+    3. config.json 'is_public' setting (explicitly True/False)
+    4. Marker file in user path
     """
     env_share = os.environ.get('FENIX_SHARE_BUILD') == '1'
     env_public = os.environ.get('FENIX_PUBLIC_BUILD') == '1'
@@ -774,7 +715,15 @@ def is_public_version() -> bool:
     if env_share or env_public or env_build_type:
         return True
 
-    # Check config.json in user dir or base dir first
+    # Check for marker file in app bundle first (get_base_path() or exe dir)
+    bundle_dirs = [get_base_path()]
+    if getattr(sys, 'frozen', False):
+        bundle_dirs.append(os.path.dirname(sys.executable))
+    for dir_path in bundle_dirs:
+        if os.path.exists(os.path.join(dir_path, "PUBLIC_VERSION")) or os.path.exists(os.path.join(dir_path, "public.flag")):
+            return True
+
+    # Check config.json in user dir or base dir
     for dir_path in [get_user_dir(), get_base_path()]:
         config_path = os.path.join(dir_path, "config.json")
         if os.path.exists(config_path):
@@ -788,10 +737,9 @@ def is_public_version() -> bool:
             except Exception:
                 pass
 
-    # Check for marker file in base_path or user_dir
-    for dir_path in [get_base_path(), get_user_dir()]:
-        if os.path.exists(os.path.join(dir_path, "PUBLIC_VERSION")) or os.path.exists(os.path.join(dir_path, "public.flag")):
-            return True
+    # Check for marker file in user_dir
+    if os.path.exists(os.path.join(get_user_dir(), "PUBLIC_VERSION")) or os.path.exists(os.path.join(get_user_dir(), "public.flag")):
+        return True
 
     return False
 

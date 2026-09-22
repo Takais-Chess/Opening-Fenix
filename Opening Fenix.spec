@@ -19,8 +19,6 @@ def get_safe_tree_datas(src_dir):
     return datas
 
 datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
-if not is_share and os.path.exists('profiles'):
-    datas_list.extend(get_safe_tree_datas('profiles'))
 if os.path.exists('repertoires'):
     datas_list.extend(get_safe_tree_datas('repertoires'))
 

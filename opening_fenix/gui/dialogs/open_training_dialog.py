@@ -88,6 +88,7 @@ class OpenTrainingSetupDialog(QDialog):
                 height: {scale(11)}px;
             }}
             QComboBox QAbstractItemView {{
+                min-width: {scale(75)}px;
                 background-color: white;
                 color: {COLORS['brown_text']};
                 selection-background-color: rgba(211, 84, 0, 0.15);

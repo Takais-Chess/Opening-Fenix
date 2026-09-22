@@ -112,7 +112,7 @@ class PGNImportThread(QThread):
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, pgn_path, repo_name, side, level_name, level_order, target_lang="de"):
+    def __init__(self, pgn_path, repo_name, side, level_name, level_order, target_lang="de", subvariations_as_comments: bool = False):
         super().__init__()
         self.pgn_path = pgn_path
         self.repo_name = repo_name
@@ -120,6 +120,7 @@ class PGNImportThread(QThread):
         self.level_name = level_name
         self.level_order = level_order
         self.target_lang = target_lang
+        self.subvariations_as_comments = subvariations_as_comments
 
     def run(self):
         success, msg = import_pgn_to_db(
@@ -129,7 +130,8 @@ class PGNImportThread(QThread):
             self.level_name,
             self.level_order,
             progress_callback=self.progress_signal.emit,
-            target_lang=self.target_lang
+            target_lang=self.target_lang,
+            subvariations_as_comments=self.subvariations_as_comments
         )
         self.finished_signal.emit(success, msg)
 

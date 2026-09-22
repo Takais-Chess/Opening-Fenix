@@ -76,8 +76,8 @@ def _run_iscc(iscc_exe, iss_file, app_version, build_type):
 
 
 def build_private(dist_dir, iscc_exe, iss_file, app_version):
-    """Compile the PRIVATE installer (all profiles & repertoires included)."""
-    print("\n3a. Compiling PRIVATE Installer (with profiles & all repertoires, engines excluded)...")
+    """Compile the PRIVATE installer (non-example repertoires, no profiles, engines excluded)."""
+    print("\n3a. Compiling PRIVATE Installer (non-example repertoires only, engines excluded)...")
 
     _clean_engines(dist_dir)
 
@@ -86,15 +86,36 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
         if os.path.exists(pub_marker):
             os.remove(pub_marker)
 
-    for folder in ['profiles', 'repertoires']:
-        if os.path.exists(folder):
-            for target_base in [dist_dir, os.path.join(dist_dir, '_internal')]:
-                if os.path.exists(target_base):
-                    dst = os.path.join(target_base, folder)
-                    if os.path.exists(dst):
-                        safe_rmtree(dst)
-                    shutil.copytree(folder, dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock'))
-                    print(f" -> Synced {folder} to {dst}")
+    # Remove any profiles from the bundle (profiles are user-created only)
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'profiles':
+                p_dir = os.path.join(root_dir_path, d)
+                safe_rmtree(p_dir)
+                print(f" -> Removed profile directory '{p_dir}' from private bundle")
+
+    # Sync repertoires into the bundle
+    if os.path.exists('repertoires'):
+        for target_base in [dist_dir, os.path.join(dist_dir, '_internal')]:
+            if os.path.exists(target_base):
+                dst = os.path.join(target_base, 'repertoires')
+                if os.path.exists(dst):
+                    safe_rmtree(dst)
+                shutil.copytree('repertoires', dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock'))
+                print(f" -> Synced repertoires to {dst}")
+
+    # Remove example/sample repertoires (private installer only ships non-example repos)
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'repertoires':
+                repo_dir = os.path.join(root_dir_path, d)
+                for item in os.listdir(repo_dir):
+                    item_path = os.path.join(repo_dir, item)
+                    item_lower = item.lower()
+                    if os.path.isdir(item_path) and ("example" in item_lower or "sample" in item_lower):
+                        safe_rmtree(item_path)
+                        safe_item = item.encode('ascii', errors='replace').decode('ascii')
+                        print(f" -> Removed example repertoire '{safe_item}' from '{repo_dir}'")
 
     res = _run_iscc(iscc_exe, iss_file, app_version, 'Private')
     if res.returncode != 0:
@@ -113,14 +134,6 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
             with open(pub_marker, 'w', encoding='utf-8') as f:
                 f.write('1')
             print(f" -> Placed PUBLIC_VERSION marker at {pub_marker}")
-
-    # Remove all profiles from the bundle
-    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
-        for d in dirs:
-            if d.lower() == 'profiles':
-                p_dir = os.path.join(root_dir_path, d)
-                safe_rmtree(p_dir)
-                print(f" -> Removed profile directory '{p_dir}' from public bundle")
 
     # Clean repertoires across the entire bundle, keeping ONLY example/sample folders
     for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):

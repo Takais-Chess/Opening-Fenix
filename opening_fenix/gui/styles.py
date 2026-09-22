@@ -376,6 +376,7 @@ def get_main_window_style():
     }}
 
     QComboBox QAbstractItemView {{
+        min-width: {scale(75)}px;
         background-color: {COLORS['beige']};
         color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
@@ -624,6 +625,7 @@ def get_creator_window_style():
         image: none;
     }}
     QComboBox QAbstractItemView {{
+        min-width: {scale(75)}px;
         background-color: {COLORS['beige']};
         color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
@@ -827,6 +829,7 @@ def get_repo_settings_style():
     }}
 
     QComboBox QAbstractItemView {{
+        min-width: {scale(75)}px;
         background-color: {COLORS['beige']};
         color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
@@ -904,6 +907,7 @@ def get_export_dialog_style():
     }}
 
     QComboBox QAbstractItemView {{
+        min-width: {scale(75)}px;
         background-color: {COLORS['beige']};
         color: {COLORS['brown_text']};
         border: 1px solid {COLORS['glass_border']};
@@ -1087,6 +1091,7 @@ def get_bw_glass_style():
     }}
 
     QComboBox QAbstractItemView {{
+        min-width: {scale(75)}px;
         background-color: white;
         color: {COLORS['bw_text']};
         selection-background-color: rgba(0, 0, 0, 0.08);
@@ -1325,7 +1330,7 @@ def get_login_dialog_style():
     QMenu {{
         background-color: {COLORS['beige']};
         color: {COLORS['brown_text']};
-        border: 1px solid {COLORS['glass_border']};
+        border: 1px solid {COLORS['border']};
         border-radius: {scale(8)}px;
         padding: {scale(4)}px 0px;
     }}
@@ -1339,6 +1344,11 @@ def get_login_dialog_style():
         color: {COLORS['burnt_orange']};
         border-radius: {scale(4)}px;
         margin: 0px {scale(4)}px;
+    }}
+    QMenu::separator {{
+        height: 1px;
+        background-color: rgba(62, 39, 35, 0.15);
+        margin: {scale(4)}px {scale(8)}px;
     }}
     
     /* Global ToolTip Styling */

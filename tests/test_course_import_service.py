@@ -477,6 +477,36 @@ def test_is_intro_detection():
     g7 = chess.pgn.read_game(io.StringIO(pgn7))
     assert is_game_intro(g7) is False
 
+    # 8. White tag containing instructions with deep moves
+    pgn8 = """[Event "Course"]
+[White "Chapter 1 - Instructions"]
+[Black "Openings"]
+
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 Nf6 *
+"""
+    g8 = chess.pgn.read_game(io.StringIO(pgn8))
+    assert is_game_intro(g8) is True
+
+    # 9. White tag containing German terms (Anleitung, Hinweise, Leitfaden) with moves
+    pgn9 = """[Event "Course"]
+[White "Wichtige Hinweise & Anleitung zum Repertoire"]
+[Black "Openings"]
+
+1. d4 d5 2. c4 e6 3. Nc3 Nf6 *
+"""
+    g9 = chess.pgn.read_game(io.StringIO(pgn9))
+    assert is_game_intro(g9) is True
+
+    # 10. White tag containing Guide / Guidelines
+    pgn10 = """[Event "Course"]
+[White "Guidelines for the Middlegame"]
+[Black "Openings"]
+
+1. e4 c5 2. Nf3 d6 *
+"""
+    g10 = chess.pgn.read_game(io.StringIO(pgn10))
+    assert is_game_intro(g10) is True
+
 def test_classify_chapter_intro_variants():
     assert classify_chapter("Info") == CATEGORY_INTRO
     assert classify_chapter("Infos") == CATEGORY_INTRO
@@ -488,6 +518,10 @@ def test_classify_chapter_intro_variants():
     assert classify_chapter("Ueberblick") == CATEGORY_INTRO
     assert classify_chapter("Vorwort") == CATEGORY_INTRO
     assert classify_chapter("[%info] Course Notes") == CATEGORY_INTRO
+    assert classify_chapter("Instructions") == CATEGORY_INTRO
+    assert classify_chapter("Chapter 1: Anleitung & Hinweise") == CATEGORY_INTRO
+    assert classify_chapter("Repertoire Leitfaden") == CATEGORY_INTRO
+    assert classify_chapter("General Guidelines") == CATEGORY_INTRO
 
 def test_embedded_intro_extraction_in_course_import(temp_course_env):
     # Chapter 1 is a normal opening chapter (Level 2), but contains an embedded [%info] game

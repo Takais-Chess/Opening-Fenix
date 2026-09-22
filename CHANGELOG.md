@@ -2,6 +2,22 @@
  
 All notable changes to this project will be documented in this file.
  
+## [1.2.0] - 2026-09-22
+
+### Added & Improved
+- **PGN Subvariation Import Controls**: Introduced granular subvariation import options allowing users to enable/disable subvariations and limit tree import depth, preserving clean repertoire structures.
+- **Modernized Authentication & Login Flow**: Redesigned Chessable and Lichess login dialogs with real-time token validation, secure credential storage, and responsive glassmorphism styling.
+- **Hole Finder & Candidate Moves Prioritization**: Incremental MultiPV evaluation for precise centipawn loss calculations and transposition-aware move rankings.
+- **Creator Window Auto-Fit Geometry**: Hardened responsive board sizing accounting for container margins, preserving 1:1 square aspect ratios during window resizes.
+- **Clean Public Installer Distribution**: Refined packaging pipeline to strictly exclude local user profiles and personal repertoires from the public installer build.
+
+## [1.1.0] - 2026-09-19
+
+### Added & Improved
+- **ChessBase Board Annotations**: Interactive board drawing tools (arrows and circle highlights) with modifier key color customization.
+- **Bidirectional PGN Tag Compatibility**: Full support for standard ChessBase `[%cal ...]` and `[%csl ...]` tags during PGN import and export.
+- **Smart Trainer Display**: Hidden annotations during training challenges that automatically reveal at variation endpoints to display the author's strategic summary.
+
 ## [1.0.0] - 2026-09-18
  
 ### Added & Improved
