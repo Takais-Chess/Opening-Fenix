@@ -1007,8 +1007,12 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                 cp_loss = best_score - u2_score
                                                 if cp_loss <= 10:
                                                     is_best = True
-                                                    quality = "solide"
-                                                    quality_label = f"🟡 Solide (-{cp_loss} cp)" if cp_loss > 0 else "🟢 Ausgezeichnet"
+                                                    if cp_loss <= 0:
+                                                        quality = "ausgezeichnet"
+                                                        quality_label = "🟢 Ausgezeichnet"
+                                                    else:
+                                                        quality = "solide"
+                                                        quality_label = f"🟡 Solide (-{cp_loss} cp)"
                                                     logger.info(f"[Transpos-2M] ✓ m2={u2} accepted: loss {cp_loss} cp <= 10 cp (best={best_uci} [{best_score} cp], m2=[{u2_score} cp])")
                                                 else:
                                                     logger.info(f"[Transpos-2M] ✗ m2={u2} rejected: loss {cp_loss} cp > 10 cp (best={best_uci} [{best_score} cp], m2=[{u2_score} cp])")

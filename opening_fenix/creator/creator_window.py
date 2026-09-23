@@ -6266,9 +6266,9 @@ class CreatorWindow(QMainWindow):
                             p_qual_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if p_qual == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
                         qual_item = QTableWidgetItem(p_qual_label)
                         qual_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                        if p_qual == "ausgezeichnet":
+                        if p_qual == "ausgezeichnet" or (p_qual_label and "🟢" in p_qual_label):
                             qual_item.setForeground(QColor(COLORS['success_green']))
-                        elif p_qual == "solide":
+                        elif p_qual == "solide" or (p_qual_label and "🟡" in p_qual_label):
                             qual_item.setForeground(QColor("#f1c40f"))
                         else:
                             qual_item.setForeground(QColor(COLORS['light_text']))
@@ -6632,7 +6632,8 @@ class CreatorWindow(QMainWindow):
             if not q_label:
                 q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
             item_qual = QTableWidgetItem(q_label)
-            item_qual.setForeground(QColor(COLORS['success_green'] if q == 'ausgezeichnet' else "#f1c40f"))
+            is_exc = (q == 'ausgezeichnet') or (q_label and '🟢' in q_label)
+            item_qual.setForeground(QColor(COLORS['success_green'] if is_exc else "#f1c40f"))
         item_qual.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_transpositions.setItem(r, 3, item_qual)
 
@@ -8283,7 +8284,8 @@ class CreatorWindow(QMainWindow):
                 if not q_label:
                     q_label = tr_ui("creator.tag_quality_excellent", "🟢 Ausgezeichnet") if q == "ausgezeichnet" else tr_ui("creator.tag_quality_sound", "🟡 Solide")
                 item_pop = QTableWidgetItem(q_label)
-                if q == 'ausgezeichnet':
+                is_exc = (q == 'ausgezeichnet') or (q_label and '🟢' in q_label)
+                if is_exc:
                     item_pop.setForeground(QBrush(QColor(COLORS['success_green'])))
                 else:
                     item_pop.setForeground(QBrush(QColor("#f1c40f")))

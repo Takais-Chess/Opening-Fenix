@@ -1282,6 +1282,65 @@ def test_2move_transposition_within_10cp_accepted(backend):
     assert '🟡' in match[0]['quality_label']
 
 
+def test_2move_transposition_tied_score_is_ausgezeichnet(backend):
+    """
+    When the user's transposition move is not the #1 UCI string, but is tied with the best score
+    (loss = 0 cp), it must be accepted with quality 'ausgezeichnet' and '🟢 Ausgezeichnet'.
+    """
+    from unittest.mock import MagicMock
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="French")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3, p_fre_e6])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_e6 = Move(from_position_id=p_e4.id, to_position_id=p_fre_e6.id, uci="e7e6", san="e6")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+
+    session.add_all([m_e4, m_e6, m_nf3])
+    session.flush()
+    for m in [m_e4, m_e6, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    mock_engine = MagicMock()
+    class MockScore:
+        def __init__(self, cp):
+            self.cp = cp
+        @property
+        def relative(self):
+            return self
+        def score(self, mate_score=10000):
+            return self.cp
+
+    # Tied evaluation: d2d4 (40 cp), g1f3 (40 cp) -> loss = 0 cp
+    def fake_analyse(board, limit, multipv=1, **kwargs):
+        results = [
+            {"score": MockScore(40), "pv": [chess.Move.from_uci("d2d4")]},
+            {"score": MockScore(40), "pv": [chess.Move.from_uci("g1f3")]},
+        ]
+        return results[:multipv]
+
+    mock_engine.analyse.side_effect = fake_analyse
+
+    transpositions = find_repertoire_transpositions(session, engine=mock_engine)
+    match = [t for t in transpositions if t['depth'] == 2 and 'c5' in t['move_san'] and 'Nf3' in t['move_san']]
+    assert len(match) == 1
+    assert match[0]['quality'] == 'ausgezeichnet'
+    assert '🟢 Ausgezeichnet' in match[0]['quality_label']
+
+
 def test_find_repertoire_transpositions_progress_callback(backend):
     """Verify that find_repertoire_transpositions invokes progress_callback with (curr, total, msg)."""
     session = backend.session
