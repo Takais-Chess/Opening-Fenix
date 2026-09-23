@@ -43,6 +43,7 @@ class CourseGameInfo:
     is_model: bool = False
     is_intro: bool = False
     target_type: str = "" # Inferred default target (e.g. level_1, level_2, tactics, etc.)
+    parsing_errors: List[str] = field(default_factory=list)
 
 @dataclass
 class CourseChapterInfo:
@@ -66,6 +67,7 @@ class CourseAnalysisResult:
     category_counts: Dict[str, int] = field(default_factory=dict)
     cover_image_path: Optional[str] = None
     pgn_path: str = ""
+    parsing_warnings: List[str] = field(default_factory=list)
 
     def __post_init__(self):
         if not self.pgn_path and self.pgn_paths:
@@ -110,52 +112,117 @@ class CourseImportResult:
     embedded_models: int = 0
     embedded_intros: int = 0
     original_pgns_archived: int = 0
+    parsing_warnings: List[str] = field(default_factory=list)
 
 def sanitize_comment_variations(text: str) -> str:
     """
-    Sanitizes commentary notes wrapped in parentheses that start with comments,
-    such as `({Kamsky's approach...} 4...O-O 5.Nbd2 {.})` or `({Let's be consistent.} 8.O-O)`.
-    These are textual explanations with continuation examples rather than valid PGN branching
-    variations. If treated as branching variations, their move numbers cause IllegalMoveError
-    in python-chess and abort the remainder of the game.
-    Converting them to standard comment blocks `{ (...) }` safely preserves all commentary
-    while allowing python-chess to parse the full mainline to completion.
-    """
-    if '(' not in text or '{' not in text:
-        return text
+    Sanitizes commentary notes wrapped in parentheses that are not valid chess variations:
+    1. Parenthesized blocks starting with comments: `({Kamsky's approach...} 4...O-O)`.
+    2. Explanatory cross-references and notes formatted with parentheses, such as:
+       `(6.O-O {is covered via})`, `(5.O-O {in White's remaining bits...})`, `(4.O-O {.})`.
+    3. Mismatched branches where White move numbers (e.g. `6.O-O`) directly follow Black's moves,
+       or Black move numbers (`10...O-O`) directly follow White's moves.
+    4. Malformed comment artifacts like `{(})` or `{)}`.
     
+    Converting these textual notes into standard comment blocks `{ (...) }` safely preserves
+    all author explanations while allowing python-chess to parse the full mainline to completion.
+    """
+    if '(' not in text:
+        return text
+
+    # Clean malformed comment artifacts from Chessable exports like {(}) or {)}
+    text = re.sub(r'\{\s*\(\s*\}\s*\{\s*', '{ ', text)
+    text = re.sub(r'\{\s*\)\s*\}\s*\{\s*', '{ ', text)
+
     result = []
     i = 0
     n = len(text)
+    in_curly = False
+
     while i < n:
-        if text[i] == '(' and i + 1 < n:
-            j = i + 1
-            while j < n and text[j] in ' \t\r\n':
-                j += 1
-            if j < n and text[j] == '{':
-                depth = 1
-                k = i + 1
-                in_brace = False
-                while k < n and depth > 0:
-                    if text[k] == '{':
-                        in_brace = True
-                    elif text[k] == '}':
-                        in_brace = False
-                    elif text[k] == '(' and not in_brace:
-                        depth += 1
-                    elif text[k] == ')' and not in_brace:
-                        depth -= 1
-                    k += 1
-                
-                if depth == 0:
-                    inner_chunk = text[i+1:k-1]
-                    clean = inner_chunk.replace('{', ' ').replace('}', ' ')
+        c = text[i]
+        if c == '{':
+            in_curly = True
+            result.append(c)
+            i += 1
+            continue
+        elif c == '}':
+            in_curly = False
+            result.append(c)
+            i += 1
+            continue
+
+        # ONLY process '(' if we are outside of curly braces {...}
+        if not in_curly and c == '(' and i + 1 < n:
+            depth = 1
+            k = i + 1
+            in_brace = False
+            while k < n and depth > 0:
+                if text[k] == '{':
+                    in_brace = True
+                elif text[k] == '}':
+                    in_brace = False
+                elif text[k] == '(' and not in_brace:
+                    depth += 1
+                elif text[k] == ')' and not in_brace:
+                    depth -= 1
+                k += 1
+
+            if depth == 0:
+                chunk = text[i+1:k-1].strip()
+
+                # Find last mainline token before any variations/comments at this level
+                prefix = text[:i].rstrip()
+                clean_p = re.sub(r'\{[^{}]*\}', '', prefix).rstrip()
+                while clean_p.endswith(')'):
+                    p_depth = 1
+                    p_idx = len(clean_p) - 2
+                    while p_idx >= 0 and p_depth > 0:
+                        if clean_p[p_idx] == ')':
+                            p_depth += 1
+                        elif clean_p[p_idx] == '(':
+                            p_depth -= 1
+                        p_idx -= 1
+                    clean_p = clean_p[:p_idx+1].rstrip()
+                    clean_p = re.sub(r'\{[^{}]*\}', '', clean_p).rstrip()
+
+                tokens = clean_p.split()
+                last_tok = tokens[-1] if tokens else ""
+
+                is_after_white_move = False
+                is_after_black_move = False
+                if tokens:
+                    if re.match(r'^\d+\.(?!\.)', last_tok):
+                        is_after_white_move = True
+                    elif len(tokens) >= 2 and re.match(r'^\d+\.(?!\.)$', tokens[-2]):
+                        is_after_white_move = True
+                    else:
+                        is_after_black_move = True
+
+                is_comment_start = chunk.startswith('{')
+                m_white = re.match(r'^\d+\.(?!\.)\s*([A-Za-z0-9\-+=]+)', chunk)
+                m_black = re.match(r'^\d+\.\.\.\s*([A-Za-z0-9\-+=]+)', chunk)
+
+                convert_to_comment = False
+                if is_comment_start:
+                    convert_to_comment = True
+                elif m_white and is_after_black_move:
+                    convert_to_comment = True
+                elif m_black and is_after_white_move:
+                    convert_to_comment = True
+                elif re.search(r'(?i)\b(is covered via|is covered in|is covered by|move order\b|will transpose\b)', chunk):
+                    convert_to_comment = True
+
+                if convert_to_comment:
+                    clean = chunk.replace('{', ' ').replace('}', ' ')
                     clean = re.sub(r'\s+', ' ', clean).strip()
                     result.append(f" {{ ({clean}) }} ")
                     i = k
                     continue
-        result.append(text[i])
+
+        result.append(c)
         i += 1
+
     return "".join(result)
 
 class SanitizedPGNReader:
@@ -180,7 +247,7 @@ class SanitizedPGNReader:
             return "\n"
         if line.startswith((' ', '\t')) and line.lstrip().startswith('['):
             return line.lstrip()
-        if '(' in line and '{' in line:
+        if '(' in line:
             line = sanitize_comment_variations(line)
         return line
         
@@ -194,10 +261,89 @@ def sanitize_repertoire_name(name: str) -> str:
         name = name.replace(ch, "")
     return re.sub(r'\s+', ' ', name).strip()
 
+GENERIC_EVENT_NAMES = {
+    "?", "untitled", "default chapter", "annotated game", "chess position trainer",
+    "rated blitz game", "rated classical game", "rated rapid game", "rated correspondence game",
+    "casual blitz game", "casual classical game", "casual rapid game", "casual correspondence game",
+    "live chess", "let's play!", "chess.com", "fide world championship",
+    "white repertoire", "black repertoire", "model games", "typical motives", "tactics",
+    "game", "partie", "training", "exercises", "puzzle", "puzzles"
+}
+
+def extract_event_name_from_pgn(pgn_path: str) -> Optional[str]:
+    """
+    Reads the first game's 'Event' tag from a PGN file using fast header parsing.
+    Returns the event name if it's a descriptive course title, or None if missing,
+    too short, or a generic placeholder.
+    """
+    if not pgn_path or not os.path.isfile(pgn_path):
+        return None
+    try:
+        with open(pgn_path, "r", encoding="utf-8", errors="replace") as fp:
+            headers = chess.pgn.read_headers(fp)
+            if not headers:
+                return None
+            event = headers.get("Event", "").strip()
+            if not event or event == "?":
+                return None
+            if event.lower() in GENERIC_EVENT_NAMES:
+                return None
+            if len(event) < 3 or event.isdigit():
+                return None
+            if re.match(r'^(chapter|kapitel)\s*\d+\b', event.strip(), re.IGNORECASE):
+                return None
+            return event
+    except Exception as e:
+        logger.debug(f"Failed to extract Event header from {pgn_path}: {e}")
+        return None
+
+def clean_suggested_name(name: str) -> str:
+    """
+    Cleans up a suggested course name by:
+    - Converting downloader apostrophe patterns like '_s_' or '-s-' into "'s"
+    - Converting underscores '_' into spaces ' '
+    - Stripping trailing part designations (e.g. Part 1, Part 2, Vol 1)
+    - Sanitizing invalid filesystem characters
+    """
+    if not name:
+        return ""
+    # Convert downloader patterns: Gawain_s_1_e4_e5 -> Gawain's_1_e4_e5, Peter-s-French -> Peter's-French
+    name = re.sub(r'([A-Za-z0-9])[_-]s(?=[^A-Za-z0-9]|$)', r"\1's", name)
+    # Replace underscores with spaces
+    name = name.replace("_", " ")
+    # Strip trailing part designations: "- Part 1", "Part 2", "- Part", "Vol 1", etc.
+    name = re.sub(r'[\s\-–—]+(Part|Teil|Volume|Vol)(\b|\s*\d+.*)$', '', name, flags=re.IGNORECASE).rstrip(" -_–—")
+    return sanitize_repertoire_name(name)
+
 def suggest_course_name_from_paths(paths: List[str]) -> str:
-    """Derives a clean repertoire name, stripping Part 1 / Part 2 suffixes if multiple parts."""
+    """
+    Derives a clean repertoire name, preferring the PGN's [Event] tag if available and descriptive,
+    otherwise deriving and cleaning the name from file paths (stripping Part 1 / Part 2 suffixes
+    and replacing downloader underscores with proper spaces and apostrophes).
+    """
     if not paths:
         return "New Course"
+
+    # 1. Try to extract clean course title from PGN Event headers
+    event_names = []
+    for p in paths:
+        if os.path.isfile(p):
+            ev = extract_event_name_from_pgn(p)
+            if ev:
+                event_names.append(ev)
+
+    if event_names and len(event_names) == len(paths):
+        if len(event_names) == 1:
+            name = event_names[0]
+            name = re.sub(r'[\s\-–—]+(Part|Teil|Volume|Vol)(\b|\s*\d+.*)$', '', name, flags=re.IGNORECASE).rstrip(" -_–—")
+            return sanitize_repertoire_name(name)
+        else:
+            common = os.path.commonprefix(event_names).rstrip(" -_–—:")
+            if len(common) >= 4:
+                name = re.sub(r'[\s\-–—]+(Part|Teil|Volume|Vol)(\b|\s*\d+.*)$', '', common, flags=re.IGNORECASE).rstrip(" -_–—")
+                return sanitize_repertoire_name(name)
+
+    # 2. Fall back to filenames
     names = [os.path.splitext(os.path.basename(p))[0] for p in paths]
     if len(names) == 1:
         name = names[0]
@@ -205,9 +351,7 @@ def suggest_course_name_from_paths(paths: List[str]) -> str:
         name = os.path.commonprefix(names).rstrip(" -_–—")
         if len(name) < 4:
             name = names[0]
-    # Strip trailing part designations: "- Part 1", "Part 2", "- Part", "Vol 1", etc.
-    name = re.sub(r'[\s\-–—]+(Part|Teil|Volume|Vol)(\b|\s*\d+.*)$', '', name, flags=re.IGNORECASE).rstrip(" -_–—")
-    return sanitize_repertoire_name(name)
+    return clean_suggested_name(name)
 
 INTRO_KEYWORDS = (
     r'(introduction|einleitung|overview|überblick|ueberblick|about the author|preface|vorwort|'
@@ -254,29 +398,47 @@ def classify_chapter(name: str) -> str:
     # 6. Default to Level 2 (Deep Theory)
     return CATEGORY_LEVEL_2
 
+def is_white_info(headers: Any) -> bool:
+    """Checks whether the White header starts with 'info' (e.g. 'Info | ...', 'Info: ...', 'Info ...')."""
+    if not hasattr(headers, "get"):
+        return False
+    white = headers.get("White", "").strip()
+    return bool(re.match(r'^(info\s*\||info\b|\[%info\]|\[info\])', white, re.IGNORECASE))
+
 def is_header_intro(headers: Any) -> bool:
-    """Checks whether PGN headers represent an introduction or informational game."""
+    """Checks whether PGN headers represent an individual introduction or informational game."""
     if not hasattr(headers, "get"):
         return False
     white = headers.get("White", "").strip()
     black = headers.get("Black", "").strip()
     event = headers.get("Event", "").strip()
-    section = headers.get("Section", "").strip()
     annotator = headers.get("Annotator", "").strip()
     
-    for h_val in (white, black, event, section, annotator):
+    # Quickstarter is Level 1, never an intro
+    if re.search(r'(?i)\b(quickstarter|schnellstarter)\b', black) or re.search(r'(?i)\b(quickstarter|schnellstarter)\b', event):
+        # Unless the white line explicitly starts with an info tag
+        if not is_white_info(headers):
+            return False
+
+    # 1. White tag starts with info marker
+    if is_white_info(headers):
+        return True
+
+    # 2. Check [%info] or [info] tags in headers
+    for h_val in (white, black, event, annotator):
         if not h_val:
             continue
         h_lower = h_val.lower()
         if "[%info]" in h_lower or "[info]" in h_lower:
             return True
-        if re.search(r'(?i)^\s*(\[%info\]|\[info\]|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b|instruction\b|anleitung\b|hinweis\b|guide\b|leitfaden\b)', h_val):
-            return True
 
+    # 3. For White tag specifically: intro keywords or descriptive instruction text
     intro_keywords = rf'(?i)\b{INTRO_KEYWORDS}\b'
-    if re.search(intro_keywords, white) or re.search(intro_keywords, event) or re.search(intro_keywords, section):
+    if re.search(intro_keywords, white):
         return True
-        
+    if re.search(r'(?i)^\s*(\[%info\]|\[info\]|info\b|intro\b|introduction\b|einleitung\b|overview\b|information\b|instruction\b|anleitung\b|hinweis\b|guide\b|leitfaden\b)', white):
+        return True
+
     return False
 
 def is_header_puzzle(headers: Any) -> bool:
@@ -292,14 +454,49 @@ def is_header_puzzle(headers: Any) -> bool:
     return False
 
 def is_header_model(headers: Any) -> bool:
-    """Checks whether PGN headers represent a model/reference game."""
+    """Checks whether PGN headers represent an individual model/reference game."""
     white = headers.get("White", "").strip() if hasattr(headers, "get") else ""
-    black = headers.get("Black", "").strip() if hasattr(headers, "get") else ""
-    event = headers.get("Event", "").strip() if hasattr(headers, "get") else ""
     model_keywords = r'(?i)\b(model game|reference game|musterpartie|example game)\b'
-    if re.search(model_keywords, white) or re.search(model_keywords, black) or re.search(model_keywords, event):
+    if re.search(model_keywords, white):
         return True
     return False
+
+def resolve_game_target(
+    game_id: int,
+    ch_target: str,
+    game_targets: Optional[Dict[int, str]] = None,
+    is_puzzle: bool = False,
+    is_model: bool = False,
+    is_intro: bool = False,
+) -> str:
+    """
+    Resolves the effective target category for a game given chapter and line configuration:
+    1. Explicit line-level override (game_targets) takes absolute precedence.
+    2. Ignored chapter (CATEGORY_IGNORE) ignores all non-overridden games.
+    3. Puzzles / tactics exercises route to CATEGORY_TACTICS (unless chapter ignored).
+    4. Specialized chapter targets (TACTICS, MODEL, INTRO, MOTIVES) take precedence.
+    5. Main repertoire chapters (LEVEL_1 or LEVEL_2) extract embedded model games
+       and embedded intro lines into their respective categories.
+    6. Otherwise routes to the chapter target (e.g. LEVEL_1, LEVEL_2).
+    """
+    if game_targets and game_id in game_targets:
+        return game_targets[game_id]
+
+    if ch_target == CATEGORY_IGNORE:
+        return CATEGORY_IGNORE
+
+    if is_puzzle:
+        return CATEGORY_TACTICS
+
+    if ch_target in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_MOTIVES):
+        return ch_target
+
+    if is_model:
+        return CATEGORY_MODEL
+    if is_intro:
+        return CATEGORY_INTRO
+
+    return ch_target
 
 def is_game_intro(game: chess.pgn.Game) -> bool:
     """
@@ -457,10 +654,14 @@ def find_cover_image(folder_path: str) -> Optional[str]:
             return os.path.join(folder_path, f)
     return None
 
-def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
+def analyze_course_pgns(
+    pgn_paths: List[str],
+    progress_callback: Optional[Callable[[int, int], None]] = None
+) -> CourseAnalysisResult:
     """
     Scans one or multiple PGN files to detect chapters, games, suggested name, color,
     and classifies every chapter and game into its default target.
+    Optional progress_callback receives (games_scanned, total_files).
     """
     if not pgn_paths:
         raise ValueError("No PGN files provided.")
@@ -481,6 +682,7 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
 
     chapters_dict: Dict[str, CourseChapterInfo] = {}
     total_games = 0
+    all_parsing_warnings = []
 
     for p in valid_paths:
         with open(p, "r", encoding="utf-8", errors="replace") as fp:
@@ -491,6 +693,8 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                     break
                 game_idx = total_games
                 total_games += 1
+                if progress_callback and (total_games == 1 or total_games % 25 == 0):
+                    progress_callback(total_games, len(valid_paths))
                 headers = game.headers
                 chapter_name = headers.get("Black", "").strip() or headers.get("Event", "Default Chapter").strip()
                 white_title = headers.get("White", "").strip() or f"Line {total_games}"
@@ -500,6 +704,14 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                 is_puz = is_game_puzzle(game)
                 is_mod = is_game_model(game)
                 is_intr = is_game_intro(game)
+
+                # Capture parser errors/ambiguities reported by python-chess
+                game_errors = []
+                if game.errors:
+                    for err in game.errors:
+                        err_str = str(err)
+                        game_errors.append(err_str)
+                        all_parsing_warnings.append(f"{chapter_name}: '{white_title}' – {err_str}")
 
                 if chapter_name not in chapters_dict:
                     category = classify_chapter(chapter_name)
@@ -516,18 +728,21 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                 if len(info.sample_titles) < 3 and white_title:
                     info.sample_titles.append(white_title)
 
-                # Check for embedded puzzles / model games / introductions
-                if info.target_type != CATEGORY_TACTICS and is_puz:
+                # Resolve individual game target using unified resolution
+                game_target = resolve_game_target(
+                    game_id=game_idx,
+                    ch_target=info.target_type,
+                    game_targets=None,
+                    is_puzzle=is_puz,
+                    is_model=is_mod,
+                    is_intro=is_intr
+                )
+                if is_puz and info.target_type != CATEGORY_TACTICS:
                     info.embedded_puzzles += 1
-                    game_target = CATEGORY_TACTICS
-                elif info.target_type != CATEGORY_MODEL and is_mod:
+                if is_mod and info.target_type != CATEGORY_MODEL:
                     info.embedded_models += 1
-                    game_target = CATEGORY_MODEL
-                elif info.target_type != CATEGORY_INTRO and is_intr:
+                if is_intr and info.target_type != CATEGORY_INTRO:
                     info.embedded_intros += 1
-                    game_target = CATEGORY_INTRO
-                else:
-                    game_target = info.target_type
 
                 game_info = CourseGameInfo(
                     game_id=game_idx,
@@ -539,9 +754,13 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
                     is_puzzle=is_puz,
                     is_model=is_mod,
                     is_intro=is_intr,
-                    target_type=game_target
+                    target_type=game_target,
+                    parsing_errors=game_errors
                 )
                 info.games.append(game_info)
+
+    if progress_callback:
+        progress_callback(total_games, len(valid_paths))
 
     # Sort chapters: Quickstarter first, then main chapters, motives, tactics, model, intro, ignore
     order_map = {
@@ -585,7 +804,8 @@ def analyze_course_pgns(pgn_paths: List[str]) -> CourseAnalysisResult:
         total_games=total_games,
         chapters=sorted_chapters,
         category_counts=category_counts,
-        cover_image_path=cover_image_path
+        cover_image_path=cover_image_path,
+        parsing_warnings=all_parsing_warnings
     )
 
 def analyze_course_pgn(pgn_path: str) -> CourseAnalysisResult:
@@ -739,6 +959,7 @@ def execute_course_import(
         total_bytes = sum(os.path.getsize(p) for p in paths_to_import)
         processed_bytes = 0
         game_idx = 0
+        import_parsing_warnings = []
 
         if progress_callback:
             progress_callback(15, tr_ui("course_import.status_processing_games", "Verarbeite Partien, Varianten und Puzzles..."))
@@ -763,26 +984,30 @@ def execute_course_import(
 
                     # Identify chapter & default target
                     ch_name = game.headers.get("Black", "").strip() or game.headers.get("Event", "").strip()
+                    white_title = game.headers.get("White", "").strip() or f"Line {game_idx}"
+
+                    if game.errors:
+                        for err in game.errors:
+                            err_str = str(err)
+                            import_parsing_warnings.append(f"{ch_name}: '{white_title}' – {err_str}")
+
                     ch_target = plan.chapter_targets.get(ch_name, classify_chapter(ch_name))
 
-                    # Resolve effective target: explicit game override takes precedence
-                    if cur_game_id in plan.game_targets:
-                        target = plan.game_targets[cur_game_id]
-                    else:
-                        if ch_target not in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_IGNORE, CATEGORY_MOTIVES):
-                            if is_game_puzzle(game):
-                                target = CATEGORY_TACTICS
-                                embedded_puzzles_count += 1
-                            elif is_game_model(game):
-                                target = CATEGORY_MODEL
-                                embedded_models_count += 1
-                            elif is_game_intro(game):
-                                target = CATEGORY_INTRO
-                                embedded_intros_count += 1
-                            else:
-                                target = ch_target
-                        else:
-                            target = ch_target
+                    # Resolve effective target: unified resolution logic
+                    target = resolve_game_target(
+                        game_id=cur_game_id,
+                        ch_target=ch_target,
+                        game_targets=plan.game_targets,
+                        is_puzzle=is_game_puzzle(game),
+                        is_model=is_game_model(game),
+                        is_intro=is_game_intro(game)
+                    )
+                    if target == CATEGORY_TACTICS and ch_target != CATEGORY_TACTICS:
+                        embedded_puzzles_count += 1
+                    elif target == CATEGORY_MODEL and ch_target != CATEGORY_MODEL:
+                        embedded_models_count += 1
+                    elif target == CATEGORY_INTRO and ch_target != CATEGORY_INTRO:
+                        embedded_intros_count += 1
 
                     # Route according to target
                     if target == CATEGORY_IGNORE:
@@ -1069,6 +1294,13 @@ def execute_course_import(
                 count=original_pgns_archived
             )
 
+        if import_parsing_warnings:
+            msg += "\n\n⚠️ " + tr_ui(
+                "course_import.pgn_warnings_note",
+                "Hinweis: In {count} Partie(n) wurden fehlerhafte/uneindeutige PGN-Züge festgestellt (ungültige Varianten übersprungen).",
+                count=len(import_parsing_warnings)
+            )
+
         return CourseImportResult(
             success=True,
             message=msg,
@@ -1084,7 +1316,8 @@ def execute_course_import(
             embedded_puzzles=embedded_puzzles_count,
             embedded_models=embedded_models_count,
             embedded_intros=embedded_intros_count,
-            original_pgns_archived=original_pgns_archived
+            original_pgns_archived=original_pgns_archived,
+            parsing_warnings=import_parsing_warnings
         )
 
     except Exception as e:

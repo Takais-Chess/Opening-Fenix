@@ -74,7 +74,17 @@ def order_positions_topologically(session: Session, positions: list) -> list:
     # Sort positions by BFS discovery order; unreached/orphan positions sort deterministically by id
     return sorted(positions, key=lambda p: (pos_id_order.get(p.id, 999999999), p.id))
 
-def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None, hash_size: int = 256) -> Tuple[bool, str]:
+def run_db_analysis(
+    repo_name: str, 
+    engine_path: str, 
+    depth: int, 
+    threads: int, 
+    progress_callback: Optional[Callable[[int], None]] = None, 
+    check_cancel: Optional[Callable[[], bool]] = None, 
+    hash_size: int = 256,
+    reuse_other_courses: bool = True,
+    status_callback: Optional[Callable[[str], None]] = None
+) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
@@ -84,6 +94,20 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         player_color = get_meta(session, "color", "w")
         turn_filter = Position.fen.like(f'% {player_color} %')
 
+        reused_count = 0
+        if reuse_other_courses:
+            from opening_fenix.core.services.analysis_sync_service import sync_analysis_data_from_other_repertoires
+            reused_count = sync_analysis_data_from_other_repertoires(
+                target_session=session,
+                current_repo_name=repo_name,
+                target_depth=depth,
+                player_color=player_color,
+                check_cancel=check_cancel,
+                status_callback=status_callback
+            )
+            if check_cancel and check_cancel():
+                return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
+
         query = session.query(Position).filter(
             turn_filter,
             or_(Position.analysis_depth == None, Position.analysis_depth < depth)
@@ -92,7 +116,20 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
         positions_to_analyze = query.all()
         total_positions = len(positions_to_analyze)
         if total_positions == 0:
+            if progress_callback:
+                try:
+                    progress_callback(100, 0, 0)
+                except TypeError:
+                    progress_callback(100)
+            if reused_count > 0:
+                return True, f"Erfolg: {reused_count} Positionen wurden aus anderen Kursen übernommen. Alle Positionen sind auf Tiefe {depth} oder tiefer analysiert."
             return True, f"Alle Positionen sind bereits auf Tiefe {depth} oder tiefer analysiert."
+
+        if status_callback:
+            if reused_count > 0:
+                status_callback(f"{reused_count} Positionen aus anderen Kursen übernommen. Analysiere verbleibende {total_positions} Positionen...")
+            else:
+                status_callback(f"Keine passenden Analysen in anderen Kursen gefunden. Analysiere {total_positions} Positionen...")
 
         # Order positions in BFS / topological order to maximize Stockfish hash hits
         positions_to_analyze = order_positions_topologically(session, positions_to_analyze)
@@ -217,12 +254,18 @@ def run_db_analysis(repo_name: str, engine_path: str, depth: int, threads: int, 
                 if current_pos is not None:
                     current_pos.good_moves = json.dumps([])
 
+            pct = int((i + 1) * 100 / total_positions)
             if progress_callback:
-                pct = int((i + 1) * 100 / total_positions)
                 try:
                     progress_callback(pct, i + 1, total_positions)
                 except TypeError:
                     progress_callback(pct)
+
+            if status_callback:
+                if reused_count > 0:
+                    status_callback(f"{reused_count} übernommen. Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
+                else:
+                    status_callback(f"Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
             
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
                 try:
@@ -349,7 +392,7 @@ def get_repertoire_analysis_status(repo_name: str, session: Optional[Session] = 
             session.close()
             db.close()
 
-def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: str, depth: int = 10) -> Tuple[bool, str]:
+def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: str, depth: int = 10, reuse_other_courses: bool = True) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     from opening_fenix.core.logger import logger
     logger.info(f"enrich_position: Using DB at {db_path}")
@@ -423,6 +466,16 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                                     logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
                 except Exception as e:
                     print(f"Lichess fetch failed for enrichment of {p_clean}: {e}")
+
+        if (pos.analysis_depth is None or pos.analysis_depth < depth) and reuse_other_courses:
+            from opening_fenix.core.services.analysis_sync_service import sync_analysis_data_from_other_repertoires
+            sync_analysis_data_from_other_repertoires(
+                target_session=session,
+                current_repo_name=repo_name,
+                target_depth=depth,
+                player_color=user_color
+            )
+            session.refresh(pos)
 
         if engine_path and os.path.exists(engine_path) and (pos.analysis_depth is None or pos.analysis_depth < depth):
             engine = None

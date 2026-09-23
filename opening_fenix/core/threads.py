@@ -12,14 +12,16 @@ from opening_fenix.core.services.repertoire_mistake_service import audit_reperto
 
 class AnalysisThread(QThread):
     progress_signal = pyqtSignal(int)
+    status_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, repo_name, depth, threads, engine_path):
+    def __init__(self, repo_name, depth, threads, engine_path, reuse_other_courses: bool = True):
         super().__init__()
         self.repo_name = repo_name
         self.depth = depth
         self.threads = threads
         self.engine_path = engine_path
+        self.reuse_other_courses = reuse_other_courses
         self._is_canceled = False
 
     def run(self):
@@ -29,7 +31,9 @@ class AnalysisThread(QThread):
             self.depth, 
             self.threads, 
             progress_callback=self.progress_signal.emit,
-            check_cancel=lambda: self._is_canceled
+            check_cancel=lambda: self._is_canceled,
+            reuse_other_courses=self.reuse_other_courses,
+            status_callback=self.status_signal.emit
         )
         self.finished_signal.emit(success, msg)
 
@@ -136,7 +140,41 @@ class PGNImportThread(QThread):
         self.finished_signal.emit(success, msg)
 
 
-from opening_fenix.core.services.course_import_service import CourseImportPlan, CourseImportResult, execute_course_import
+from opening_fenix.core.services.course_import_service import (
+    CourseImportPlan,
+    CourseImportResult,
+    execute_course_import,
+    CourseAnalysisResult,
+    analyze_course_pgns
+)
+
+class CourseAnalysisThread(QThread):
+    progress_signal = pyqtSignal(int, str)
+    finished_signal = pyqtSignal(bool, object, str)
+
+    def __init__(self, pgn_paths):
+        super().__init__()
+        self.pgn_paths = pgn_paths
+        self._is_canceled = False
+
+    def run(self):
+        try:
+            def on_progress(games_scanned: int, total_files: int):
+                if self._is_canceled:
+                    return
+                msg = f"Analysiere Kurs-PGN ({games_scanned:,} Partien eingelesen)...".replace(",", ".")
+                self.progress_signal.emit(games_scanned, msg)
+
+            res = analyze_course_pgns(self.pgn_paths, progress_callback=on_progress)
+            if not self._is_canceled:
+                self.finished_signal.emit(True, res, "")
+        except Exception as e:
+            if not self._is_canceled:
+                self.finished_signal.emit(False, None, str(e))
+
+    def cancel(self):
+        self._is_canceled = True
+
 
 class CourseImportThread(QThread):
     progress_signal = pyqtSignal(int, str)

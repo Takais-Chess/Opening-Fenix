@@ -428,7 +428,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                    item_callback = None, cancel_check = None,
                                    engine = None, max_transpositions: int = None,
                                    cache_service = None, depth: int = 25,
-                                   progress_callback = None):
+                                   progress_callback = None, only_1move: bool = False):
     """
     Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
     Filters strictly for sound/good lines:
@@ -665,6 +665,34 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
         f for f in reachable_fens
         if len(f.split()) > 1 and f.split()[1] != player_color and f not in exempt_fens
     ]
+
+    # Sort opponent-reachable positions so the most popular positions are searched first:
+    # 1. Primary: Repertoire reach probability (reach_probs_fen / reach_probs / incoming move priority)
+    # 2. Secondary: Total games in Lichess database for this position
+    # 3. Tertiary: Shallower ply depth (closer to root)
+    def get_position_reach_prob(f):
+        if f == root_norm:
+            return 1.0
+        p_obj = fen_to_pos.get(f)
+        pid = p_obj.id if p_obj else None
+        prob = reach_probs_fen.get(f, 0.0)
+        if prob <= 0.0 and pid:
+            prob = reach_probs.get(pid, 0.0)
+        if prob <= 0.0 and p_obj and p_obj.incoming_moves:
+            prob = max((m.priority_score or 0.0 for m in p_obj.incoming_moves), default=0.0)
+        return prob or 0.0
+
+    def get_position_total_games(f):
+        lm = lichess_cache.get(f, {})
+        return sum(v.get('total', 0) for v in lm.values()) if lm else 0
+
+    def position_popularity_key(f):
+        p_reach = get_position_reach_prob(f)
+        total_games = get_position_total_games(f)
+        ply = reachable_depths.get(f, 999) or 999
+        return (-p_reach, -total_games, ply)
+
+    opponent_reachable_fens.sort(key=position_popularity_key)
     total_opp = len(opponent_reachable_fens)
 
     # Pass 1: 1-Move Opponent Transpositions (Opponent plays m1 directly into our repertoire, no badge)
@@ -687,7 +715,17 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
         except Exception:
             continue
 
-        for m1 in list(board_1.legal_moves):
+        lichess_moves_1 = lichess_cache.get(f_orig, {})
+        def m1_popularity_key(m):
+            u = m.uci().strip().lower()
+            st = lichess_moves_1.get(u)
+            if not st:
+                alt = CASTLING_ALT.get(u)
+                if alt:
+                    st = lichess_moves_1.get(alt)
+            return st.get('total', 0) if st else 0
+
+        for m1 in sorted(board_1.legal_moves, key=m1_popularity_key, reverse=True):
             if max_transpositions is not None and len(results) >= max_transpositions:
                 break
             if cancel_check and cancel_check():
@@ -742,6 +780,9 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                             item_callback(res_item)
                             time.sleep(0.001)
 
+    if only_1move:
+        return results
+
     # Pass 2: 2-Move Transpositions (Opponent plays m1, then WE play m2 to get back into repertoire)
     if max_transpositions is None or len(results) < max_transpositions:
         own_engine = False
@@ -789,7 +830,17 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                 except Exception:
                     continue
 
-                for m1 in list(board_1.legal_moves):
+                lichess_moves_1 = lichess_cache.get(f_orig, {})
+                def m1_popularity_key(m):
+                    u = m.uci().strip().lower()
+                    st = lichess_moves_1.get(u)
+                    if not st:
+                        alt = CASTLING_ALT.get(u)
+                        if alt:
+                            st = lichess_moves_1.get(alt)
+                    return st.get('total', 0) if st else 0
+
+                for m1 in sorted(board_1.legal_moves, key=m1_popularity_key, reverse=True):
                     if max_transpositions is not None and len(results) >= max_transpositions:
                         break
                     if cancel_check and cancel_check():

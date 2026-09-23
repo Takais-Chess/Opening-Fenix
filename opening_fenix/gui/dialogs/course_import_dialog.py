@@ -24,9 +24,10 @@ from opening_fenix.core.services.course_import_service import (
     CATEGORY_TACTICS,
     CATEGORY_MODEL,
     CATEGORY_INTRO,
-    CATEGORY_IGNORE
+    CATEGORY_IGNORE,
+    resolve_game_target
 )
-from opening_fenix.core.threads import CourseImportThread
+from opening_fenix.core.threads import CourseImportThread, CourseAnalysisThread
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_chevron_icon_path
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui, translator
@@ -67,15 +68,16 @@ class ChapterLinesDialog(QDialog):
             if g.game_id in current_game_targets:
                 self.game_targets[g.game_id] = current_game_targets[g.game_id]
             else:
-                if default_target not in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_IGNORE, CATEGORY_MOTIVES):
-                    if g.is_puzzle:
-                        self.game_targets[g.game_id] = CATEGORY_TACTICS
-                    elif g.is_model:
-                        self.game_targets[g.game_id] = CATEGORY_MODEL
-                    elif g.is_intro:
-                        self.game_targets[g.game_id] = CATEGORY_INTRO
-                    else:
-                        self.game_targets[g.game_id] = default_target
+                if g.is_puzzle:
+                    self.game_targets[g.game_id] = CATEGORY_TACTICS
+                elif default_target == CATEGORY_MODEL or g.is_model:
+                    self.game_targets[g.game_id] = CATEGORY_MODEL
+                elif default_target == CATEGORY_INTRO or g.is_intro:
+                    self.game_targets[g.game_id] = CATEGORY_INTRO
+                elif default_target == CATEGORY_MOTIVES:
+                    self.game_targets[g.game_id] = CATEGORY_MOTIVES
+                elif default_target == CATEGORY_IGNORE:
+                    self.game_targets[g.game_id] = CATEGORY_IGNORE
                 else:
                     self.game_targets[g.game_id] = default_target
 
@@ -317,7 +319,14 @@ class ChapterLinesDialog(QDialog):
             for cat_id, cat_label in self.target_options:
                 cb.addItem(cat_label, cat_id)
             
-            curr_target = self.game_targets.get(g.game_id, self.default_target)
+            curr_target = resolve_game_target(
+                g.game_id,
+                self.default_target,
+                self.game_targets,
+                g.is_puzzle,
+                g.is_model,
+                g.is_intro
+            )
             idx = cb.findData(curr_target)
             if idx >= 0:
                 cb.setCurrentIndex(idx)
@@ -430,7 +439,14 @@ class ChapterLinesDialog(QDialog):
 
         counts = {}
         for g in self.chapter.games:
-            target = self.game_targets.get(g.game_id, self.default_target)
+            target = resolve_game_target(
+                g.game_id,
+                self.default_target,
+                self.game_targets,
+                g.is_puzzle,
+                g.is_model,
+                g.is_intro
+            )
             counts[target] = counts.get(target, 0) + 1
 
         is_mixed = len(counts) > 1
@@ -542,7 +558,7 @@ class CourseImportDialog(QDialog):
     """
     _FORBIDDEN_CHARS = set('\\/:*?"<>|')
 
-    def __init__(self, parent=None, initial_pgn_path: Optional[str] = None):
+    def __init__(self, parent=None, initial_pgn_path: Optional[str] = None, sync_load: bool = True):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("course_import.window_title", "Kurs-Import-Assistent (Chessable PGN)"))
@@ -552,6 +568,7 @@ class CourseImportDialog(QDialog):
 
         self.selected_paths: List[str] = []
         self.analysis_result: Optional[CourseAnalysisResult] = None
+        self.analysis_thread: Optional[CourseAnalysisThread] = None
         self.import_thread: Optional[CourseImportThread] = None
         self.imported_repo_name: Optional[str] = None
         self.custom_chapter_targets: Dict[str, str] = {}
@@ -562,12 +579,52 @@ class CourseImportDialog(QDialog):
         self.game_to_chapter: Dict[int, CourseChapterInfo] = {}
         self._details_expanded = False
         self._taskbar_filter = None
+        self._has_initially_positioned = False
 
         self.init_ui()
         self._install_taskbar_close_filter()
 
         if initial_pgn_path and os.path.exists(initial_pgn_path):
-            self.load_files([initial_pgn_path])
+            self.load_files([initial_pgn_path], sync=sync_load)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not getattr(self, "_has_initially_positioned", False):
+            self._has_initially_positioned = True
+            screen = self.screen() or QApplication.primaryScreen()
+            if screen:
+                avail = screen.availableGeometry()
+                w = self.width()
+                h = self.height()
+                x = avail.left() + max(0, (avail.width() - w) // 2)
+                y = avail.top() + scale(35)
+                self.move(x, y)
+
+    def _reposition_to_fit_screen(self):
+        screen = self.screen() or QApplication.primaryScreen()
+        if not screen:
+            return
+        avail = screen.availableGeometry()
+        curr_geo = self.geometry()
+
+        max_h = max(scale(350), avail.height() - scale(30))
+        max_w = max(scale(600), avail.width() - scale(30))
+
+        new_w = min(curr_geo.width(), max_w)
+        new_h = min(curr_geo.height(), max_h)
+
+        new_x = avail.left() + max(0, (avail.width() - new_w) // 2)
+        new_y = curr_geo.y()
+
+        # Clamp vertical position to stay comfortably within screen and above taskbar
+        if new_y + new_h > avail.bottom() - scale(12):
+            new_y = avail.bottom() - new_h - scale(12)
+        if new_y < avail.top() + scale(25):
+            new_y = avail.top() + scale(25)
+            if new_y + new_h > avail.bottom() - scale(12):
+                new_h = avail.bottom() - new_y - scale(12)
+
+        self.setGeometry(new_x, new_y, new_w, new_h)
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -698,6 +755,7 @@ class CourseImportDialog(QDialog):
 
         # 2. Configuration Box
         self.config_box = QFrame()
+        self.config_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
         self.config_box.setStyleSheet(f"""
             QFrame {{
                 background-color: rgba(255, 255, 255, 0.4);
@@ -706,6 +764,7 @@ class CourseImportDialog(QDialog):
             }}
         """)
         cfg_layout = QVBoxLayout(self.config_box)
+        cfg_layout.setSizeConstraint(QVBoxLayout.SizeConstraint.SetMinimumSize)
         cfg_layout.setContentsMargins(scale(14), scale(12), scale(14), scale(12))
         cfg_layout.setSpacing(scale(10))
 
@@ -867,6 +926,31 @@ class CourseImportDialog(QDialog):
 
         bottom_layout.addWidget(self.config_box)
 
+        # Warning Card (Shown only if PGN parsing errors/ambiguities were detected)
+        self.warning_box = QFrame()
+        self.warning_box.setStyleSheet(f"""
+            QFrame {{
+                background-color: rgba(253, 237, 236, 0.95);
+                border: 1.5px solid #e74c3c;
+                border-radius: {scale(8)}px;
+            }}
+        """)
+        w_layout = QHBoxLayout(self.warning_box)
+        w_layout.setContentsMargins(scale(12), scale(8), scale(12), scale(8))
+        w_layout.setSpacing(scale(10))
+
+        self.lbl_warning_icon = QLabel("⚠️")
+        self.lbl_warning_icon.setStyleSheet("font-size: 20px; border: none; background: transparent;")
+        w_layout.addWidget(self.lbl_warning_icon)
+
+        self.lbl_warning_text = QLabel("")
+        self.lbl_warning_text.setWordWrap(True)
+        self.lbl_warning_text.setStyleSheet(f"font-size: {scale(11)}px; color: #c0392b; font-weight: bold; border: none; background: transparent;")
+        w_layout.addWidget(self.lbl_warning_text, 1)
+
+        self.warning_box.setVisible(False)
+        bottom_layout.addWidget(self.warning_box)
+
         # 3. Overview Badges
         self.cards_frame = QFrame()
         self.cards_frame.setStyleSheet("background: transparent; border: none;")
@@ -955,7 +1039,7 @@ class CourseImportDialog(QDialog):
                 background-color: rgba(255, 255, 255, 0.95);
             }}
         """)
-        self.btn_expand_all.clicked.connect(lambda: self.tree_details.expandAll())
+        self.btn_expand_all.clicked.connect(self.on_expand_all_clicked)
         self.btn_expand_all.setVisible(False)
         details_bar.addWidget(self.btn_expand_all)
 
@@ -975,7 +1059,7 @@ class CourseImportDialog(QDialog):
                 background-color: rgba(255, 255, 255, 0.95);
             }}
         """)
-        self.btn_collapse_all.clicked.connect(lambda: self.tree_details.collapseAll())
+        self.btn_collapse_all.clicked.connect(self.on_collapse_all_clicked)
         self.btn_collapse_all.setVisible(False)
         details_bar.addWidget(self.btn_collapse_all)
 
@@ -1141,9 +1225,9 @@ class CourseImportDialog(QDialog):
             tr_ui("creator.dlg_select_pgn_file_filter", "PGN-Dateien (*.pgn)")
         )
         if paths:
-            self.load_files(paths)
+            self.load_files(paths, sync=False)
 
-    def load_files(self, paths: List[str]):
+    def load_files(self, paths: List[str], sync: bool = True):
         self.selected_paths = [p for p in paths if os.path.exists(p)]
         if not self.selected_paths:
             return
@@ -1159,55 +1243,109 @@ class CourseImportDialog(QDialog):
 
         self.file_input.setCursorPosition(0)
 
-        try:
-            res = analyze_course_pgns(self.selected_paths)
-            self.analysis_result = res
-            self.custom_chapter_targets = {c.name: c.target_type for c in res.chapters}
-            self.custom_game_targets.clear()
+        # Cancel any previous analysis thread
+        if getattr(self, "analysis_thread", None) and self.analysis_thread.isRunning():
+            self.analysis_thread.cancel()
+            self.analysis_thread.wait(300)
 
-            # Pre-fill inputs
-            self.name_input.setText(res.suggested_repo_name)
-            self.name_input.setCursorPosition(0)
-            self.name_input.setToolTip(res.suggested_repo_name)
-            idx = self.color_combo.findData(res.suggested_color)
-            if idx >= 0:
-                self.color_combo.setCurrentIndex(idx)
+        if sync:
+            try:
+                res = analyze_course_pgns(self.selected_paths)
+                self._apply_analysis_result(res)
+            except Exception as e:
+                QMessageBox.critical(self, tr_ui("creator.dlg_import_error_title", "Fehler"), f"Fehler beim Analysieren der PGN-Datei:\n{e}")
+            return
 
-            if hasattr(res, 'suggested_elo') and res.suggested_elo:
-                idx_elo = self.elo_combo.findData(res.suggested_elo)
-                if idx_elo >= 0:
-                    self.elo_combo.setCurrentIndex(idx_elo)
+        # Start asynchronous scan with animated progress indication
+        self.btn_browse.setEnabled(False)
+        self.progress_container.setVisible(True)
+        self.progress_bar.setRange(0, 0)
+        self.lbl_status.setText(tr_ui("course_import.status_analyzing", "Analysiere Kurs-PGN..."))
 
-            # Cover image status
-            if res.cover_image_path:
-                cover_name = os.path.basename(res.cover_image_path)
-                self.lbl_cover_status.setText(f"🖼️ {tr_ui('course_import.cover_found', 'Gefunden: {name}', name=cover_name)}")
-                self.lbl_cover_status.setStyleSheet(f"font-size: {scale(11)}px; color: #27ae60; font-weight: bold; border: none; background: transparent;")
-            else:
-                self.lbl_cover_status.setText(f"ℹ️ {tr_ui('course_import.cover_none', 'Kein Cover im Kursordner')}")
-                self.lbl_cover_status.setStyleSheet(f"font-size: {scale(11)}px; color: #7f8c8d; border: none; background: transparent;")
+        self.analysis_thread = CourseAnalysisThread(self.selected_paths)
+        self.analysis_thread.progress_signal.connect(self.on_analysis_progress)
+        self.analysis_thread.finished_signal.connect(self.on_analysis_finished)
+        self.analysis_thread.start()
 
-            self.update_cards()
-            self.populate_details_tree()
+    def on_analysis_progress(self, games_count: int, msg: str):
+        self.lbl_status.setText(msg)
 
-            self._details_expanded = False
-            # Reveal bottom section, enable import, and adjust window
-            self.bottom_container.setVisible(True)
-            self.btn_import.setVisible(True)
-            self.btn_import.setEnabled(True)
-            self.lbl_file_hint.setVisible(False)
-            self.lbl_sub.setText(
+    def on_analysis_finished(self, success: bool, res: Optional[CourseAnalysisResult], err_msg: str):
+        self.btn_browse.setEnabled(True)
+        self.progress_container.setVisible(False)
+        self.progress_bar.setRange(0, 100)
+
+        if not success or not res:
+            QMessageBox.critical(self, tr_ui("creator.dlg_import_error_title", "Fehler"), f"Fehler beim Analysieren der PGN-Datei:\n{err_msg}")
+            return
+
+        self._apply_analysis_result(res)
+
+    def _apply_analysis_result(self, res: CourseAnalysisResult):
+        self.analysis_result = res
+        self.custom_chapter_targets = {c.name: c.target_type for c in res.chapters}
+        self.custom_game_targets.clear()
+
+        # Pre-fill inputs
+        self.name_input.setText(res.suggested_repo_name)
+        self.name_input.setCursorPosition(0)
+        self.name_input.setToolTip(res.suggested_repo_name)
+        idx = self.color_combo.findData(res.suggested_color)
+        if idx >= 0:
+            self.color_combo.setCurrentIndex(idx)
+
+        if hasattr(res, 'suggested_elo') and res.suggested_elo:
+            idx_elo = self.elo_combo.findData(res.suggested_elo)
+            if idx_elo >= 0:
+                self.elo_combo.setCurrentIndex(idx_elo)
+
+        # Cover image status
+        if res.cover_image_path:
+            cover_name = os.path.basename(res.cover_image_path)
+            self.lbl_cover_status.setText(f"🖼️ {tr_ui('course_import.cover_found', 'Gefunden: {name}', name=cover_name)}")
+            self.lbl_cover_status.setStyleSheet(f"font-size: {scale(11)}px; color: #27ae60; font-weight: bold; border: none; background: transparent;")
+        else:
+            self.lbl_cover_status.setText(f"ℹ️ {tr_ui('course_import.cover_none', 'Kein Cover im Kursordner')}")
+            self.lbl_cover_status.setStyleSheet(f"font-size: {scale(11)}px; color: #7f8c8d; border: none; background: transparent;")
+
+        # Warning Card (Shown only if PGN parsing errors/ambiguities were detected)
+        if getattr(res, "parsing_warnings", None):
+            warn_count = len(res.parsing_warnings)
+            self.lbl_warning_text.setText(
                 tr_ui(
-                    "course_import.subtitle",
-                    "Verwandelt Kurs-PGNs vollautomatisch in strukturierte Repertoires mit <b>Quickstarter</b>, <b>Tiefe Theorie</b> und <b>Puzzles</b>."
+                    "course_import.pgn_warnings_found",
+                    "Achtung: In {count} Partie(n) wurden fehlerhafte oder uneindeutige PGN-Züge festgestellt. "
+                    "Ungültige Züge/Varianten wurden übersprungen, die Hauptlinie wurde bis zum Fehler eingelesen.",
+                    count=warn_count
                 )
             )
-            self.bottom_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
-            self.setMinimumSize(scale(800), scale(640))
-            self.resize(scale(880), scale(720))
+            preview_lines = "\n• ".join(res.parsing_warnings[:10])
+            if warn_count > 10:
+                preview_lines += f"\n... (+{warn_count - 10} " + tr_ui("course_import.more_warnings", "weitere") + ")"
+            self.warning_box.setToolTip("• " + preview_lines)
+            self.warning_box.setVisible(True)
+        else:
+            self.warning_box.setVisible(False)
 
-        except Exception as e:
-            QMessageBox.critical(self, tr_ui("creator.dlg_import_error_title", "Fehler"), f"Fehler beim Analysieren der PGN-Datei:\n{e}")
+        self.update_cards()
+        self.populate_details_tree()
+
+        self._details_expanded = False
+        # Reveal bottom section, enable import, and adjust window
+        self.bottom_container.setVisible(True)
+        self.btn_import.setVisible(True)
+        self.btn_import.setEnabled(True)
+        self.lbl_file_hint.setVisible(False)
+        self.lbl_sub.setText(
+            tr_ui(
+                "course_import.subtitle",
+                "Verwandelt Kurs-PGNs vollautomatisch in strukturierte Repertoires mit <b>Quickstarter</b>, <b>Tiefe Theorie</b> und <b>Puzzles</b>."
+            )
+        )
+        self.bottom_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
+        self.setMinimumSize(scale(800), scale(640))
+        self.resize(scale(880), scale(700))
+        self._reposition_to_fit_screen()
 
     def _update_toggle_button_text(self, count: int = 0, expanded: bool = False):
         if expanded:
@@ -1235,20 +1373,14 @@ class CourseImportDialog(QDialog):
         for c in self.analysis_result.chapters:
             ch_target = self.custom_chapter_targets.get(c.name, c.target_type)
             for g in c.games:
-                if g.game_id in self.custom_game_targets:
-                    effective = self.custom_game_targets[g.game_id]
-                else:
-                    if ch_target not in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_IGNORE, CATEGORY_MOTIVES):
-                        if g.is_puzzle:
-                            effective = CATEGORY_TACTICS
-                        elif g.is_model:
-                            effective = CATEGORY_MODEL
-                        elif g.is_intro:
-                            effective = CATEGORY_INTRO
-                        else:
-                            effective = ch_target
-                    else:
-                        effective = ch_target
+                effective = resolve_game_target(
+                    g.game_id,
+                    ch_target,
+                    self.custom_game_targets,
+                    g.is_puzzle,
+                    g.is_model,
+                    g.is_intro
+                )
                 counts[effective] = counts.get(effective, 0) + 1
 
         def fmt_games(c):
@@ -1272,218 +1404,260 @@ class CourseImportDialog(QDialog):
         if not self.analysis_result:
             return
 
-        chapters = self.analysis_result.chapters
-        self._update_toggle_button_text(len(chapters), expanded=self.tree_details.isVisible())
-        self.tree_details.clear()
-        self.chapter_combos.clear()
-        self.game_combos.clear()
+        self.tree_details.setUpdatesEnabled(False)
+        try:
+            chapters = self.analysis_result.chapters
+            self._update_toggle_button_text(len(chapters), expanded=self.tree_details.isVisible())
+            self.tree_details.clear()
+            self.chapter_combos.clear()
+            self.game_combos.clear()
 
-        target_options = [
-            (CATEGORY_LEVEL_1, tr_ui("course_import.target_level_1", "⚡ Level 1 (Quickstarter)")),
-            (CATEGORY_LEVEL_2, tr_ui("course_import.target_level_2", "📚 Level 2 (Tiefe Theorie)")),
-            (CATEGORY_MOTIVES, tr_ui("course_import.target_motives", "💡 Typische Motive (Typical Motives.pgn)")),
-            (CATEGORY_TACTICS, tr_ui("course_import.target_tactics", "🧩 Taktik (Tactics.pgn)")),
-            (CATEGORY_MODEL, tr_ui("course_import.target_model", "🏆 Musterpartie (Model Games.pgn)")),
-            (CATEGORY_INTRO, tr_ui("course_import.target_intro", "📖 Einleitung (Introductions from pgn import.pgn)")),
-            (CATEGORY_IGNORE, tr_ui("course_import.target_ignore", "🚫 Ignorieren (Überspringen)")),
-        ]
+            target_options = [
+                (CATEGORY_LEVEL_1, tr_ui("course_import.target_level_1", "⚡ Level 1 (Quickstarter)")),
+                (CATEGORY_LEVEL_2, tr_ui("course_import.target_level_2", "📚 Level 2 (Tiefe Theorie)")),
+                (CATEGORY_MOTIVES, tr_ui("course_import.target_motives", "💡 Typische Motive (Typical Motives.pgn)")),
+                (CATEGORY_TACTICS, tr_ui("course_import.target_tactics", "🧩 Taktik (Tactics.pgn)")),
+                (CATEGORY_MODEL, tr_ui("course_import.target_model", "🏆 Musterpartie (Model Games.pgn)")),
+                (CATEGORY_INTRO, tr_ui("course_import.target_intro", "📖 Einleitung (Introductions from pgn import.pgn)")),
+                (CATEGORY_IGNORE, tr_ui("course_import.target_ignore", "🚫 Ignorieren (Überspringen)")),
+            ]
 
-        combo_style = f"""
-            QComboBox {{
-                background-color: rgba(255, 255, 255, 0.95);
-                border: 1px solid rgba(0, 0, 0, 0.15);
-                border-radius: {scale(6)}px;
-                padding: 0 {scale(24)}px 0 {scale(8)}px;
-                font-size: {scale(11)}px;
-                color: {COLORS['brown_text']};
-            }}
-            QComboBox:hover {{
-                border: 1.5px solid {COLORS['burnt_orange']};
-            }}
-            QComboBox:focus {{
-                border: 1.5px solid {COLORS['burnt_orange']};
-            }}
-            QComboBox::drop-down {{
-                border: none;
-                width: {scale(20)}px;
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-            }}
-            QComboBox::down-arrow {{
-                image: url("{get_chevron_icon_path()}");
-                width: {scale(10)}px;
-                height: {scale(10)}px;
-                margin-right: {scale(6)}px;
-            }}
-            QComboBox QAbstractItemView {{
-                min-width: {scale(75)}px;
-                background-color: {COLORS['beige']};
-                color: {COLORS['brown_text']};
-                border: 1px solid {COLORS['glass_border']};
-                border-radius: {scale(6)}px;
-                selection-background-color: rgba(211, 84, 0, 0.15);
-                selection-color: {COLORS['burnt_orange']};
-                padding: {scale(2)}px;
-                outline: none;
-            }}
-        """
-
-        self.chapter_items.clear()
-        self.game_to_chapter.clear()
-
-        for ch in chapters:
-            # 1. Top-level Chapter Item
-            ch_item = QTreeWidgetItem(self.tree_details)
-            ch_item.setText(0, ch.name)
-            font = ch_item.font(0)
-            font.setBold(True)
-            ch_item.setFont(0, font)
-            ch_item.setToolTip(0, "\n".join(ch.sample_titles) if ch.sample_titles else ch.name)
-            ch_item.setSizeHint(0, QSize(scale(200), scale(36)))
-            ch_item.setSizeHint(1, QSize(scale(220), scale(36)))
-            ch_item.setSizeHint(2, QSize(scale(230), scale(36)))
-
-            self.chapter_items[ch.name] = ch_item
-
-            target = self.custom_chapter_targets.get(ch.name, ch.target_type)
-
-            # Column 1 container widget: label + [ 🎨 Gemischt ] badge + [ 🔍 Linien anpassen ] button
-            col1_widget = QWidget()
-            col1_layout = QHBoxLayout(col1_widget)
-            col1_layout.setContentsMargins(scale(4), 0, scale(4), 0)
-            col1_layout.setSpacing(scale(8))
-
-            lbl_cnt = QLabel("")
-            lbl_cnt.setStyleSheet(f"font-size: {scale(11)}px; color: {COLORS['brown_text']}; border: none; background: transparent;")
-            col1_layout.addWidget(lbl_cnt)
-
-            lbl_mixed = QLabel("")
-            lbl_mixed.setStyleSheet(f"""
-                QLabel {{
-                    background-color: rgba(254, 249, 231, 0.95);
-                    border: 1px solid #f39c12;
-                    border-radius: {scale(4)}px;
-                    padding: 0 {scale(6)}px;
+            combo_style = f"""
+                QComboBox {{
+                    background-color: rgba(255, 255, 255, 0.95);
+                    border: 1px solid rgba(0, 0, 0, 0.15);
+                    border-radius: {scale(6)}px;
+                    padding: 0 {scale(24)}px 0 {scale(8)}px;
                     font-size: {scale(11)}px;
-                    font-weight: bold;
-                    color: #d35400;
+                    color: {COLORS['brown_text']};
                 }}
-            """)
-            lbl_mixed.setVisible(False)
-            col1_layout.addWidget(lbl_mixed)
-
-            btn_edit = QPushButton(tr_ui("course_import.btn_edit_lines", "🔍 Linien anpassen"))
-            btn_edit.setFixedHeight(scale(24))
-            btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_edit.setStyleSheet(f"""
-                QPushButton {{
-                    background-color: rgba(255, 255, 255, 0.85);
+                QComboBox:hover {{
+                    border: 1.5px solid {COLORS['burnt_orange']};
+                }}
+                QComboBox:focus {{
+                    border: 1.5px solid {COLORS['burnt_orange']};
+                }}
+                QComboBox::drop-down {{
+                    border: none;
+                    width: {scale(20)}px;
+                    subcontrol-origin: padding;
+                    subcontrol-position: center right;
+                }}
+                QComboBox::down-arrow {{
+                    image: url("{get_chevron_icon_path()}");
+                    width: {scale(10)}px;
+                    height: {scale(10)}px;
+                    margin-right: {scale(6)}px;
+                }}
+                QComboBox QAbstractItemView {{
+                    min-width: {scale(75)}px;
+                    background-color: {COLORS['beige']};
+                    color: {COLORS['brown_text']};
                     border: 1px solid {COLORS['glass_border']};
-                    border-radius: {scale(4)}px;
-                    padding: 0 {scale(8)}px;
-                    font-size: {scale(11)}px;
-                    font-weight: bold;
-                    color: {COLORS['burnt_orange']};
+                    border-radius: {scale(6)}px;
+                    selection-background-color: rgba(211, 84, 0, 0.15);
+                    selection-color: {COLORS['burnt_orange']};
+                    padding: {scale(2)}px;
+                    outline: none;
                 }}
-                QPushButton:hover {{
-                    background-color: {COLORS['burnt_orange']};
-                    color: white;
-                }}
-            """)
-            btn_edit.clicked.connect(lambda _, c=ch: self.open_chapter_lines_dialog(c))
-            col1_layout.addWidget(btn_edit)
-            col1_layout.addStretch()
+            """
 
-            ch_item._lbl_cnt = lbl_cnt
-            ch_item._lbl_mixed = lbl_mixed
+            self.chapter_items.clear()
+            self.game_to_chapter.clear()
 
-            self.tree_details.setItemWidget(ch_item, 1, col1_widget)
-            self._update_chapter_row_info(ch, ch_item)
+            self._target_options = target_options
+            self._combo_style = combo_style
 
-            # Chapter ComboBox (Column 2)
-            ch_combo = NoWheelComboBox()
-            ch_combo.setFixedHeight(scale(28))
-            ch_combo.setStyleSheet(combo_style)
-            ch_combo.blockSignals(True)
-            for cat_id, cat_label in target_options:
-                ch_combo.addItem(cat_label, cat_id)
-            idx = ch_combo.findData(target)
-            if idx >= 0:
-                ch_combo.setCurrentIndex(idx)
-            ch_combo.blockSignals(False)
+            total_games = self.analysis_result.total_games if self.analysis_result else 0
+            lazy_child_combos = (total_games > 150)
+            target_label_map = dict(target_options)
 
-            ch_combo.currentIndexChanged.connect(
-                lambda _, c=ch_combo, ch_obj=ch, item=ch_item: self.on_chapter_target_changed(ch_obj.name, c.currentData(), ch_obj, item)
-            )
-            self.tree_details.setItemWidget(ch_item, 2, ch_combo)
-            self.chapter_combos[ch.name] = ch_combo
+            for ch in chapters:
+                # 1. Top-level Chapter Item
+                ch_item = QTreeWidgetItem(self.tree_details)
+                ch_item.setText(0, ch.name)
+                font = ch_item.font(0)
+                font.setBold(True)
+                ch_item.setFont(0, font)
+                ch_item.setToolTip(0, "\n".join(ch.sample_titles) if ch.sample_titles else ch.name)
+                ch_item.setSizeHint(0, QSize(scale(200), scale(36)))
+                ch_item.setSizeHint(1, QSize(scale(220), scale(36)))
+                ch_item.setSizeHint(2, QSize(scale(230), scale(36)))
 
-            # 2. Child Game Items
-            for g in ch.games:
-                self.game_to_chapter[g.game_id] = ch
+                self.chapter_items[ch.name] = ch_item
 
-                g_item = QTreeWidgetItem(ch_item)
-                g_item.setText(0, f"↳  {g.title}")
-                g_font = g_item.font(0)
-                g_font.setPointSize(max(9, g_font.pointSize() - 1))
-                g_item.setFont(0, g_font)
-                g_item.setToolTip(0, f"{g.title}\n{g.chapter_name}")
-                g_item.setSizeHint(0, QSize(scale(200), scale(32)))
-                g_item.setSizeHint(1, QSize(scale(80), scale(32)))
-                g_item.setSizeHint(2, QSize(scale(230), scale(32)))
+                target = self.custom_chapter_targets.get(ch.name, ch.target_type)
 
-                # Game Details Badge
-                if g.is_puzzle:
-                    g_item.setText(1, "🧩 Puzzle")
-                elif g.is_model:
-                    g_item.setText(1, "🏆 Muster")
-                elif g.is_intro:
-                    g_item.setText(1, "📖 Einleitung")
-                elif g.eco:
-                    g_item.setText(1, f"ECO {g.eco}")
-                else:
-                    g_item.setText(1, tr_ui("course_import.line_badge", "Linie"))
-                g_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+                # Column 1 container widget: label + [ 🎨 Gemischt ] badge + [ 🔍 Linien anpassen ] button
+                col1_widget = QWidget()
+                col1_layout = QHBoxLayout(col1_widget)
+                col1_layout.setContentsMargins(scale(4), 0, scale(4), 0)
+                col1_layout.setSpacing(scale(8))
 
-                # Game ComboBox
-                g_combo = NoWheelComboBox()
-                g_combo.setFixedHeight(scale(26))
-                g_combo.setStyleSheet(combo_style)
-                g_combo.blockSignals(True)
+                lbl_cnt = QLabel("")
+                lbl_cnt.setStyleSheet(f"font-size: {scale(11)}px; color: {COLORS['brown_text']}; border: none; background: transparent;")
+                col1_layout.addWidget(lbl_cnt)
+
+                lbl_mixed = QLabel("")
+                lbl_mixed.setStyleSheet(f"""
+                    QLabel {{
+                        background-color: rgba(254, 249, 231, 0.95);
+                        border: 1px solid #f39c12;
+                        border-radius: {scale(4)}px;
+                        padding: 0 {scale(6)}px;
+                        font-size: {scale(11)}px;
+                        font-weight: bold;
+                        color: #d35400;
+                    }}
+                """)
+                lbl_mixed.setVisible(False)
+                col1_layout.addWidget(lbl_mixed)
+
+                btn_edit = QPushButton(tr_ui("course_import.btn_edit_lines", "🔍 Linien anpassen"))
+                btn_edit.setFixedHeight(scale(24))
+                btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_edit.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: rgba(255, 255, 255, 0.85);
+                        border: 1px solid {COLORS['glass_border']};
+                        border-radius: {scale(4)}px;
+                        padding: 0 {scale(8)}px;
+                        font-size: {scale(11)}px;
+                        font-weight: bold;
+                        color: {COLORS['burnt_orange']};
+                    }}
+                    QPushButton:hover {{
+                        background-color: {COLORS['burnt_orange']};
+                        color: white;
+                    }}
+                """)
+                btn_edit.clicked.connect(lambda _, c=ch: self.open_chapter_lines_dialog(c))
+                col1_layout.addWidget(btn_edit)
+                col1_layout.addStretch()
+
+                ch_item._lbl_cnt = lbl_cnt
+                ch_item._lbl_mixed = lbl_mixed
+
+                self.tree_details.setItemWidget(ch_item, 1, col1_widget)
+                self._update_chapter_row_info(ch, ch_item)
+
+                # Chapter ComboBox (Column 2)
+                ch_combo = NoWheelComboBox()
+                ch_combo.setFixedHeight(scale(28))
+                ch_combo.setStyleSheet(combo_style)
+                ch_combo.blockSignals(True)
                 for cat_id, cat_label in target_options:
-                    g_combo.addItem(cat_label, cat_id)
-                
-                # Determine initial game target
-                curr_g_target = self.custom_game_targets.get(g.game_id, g.target_type)
-                g_idx = g_combo.findData(curr_g_target)
-                if g_idx >= 0:
-                    g_combo.setCurrentIndex(g_idx)
-                g_combo.blockSignals(False)
+                    ch_combo.addItem(cat_label, cat_id)
+                idx = ch_combo.findData(target)
+                if idx >= 0:
+                    ch_combo.setCurrentIndex(idx)
+                ch_combo.blockSignals(False)
 
-                g_combo.currentIndexChanged.connect(
-                    lambda _, c=g_combo, gid=g.game_id: self.on_game_target_changed(gid, c.currentData())
+                ch_combo.currentIndexChanged.connect(
+                    lambda _, c=ch_combo, ch_obj=ch, item=ch_item: self.on_chapter_target_changed(ch_obj.name, c.currentData(), ch_obj, item)
                 )
-                self.tree_details.setItemWidget(g_item, 2, g_combo)
-                self.game_combos[g.game_id] = g_combo
+                self.tree_details.setItemWidget(ch_item, 2, ch_combo)
+                self.chapter_combos[ch.name] = ch_combo
+
+                # 2. Child Game Items
+                for g in ch.games:
+                    self.game_to_chapter[g.game_id] = ch
+
+                    g_item = QTreeWidgetItem(ch_item)
+                    g_item.setText(0, f"↳  {g.title}")
+                    g_font = g_item.font(0)
+                    g_font.setPointSize(max(9, g_font.pointSize() - 1))
+                    g_item.setFont(0, g_font)
+                    g_item.setToolTip(0, f"{g.title}\n{g.chapter_name}")
+                    g_item.setSizeHint(0, QSize(scale(200), scale(32)))
+                    g_item.setSizeHint(1, QSize(scale(80), scale(32)))
+                    g_item.setSizeHint(2, QSize(scale(230), scale(32)))
+
+                    # Game Details Badge
+                    if g.is_puzzle:
+                        g_item.setText(1, "🧩 Puzzle")
+                    elif g.is_model:
+                        g_item.setText(1, "🏆 Muster")
+                    elif g.is_intro:
+                        g_item.setText(1, "📖 Einleitung")
+                    elif g.eco:
+                        g_item.setText(1, f"ECO {g.eco}")
+                    else:
+                        g_item.setText(1, tr_ui("course_import.line_badge", "Linie"))
+                    g_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+
+                    curr_g_target = resolve_game_target(
+                        g.game_id,
+                        target,
+                        self.custom_game_targets,
+                        g.is_puzzle,
+                        g.is_model,
+                        g.is_intro
+                    )
+                    g_item.setText(2, target_label_map.get(curr_g_target, curr_g_target))
+
+                    if not lazy_child_combos:
+                        self._create_game_combo(g_item, g)
+                    else:
+                        g_item._needs_combo = True
+                        g_item._game = g
+        finally:
+            self.tree_details.setUpdatesEnabled(True)
+
+    def _create_game_combo(self, g_item: QTreeWidgetItem, g: CourseGameInfo):
+        if g.game_id in self.game_combos:
+            return self.game_combos[g.game_id]
+        combo_style = getattr(self, "_combo_style", "")
+        target_options = getattr(self, "_target_options", [])
+        g_combo = NoWheelComboBox()
+        g_combo.setFixedHeight(scale(26))
+        if combo_style:
+            g_combo.setStyleSheet(combo_style)
+        g_combo.blockSignals(True)
+        for cat_id, cat_label in target_options:
+            g_combo.addItem(cat_label, cat_id)
+
+        ch = self.game_to_chapter.get(g.game_id)
+        ch_target = self.custom_chapter_targets.get(ch.name, ch.target_type) if ch else g.target_type
+        curr_g_target = resolve_game_target(
+            g.game_id,
+            ch_target,
+            self.custom_game_targets,
+            g.is_puzzle,
+            g.is_model,
+            g.is_intro
+        )
+        g_idx = g_combo.findData(curr_g_target)
+        if g_idx >= 0:
+            g_combo.setCurrentIndex(g_idx)
+        g_combo.blockSignals(False)
+
+        g_combo.currentIndexChanged.connect(
+            lambda _, c=g_combo, gid=g.game_id: self.on_game_target_changed(gid, c.currentData())
+        )
+        self.tree_details.setItemWidget(g_item, 2, g_combo)
+        self.game_combos[g.game_id] = g_combo
+        return g_combo
+
+    def _ensure_chapter_combos(self, ch_item: QTreeWidgetItem):
+        for i in range(ch_item.childCount()):
+            child = ch_item.child(i)
+            if getattr(child, "_needs_combo", False):
+                self._create_game_combo(child, child._game)
+                child._needs_combo = False
 
     def _get_chapter_category_breakdown(self, ch: CourseChapterInfo) -> Dict[str, int]:
         ch_target = self.custom_chapter_targets.get(ch.name, ch.target_type)
         breakdown: Dict[str, int] = {}
         for g in ch.games:
-            if g.game_id in self.custom_game_targets:
-                eff = self.custom_game_targets[g.game_id]
-            else:
-                if ch_target not in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_IGNORE, CATEGORY_MOTIVES):
-                    if g.is_puzzle:
-                        eff = CATEGORY_TACTICS
-                    elif g.is_model:
-                        eff = CATEGORY_MODEL
-                    elif g.is_intro:
-                        eff = CATEGORY_INTRO
-                    else:
-                        eff = ch_target
-                else:
-                    eff = ch_target
+            eff = resolve_game_target(
+                g.game_id,
+                ch_target,
+                self.custom_game_targets,
+                g.is_puzzle,
+                g.is_model,
+                g.is_intro
+            )
             breakdown[eff] = breakdown.get(eff, 0) + 1
         return breakdown
 
@@ -1536,9 +1710,12 @@ class CourseImportDialog(QDialog):
         # Single click on chapter row (column 0) toggles expand/collapse smoothly
         if item.parent() is None and column == 0:
             item.setExpanded(not item.isExpanded())
+        elif item.parent() is not None and getattr(item, "_needs_combo", False):
+            self._ensure_chapter_combos(item.parent())
 
     def on_tree_item_expanded(self, item: QTreeWidgetItem):
-        # Ensure all child widgets are unhidden and geometries refreshed
+        # Ensure child combos are created if on-demand and widgets are visible
+        self._ensure_chapter_combos(item)
         for i in range(item.childCount()):
             child = item.child(i)
             w = self.tree_details.itemWidget(child, 2)
@@ -1551,6 +1728,7 @@ class CourseImportDialog(QDialog):
         ch_target = self.custom_chapter_targets.get(ch.name, ch.target_type)
         dlg = ChapterLinesDialog(ch, ch_target, self.custom_game_targets, parent=self)
         if dlg.exec():
+            target_label_map = dict(getattr(self, "_target_options", []))
             for gid, target in dlg.result_targets.items():
                 self.custom_game_targets[gid] = target
                 g_combo = self.game_combos.get(gid)
@@ -1562,26 +1740,50 @@ class CourseImportDialog(QDialog):
                     g_combo.blockSignals(False)
             ch_item = self.chapter_items.get(ch.name)
             if ch_item:
+                for i in range(ch_item.childCount()):
+                    child = ch_item.child(i)
+                    g = getattr(child, "_game", None)
+                    if not g and i < len(ch.games):
+                        g = ch.games[i]
+                    if g:
+                        child_target = resolve_game_target(
+                            g.game_id,
+                            ch_target,
+                            self.custom_game_targets,
+                            g.is_puzzle,
+                            g.is_model,
+                            g.is_intro
+                        )
+                        child.setText(2, target_label_map.get(child_target, child_target))
                 self._update_chapter_row_info(ch, ch_item)
             self.update_cards()
 
     def on_chapter_target_changed(self, chapter_name: str, new_target: str, ch_obj: CourseChapterInfo, ch_item: QTreeWidgetItem):
         self.custom_chapter_targets[chapter_name] = new_target
-        self._update_chapter_row_info(ch_obj, ch_item)
 
-        # Update non-overridden child games
+        # When the user explicitly changes the chapter target, clear any previously saved
+        # line-level overrides for this chapter so all lines default to the new chapter assignment
         for g in ch_obj.games:
-            if g.game_id not in self.custom_game_targets:
-                if new_target not in (CATEGORY_TACTICS, CATEGORY_MODEL, CATEGORY_INTRO, CATEGORY_IGNORE, CATEGORY_MOTIVES):
-                    if g.is_puzzle:
-                        g_eff = CATEGORY_TACTICS
-                    elif g.is_model:
-                        g_eff = CATEGORY_MODEL
-                    else:
-                        g_eff = new_target
-                else:
-                    g_eff = new_target
-                
+            self.custom_game_targets.pop(g.game_id, None)
+
+        target_label_map = dict(getattr(self, "_target_options", []))
+
+        # Update child games in tree (combos and text)
+        for i in range(ch_item.childCount()):
+            child = ch_item.child(i)
+            g = getattr(child, "_game", None)
+            if not g and i < len(ch_obj.games):
+                g = ch_obj.games[i]
+            if g:
+                g_eff = resolve_game_target(
+                    g.game_id,
+                    new_target,
+                    self.custom_game_targets,
+                    g.is_puzzle,
+                    g.is_model,
+                    g.is_intro
+                )
+                child.setText(2, target_label_map.get(g_eff, g_eff))
                 g_combo = self.game_combos.get(g.game_id)
                 if g_combo:
                     g_combo.blockSignals(True)
@@ -1602,6 +1804,33 @@ class CourseImportDialog(QDialog):
                 self._update_chapter_row_info(ch, ch_item)
         self.update_cards()
 
+    def on_expand_all_clicked(self):
+        self.tree_details.setUpdatesEnabled(False)
+        self.tree_details.blockSignals(True)
+        try:
+            for i in range(self.tree_details.topLevelItemCount()):
+                item = self.tree_details.topLevelItem(i)
+                self._ensure_chapter_combos(item)
+                item.setExpanded(True)
+                for j in range(item.childCount()):
+                    child = item.child(j)
+                    w = self.tree_details.itemWidget(child, 2)
+                    if w:
+                        w.show()
+        finally:
+            self.tree_details.blockSignals(False)
+            self.tree_details.setUpdatesEnabled(True)
+            self.tree_details.updateGeometries()
+
+    def on_collapse_all_clicked(self):
+        self.tree_details.setUpdatesEnabled(False)
+        self.tree_details.blockSignals(True)
+        try:
+            self.tree_details.collapseAll()
+        finally:
+            self.tree_details.blockSignals(False)
+            self.tree_details.setUpdatesEnabled(True)
+
     def toggle_details_tree(self):
         self._details_expanded = not getattr(self, "_details_expanded", False)
         visible = self._details_expanded
@@ -1612,15 +1841,20 @@ class CourseImportDialog(QDialog):
         count = len(self.analysis_result.chapters) if self.analysis_result else 0
         if visible:
             self.bottom_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
-            self.tree_details.setMinimumHeight(scale(220))
-            if self.height() < scale(680):
-                self.resize(self.width(), scale(720))
+            self.tree_details.setMinimumHeight(scale(130))
+            screen = self.screen() or QApplication.primaryScreen()
+            avail_h = screen.availableGeometry().height() if screen else 900
+            target_h = min(scale(800), avail_h - scale(50))
+            if self.height() < target_h:
+                self.resize(self.width(), target_h)
             self._update_toggle_button_text(count, expanded=True)
         else:
             self.bottom_spacer.changeSize(0, 0, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding)
             self.tree_details.setMinimumHeight(0)
             self._update_toggle_button_text(count, expanded=False)
-        self.bottom_container.layout().invalidate()
+        self.bottom_container.layout().activate()
+        self.layout().activate()
+        self._reposition_to_fit_screen()
         self.update()
         if self.parent():
             self.parent().update()
@@ -1693,7 +1927,10 @@ class CourseImportDialog(QDialog):
 
         if success:
             self.imported_repo_name = self.name_input.text().strip()
-            QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
+            if result and getattr(result, "parsing_warnings", None):
+                QMessageBox.warning(self, tr_ui("course_import.dlg_warning_title", "Import mit Hinweisen"), message)
+            else:
+                QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
             self.accept()
         else:
             QMessageBox.critical(self, tr_ui("creator.dlg_import_error_title", "Fehler"), message)
@@ -1706,6 +1943,13 @@ class CourseImportDialog(QDialog):
         self._taskbar_filter = None
 
     def _cancel_and_cleanup_thread(self):
+        if getattr(self, "analysis_thread", None) and self.analysis_thread.isRunning():
+            try:
+                self.analysis_thread.cancel()
+                if not self.analysis_thread.wait(300):
+                    self.analysis_thread.terminate()
+            except Exception:
+                pass
         if self.import_thread and self.import_thread.isRunning():
             try:
                 self.import_thread.requestInterruption()

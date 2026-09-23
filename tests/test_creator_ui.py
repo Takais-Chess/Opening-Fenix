@@ -1529,4 +1529,238 @@ def test_global_transposition_progress_updates_status(creator_window, qapp):
     assert "1 gefunden" in text
 
 
+def test_suggest_transposition_level_5pct_rule_only_on_level_1(creator_window, qapp):
+    """Verify that the 5% frequency penalty ONLY shifts level when considering Level 1 (x_base == 1)."""
+    from opening_fenix.core.models import Position, Move, RepertoireMove, RepertoireLevel
+
+    session = creator_window.backend.session
+    session.query(RepertoireLevel).delete()
+    session.add(RepertoireLevel(name="Level 1", order=1, target_elo=1500))
+    session.add(RepertoireLevel(name="Level 2", order=2, target_elo=1800))
+    session.add(RepertoireLevel(name="Level 3", order=3, target_elo=2000))
+    session.commit()
+
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    t_fen_l1 = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    t_fen_l2 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"
+    t_fen_l3 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR b KQkq -"
+
+    # Setup positions
+    p_l1 = Position(fen=" ".join(t_fen_l1.split()[:4]))
+    p_l2 = Position(fen=" ".join(t_fen_l2.split()[:4]))
+    p_l3 = Position(fen=" ".join(t_fen_l3.split()[:4]))
+    session.add_all([p_l1, p_l2, p_l3])
+    session.flush()
+
+    # Outgoing moves for each target
+    p_out = Position(fen="rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -")
+    session.add(p_out)
+    session.flush()
+
+    m1 = Move(from_position_id=p_l1.id, to_position_id=p_out.id, uci="c7c5", san="c5")
+    m2 = Move(from_position_id=p_l2.id, to_position_id=p_out.id, uci="e7e5", san="e5")
+    m3 = Move(from_position_id=p_l3.id, to_position_id=p_out.id, uci="d7d6", san="d6")
+    session.add_all([m1, m2, m3])
+    session.flush()
+
+    session.add(RepertoireMove(move_id=m1.id, level=1, is_active=True))
+    session.add(RepertoireMove(move_id=m2.id, level=2, is_active=True))
+    session.add(RepertoireMove(move_id=m3.id, level=3, is_active=True))
+    session.commit()
+
+    # Clear suggestion caches
+    creator_window._transpos_suggestion_cache = {}
+    creator_window._target_level_cache = {}
+
+    # Case 1: Base is Level 1, low frequency (1% < 5%) -> should shift to Level 2
+    data_lvl1_low = {
+        "type": "direct",
+        "search_fen": start_fen,
+        "target_fen": t_fen_l1,
+        "move_uci": "c7c5",
+        "move_san": "c5",
+        "pos_prio": 0.01,
+        "depth": 1,
+    }
+    sugg1, reason1 = creator_window.suggest_transposition_level(data_lvl1_low)
+    assert sugg1 == 2
+    assert "5%" in reason1
+
+    # Case 2: Base is Level 2, low frequency (1% < 5%) -> should STAY at Level 2 (no bump to Level 3!)
+    data_lvl2_low = {
+        "type": "direct",
+        "search_fen": start_fen,
+        "target_fen": t_fen_l2,
+        "move_uci": "e7e5",
+        "move_san": "e5",
+        "pos_prio": 0.01,
+        "depth": 1,
+    }
+    sugg2, reason2 = creator_window.suggest_transposition_level(data_lvl2_low)
+    assert sugg2 == 2
+    assert "Level 2" in reason2
+    assert "5%" not in reason2
+
+    # Case 3: Base is Level 3, low frequency (0.001 < 0.05) -> should STAY at Level 3 (no bump to Level 4!)
+    data_lvl3_low = {
+        "type": "direct",
+        "search_fen": start_fen,
+        "target_fen": t_fen_l3,
+        "move_uci": "d7d6",
+        "move_san": "d6",
+        "pos_prio": 0.001,
+        "depth": 1,
+    }
+    sugg3, reason3 = creator_window.suggest_transposition_level(data_lvl3_low)
+    assert sugg3 == 3
+    assert "Level 3" in reason3
+    assert "5%" not in reason3
+
+
+def test_add_all_1move_transpositions_button_and_batch_add(creator_window, qapp, monkeypatch):
+    """Test the 'Add All 1-Move Transpositions' button and batch addition logic."""
+    from PyQt6.QtWidgets import QMessageBox
+    from opening_fenix.core.models import Position, Move, RepertoireMove, RepertoireLevel
+
+    # 1. Verify button exists and is configured
+    assert hasattr(creator_window, "btn_add_all_1move")
+    assert creator_window.btn_add_all_1move is not None
+    assert "1-Zug" in creator_window.btn_add_all_1move.text() or "1-Move" in creator_window.btn_add_all_1move.text()
+
+    # 2. Setup DB with levels and positions
+    session = creator_window.backend.session
+    session.query(RepertoireLevel).delete()
+    session.add(RepertoireLevel(name="Hauptvarianten", order=1, target_elo=1500))
+    session.add(RepertoireLevel(name="Nebenvarianten", order=2, target_elo=1800))
+    session.commit()
+
+    f_orig = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    p_orig = Position(fen=" ".join(f_orig.split()[:4]))
+    session.add(p_orig)
+    session.flush()
+
+    # Target 1 (connected in Level 1)
+    f_t1 = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    p_t1 = Position(fen=" ".join(f_t1.split()[:4]))
+    session.add(p_t1)
+    session.flush()
+
+    p_out1 = Position(fen="rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -")
+    session.add(p_out1)
+    session.flush()
+    m_out1 = Move(from_position_id=p_t1.id, to_position_id=p_out1.id, uci="g1f3", san="Nf3")
+    session.add(m_out1)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_out1.id, level=1, is_active=True))
+
+    # Target 2 (connected in Level 2)
+    f_t2 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    p_t2 = Position(fen=" ".join(f_t2.split()[:4]))
+    session.add(p_t2)
+    session.flush()
+    m_out2 = Move(from_position_id=p_t2.id, to_position_id=p_out1.id, uci="g1f3", san="Nf3")
+    session.add(m_out2)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_out2.id, level=2, is_active=True))
+    session.commit()
+
+    creator_window._transpos_suggestion_cache = {}
+    creator_window._target_level_cache = {}
+
+    # Setup _global_transpos_results with two 1-move transpositions and one 2-move transposition
+    item_1m_a = {
+        "fen": f_orig,
+        "target_fen": f_t1,
+        "move_san": "c5",
+        "move_uci": "c7c5",
+        "path_sans": ["c5"],
+        "path_ucis": ["c7c5"],
+        "depth": 1,
+        "type": "transposition_1",
+        "pos_prio": 0.25, # >= 5% -> suggested level 1
+    }
+    item_1m_b = {
+        "fen": f_orig,
+        "target_fen": f_t2,
+        "move_san": "e5",
+        "move_uci": "e7e5",
+        "path_sans": ["e5"],
+        "path_ucis": ["e7e5"],
+        "depth": 1,
+        "type": "transposition_1",
+        "pos_prio": 0.01, # < 5%, but base is 2 -> suggested level 2
+    }
+    item_2m = {
+        "fen": f_orig,
+        "target_fen": f_t1,
+        "move_san": "c6  Nf3",
+        "move_uci": "c7c6",
+        "path_sans": ["c6", "Nf3"],
+        "path_ucis": ["c7c6", "g1f3"],
+        "depth": 2,
+        "type": "transposition_2",
+    }
+    creator_window._global_transpos_results = [item_1m_a, item_1m_b, item_2m]
+    creator_window._render_transpositions_table(rebuild_global=True)
+
+    # Mock QMessageBox.question to accept
+    question_called = []
+    def mock_question(parent, title, text, buttons, default):
+        question_called.append((title, text))
+        return QMessageBox.StandardButton.Yes
+    monkeypatch.setattr(QMessageBox, "question", mock_question)
+
+    # Call add_all_1move_transpositions
+    creator_window.add_all_1move_transpositions()
+
+    # Assert confirmation dialog was shown with counts
+    assert len(question_called) == 1
+    assert "2" in question_called[0][1] # 2 1-move transpositions found
+
+    # Verify both 1-move transpositions were removed from _global_transpos_results, but 2-move remains
+    assert len(creator_window._global_transpos_results) == 1
+    assert creator_window._global_transpos_results[0]["depth"] == 2
+
+    # Verify DB now has both moves in the repertoire at their suggested levels
+    clean_orig = " ".join(f_orig.split()[:4])
+    pos_orig_db = session.query(Position).filter_by(fen=clean_orig).first()
+    assert pos_orig_db is not None
+
+    rep_moves = session.query(RepertoireMove).join(Move).filter(Move.from_position_id == pos_orig_db.id).all()
+    assert len(rep_moves) == 2
+
+    # c7c5 was suggested for Level 1
+    move_c5 = session.query(Move).filter_by(from_position_id=pos_orig_db.id, uci="c7c5").first()
+    assert move_c5 is not None
+    rep_c5 = session.query(RepertoireMove).filter_by(move_id=move_c5.id).first()
+    assert rep_c5.level == 1
+
+    # e7e5 was suggested for Level 2
+    move_e5 = session.query(Move).filter_by(from_position_id=pos_orig_db.id, uci="e7e5").first()
+    assert move_e5 is not None
+    rep_e5 = session.query(RepertoireMove).filter_by(move_id=move_e5.id).first()
+    assert rep_e5.level == 2
+
+    # Status label was updated
+    status_text = creator_window.lbl_transpos_status.text()
+    assert "2" in status_text
+
+
+def test_add_all_1move_transpositions_none_found(creator_window, qapp, monkeypatch):
+    """Verify notification when no 1-move transpositions are found."""
+    from PyQt6.QtWidgets import QMessageBox
+
+    creator_window._global_transpos_results = []
+    
+    info_called = []
+    def mock_info(parent, title, text):
+        info_called.append((title, text))
+    monkeypatch.setattr(QMessageBox, "information", mock_info)
+
+    # Fast scan will find 0 transpositions on an empty dummy repo
+    creator_window.add_all_1move_transpositions()
+    assert len(info_called) == 1 or "Keine" in creator_window.lbl_transpos_status.text() or "No" in creator_window.lbl_transpos_status.text()
+
+
+
 

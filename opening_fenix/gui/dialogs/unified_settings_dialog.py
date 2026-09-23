@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread, QEvent
-from PyQt6.QtGui import QIcon, QFont, QPixmap, QPainter, QPainterPath, QColor, QBrush
+from PyQt6.QtGui import QIcon, QFont, QFontMetrics, QPixmap, QPainter, QPainterPath, QColor, QBrush
 from PyQt6.QtCore import QRectF
 
 from opening_fenix.core.version import APP_VERSION
@@ -335,6 +335,41 @@ class RepertoireConfigCard(QFrame):
         else:
             self.setMinimumHeight(scale(64))
             self.setMaximumHeight(scale(75))
+        self.adjust_title_font()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.adjust_title_font()
+
+    def adjust_title_font(self):
+        if not hasattr(self, 'lbl_name') or not hasattr(self, 'info_widget'):
+            return
+        avail_w = self.info_widget.width()
+        if avail_w <= 20:
+            avail_w = max(50, self.width() - scale(48) - scale(39))
+        if not self.is_active:
+            avail_h = self.height() - scale(16) - scale(22) - scale(4)
+            if avail_h <= 10:
+                avail_h = scale(34)
+            max_pt = 15
+            min_pt = 9
+        else:
+            avail_h = scale(44)
+            max_pt = 16
+            min_pt = 11
+
+        text = self.repo_name
+        best_pt = min_pt
+        for pt in range(max_pt, min_pt - 1, -1):
+            f = QFont()
+            f.setBold(True)
+            f.setPixelSize(scale(pt))
+            fm = QFontMetrics(f)
+            rect = fm.boundingRect(0, 0, avail_w, 1000, Qt.TextFlag.TextWordWrap, text)
+            if rect.height() <= avail_h and rect.width() <= avail_w:
+                best_pt = pt
+                break
+        self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(best_pt)}px;")
 
     def get_selected_level_elo(self):
         level = self.combo_level.currentData() if hasattr(self, 'combo_level') else None
@@ -379,6 +414,7 @@ class RepertoireConfigCard(QFrame):
         else:
             self.setMinimumHeight(scale(64))
             self.setMaximumHeight(scale(75))
+        self.adjust_title_font()
         
         if self.main_window and hasattr(self.main_window, 'training_manager'):
             self.main_window.training_manager.set_repo_visibility(self.repo_name, self.is_active)
@@ -2347,7 +2383,7 @@ class UnifiedSettingsDialog(QDialog):
         
         if hasattr(self, 'lbl_color'):
             if color == 'w':
-                self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♟️"))
+                self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♙"))
             else:
                 self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
             self.lbl_color.setStyleSheet(
@@ -2398,7 +2434,7 @@ class UnifiedSettingsDialog(QDialog):
         if "color" in info and hasattr(self, 'lbl_color'):
             color = info.get("color", "w") or "w"
             if color == 'w':
-                self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♟️"))
+                self.lbl_color.setText(tr_ui("settings.repo_color_white", "Weiß ♙"))
             else:
                 self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
             self.lbl_color.setStyleSheet(
@@ -3328,6 +3364,14 @@ class UnifiedSettingsDialog(QDialog):
         f_eng.addRow(tr_ui("repo_settings.threads_label", "Threads:"), self.combo_scan_threads)
         v_eng.addLayout(f_eng)
 
+        # Reuse analysis from other courses
+        self.chk_eng_reuse_courses = QCheckBox(tr_ui("repo_settings.chk_eng_reuse_courses", "⚡ Daten aus anderen Kursen nutzen"))
+        self.chk_eng_reuse_courses.setToolTip(tr_ui("repo_settings.chk_eng_reuse_courses_tip", "Übernimmt bereits vorhandene Engine-Analysen (Alternativ-Züge) mit gleicher oder höherer Tiefe aus anderen Kursen, um die Analyse drastisch zu beschleunigen."))
+        cfg_dialog = self.get_config()
+        self.chk_eng_reuse_courses.setChecked(cfg_dialog.get("engine_reuse_courses", True))
+        self.chk_eng_reuse_courses.toggled.connect(lambda val: self.set_setting("engine_reuse_courses", val))
+        v_eng.addWidget(self.chk_eng_reuse_courses)
+
         self.btn_start_eng_scan = QPushButton(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
         self.btn_start_eng_scan.clicked.connect(self.toggle_engine_scan)
         v_eng.addWidget(self.btn_start_eng_scan)
@@ -3456,11 +3500,26 @@ class UnifiedSettingsDialog(QDialog):
         if hasattr(self, 'txt_engine_path'):
             self.txt_engine_path.setText(ep)
 
+        reuse_courses = self.chk_eng_reuse_courses.isChecked() if hasattr(self, 'chk_eng_reuse_courses') else True
+        self.set_setting("engine_reuse_courses", reuse_courses)
+
         from opening_fenix.gui.dialogs import repo_settings_dialog
         thread_cls = getattr(repo_settings_dialog, 'AnalysisThread', AnalysisThread)
-        self.w_eng = thread_cls(backend.active_repo_name, self.spin_scan_depth.value(), int(self.combo_scan_threads.currentText()), ep)
+        try:
+            self.w_eng = thread_cls(
+                backend.active_repo_name, 
+                self.spin_scan_depth.value(), 
+                int(self.combo_scan_threads.currentText()), 
+                ep,
+                reuse_other_courses=reuse_courses
+            )
+        except TypeError:
+            self.w_eng = thread_cls(backend.active_repo_name, self.spin_scan_depth.value(), int(self.combo_scan_threads.currentText()), ep)
+
         self.pb_scan.setValue(0)
         self.w_eng.progress_signal.connect(self.pb_scan.setValue)
+        if hasattr(self.w_eng, 'status_signal'):
+            self.w_eng.status_signal.connect(self.lbl_scan_status.setText)
         
         def on_done(success, message):
             self.btn_start_eng_scan.setEnabled(True)

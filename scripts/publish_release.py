@@ -69,30 +69,21 @@ def main():
     tag_name = f"v{APP_VERSION}"
     release_name = f"Opening Fenix v{APP_VERSION}"
     
-    release_body = f"""## 🎉 Opening Fenix v{APP_VERSION} - Feature Release: PGN Subvariations & Modernized Login UI
-
-Opening Fenix v{APP_VERSION} introduces granular PGN subvariation import controls, a completely modernized Chessable/Lichess login interface, enhanced Hole Finder MultiPV evaluation, and responsive board auto-fit geometry.
-
-### 🌟 What's New in v{APP_VERSION}
-
-#### 🔀 PGN Subvariation Import Controls
-- **Toggle Subvariation Import**: Users can now choose whether to include full tree subvariations or focus solely on main course lines.
-- **Tree Depth Limits**: Option to limit imported subvariation ply depth to keep repertoires concise and memory-friendly.
-- **Clean Structure Preservation**: Preserves variations without cluttering the candidate moves database.
-
-#### 🔐 Modernized Authentication & Login Interface
-- **Revamped Login Flow**: Sleek glassmorphism dialog for Chessable and Lichess authentication.
-- **Secure Token Storage & Validation**: Real-time token validation and seamless account switching.
-- **Visual Polish**: Full translation parity across German and English login elements with consistent error feedback.
-
-#### ♟️ Hole Finder & Transposition Polish
-- **Incremental MultiPV Evaluation**: Accurate centipawn loss display across alternative candidate lines.
-- **Transposition Move Prioritization**: Improved ordering of candidate moves based on real-world transposition frequency.
-
-#### 📐 Responsive Board Geometry & Build Packaging
-- **Square Aspect Ratio Guarantee**: Auto-fitting board geometry respects container margins across all screen resolutions.
-- **Streamlined Public Installer**: Bundles only public example courses and excludes personal user profiles and private databases.
-"""
+    # Extract release body dynamically from CHANGELOG.md for the current APP_VERSION
+    changelog_path = os.path.join(project_root, "CHANGELOG.md")
+    release_body = f"## 🎉 Opening Fenix v{APP_VERSION}\n\nOfficial release v{APP_VERSION}."
+    if os.path.exists(changelog_path):
+        try:
+            with open(changelog_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            import re
+            pattern = rf"##\s*\[{re.escape(APP_VERSION)}\][^\n]*\n([\s\S]*?)(?=\n##\s*\[|\Z)"
+            m = re.search(pattern, content)
+            if m:
+                body = m.group(1).strip()
+                release_body = f"## 🎉 Opening Fenix v{APP_VERSION}\n\n{body}"
+        except Exception as e:
+            print(f"Warning: could not extract notes from CHANGELOG.md: {e}")
 
     headers = {
         "Authorization": f"Bearer {token}",

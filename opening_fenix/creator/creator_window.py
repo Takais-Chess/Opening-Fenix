@@ -36,7 +36,7 @@ from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -4288,11 +4288,22 @@ class CreatorWindow(QMainWindow):
                 cdict = get_multilingual_comment_dict(c['comment'])
                 if self.active_comment_lang == "all":
                     if len(cdict) > 1:
-                        comment_disp = " ".join([f"[:{k}] {v}" for k, v in cdict.items()])
+                        cleaned_parts = [
+                            f"[:{k}] {clean_chessbase_annotations(v)}" 
+                            for k, v in cdict.items() 
+                            if clean_chessbase_annotations(v)
+                        ]
+                        comment_disp = " ".join(cleaned_parts)
                     else:
-                        comment_disp = cdict.get("de", list(cdict.values())[0]) if cdict else ""
+                        raw_c = cdict.get("de", list(cdict.values())[0]) if cdict else ""
+                        comment_disp = clean_chessbase_annotations(raw_c)
                 else:
-                    comment_disp = cdict.get(self.active_comment_lang, "")
+                    raw_c = cdict.get(self.active_comment_lang, "")
+                    if not raw_c and cdict and len(cdict) == 1:
+                        raw_c = list(cdict.values())[0]
+                    comment_disp = clean_chessbase_annotations(raw_c)
+
+                comment_disp = re.sub(r'\s+', ' ', comment_disp).strip()
 
                 pos_prio_num = None
                 pos_prio_str = "—"
@@ -5416,8 +5427,10 @@ class CreatorWindow(QMainWindow):
             if event.key() in [Qt.Key.Key_Up, Qt.Key.Key_Down]:
                 focus_w = self.focusWidget()
                 if focus_w not in [self.i_v1, self.i_v2, self.i_v3, self.txt_c]:
-                    # Exclude combos lineEdits
-                    if isinstance(focus_w, QLineEdit) and focus_w.parent() in [self.combo_depth, self.combo_threads, self.combo_lines, self.combo_hash]:
+                    combos = [self.combo_depth, self.combo_threads, self.combo_lines, self.combo_hash]
+                    if hasattr(self, 'combo_transpos_depth'):
+                        combos.append(self.combo_transpos_depth)
+                    if isinstance(focus_w, QLineEdit) and focus_w.parent() in combos:
                         return False
                     
                     if obj != self.tree_widget:
@@ -5441,7 +5454,10 @@ class CreatorWindow(QMainWindow):
                 return True
         if event.type() == QEvent.Type.MouseButtonRelease:
             # Check if click is on one of our settings boxes (now through the internal lineEdit)
-            if isinstance(obj, QLineEdit) and obj.parent() in [self.combo_depth, self.combo_threads, self.combo_lines]:
+            watched_combos = [self.combo_depth, self.combo_threads, self.combo_lines, self.combo_hash]
+            if hasattr(self, 'combo_transpos_depth'):
+                watched_combos.append(self.combo_transpos_depth)
+            if isinstance(obj, QLineEdit) and obj.parent() in watched_combos:
                 # Trigger the dropdown menu
                 obj.parent().showPopup()
                 return True
@@ -5945,39 +5961,13 @@ class CreatorWindow(QMainWindow):
             self.combo_transpos_depth.setCurrentText(saved_depth)
         else:
             self.combo_transpos_depth.setCurrentText("25")
-        self.combo_transpos_depth.setFixedWidth(scale(52))
+        self.combo_transpos_depth.setFixedWidth(scale(34))
         self.combo_transpos_depth.view().setMinimumWidth(scale(75))
-        self.combo_transpos_depth.setMinimumHeight(scale(28))
         self.combo_transpos_depth.setToolTip(depth_tooltip)
-        self.combo_transpos_depth.setObjectName("TransposDepthCombo")
-        self.combo_transpos_depth.setStyleSheet(f"""
-            QComboBox#TransposDepthCombo {{
-                background-color: {COLORS['white']};
-                color: {COLORS['brown_text']};
-                border: 1px solid {COLORS['glass_border']};
-                border-radius: {scale(10)}px;
-                padding-left: {scale(4)}px;
-                padding-right: {scale(16)}px;
-                font-weight: bold;
-                font-size: {scale(12)}px;
-                min-height: {scale(26)}px;
-            }}
-            QComboBox#TransposDepthCombo:hover {{
-                border-color: {COLORS['burnt_orange']};
-            }}
-            QComboBox#TransposDepthCombo::drop-down {{
-                subcontrol-origin: padding;
-                subcontrol-position: center right;
-                width: {scale(14)}px;
-                border: none;
-            }}
-            QComboBox#TransposDepthCombo::down-arrow {{
-                image: url("{get_chevron_icon_path()}");
-                width: {scale(9)}px;
-                height: {scale(9)}px;
-            }}
-        """)
+        self.combo_transpos_depth.setProperty("class", "SmallCombo")
+        self.repolish(self.combo_transpos_depth)
         self.combo_transpos_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_transpos_depth.lineEdit().installEventFilter(self)
         self.combo_transpos_depth.currentTextChanged.connect(self._on_transpos_depth_changed)
         h_toolbar.addWidget(self.combo_transpos_depth)
 
@@ -5994,6 +5984,21 @@ class CreatorWindow(QMainWindow):
         self.repolish(self.btn_global_transpos_scan)
         self.btn_global_transpos_scan.clicked.connect(self.run_global_transpos_scan)
         h_toolbar.addWidget(self.btn_global_transpos_scan)
+
+        self.btn_add_all_1move = QPushButton(tr_ui("creator.transpos_btn_add_all_1move", "⭐ Alle 1-Zug"))
+        self.btn_add_all_1move.setMinimumHeight(scale(28))
+        self.btn_add_all_1move.setProperty("class", "GlassPill")
+        self.btn_add_all_1move.setToolTip(tr_ui("creator.transpos_btn_add_all_1move_tooltip", "Fügt alle 1-Zug-Überleitungen zu ihren empfohlenen Repertoire-Levels hinzu."))
+        self.btn_add_all_1move.setStyleSheet(f"""
+            QPushButton {{
+                padding: {scale(4)}px {scale(8)}px;
+                font-size: {scale(12)}px;
+                font-weight: 600;
+            }}
+        """)
+        self.repolish(self.btn_add_all_1move)
+        self.btn_add_all_1move.clicked.connect(self.add_all_1move_transpositions)
+        h_toolbar.addWidget(self.btn_add_all_1move)
 
         inner.addLayout(h_toolbar)
 
@@ -7176,43 +7181,45 @@ class CreatorWindow(QMainWindow):
         x_base = max(min_level, min(x_base, max_level))
 
         # 5. Check Frequency of first move (< 5% check)
+        # Note: 5% frequency penalty is only active when considering Level 1 (x_base == 1)
         is_low_freq = False
-        pos_prio_val = data.get("pos_prio")
-        if pos_prio_val is not None:
-            if pos_prio_val < 0.05:
-                is_low_freq = True
-        elif first_uci and clean_origin:
-            castling_aliases = {
-                'e1g1': 'e1h1', 'e1h1': 'e1g1',
-                'e1c1': 'e1a1', 'e1a1': 'e1c1',
-                'e8g8': 'e8h8', 'e8h8': 'e8g8',
-                'e8c8': 'e8a8', 'e8a8': 'e8c8'
-            }
-            alt_first_uci = castling_aliases.get(first_uci) if first_uci else None
-            try:
-                ld_list = self.backend.session.query(LichessData).filter_by(fen=clean_origin).all()
-                if ld_list:
-                    total_pos_games = 0
-                    move_games = 0
-                    for ld in ld_list:
-                        if ld.moves_json:
-                            m_dict = json.loads(ld.moves_json)
-                            for u, st in m_dict.items():
-                                if isinstance(st, dict):
-                                    w = st.get('white', 0)
-                                    d = st.get('draws', 0)
-                                    b = st.get('black', 0)
-                                    tot = st.get('total', w + d + b)
-                                    total_pos_games += tot
-                                    m_san = st.get('san')
-                                    if u == first_uci or (alt_first_uci and u == alt_first_uci) or (first_san and m_san and m_san == first_san):
-                                        move_games += tot
-                    if total_pos_games >= 20:
-                        freq = move_games / total_pos_games
-                        if freq < 0.05:
-                            is_low_freq = True
-            except Exception:
-                pass
+        if x_base == 1:
+            pos_prio_val = data.get("pos_prio")
+            if pos_prio_val is not None:
+                if pos_prio_val < 0.05:
+                    is_low_freq = True
+            elif first_uci and clean_origin:
+                castling_aliases = {
+                    'e1g1': 'e1h1', 'e1h1': 'e1g1',
+                    'e1c1': 'e1a1', 'e1a1': 'e1c1',
+                    'e8g8': 'e8h8', 'e8h8': 'e8g8',
+                    'e8c8': 'e8a8', 'e8a8': 'e8c8'
+                }
+                alt_first_uci = castling_aliases.get(first_uci) if first_uci else None
+                try:
+                    ld_list = self.backend.session.query(LichessData).filter_by(fen=clean_origin).all()
+                    if ld_list:
+                        total_pos_games = 0
+                        move_games = 0
+                        for ld in ld_list:
+                            if ld.moves_json:
+                                m_dict = json.loads(ld.moves_json)
+                                for u, st in m_dict.items():
+                                    if isinstance(st, dict):
+                                        w = st.get('white', 0)
+                                        d = st.get('draws', 0)
+                                        b = st.get('black', 0)
+                                        tot = st.get('total', w + d + b)
+                                        total_pos_games += tot
+                                        m_san = st.get('san')
+                                        if u == first_uci or (alt_first_uci and u == alt_first_uci) or (first_san and m_san and m_san == first_san):
+                                            move_games += tot
+                        if total_pos_games >= 20:
+                            freq = move_games / total_pos_games
+                            if freq < 0.05:
+                                is_low_freq = True
+                except Exception:
+                    pass
 
         # 6. Final Suggested Level & Reason
         if is_low_freq:
@@ -7402,6 +7409,170 @@ class CreatorWindow(QMainWindow):
             self.lbl_transpos_status.setText(
                 tr_ui("creator.transpositions_added_success", "✓ {move} zu Level {level} hinzugefügt.", move=move_label, level=f"{level_order} ({lvl_name})")
             )
+
+    def add_all_1move_transpositions(self):
+        """Adds all 1-move transpositions across the repertoire to their recommended levels."""
+        if not self.backend or not self.backend.active_repo_name or not self.backend.session:
+            QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), tr_ui("creator.msg_load_repo_first", "Bitte lade zuerst ein Repertoire."))
+            return
+
+        if hasattr(self, "global_transpos_thread") and self.global_transpos_thread and self.global_transpos_thread.isRunning():
+            QMessageBox.information(
+                self,
+                tr_ui("creator.transpos_title", "Überleitungen"),
+                tr_ui("creator.transpositions_scan_running_wait", "Bitte warte, bis der aktuelle Scan abgeschlossen ist, oder stoppe ihn zuerst.")
+            )
+            return
+
+        # 1. Collect candidate 1-move transpositions
+        # Prefer already-scanned items from _global_transpos_results if present; otherwise do a fast on-demand 1-move scan
+        candidates = []
+        if hasattr(self, "_global_transpos_results") and self._global_transpos_results:
+            candidates = [dict(h) for h in self._global_transpos_results if h.get("depth", 1) == 1]
+
+        if not candidates:
+            elo = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
+            from opening_fenix.core.services.hole_finder_service import find_repertoire_transpositions
+            candidates = find_repertoire_transpositions(self.backend.session, elo_range=elo, only_1move=True)
+
+        # Filter candidates and compute suggested level for each
+        items_to_add = []
+        seen_keys = set()
+        level_counts = collections.defaultdict(int)
+
+        for c in candidates:
+            orig_fen = c.get("search_fen") or c.get("fen")
+            if not orig_fen:
+                continue
+            clean_orig = " ".join(orig_fen.strip().split()[:4])
+            c_copy = dict(c)
+            c_copy["search_fen"] = orig_fen
+
+            uci = c.get("move_uci") or (c.get("path_ucis", [None])[0] if c.get("path_ucis") else None)
+            san = c.get("move_san") or (c.get("path_sans", [None])[0] if c.get("path_sans") else None)
+            if not uci:
+                continue
+
+            dedup_key = (clean_orig, uci)
+            if dedup_key in seen_keys:
+                continue
+            seen_keys.add(dedup_key)
+
+            sugg_lvl, sugg_reason = self.suggest_transposition_level(c_copy)
+            items_to_add.append((c_copy, sugg_lvl, uci, san))
+            level_counts[sugg_lvl] += 1
+
+        if not items_to_add:
+            if hasattr(self, "lbl_transpos_status"):
+                self.lbl_transpos_status.setText(tr_ui("creator.transpos_status_none_found", "Keine neuen 1-Zug-Überleitungen gefunden."))
+            QMessageBox.information(
+                self,
+                tr_ui("creator.transpos_dlg_add_all_title", "1-Zug-Überleitungen übernehmen"),
+                tr_ui("creator.transpos_status_none_found", "Keine neuen 1-Zug-Überleitungen gefunden.")
+            )
+            return
+
+        # 2. Build breakdown summary for the confirmation dialog
+        levels_meta = {lvl.get("order"): lvl.get("name", f"Level {lvl.get('order')}") for lvl in self.backend.get_repertoire_levels()}
+        breakdown_lines = []
+        for lvl_order in sorted(level_counts.keys()):
+            lvl_name = levels_meta.get(lvl_order, f"Level {lvl_order}")
+            cnt = level_counts[lvl_order]
+            breakdown_lines.append(f"• {lvl_name} (Level {lvl_order}): {cnt}")
+        breakdown_str = "\n".join(breakdown_lines)
+
+        confirm_msg = tr_ui(
+            "creator.transpos_dlg_add_all_msg",
+            "{count} 1-Zug-Überleitung(en) gefunden:\n\n{breakdown}\n\nMöchtest du diese Züge zu ihren empfohlenen Levels hinzufügen?",
+            count=len(items_to_add),
+            breakdown=breakdown_str
+        )
+
+        reply = QMessageBox.question(
+            self,
+            tr_ui("creator.transpos_dlg_add_all_title", "1-Zug-Überleitungen übernehmen"),
+            confirm_msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 3. Add all moves to the repertoire
+        added_count = 0
+        added_fens = []
+        added_pairs = set()
+
+        for c_copy, lvl_order, uci, san in items_to_add:
+            orig_fen = c_copy.get("search_fen") or c_copy.get("fen")
+            clean_orig = " ".join(orig_fen.strip().split()[:4])
+
+            if not san and uci and orig_fen:
+                try:
+                    b = chess.Board(orig_fen)
+                    m = chess.Move.from_uci(uci)
+                    san = b.san(m)
+                except Exception:
+                    san = uci
+
+            self.backend.add_move(orig_fen, uci, san or uci, level_order=lvl_order)
+            added_count += 1
+            added_pairs.add((clean_orig, uci))
+            if san:
+                added_pairs.add((clean_orig, san))
+
+            target_fen = c_copy.get("target_fen")
+            if not target_fen:
+                try:
+                    b = chess.Board(orig_fen)
+                    m = chess.Move.from_uci(uci)
+                    if m in b.legal_moves:
+                        b.push(m)
+                        target_fen = b.fen()
+                except Exception:
+                    pass
+            if target_fen:
+                added_fens.append(target_fen)
+
+        # 4. Clean up UI and global results
+        if hasattr(self, "_global_transpos_results") and self._global_transpos_results:
+            def was_added(h):
+                h_fen = " ".join(h.get("fen", "").strip().split()[:4])
+                h_uci = (h.get("path_ucis", [None])[0] if h.get("path_ucis") else None) or h.get("move_uci")
+                h_san = h.get("move_san")
+                return (h_fen, h_uci) in added_pairs or (h_fen, h_san) in added_pairs
+
+            self._global_transpos_results = [h for h in self._global_transpos_results if not was_added(h)]
+
+        # Clear suggestion cache
+        if hasattr(self, "_transpos_suggestion_cache"):
+            self._transpos_suggestion_cache = {}
+        if hasattr(self, "_target_level_cache"):
+            self._target_level_cache = {}
+        if self.backend:
+            self.backend._min_reachable_level_cache = None
+
+        # Re-render table and update tree/board
+        curr_fen = self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None
+        if curr_fen:
+            outgoing = self.backend.find_outgoing_transpositions(curr_fen)
+            self._populate_outgoing_table(outgoing)
+        else:
+            self._render_transpositions_table(rebuild_global=True)
+
+        self.play_sound("move")
+        self.update_ui_from_fen()
+
+        for fen_to_enrich in added_fens:
+            self.trigger_background_enrichment(fen_to_enrich)
+
+        success_msg = tr_ui(
+            "creator.transpos_status_added_all",
+            f"✓ {added_count} 1-Zug-Überleitung(en) zu empfohlenen Levels hinzugefügt.",
+            count=added_count
+        )
+        if hasattr(self, "lbl_transpos_status"):
+            self.lbl_transpos_status.setText(success_msg)
 
     def _adjust_transposition_table_columns(self):
         """Ensures all columns in the transpositions table have optimal sizing without clipping."""

@@ -50,7 +50,8 @@ def test_course_import_dialog_load_file(qtbot, temp_pgn):
     dlg = CourseImportDialog(initial_pgn_path=temp_pgn)
     qtbot.addWidget(dlg)
 
-    assert dlg.name_input.text() == "Sicilian Course"
+    # Suggests name from PGN Event tag "Sicilian Repertoire"
+    assert dlg.name_input.text() == "Sicilian Repertoire"
     assert dlg.btn_import.isEnabled() is True
     assert dlg.val_l1.text() in ("1 Partie", "1 game")
     assert dlg.val_l2.text() in ("1 Partie", "1 game")
@@ -343,6 +344,140 @@ def test_course_import_dialog_subvariations_checkbox(qtbot, temp_pgn):
     assert dlg.chk_subvariations_to_comments.isChecked() is True
 
 
+def test_course_import_dialog_async_load_with_thread(qtbot, temp_pgn):
+    dlg = CourseImportDialog()
+    qtbot.addWidget(dlg)
+
+    assert dlg.analysis_thread is None
+
+    # Load with sync=False (as triggered by on_browse_files)
+    dlg.load_files([temp_pgn], sync=False)
+    assert dlg.analysis_thread is not None
+    assert dlg.btn_browse.isEnabled() is False
+    assert not dlg.progress_container.isHidden()
+
+    # Wait for thread to finish
+    qtbot.waitUntil(lambda: dlg.analysis_result is not None, timeout=5000)
+
+    assert dlg.btn_browse.isEnabled() is True
+    assert dlg.progress_container.isHidden() is True
+    assert dlg.name_input.text() == "Sicilian Repertoire"
+    assert not dlg.bottom_container.isHidden()
 
 
+def test_course_import_dialog_expand_collapse_all_batch(qtbot, temp_pgn):
+    dlg = CourseImportDialog(initial_pgn_path=temp_pgn)
+    qtbot.addWidget(dlg)
+    dlg.toggle_details_tree()
 
+    # Expand all batch
+    dlg.on_expand_all_clicked()
+    for i in range(dlg.tree_details.topLevelItemCount()):
+        item = dlg.tree_details.topLevelItem(i)
+        assert item.isExpanded() is True
+
+    # Collapse all batch
+    dlg.on_collapse_all_clicked()
+    for i in range(dlg.tree_details.topLevelItemCount()):
+        item = dlg.tree_details.topLevelItem(i)
+        assert item.isExpanded() is False
+
+
+def test_course_import_dialog_config_box_constraints_and_reposition(qtbot, temp_pgn):
+    from PyQt6.QtWidgets import QSizePolicy, QVBoxLayout
+    dlg = CourseImportDialog(initial_pgn_path=temp_pgn)
+    qtbot.addWidget(dlg)
+
+    # Verify config box size constraints prevent crushing
+    assert dlg.config_box.sizePolicy().verticalPolicy() in (QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+    assert dlg.config_box.layout().sizeConstraint() == QVBoxLayout.SizeConstraint.SetMinimumSize
+
+    # Test _reposition_to_fit_screen
+    dlg._reposition_to_fit_screen()
+    geo = dlg.geometry()
+    screen = dlg.screen()
+    if screen:
+        avail = screen.availableGeometry()
+        assert geo.bottom() <= avail.bottom()
+        assert geo.top() >= avail.top()
+
+
+def test_course_import_dialog_warning_banner(qtbot, tmp_path):
+    # Create PGN with invalid variation move (illegal SAN move)
+    pgn_file = tmp_path / "warn_course.pgn"
+    pgn_content = (
+        '[Event "KID Part 2"]\n'
+        '[White "Fianchetto: 7.d5 #1"]\n'
+        '[Black "Fianchetto Variation"]\n'
+        '1. d4 (1. Ne4) 1... d5 *\n'
+    )
+    pgn_file.write_text(pgn_content, encoding="utf-8")
+
+    dlg = CourseImportDialog(initial_pgn_path=str(pgn_file))
+    qtbot.addWidget(dlg)
+
+    # warning_box should not be hidden
+    assert not dlg.warning_box.isHidden()
+    assert "Achtung:" in dlg.lbl_warning_text.text()
+    assert dlg.warning_box.toolTip() != ""
+
+def test_course_import_dialog_target_mapping_updates_summary_cards(qtbot, tmp_path):
+    from opening_fenix.core.services.course_import_service import CATEGORY_LEVEL_1, CATEGORY_LEVEL_2, CATEGORY_MOTIVES
+
+    pgn_content = """[Event "Test Course"]
+[White "Line 1"]
+[Black "1) Main Chapter"]
+1. e4 e5 *
+
+[Event "Test Course"]
+[White "7.c3 line 1"]
+[Black "4) Archangel with 7.c3 - Introduction"]
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 *
+
+[Event "Test Course"]
+[White "7.c3 line 2"]
+[Black "4) Archangel with 7.c3 - Introduction"]
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 d6 *
+"""
+    pgn_file = tmp_path / "target_mapping_test.pgn"
+    pgn_file.write_text(pgn_content, encoding="utf-8")
+
+    dlg = CourseImportDialog(initial_pgn_path=str(pgn_file))
+    qtbot.addWidget(dlg)
+
+    # Initial state: 1 game in Level 2, 2 games in Introductions
+    assert dlg.val_l2.text() in ("1 Partie", "1 game")
+    assert dlg.val_intro.text() in ("2 Partien", "2 games")
+    assert dlg.val_l1.text() in ("0 Partien", "0 games")
+
+    # Find the combobox for chapter "4) Archangel with 7.c3 - Introduction"
+    intro_ch_name = "4) Archangel with 7.c3 - Introduction"
+    assert intro_ch_name in dlg.chapter_combos
+    combo = dlg.chapter_combos[intro_ch_name]
+
+    # Change Target Mapping to Level 2 (Deep Theory)
+    idx_l2 = combo.findData(CATEGORY_LEVEL_2)
+    assert idx_l2 >= 0
+    combo.setCurrentIndex(idx_l2)
+
+    # Verify that summary cards update immediately!
+    assert dlg.val_l2.text() in ("3 Partien", "3 games")
+    assert dlg.val_intro.text() in ("0 Partien", "0 games")
+
+    # Now change to Level 1 (Quickstarter)
+    idx_l1 = combo.findData(CATEGORY_LEVEL_1)
+    assert idx_l1 >= 0
+    combo.setCurrentIndex(idx_l1)
+
+    # Verify that Level 1 increased and Level 2 decreased!
+    assert dlg.val_l1.text() in ("2 Partien", "2 games")
+    assert dlg.val_l2.text() in ("1 Partie", "1 game")
+    assert dlg.val_intro.text() in ("0 Partien", "0 games")
+
+    # Now change to Motives
+    idx_mot = combo.findData(CATEGORY_MOTIVES)
+    assert idx_mot >= 0
+    combo.setCurrentIndex(idx_mot)
+
+    assert dlg.val_mot.text() in ("2 Partien", "2 games")
+    assert dlg.val_l1.text() in ("0 Partien", "0 games")

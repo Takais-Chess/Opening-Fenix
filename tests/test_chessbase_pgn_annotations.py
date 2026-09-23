@@ -71,6 +71,20 @@ def test_clean_chessbase_annotations():
     assert "Important position!\nWatch out for d5." in clean
 
 
+def test_clean_drawing_annotations_user_screenshot():
+    """Test the exact case from the user's screenshot with multiple drawing tags and [%alt ...]."""
+    raw_only_drawings = "[%cal Rh4h5,Ge7g6,Ge4e5][%csl Rd6,Rf6,Gh5][%alt Na3]"
+    clean_empty = clean_chessbase_annotations(raw_only_drawings)
+    assert clean_empty == ""
+
+    raw_with_text = "[%cal Rh4h5,Ge7g6,Ge4e5][%csl Rd6,Rf6,Gh5][%alt Na3] Attacking the king."
+    clean_text = clean_chessbase_annotations(raw_with_text)
+    assert clean_text == "Attacking the king."
+    assert "[%cal" not in clean_text
+    assert "[%csl" not in clean_text
+    assert "[%alt" not in clean_text
+
+
 def test_serialize_annotations():
     """Test serializing highlights and arrows into standard ChessBase PGN format."""
     highlights = {chess.E5: "red", chess.D4: "green"}

@@ -291,7 +291,9 @@ class RepertoireService:
 
         # 1. Validation
         import re
-        if not re.match(r'^[a-zA-Z0-9_\- ]+$', new_name):
+        # Allow letters, digits, spaces, and characters valid in Windows filenames
+        # (underscore, hyphen, apostrophe, dot, parens, exclamation, ampersand, plus, comma)
+        if not re.match(r"^[a-zA-Z0-9äöüÄÖÜß _\-'\.&!()+,]+$", new_name):
             return False, "Ungültige Zeichen im Namen."
 
         old_dir = get_repertoire_dir(old_name)
@@ -309,56 +311,57 @@ class RepertoireService:
         release_repertoire_locks(old_name)
 
         import gc
+        import shutil
         import stat
         gc.collect()
 
-        try:
-            # 3. Rename Folder with retry on Windows
-            renamed = False
+        def _rename_with_fallback(src, dst, retries=8, delay=0.25):
+            """
+            Try os.rename() first (fast, atomic on normal filesystems).
+            If it keeps failing (e.g. Google Drive, OneDrive, network share),
+            fall back to shutil.move() which copies then deletes – always works.
+            """
             last_err = None
-            for attempt in range(8):
+            for attempt in range(retries):
                 try:
-                    os.chmod(old_dir, stat.S_IWRITE)
-                    os.rename(old_dir, new_dir)
-                    renamed = True
-                    break
+                    os.chmod(src, stat.S_IWRITE)
+                    os.rename(src, dst)
+                    return
                 except Exception as e:
                     last_err = e
                     gc.collect()
-                    time.sleep(0.25 * (attempt + 1))
+                    time.sleep(delay * (attempt + 1))
+            # Fallback: shutil.move handles cross-device / virtual FS renames
+            try:
+                logger.warning(
+                    f"os.rename failed ({last_err}); falling back to shutil.move: {src} -> {dst}"
+                )
+                shutil.move(src, dst)
+            except Exception as e:
+                raise OSError(
+                    f"Could not rename '{src}' to '{dst}' (tried os.rename and shutil.move): {e}"
+                ) from e
 
-            if not renamed:
-                raise last_err
-            
+        try:
+            # 3. Rename Folder with retry + cloud FS fallback
+            _rename_with_fallback(old_dir, new_dir)
+
             # 4. Rename Database File
             old_db = os.path.join(new_dir, f"{old_name}.db")
             new_db = os.path.join(new_dir, f"{new_name}.db")
             if os.path.exists(old_db):
-                for attempt in range(5):
-                    try:
-                        os.chmod(old_db, stat.S_IWRITE)
-                        os.rename(old_db, new_db)
-                        break
-                    except Exception:
-                        gc.collect()
-                        time.sleep(0.2)
-            
+                _rename_with_fallback(old_db, new_db, retries=5, delay=0.2)
+
             # 5. Rename Auxiliary Files
             for ext in [".db-wal", ".db-shm"]:
                 old_aux = os.path.join(new_dir, f"{old_name}{ext}")
                 new_aux = os.path.join(new_dir, f"{new_name}{ext}")
                 if os.path.exists(old_aux):
-                    for attempt in range(5):
-                        try:
-                            os.chmod(old_aux, stat.S_IWRITE)
-                            os.rename(old_aux, new_aux)
-                            break
-                        except Exception:
-                            gc.collect()
-                            time.sleep(0.2)
-            
+                    _rename_with_fallback(old_aux, new_aux, retries=5, delay=0.2)
+
             # 6. Global Profile Update (Keep learning progress)
             update_repertoire_name_globally(old_name, new_name)
+
 
             # 7. Update Metadata inside the DB
             try:

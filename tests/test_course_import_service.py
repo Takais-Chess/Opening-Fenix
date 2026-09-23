@@ -22,7 +22,10 @@ from opening_fenix.core.services.course_import_service import (
     CATEGORY_LEVEL_2,
     CATEGORY_TACTICS,
     CATEGORY_MODEL,
-    CATEGORY_INTRO
+    CATEGORY_INTRO,
+    suggest_course_name_from_paths,
+    clean_suggested_name,
+    extract_event_name_from_pgn
 )
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 
@@ -130,7 +133,8 @@ def test_end_to_end_course_import(temp_course_env):
 
     # 1. Test Analysis
     analysis = analyze_course_pgn(pgn_path)
-    assert analysis.suggested_repo_name == "Test Course"
+    # Suggested repo name is extracted from PGN Event header "Sample Course"
+    assert analysis.suggested_repo_name == "Sample Course"
     assert analysis.total_games == 5
     assert analysis.category_counts[CATEGORY_LEVEL_1] == 1
     assert analysis.category_counts[CATEGORY_LEVEL_2] == 1
@@ -497,15 +501,26 @@ def test_is_intro_detection():
     g9 = chess.pgn.read_game(io.StringIO(pgn9))
     assert is_game_intro(g9) is True
 
-    # 10. White tag containing Guide / Guidelines
-    pgn10 = """[Event "Course"]
-[White "Guidelines for the Middlegame"]
-[Black "Openings"]
+    # 11. White tag starting with Info | (user's new format)
+    pgn11 = """[Event "Course"]
+[White "Info | 3.Nc3 Bg7 4.e3 O-O Informational"]
+[Black "28. e3 Set-ups"]
 
-1. e4 c5 2. Nf3 d6 *
+1. d4 Nf6 2. c4 g6 3. Nc3 Bg7 4. e3 O-O *
 """
-    g10 = chess.pgn.read_game(io.StringIO(pgn10))
-    assert is_game_intro(g10) is True
+    g11 = chess.pgn.read_game(io.StringIO(pgn11))
+    assert is_game_intro(g11) is True
+
+    # 12. Tactics evaluated independently even if White has or does not have Info
+    pgn12 = """[Event "Course"]
+[White "Tactical Exercise 1"]
+[Black "Tactics"]
+[FEN "r1bqkb1r/pp2pppp/3p4/1P2nP2/5B2/2N5/1PP3PP/R2QKB1R w KQkq - 0 13"]
+
+1. Bxe5 dxe5 *
+"""
+    g12 = chess.pgn.read_game(io.StringIO(pgn12))
+    assert is_game_puzzle(g12) is True
 
 def test_classify_chapter_intro_variants():
     assert classify_chapter("Info") == CATEGORY_INTRO
@@ -632,5 +647,123 @@ def test_course_import_archive_original_pgns(temp_course_env):
     assert not os.path.exists(orig_dir_no_arch)
 
 
+def test_suggest_course_name_from_paths_and_cleaning(tmp_path):
+    # 1. Test clean_suggested_name
+    assert clean_suggested_name("Lifetime_Repertoires_Gawain_s_1_e4_e5") == "Lifetime Repertoires Gawain's 1 e4 e5"
+    assert clean_suggested_name("Lifetime_Repertoires_King_s_Indian_Defense_Part_1") == "Lifetime Repertoires King's Indian Defense"
+    assert clean_suggested_name("Peter_Svidler_s_French_Part_2") == "Peter Svidler's French"
+    assert clean_suggested_name("Mastering_Pawn_Endgames_Volume_1") == "Mastering Pawn Endgames"
+    assert clean_suggested_name("bortnyk-and-naroditsky-s-jobava-london") == "bortnyk-and-naroditsky's-jobava-london"
+    assert clean_suggested_name("Sicilian Course") == "Sicilian Course"
+
+    # 2. Test extract_event_name_from_pgn with meaningful event
+    pgn_valid = tmp_path / "valid.pgn"
+    pgn_valid.write_text('[Event "Lifetime Repertoires: Gawain\'s 1.e4 e5"]\n[White "Line 1"]\n1. e4 *\n', encoding="utf-8")
+    assert extract_event_name_from_pgn(str(pgn_valid)) == "Lifetime Repertoires: Gawain's 1.e4 e5"
+
+    # 3. Test extract_event_name_from_pgn with generic events
+    pgn_generic = tmp_path / "generic.pgn"
+    pgn_generic.write_text('[Event "Rated Blitz game"]\n[White "Line 1"]\n1. e4 *\n', encoding="utf-8")
+    assert extract_event_name_from_pgn(str(pgn_generic)) is None
+
+    pgn_q = tmp_path / "question.pgn"
+    pgn_q.write_text('[Event "?"]\n[White "Line 1"]\n1. e4 *\n', encoding="utf-8")
+    assert extract_event_name_from_pgn(str(pgn_q)) is None
+
+    pgn_chap = tmp_path / "chapter.pgn"
+    pgn_chap.write_text('[Event "Chapter 1"]\n[White "Line 1"]\n1. e4 *\n', encoding="utf-8")
+    assert extract_event_name_from_pgn(str(pgn_chap)) is None
+
+    # 4. Test suggest_course_name_from_paths with single valid PGN file
+    assert suggest_course_name_from_paths([str(pgn_valid)]) == "Lifetime Repertoires - Gawain's 1.e4 e5"
+
+    # 5. Test suggest_course_name_from_paths with multi-part PGN files
+    p1 = tmp_path / "Lifetime_Repertoires_KID_Part_1.pgn"
+    p2 = tmp_path / "Lifetime_Repertoires_KID_Part_2.pgn"
+    p1.write_text('[Event "Lifetime Repertoires: King\'s Indian Defense - Part 1"]\n1. d4 *\n', encoding="utf-8")
+    p2.write_text('[Event "Lifetime Repertoires: King\'s Indian Defense - Part 2"]\n1. d4 *\n', encoding="utf-8")
+    assert suggest_course_name_from_paths([str(p1), str(p2)]) == "Lifetime Repertoires - King's Indian Defense"
+
+    # 6. Test suggest_course_name_from_paths fallback to filename when event is generic
+    p_fallback = tmp_path / "Lifetime_Repertoires_Peter_Svidler_s_French_Part_1.pgn"
+    p_fallback.write_text('[Event "?"]\n1. e4 *\n', encoding="utf-8")
+    assert suggest_course_name_from_paths([str(p_fallback)]) == "Lifetime Repertoires Peter Svidler's French"
+
+    # 7. Test suggest_course_name_from_paths with non-existent paths (strings only)
+    assert suggest_course_name_from_paths(["Lifetime_Repertoires_King_s_Indian_Defense_Part_1.pgn"]) == "Lifetime Repertoires King's Indian Defense"
+
+def test_course_import_parsing_warnings(tmp_path, monkeypatch):
+    test_user_dir = str(tmp_path / "app_data")
+    monkeypatch.setattr("opening_fenix.core.services.course_import_service.get_user_dir", lambda: test_user_dir)
+    monkeypatch.setattr("opening_fenix.core.utils.get_user_dir", lambda: test_user_dir)
+
+    # Game with an illegal move in variation: 1. Ne4 from initial position
+    pgn_file = tmp_path / "corrupted_line.pgn"
+    pgn_content = (
+        '[Event "KID Part 2"]\n'
+        '[Site "Chessable"]\n'
+        '[Date "2026.01.01"]\n'
+        '[Round "017.021"]\n'
+        '[White "Fianchetto: 7.d5 e6 with 9.Ng5 #6"]\n'
+        '[Black "Fianchetto Variation"]\n'
+        '[Result "*"]\n\n'
+        '1. d4 (1. Ne4) 1... d5 *\n'
+    )
+    pgn_file.write_text(pgn_content, encoding="utf-8")
+
+    # 1. Test analyze_course_pgns captures warnings
+    res = analyze_course_pgns([str(pgn_file)])
+    assert len(res.parsing_warnings) >= 1
+    assert "Fianchetto Variation" in res.parsing_warnings[0]
+    assert "Ne4" in res.parsing_warnings[0]
+    assert len(res.chapters[0].games[0].parsing_errors) >= 1
+
+    # 2. Test execute_course_import carries warnings into CourseImportResult
+    plan = CourseImportPlan(
+        pgn_paths=[str(pgn_file)],
+        repo_name="Test Warnings Repo",
+        side="w",
+        chapter_targets={"Fianchetto Variation": CATEGORY_LEVEL_2}
+    )
+    import_res = execute_course_import(plan)
+    assert import_res.success is True
+    assert len(import_res.parsing_warnings) >= 1
+    assert "Ne4" in import_res.parsing_warnings[0]
+    assert "Hinweis:" in import_res.message
+
+
+def test_course_import_with_chapter_target_override_from_intro_to_level_2(temp_course_env):
+    pgn_file = os.path.join(temp_course_env, "intro_override_course.pgn")
+    pgn_content = """[Event "Caruana Archangel"]
+[White "Archangel with 7.c3 - 7...d6 8.d4 Bb6 9.d5"]
+[Black "4) Archangel with 7.c3 - Introduction"]
+1. e4 e5 2. Nf3 Nc6 3. Bc4 Bc5 4. c3 d6 5. d4 Bb6 6. d5 *
+
+[Event "Caruana Archangel"]
+[White "True Intro Note"]
+[Black "Introduction"]
+{ Welcome to the course } *
+"""
+    with open(pgn_file, "w", encoding="utf-8") as f:
+        f.write(pgn_content)
+
+    analysis = analyze_course_pgns([pgn_file])
+    assert analysis.total_games == 2
+
+    # Override the "4) Archangel with 7.c3 - Introduction" chapter target to CATEGORY_LEVEL_2
+    plan = CourseImportPlan(
+        pgn_paths=[pgn_file],
+        repo_name="Archangel Test Override",
+        side="b",
+        chapter_targets={
+            "4) Archangel with 7.c3 - Introduction": CATEGORY_LEVEL_2,
+            "Introduction": CATEGORY_INTRO
+        }
+    )
+    import_res = execute_course_import(plan)
+    assert import_res.success is True
+    # The 7.c3 moves line must be imported into level 2, NOT saved as intro games!
+    assert import_res.level_2_moves > 0
+    assert import_res.intro_games_saved == 1
 
 

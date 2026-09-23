@@ -330,3 +330,38 @@ def test_candidate_moves_deep_line_pos_prio_normalization(creator_window, monkey
     assert pytest.approx(ba6_item.data(2, Qt.ItemDataRole.UserRole), 0.001) == 0.5
     assert pytest.approx(bxc3_item.data(2, Qt.ItemDataRole.UserRole), 0.001) == 0.5
 
+
+def test_candidate_moves_table_cleans_drawing_annotations(creator_window, monkeypatch):
+    """Verify that drawing annotations ([%cal...], [%csl...], [%alt...]) are stripped from the Comment column."""
+    cand_moves = [
+        {
+            "id": 1, "uci": "h2h4", "san": "h4", "is_repo": True, "level": 1, "is_active": True,
+            "comment": "[%cal Rh4h5,Ge7g6,Ge4e5][%csl Rd6,Rf6,Gh5][%alt Na3]",
+            "priority": 0.0003, "nag": 0, "eval": None, "to_pos_id": 201
+        },
+        {
+            "id": 2, "uci": "g1f3", "san": "Nf3", "is_repo": True, "level": 1, "is_active": True,
+            "comment": "[%csl Re5][%cal Ge2e4] Solid developing move.",
+            "priority": 0.05, "nag": 0, "eval": None, "to_pos_id": 202
+        }
+    ]
+    monkeypatch.setattr(creator_window.backend, "get_candidate_moves", lambda fen: cand_moves)
+    creator_window.refresh_candidate_moves_table()
+
+    tree = creator_window.tree_widget
+    items = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    h4_item = next(it for it in items if "h4" in it.text(0))
+    nf3_item = next(it for it in items if "Nf3" in it.text(0))
+
+    # Column 3 is Comment:
+    # h4 had only drawings, so comment must be completely empty
+    assert h4_item.text(3) == ""
+    assert "[%cal" not in h4_item.text(3)
+    assert "[%csl" not in h4_item.text(3)
+    assert "[%alt" not in h4_item.text(3)
+
+    # Nf3 had drawings + text, so comment must show only the clean text
+    assert nf3_item.text(3) == "Solid developing move."
+    assert "[%csl" not in nf3_item.text(3)
+    assert "[%cal" not in nf3_item.text(3)
+

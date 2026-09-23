@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
  
+## [1.2.1] - 2026-09-23
+
+### Added & Improved
+- **Cross-Course Engine Analysis Synchronization**: Added capability to reuse deep Stockfish evaluations across repertoires and courses that share common board positions, eliminating redundant engine evaluations and saving compute resources.
+- **Robust Course Import & PGN Diagnostics**: Enhanced multi-file PGN course import with real-time progress feedback, syntax error detection and warning summaries, graceful skipping of ambiguous variations, and unified line targeting.
+- **Bulk 1-Move Transposition Ingestion**: One-click action in Repertoire Creator to automatically import all discovered 1-move opponent transpositions into their recommended repertoire levels.
+- **Cloud & Virtual Drive Rename Resilience**: Hardened folder and SQLite database renaming against file locks on cloud-synced storage (OneDrive, Google Drive) using automatic copy/move fallback, and expanded permitted repertoire name characters to support German umlauts and punctuation.
+- **Popularity-Driven Transposition Ranking**: Opponent-reachable positions in the Hole Finder and Transposition scanner are now ordered by repertoire reach probability, Lichess game counts, and ply depth for faster discovery of high-impact transpositions.
+
 ## [1.2.0] - 2026-09-22
 
 ### Added & Improved

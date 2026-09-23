@@ -928,10 +928,10 @@ def parse_chessbase_annotations(text: str) -> dict:
 
 
 def clean_chessbase_annotations(text: str) -> str:
-    """Removes [%csl ...] and [%cal ...] tags from comment text for clean UI presentation."""
+    """Removes [%csl ...], [%cal ...], and other [%...] annotation tags from comment text for clean UI presentation."""
     if not text or not isinstance(text, str):
         return ""
-    cleaned = re.sub(r'\[%(?:csl|cal|CSL|CAL)\s+[^\]]+\]', '', text)
+    cleaned = re.sub(r'\[%[^\]]+\]', '', text)
     lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in cleaned.split('\n')]
     # Remove empty lines at beginning and end, collapse 3+ newlines to 2
     res = '\n'.join(lines).strip()

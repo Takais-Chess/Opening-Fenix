@@ -1297,6 +1297,88 @@ def test_find_repertoire_transpositions_progress_callback(backend):
     assert "Pass 2" in msg
 
 
+def test_2move_transposition_searches_most_popular_positions_first(backend):
+    """
+    Verify that 2-move transposition search processes the most popular positions first.
+    Repertoire for White:
+      Root:
+        - 1. e4 (high priority/popularity, p=0.8)
+        - 1. d4 (low priority/popularity, p=0.2)
+      Sicilian line (1... c5 2. Nf3) reachable from 1. e4
+      French line (1... e6 2. e4) reachable from 1. d4
+    When find_repertoire_transpositions executes, 1. e4 must be searched and streamed
+    before 1. d4.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    # 1. e4 (high popularity: prio 0.8)
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    # 1. d4 (low popularity: prio 0.2)
+    p_d4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -"), variation_1="1. d4")
+
+    # Destination 1: Sicilian (after 1... c5 2. Nf3)
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian", good_moves=json.dumps(["g1f3"]))
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+
+    # Destination 2: French (after 1... e6 2. e4)
+    p_fre_e6 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq -"), variation_1="Horwitz", good_moves=json.dumps(["e2e4"]))
+    p_fre_e4 = Position(fen=clean_fen("rnbqkbnr/pppp1ppp/4p3/8/3PP3/8/PPP2PPP/RNBQKBNR b KQkq -"), variation_1="French 2.e4")
+
+    session.add_all([p_root, p_e4, p_d4, p_sic_c5, p_sic_nf3, p_fre_e6, p_fre_e4])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4", priority_score=0.8)
+    m_d4 = Move(from_position_id=p_root.id, to_position_id=p_d4.id, uci="d2d4", san="d4", priority_score=0.2)
+
+    # Active moves in branches to reach destinations
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+    m_fre_e4 = Move(from_position_id=p_fre_e6.id, to_position_id=p_fre_e4.id, uci="e2e4", san="e4")
+
+    session.add_all([m_e4, m_d4, m_nf3, m_fre_e4])
+    session.flush()
+
+    # Add Lichess data for 1. e4: c5 has 50000 games, e6 has 10000 games
+    session.add(LichessData(
+        fen=clean_fen(p_e4.fen),
+        elo_range="high",
+        moves_json=json.dumps({
+            "c7c5": {"total": 50000},
+            "e7e6": {"total": 10000}
+        })
+    ))
+
+    for m in [m_e4, m_d4, m_nf3, m_fre_e4]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    streamed_2move_items = []
+    def on_item(res):
+        if res.get("type") == "transposition_2":
+            streamed_2move_items.append(res)
+
+    results = find_repertoire_transpositions(session, elo_range="high", item_callback=on_item)
+    assert len(streamed_2move_items) == 3
+
+    # Position after 1. e4 (prio 0.8) MUST be searched and emitted before 1. d4 (prio 0.2)
+    assert streamed_2move_items[0]["fen"] == clean_fen(p_e4.fen)
+    # Within 1. e4, 1... c5 (50k games) MUST be searched and emitted before 1... e6 (10k games)
+    assert "c5" in streamed_2move_items[0]["move_san"]
+    assert streamed_2move_items[1]["fen"] == clean_fen(p_e4.fen)
+    assert "e6" in streamed_2move_items[1]["move_san"]
+
+    # Finally, 1. d4 (prio 0.2) is searched
+    assert streamed_2move_items[2]["fen"] == clean_fen(p_d4.fen)
+    assert "e6" in streamed_2move_items[2]["move_san"]
+
+
+
 
 
 
