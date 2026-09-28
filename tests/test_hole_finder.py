@@ -5,8 +5,9 @@ from opening_fenix.creator.creator_window import CreatorBackend
 from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
 from opening_fenix.core.services.hole_finder_service import (
     find_repertoire_holes, find_priority_mismatches, find_level_mismatches,
-    find_repertoire_transpositions, run_hole_finder_task
+    find_repertoire_transpositions, run_hole_finder_task, find_unanswered_moves
 )
+from opening_fenix.core.services.engine_cache_service import EngineCacheService
 
 
 def clean_fen(fen):
@@ -193,24 +194,52 @@ def test_transposition_handling(backend):
     assert any(h['move_san'] == 'e6' for h in p_holes)
 
 def test_find_priority_mismatches(backend):
-    # Setup: 1.e4 is in RepertoireLevel 1.
-    # It has priority_score 1.0 (100%) in sample_repertoire fixture.
+    # Setup: In sample_repertoire fixture:
+    # 1.e4 is User move (White) with prio 1.0, level 1.
+    # 1... e5 is Opponent move (Black) with prio 1.0.
+    from opening_fenix.core.models import Move, RepertoireMove, Metadata
+    m_e5 = backend.session.query(Move).filter_by(san="e5").first()
+    backend.session.add(RepertoireMove(move_id=m_e5.id, level=1))
+    backend.session.commit()
     
-    # Scan for Level 1 with 50% threshold -> Should find 1.e4
+    # Scan for Level 1 with 50% threshold:
+    # Level promoting finder must ONLY show opponent moves (1... e5), never user moves (1. e4)
     mismatches = find_priority_mismatches(backend.session, 1, 50)
 
     assert len(mismatches) == 1
-    assert mismatches[0]['move_san'] == 'e4'
+    assert mismatches[0]['move_san'] == 'e5'
     assert mismatches[0]['type'] == 'priority_check'
-    assert "Start" in mismatches[0]['path']
+    assert "e4" in mismatches[0]['path']
     
+    # If only_opponent is disabled, both moves should be returned
+    mismatches_all = find_priority_mismatches(backend.session, 1, 50, only_opponent=False)
+    assert len(mismatches_all) == 2
+    assert {m['move_san'] for m in mismatches_all} == {'e4', 'e5'}
+
     # Scan for Level 1 with 150% threshold -> Should find nothing
     mismatches = find_priority_mismatches(backend.session, 1, 150)
-
     assert len(mismatches) == 0
     
     # Scan for Level 2 (which doesn't exist/no moves) -> Should find nothing
     mismatches = find_priority_mismatches(backend.session, 2, 10)
+    assert len(mismatches) == 0
+
+def test_find_priority_mismatches_black_repertoire(backend):
+    """Verify that when repertoire color is Black, White moves are treated as opponent moves."""
+    from opening_fenix.core.models import Move, RepertoireMove, Metadata
+    backend.session.query(Metadata).filter_by(key="color").delete()
+    backend.session.add(Metadata(key="color", value="b"))
+    
+    # Ensure both 1. e4 and 1... e5 are in RepertoireMove level 1
+    m_e5 = backend.session.query(Move).filter_by(san="e5").first()
+    if not backend.session.query(RepertoireMove).filter_by(move_id=m_e5.id).first():
+        backend.session.add(RepertoireMove(move_id=m_e5.id, level=1))
+    backend.session.commit()
+
+    # For Black, 1. e4 is Opponent move, 1... e5 is User move
+    mismatches = find_priority_mismatches(backend.session, 1, 50)
+    assert len(mismatches) == 1
+    assert mismatches[0]['move_san'] == 'e4'
 
 
 def test_hole_finder_uses_san_dynamic(backend):
@@ -1435,6 +1464,379 @@ def test_2move_transposition_searches_most_popular_positions_first(backend):
     # Finally, 1. d4 (prio 0.2) is searched
     assert streamed_2move_items[2]["fen"] == clean_fen(p_d4.fen)
     assert "e6" in streamed_2move_items[2]["move_san"]
+
+
+def test_2move_transposition_solid_persists_in_cache_next_scan(backend, tmp_path):
+    """
+    Verify that a 2-move transposition where user move m2 is solid (<= 10 cp loss)
+    is saved with its MultiPV scores in the cache and persists on the NEXT scan
+    without needing to call the engine again.
+    """
+    from opening_fenix.core.services.engine_cache_service import EngineCacheService
+
+    cache_db = str(tmp_path / "eval_cache_solid.db")
+    cache_svc = EngineCacheService(db_path=cache_db)
+
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+    session.add_all([m_e4, m_nf3])
+    session.flush()
+
+    for m in [m_e4, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Mock engine where best move is d2d4 (+40 cp), and our transposition move g1f3 is +35 cp (loss = 5 cp <= 10 cp)
+    class MockMultiPVEngine:
+        def __init__(self):
+            self.calls = 0
+
+        def analyse(self, board, limit, multipv=1):
+            self.calls += 1
+            info1 = {
+                "pv": [chess.Move.from_uci("d2d4")],
+                "score": chess.engine.PovScore(chess.engine.Cp(40), chess.WHITE),
+                "multipv": 1
+            }
+            info2 = {
+                "pv": [chess.Move.from_uci("g1f3")],
+                "score": chess.engine.PovScore(chess.engine.Cp(35), chess.WHITE),
+                "multipv": 2
+            }
+            return [info1, info2]
+
+    engine1 = MockMultiPVEngine()
+
+    # SCAN 1: Evaluates with engine, should find g1f3 as solid (-5 cp)
+    scan1 = find_repertoire_transpositions(session, engine=engine1, cache_service=cache_svc)
+    match1 = [t for t in scan1 if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2]
+    assert len(match1) == 1
+    assert match1[0]['quality'] == 'solide'
+    assert "-5 cp" in match1[0]['quality_label']
+    assert engine1.calls > 0
+
+    # Strict engine for SCAN 2: fails if engine.analyse is called!
+    class StrictEngine:
+        def analyse(self, *args, **kwargs):
+            raise AssertionError("Engine should NOT be called on Scan 2 because MultiPV scores are cached!")
+
+    engine2 = StrictEngine()
+
+    # SCAN 2: Must read from cache and still include the solid 2-move transposition!
+    scan2 = find_repertoire_transpositions(session, engine=engine2, cache_service=cache_svc, recheck_unadded=False)
+    match2 = [t for t in scan2 if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2]
+    assert len(match2) == 1
+    assert match2[0]['quality'] == 'solide'
+    assert "-5 cp" in match2[0]['quality_label']
+
+
+def test_2move_transposition_recheck_unadded_button_recalculates_legacy_cache(backend, tmp_path):
+    """
+    Verify that when cache only contains legacy single-best move,
+    recheck_unadded=False skips engine, but recheck_unadded=True triggers engine
+    to re-verify the unadded candidate move and accept it if <= 10 cp.
+    """
+    from opening_fenix.core.services.engine_cache_service import EngineCacheService
+
+    cache_db = str(tmp_path / "eval_cache_recheck.db")
+    cache_svc = EngineCacheService(db_path=cache_db)
+
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
+
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+    session.add_all([m_e4, m_nf3])
+    session.flush()
+
+    for m in [m_e4, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Pre-populate legacy cache for intermediate position: best move is d2d4, NO scores stored
+    inter_fen = clean_fen(p_sic_c5.fen)
+    cache_svc.set_best_move(inter_fen, 25, "d2d4")
+
+    class MockEngine:
+        def __init__(self):
+            self.calls = 0
+
+        def analyse(self, board, limit, multipv=1):
+            self.calls += 1
+            return [
+                {
+                    "pv": [chess.Move.from_uci("d2d4")],
+                    "score": chess.engine.PovScore(chess.engine.Cp(30), chess.WHITE),
+                    "multipv": 1
+                },
+                {
+                    "pv": [chess.Move.from_uci("g1f3")],
+                    "score": chess.engine.PovScore(chess.engine.Cp(24), chess.WHITE),
+                    "multipv": 2
+                }
+            ]
+
+    engine = MockEngine()
+
+    # Without recheck: legacy cache says best is d2d4 without scores -> g1f3 is skipped without calling engine
+    scan_default = find_repertoire_transpositions(session, engine=engine, cache_service=cache_svc, recheck_unadded=False)
+    match_default = [t for t in scan_default if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2]
+    assert len(match_default) == 0
+    assert engine.calls == 0
+
+    # With recheck (button activated): engine IS called to re-evaluate intermediate position!
+    scan_recheck = find_repertoire_transpositions(session, engine=engine, cache_service=cache_svc, recheck_unadded=True)
+    match_recheck = [t for t in scan_recheck if t['fen'] == clean_fen(p_e4.fen) and t['depth'] == 2]
+    assert len(match_recheck) == 1
+    assert match_recheck[0]['quality'] == 'solide'
+    assert "-6 cp" in match_recheck[0]['quality_label']
+    assert engine.calls > 0
+
+
+def test_find_unanswered_moves_our_move_missing(backend):
+    """
+    Test finding unanswered leaf positions where the opponent moved but our repertoire has no reply.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    p_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"))
+
+    session.add_all([p_root, p_e4, p_c5])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_c5 = Move(from_position_id=p_e4.id, to_position_id=p_c5.id, uci="c7c5", san="c5")
+    session.add_all([m_e4, m_c5])
+    session.flush()
+
+    # White plays 1. e4, Black plays 1... c5, White has no replies in repertoire
+    for m in [m_e4, m_c5]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
+
+    # Add lichess data for popularity
+    ld_c5 = LichessData(fen=clean_fen(p_e4.fen), elo_range="high", moves_json=json.dumps({
+        "c7c5": {"san": "c5", "total": 600},
+        "e7e5": {"san": "e5", "total": 400}
+    }))
+    session.add(ld_c5)
+    session.commit()
+
+    results = find_unanswered_moves(session, threshold=0.1)
+    assert len(results) == 1
+    item = results[0]
+    assert item["type"] == "unanswered_user"
+    assert item["status_key"] == "our_move_missing"
+    assert item["fen"] == clean_fen(p_c5.fen)
+    assert item["last_move_san"] == "c5"
+    assert item["last_move_uci"] == "c7c5"
+    assert item["popularity"] == 100.0
+
+
+def test_find_unanswered_moves_ignores_opponent_turn(backend):
+    """
+    Test that positions where it is the opponent's turn (even if opponent replies are missing)
+    are ignored, because unanswered moves only checks for positions where it is OUR turn.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_d4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq -"))
+
+    session.add_all([p_root, p_d4])
+    session.flush()
+
+    m_d4 = Move(from_position_id=p_root.id, to_position_id=p_d4.id, uci="d2d4", san="d4")
+    session.add(m_d4)
+    session.flush()
+
+    session.add(RepertoireMove(move_id=m_d4.id, level=1, is_active=True))
+    session.commit()
+
+    results = find_unanswered_moves(session, threshold=0.1)
+    # Since it is Black's turn (opponent) and not White's turn (user), this position must NOT be returned
+    assert len(results) == 0
+
+
+def test_find_unanswered_moves_black_repertoire(backend):
+    """
+    Test finding unanswered leaf positions for a Black repertoire where White played a move
+    and Black has no answer in the repertoire.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="b"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+
+    session.add_all([p_root, p_e4])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    session.add(m_e4)
+    session.flush()
+
+    session.add(RepertoireMove(move_id=m_e4.id, level=1, is_active=True))
+    session.commit()
+
+    results = find_unanswered_moves(session, threshold=0.1)
+    # White played 1. e4, now Black to move, Black has no move in repertoire -> should be found
+    assert len(results) == 1
+    item = results[0]
+    assert item["type"] == "unanswered_user"
+    assert item["is_user_turn"] is True
+    assert item["fen"] == clean_fen(p_e4.fen)
+    assert item["last_move_san"] == "e4"
+    assert item["last_move_uci"] == "e2e4"
+
+
+def test_find_repertoire_holes_no_user_gaps(backend):
+    """
+    Test that include_user_gaps=False ensures only opponent holes are returned and gaps are omitted.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    session.add_all([p_root, p_e4])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    session.add(m_e4)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_e4.id, level=1, is_active=True))
+    session.commit()
+
+    # Lichess data on p_e4: c5 (50%), e5 (50%)
+    ld_e4 = LichessData(fen=clean_fen(p_e4.fen), elo_range="high", moves_json=json.dumps({
+        "c7c5": {"san": "c5", "total": 500},
+        "e7e5": {"san": "e5", "total": 500}
+    }))
+    session.add(ld_e4)
+    session.commit()
+
+    # Search with include_user_gaps=False (new holes mode)
+    holes_no_gaps = find_repertoire_holes(session, threshold=1.0, include_user_gaps=False)
+    for h in holes_no_gaps:
+        assert h["type"] == "opponent"
+
+    # Search with include_user_gaps=True (backward-compatible)
+    holes_with_gaps = find_repertoire_holes(session, threshold=1.0, include_user_gaps=True)
+    # Both should have opponent moves, but holes_no_gaps cannot have type 'repertoire_gap' or 'user'
+    types_no_gaps = {h["type"] for h in holes_no_gaps}
+    assert "user" not in types_no_gaps
+    assert "repertoire_gap" not in types_no_gaps
+
+
+def test_find_repertoire_holes_with_engine_eval_loss(backend, tmp_path):
+    """
+    Test that find_repertoire_holes calculates eval_loss using engine multipv analysis.
+    """
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+
+    session.add(Metadata(key="color", value="w"))
+
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"))
+    session.add_all([p_root, p_e4])
+    session.flush()
+
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    session.add(m_e4)
+    session.flush()
+    session.add(RepertoireMove(move_id=m_e4.id, level=1, is_active=True))
+    session.commit()
+
+    ld_e4 = LichessData(fen=clean_fen(p_e4.fen), elo_range="high", moves_json=json.dumps({
+        "c7c5": {"san": "c5", "total": 700},
+        "e7e5": {"san": "e5", "total": 300}
+    }))
+    session.add(ld_e4)
+    session.commit()
+
+    class MockHoleEngine:
+        def analyse(self, board, limit, multipv=1):
+            # Black to move: c7c5 is best (score +20 relative to side to move), e7e5 is worse (score -30 -> 50cp worse for black)
+            return [
+                {
+                    "pv": [chess.Move.from_uci("c7c5")],
+                    "score": chess.engine.PovScore(chess.engine.Cp(20), board.turn),
+                    "multipv": 1
+                },
+                {
+                    "pv": [chess.Move.from_uci("e7e5")],
+                    "score": chess.engine.PovScore(chess.engine.Cp(-30), board.turn),
+                    "multipv": 2
+                }
+            ]
+
+    test_cache = EngineCacheService(db_path=str(tmp_path / "test_engine_cache.db"))
+    holes = find_repertoire_holes(session, threshold=1.0, engine=MockHoleEngine(), cache_service=test_cache, include_user_gaps=False)
+    assert len(holes) == 2
+    c5_hole = next(h for h in holes if h["move_san"] == "c5")
+    e5_hole = next(h for h in holes if h["move_san"] == "e5")
+
+    # c5 was best move, loss should be 0.00
+    assert c5_hole["eval_loss"] == 0.0
+    # e5 was 50 cp worse than c5 for black
+    assert e5_hole["eval_loss"] == 0.50
+
 
 
 

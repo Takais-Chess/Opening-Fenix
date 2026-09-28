@@ -66,3 +66,37 @@ def test_smart_button_states(main_window):
     
     main_window.set_button_state('correct')
     assert "KORREKT" in main_window.btn_smart.text()
+
+def test_repertoire_tabs_sorting_order(main_window, qapp):
+    """Test that repertoire tabs sort by due moves descending, then Elo descending, then name ascending."""
+    repos = ["Repo_D", "Repo_B", "Repo_E", "Repo_A", "Repo_C"]
+    stats_mock = {
+        "Repo_A": (0, 10, {}),
+        "Repo_B": (0, 0, {}),
+        "Repo_C": (0, 0, {}),
+        "Repo_D": (0, 0, {}),
+        "Repo_E": (0, 0, {}),
+    }
+    ratings_mock = {
+        "Repo_A": 900.0,
+        "Repo_B": 1400.0,
+        "Repo_C": 1100.0,
+        "Repo_D": 800.0,
+        "Repo_E": 800.0,
+    }
+    with patch.object(main_window.training_manager, 'get_visible_repos', return_value=repos), \
+         patch.object(main_window.training_manager, 'get_stats_for_repertoire', side_effect=lambda r: stats_mock[r]), \
+         patch.object(main_window.training_manager, 'get_ratings_for_all_repertoires', return_value=ratings_mock):
+        
+        main_window.sorted_repo_names = None
+        main_window.refresh_repertoire_buttons()
+        qapp.processEvents()
+
+        # Expected order:
+        # 1. Repo_A (10 due moves)
+        # 2. Repo_B (0 due, 1400 Elo)
+        # 3. Repo_C (0 due, 1100 Elo)
+        # 4. Repo_D (0 due, 800 Elo)
+        # 5. Repo_E (0 due, 800 Elo)
+        assert main_window.sorted_repo_names == ["Repo_A", "Repo_B", "Repo_C", "Repo_D", "Repo_E"]
+

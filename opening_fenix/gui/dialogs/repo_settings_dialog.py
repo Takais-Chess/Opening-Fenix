@@ -10,7 +10,8 @@ from opening_fenix.gui.dialogs.unified_settings_dialog import (
     NoWheelDoubleSpinBox,
     NoWheelSlider,
     DiagnosticDialog,
-    DeleteLevelDialog
+    DeleteLevelDialog,
+    AddLevelDialog
 )
 from opening_fenix.core.data_tools import get_user_dir
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread

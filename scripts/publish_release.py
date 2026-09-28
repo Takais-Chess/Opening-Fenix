@@ -124,7 +124,9 @@ def main():
     upload_url_base = upload_url_tmpl.split("{")[0]
 
     # 2. Check if asset already exists and delete if so
-    asset_file_path = os.path.join("Output", f"OpeningFenix_Setup_v{APP_VERSION}_Public.exe")
+    asset_file_path = os.path.join(project_root, "Output", f"OpeningFenix_Setup_v{APP_VERSION}_Public.exe")
+    if not os.path.exists(asset_file_path):
+        asset_file_path = os.path.join("Output", f"OpeningFenix_Setup_v{APP_VERSION}_Public.exe")
     if not os.path.exists(asset_file_path):
         print(f"ERROR: Asset file not found at {asset_file_path}")
         sys.exit(1)

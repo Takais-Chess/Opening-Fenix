@@ -94,6 +94,9 @@ class RepertoireManager:
     def move_all_to_level(self, level: int) -> int:
         return self.core.move_all_to_level(level)
 
+    def get_move_all_to_level_impact(self, level: int) -> Dict[str, Any]:
+        return self.core.get_move_all_to_level_impact(level)
+
     def get_repertoire_info(self, fast_only=False) -> Dict[str, Any]:
         return self.core.get_repertoire_info(fast_only=fast_only)
 

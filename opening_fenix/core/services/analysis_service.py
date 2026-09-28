@@ -545,7 +545,7 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
         else:
             calculate_local_priority_scores(session, pos.id, elo_category)
             
-        session.commit()
+        commit_with_retry(session)
         return True, "Enrichment complete."
 
     except Exception as e:

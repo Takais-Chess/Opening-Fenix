@@ -272,7 +272,7 @@ class HoleFinderThread(QThread):
     progress_signal = pyqtSignal(int, int, str)
     
     def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
-                 engine_path=None, threads_count=1, engine=None, depth=25):
+                 engine_path=None, threads_count=1, engine=None, depth=18, recheck_unadded: bool = False):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
@@ -285,6 +285,7 @@ class HoleFinderThread(QThread):
         self.threads_count = threads_count
         self.engine = engine
         self.depth = depth
+        self.recheck_unadded = recheck_unadded
         self._stop_requested = False
 
     def stop(self):
@@ -319,6 +320,7 @@ class HoleFinderThread(QThread):
                 engine=self.engine,
                 depth=self.depth,
                 progress_callback=on_progress,
+                recheck_unadded=self.recheck_unadded,
             )
             if not self.isInterruptionRequested() and not self._stop_requested:
                 self.finished_signal.emit(results, self.mode)

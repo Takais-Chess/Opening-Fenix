@@ -588,6 +588,271 @@ class DiagnosticDialog(QDialog):
             self.parent().refresh_creator_info()
 
 
+class AddLevelDialog(QDialog):
+    def __init__(self, levels, default_order=None, parent=None):
+        super().__init__(parent)
+        set_consistent_icon(self)
+        self.setWindowTitle(tr_ui("repo_settings.add_level_dialog_title", "Level hinzufügen"))
+        self.setMinimumWidth(scale(560))
+        self.setStyleSheet(get_bw_glass_style())
+        self.levels = sorted(levels, key=lambda x: x['order'])
+        self.default_order = default_order
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(scale(14))
+        layout.setContentsMargins(scale(22), scale(20), scale(22), scale(20))
+
+        form = QFormLayout()
+        form.setSpacing(scale(10))
+
+        self.txt_name = QLineEdit()
+        self.txt_name.setPlaceholderText(tr_ui("repo_settings.add_level_name_placeholder", "z. B. Hauptvarianten"))
+        self.txt_name.textChanged.connect(self._on_input_changed)
+        form.addRow(tr_ui("repo_settings.add_level_name_label", "Name des Levels:"), self.txt_name)
+
+        self.spin_elo = NoWheelSpinBox()
+        self.spin_elo.setRange(500, 3000)
+        self.spin_elo.setSingleStep(25)
+        self.spin_elo.setValue(1500)
+        self.spin_elo.setSuffix(" Elo")
+        self.spin_elo.valueChanged.connect(self._on_input_changed)
+        form.addRow(tr_ui("repo_settings.add_level_elo_label", "Ziel-Elo (Trainer):"), self.spin_elo)
+
+        self.combo_pos = NoWheelComboBox()
+        n = len(self.levels)
+        if n > 0:
+            first_name = self.levels[0]['name']
+            self.combo_pos.addItem(tr_ui("repo_settings.pos_item_start", "Position 1 (Ganz am Anfang, vor '{name}')", name=first_name), 1)
+            for i in range(1, n):
+                lvl_name = self.levels[i]['name']
+                pos = i + 1
+                self.combo_pos.addItem(tr_ui("repo_settings.pos_item_before", "Position {pos} (Vor '{name}')", pos=pos, name=lvl_name), pos)
+            end_pos = n + 1
+            self.combo_pos.addItem(tr_ui("repo_settings.pos_item_end", "Position {pos} (Am Ende – Höchstes Level)", pos=end_pos), end_pos)
+        else:
+            self.combo_pos.addItem(tr_ui("repo_settings.pos_item_default", "Position 1 (Erstes Level)"), 1)
+
+        if self.default_order is not None:
+            idx = self.combo_pos.findData(self.default_order)
+            if idx >= 0:
+                self.combo_pos.setCurrentIndex(idx)
+            else:
+                self.combo_pos.setCurrentIndex(self.combo_pos.count() - 1)
+        else:
+            self.combo_pos.setCurrentIndex(self.combo_pos.count() - 1)
+
+        self.combo_pos.currentIndexChanged.connect(self._on_position_changed)
+        form.addRow(tr_ui("repo_settings.add_level_pos_label", "Position / Platzierung:"), self.combo_pos)
+        layout.addLayout(form)
+
+        # Move Handling Group
+        self.g_moves = QGroupBox(tr_widget("repo_settings.add_level_move_group", "Zuweisung bestehender Züge:"))
+        v_moves = QVBoxLayout(self.g_moves)
+        v_moves.setSpacing(scale(6))
+
+        self.radio_take_moves = QRadioButton()
+        self.radio_take_moves.setChecked(True)
+        self.radio_take_moves.toggled.connect(self._on_input_changed)
+        v_moves.addWidget(self.radio_take_moves)
+
+        self.lbl_take_moves_desc = QLabel()
+        self.lbl_take_moves_desc.setWordWrap(True)
+        self.lbl_take_moves_desc.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(12)}px; margin-left: {scale(22)}px;")
+        v_moves.addWidget(self.lbl_take_moves_desc)
+
+        self.radio_keep_moves = QRadioButton()
+        self.radio_keep_moves.toggled.connect(self._on_input_changed)
+        v_moves.addWidget(self.radio_keep_moves)
+
+        self.lbl_keep_moves_desc = QLabel()
+        self.lbl_keep_moves_desc.setWordWrap(True)
+        self.lbl_keep_moves_desc.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(12)}px; margin-left: {scale(22)}px;")
+        v_moves.addWidget(self.lbl_keep_moves_desc)
+
+        self.lbl_end_note = QLabel(tr_ui("repo_settings.add_level_at_end_note", "Neues Level wird am Ende angelegt und startet leer."))
+        self.lbl_end_note.setStyleSheet(f"color: {COLORS['text_muted']}; font-style: italic;")
+        v_moves.addWidget(self.lbl_end_note)
+
+        layout.addWidget(self.g_moves)
+
+        # Live Preview
+        lbl_preview = QLabel(tr_ui("repo_settings.add_level_preview_title", "📋 Live-Vorschau der Level-Struktur:"))
+        lbl_preview.setStyleSheet("font-weight: 600;")
+        layout.addWidget(lbl_preview)
+
+        self.tbl_preview = QTableWidget()
+        self.tbl_preview.setColumnCount(4)
+        self.tbl_preview.setHorizontalHeaderLabels([
+            tr_ui("repo_settings.col_level", "Level"),
+            tr_ui("repo_settings.col_name", "Name"),
+            tr_ui("repo_settings.col_elo", "Ziel-Elo"),
+            tr_ui("repo_settings.col_status", "Status / Züge")
+        ])
+        header = self.tbl_preview.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl_preview.verticalHeader().setVisible(False)
+        self.tbl_preview.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.tbl_preview.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.tbl_preview.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tbl_preview.setShowGrid(True)
+        self.tbl_preview.setMinimumHeight(scale(130))
+        self.tbl_preview.setMaximumHeight(scale(240))
+        layout.addWidget(self.tbl_preview)
+
+        # Buttons
+        h_btn = QHBoxLayout()
+        h_btn.addStretch()
+        btn_cancel = QPushButton(tr_widget("login.cancel", "Abbrechen"))
+        btn_cancel.clicked.connect(self.reject)
+        self.btn_ok = QPushButton(tr_widget("repo_settings.btn_create_level", "➕ Level erstellen"))
+        self.btn_ok.setProperty("class", "Primary")
+        self.btn_ok.clicked.connect(self.accept)
+        self.btn_ok.setEnabled(False)
+        h_btn.addWidget(btn_cancel)
+        h_btn.addWidget(self.btn_ok)
+        layout.addLayout(h_btn)
+
+        self._on_position_changed()
+
+    def _on_position_changed(self):
+        pos = self.combo_pos.currentData()
+        n = len(self.levels)
+        is_insert = (pos is not None and pos <= n)
+
+        self.radio_take_moves.setVisible(is_insert)
+        self.lbl_take_moves_desc.setVisible(is_insert)
+        self.radio_keep_moves.setVisible(is_insert)
+        self.lbl_keep_moves_desc.setVisible(is_insert)
+        self.lbl_end_note.setVisible(not is_insert)
+
+        if is_insert:
+            target_lvl = next((lvl for lvl in self.levels if lvl['order'] == pos), None)
+            target_name = target_lvl['name'] if target_lvl else f"Level {pos}"
+
+            take_text = tr_ui(
+                "repo_settings.add_level_take_moves",
+                "Züge von bisherigem Level {order} ('{name}') übernehmen",
+                order=pos,
+                name=target_name
+            )
+            self.radio_take_moves.setText(take_text)
+
+            take_desc = tr_ui(
+                "repo_settings.add_level_take_moves_desc",
+                "Das neue Level übernimmt alle Züge. Das bisherige Level rückt nach Level {next_order} und startet leer.",
+                next_order=pos + 1
+            )
+            self.lbl_take_moves_desc.setText(take_desc)
+
+            keep_text = tr_ui(
+                "repo_settings.add_level_keep_moves",
+                "Neues Level leer anlegen"
+            )
+            self.radio_keep_moves.setText(keep_text)
+
+            keep_desc = tr_ui(
+                "repo_settings.add_level_keep_moves_desc",
+                "Bisheriges Level rückt nach Level {next_order} und behält seine Züge. Das neue Level startet mit 0 Zügen.",
+                next_order=pos + 1
+            )
+            self.lbl_keep_moves_desc.setText(keep_desc)
+
+        self._on_input_changed()
+
+    def _on_input_changed(self):
+        name = self.txt_name.text().strip()
+        self.btn_ok.setEnabled(bool(name))
+        self._update_preview()
+
+    def _update_preview(self):
+        pos = self.combo_pos.currentData()
+        if pos is None: pos = len(self.levels) + 1
+        name = self.txt_name.text().strip() or tr_ui("repo_settings.preview_new_level_placeholder", "(Neues Level)")
+        elo = self.spin_elo.value()
+        take_moves = self.radio_take_moves.isChecked() and (pos <= len(self.levels))
+
+        projected = []
+        new_entry = {
+            "order": pos,
+            "name": name,
+            "target_elo": elo,
+            "is_new": True,
+            "status": tr_ui("repo_settings.status_new_takes_moves", "⭐ Neu (übernimmt Züge)") if take_moves
+                      else tr_ui("repo_settings.status_new_empty", "⭐ Neu (leer)")
+        }
+
+        for lvl in self.levels:
+            lvl_ord = lvl['order']
+            lvl_name = lvl['name']
+            lvl_elo = lvl.get('target_elo', 1500)
+            if lvl_ord < pos:
+                projected.append({
+                    "order": lvl_ord,
+                    "name": lvl_name,
+                    "target_elo": lvl_elo,
+                    "is_new": False,
+                    "status": tr_ui("repo_settings.status_unchanged", "Unverändert")
+                })
+            else:
+                new_ord = lvl_ord + 1
+                if lvl_ord == pos and take_moves:
+                    status = tr_ui("repo_settings.status_shifted_empty", "Verschoben (leer)")
+                else:
+                    status = tr_ui("repo_settings.status_shifted_keep", "Verschoben (Züge behalten)")
+                projected.append({
+                    "order": new_ord,
+                    "name": lvl_name,
+                    "target_elo": lvl_elo,
+                    "is_new": False,
+                    "status": status
+                })
+
+        projected.append(new_entry)
+        projected.sort(key=lambda x: x['order'])
+
+        self.tbl_preview.setRowCount(len(projected))
+        for row, item in enumerate(projected):
+            it_ord = QTableWidgetItem(str(item['order']))
+            it_ord.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_nm = QTableWidgetItem(item['name'])
+            it_nm.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            it_elo = QTableWidgetItem(f"{item['target_elo']} Elo")
+            it_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_status = QTableWidgetItem(item['status'])
+            it_status.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            if item['is_new']:
+                highlight_bg = QColor(48, 140, 198, 35)
+                bold_font = it_nm.font()
+                bold_font.setBold(True)
+                for cell in (it_ord, it_nm, it_elo, it_status):
+                    cell.setBackground(highlight_bg)
+                    cell.setFont(bold_font)
+            elif "leer" in item['status'] or "empty" in item['status'].lower():
+                dim_font = it_status.font()
+                dim_font.setItalic(True)
+                it_status.setFont(dim_font)
+                it_status.setForeground(QColor(COLORS['text_muted']))
+
+            self.tbl_preview.setItem(row, 0, it_ord)
+            self.tbl_preview.setItem(row, 1, it_nm)
+            self.tbl_preview.setItem(row, 2, it_elo)
+            self.tbl_preview.setItem(row, 3, it_status)
+            self.tbl_preview.setRowHeight(row, scale(34))
+
+    def get_data(self):
+        name = self.txt_name.text().strip() or "Test Level"
+        pos = self.combo_pos.currentData()
+        elo = self.spin_elo.value()
+        take_moves = self.radio_take_moves.isChecked() and (pos <= len(self.levels))
+        return name, pos, elo, take_moves
+
+
 class DeleteLevelDialog(QDialog):
     def __init__(self, levels, default_del_order=None, parent=None):
         super().__init__(parent)
@@ -782,8 +1047,8 @@ class UnifiedSettingsDialog(QDialog):
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
         else:
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
-        self.setMinimumSize(scale(1180), scale(760))
-        self.resize(scale(1260), scale(820))
+        self.setMinimumSize(scale(1357), scale(760))
+        self.resize(scale(1449), scale(820))
         self.setStyleSheet(get_bw_glass_style())
         
         if QApplication.instance():
@@ -1454,9 +1719,12 @@ class UnifiedSettingsDialog(QDialog):
             is_creator = item.data(0, Qt.ItemDataRole.UserRole + 1)
             is_maintenance = (idx == self.pages.indexOf(self.page_cr_maintenance))
             self.creator_header_bar.setVisible(bool(is_creator) and not is_maintenance)
-            if is_maintenance and not self.maintenance_loaded:
-                self.maintenance_loaded = True
-                self.refresh_maintenance_table(start_stats_worker=True)
+            if is_maintenance:
+                if hasattr(self, 'chk_m_transpos'):
+                    self.chk_m_transpos.setChecked(False)
+                if not self.maintenance_loaded:
+                    self.maintenance_loaded = True
+                    self.refresh_maintenance_table(start_stats_worker=True)
             elif is_creator and not is_maintenance:
                 self.ensure_backend_for_active_repo()
                 self.refresh_creator_info()
@@ -1859,24 +2127,31 @@ class UnifiedSettingsDialog(QDialog):
         v_storage.addWidget(lbl_storage_desc)
 
         h_path = QHBoxLayout()
+        h_path.setSpacing(scale(8))
         self.txt_storage_path = QLineEdit(get_user_dir())
         self.txt_storage_path.setReadOnly(True)
+        self.txt_storage_path.setMinimumHeight(scale(38))
         self.txt_storage_path.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; padding: 6px 10px; font-weight: 500;")
         h_path.addWidget(self.txt_storage_path, 1)
 
-        self.btn_change_storage = AutoAdjustButton(tr_widget("settings.storage_btn_change", "📁 Ordner ändern..."))
+        self.btn_change_storage = QPushButton(tr_widget("settings.storage_btn_change", "📁 Ordner ändern..."))
+        self.btn_change_storage.setMinimumHeight(scale(38))
         self.btn_change_storage.clicked.connect(self.change_storage_directory)
         h_path.addWidget(self.btn_change_storage)
 
-        self.btn_reset_storage = AutoAdjustButton(tr_widget("settings.storage_btn_reset", "Standard wiederherstellen"))
+        self.btn_reset_storage = QPushButton(tr_widget("settings.storage_btn_reset", "Standard wiederherstellen"))
+        self.btn_reset_storage.setMinimumHeight(scale(38))
         self.btn_reset_storage.clicked.connect(self.reset_storage_directory)
         h_path.addWidget(self.btn_reset_storage)
         v_storage.addLayout(h_path)
 
         h_open = QHBoxLayout()
-        btn_open_repos = AutoAdjustButton(tr_widget("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
+        h_open.setSpacing(scale(10))
+        btn_open_repos = QPushButton(tr_widget("settings.btn_open_repertoires_folder", "📁 Repertoires-Ordner im Explorer öffnen"))
+        btn_open_repos.setMinimumHeight(scale(38))
         btn_open_repos.clicked.connect(self.open_repertoires_folder)
-        btn_open_profs = AutoAdjustButton(tr_widget("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs = QPushButton(tr_widget("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
+        btn_open_profs.setMinimumHeight(scale(38))
         btn_open_profs.clicked.connect(self.open_profiles_folder)
         h_open.addWidget(btn_open_repos)
         h_open.addWidget(btn_open_profs)
@@ -3123,18 +3398,33 @@ class UnifiedSettingsDialog(QDialog):
                 self.main_window.refresh_active_repo_cover()
 
 
-    def add_creator_level(self):
+    def add_creator_level(self, default_order=None):
         backend = self.ensure_backend_for_active_repo()
         if not backend: return
-        name, ok = QInputDialog.getText(
-            self,
-            tr_ui("repo_settings.add_level_title", "Level hinzufügen"),
-            tr_ui("repo_settings.add_level_prompt", "Name des neuen Levels:")
-        )
-        if ok and name and name.strip():
-            backend.add_repertoire_level(name.strip())
-            invalidate_repertoire_levels_cache(backend.active_repo_name)
-            self.refresh_creator_info()
+        levels = backend.get_repertoire_levels()
+
+        if default_order is None:
+            if hasattr(self, 'selected_creator_level_order') and self.selected_creator_level_order is not None:
+                default_order = self.selected_creator_level_order
+            elif hasattr(self, 'tbl_cr_levels') and self.tbl_cr_levels.selectionModel():
+                selected_rows = self.tbl_cr_levels.selectionModel().selectedRows()
+                if selected_rows:
+                    row = selected_rows[0].row()
+                    item_ord = self.tbl_cr_levels.item(row, 0)
+                    if item_ord:
+                        try:
+                            default_order = int(item_ord.text())
+                        except ValueError:
+                            pass
+
+        dlg = AddLevelDialog(levels, default_order=default_order, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            name, pos, target_elo, take_moves = dlg.get_data()
+            if name:
+                backend.add_repertoire_level(name, idx=pos, target_elo=target_elo, take_moves=take_moves)
+                invalidate_repertoire_levels_cache(backend.active_repo_name)
+                self.selected_creator_level_order = None
+                self.refresh_creator_info()
 
     def rename_creator_level(self, item):
         if item.column() != 1: return
@@ -3856,10 +4146,30 @@ class UnifiedSettingsDialog(QDialog):
         if not backend: return
         d = ExportDialog(backend, self)
         if d.exec() == QDialog.DialogCode.Accepted:
-            fmt, scope, transpos, max_l, lang = d.result_data
+            result = d.result_data
+            fmt, scope, transpos, max_l, lang = result[:5]
+            est = result[5] if len(result) > 5 else None
+            est_total = est.get("estimated_moves", 0) if isinstance(est, dict) else 0
+
             if fmt == "pgn":
-                p = QProgressDialog("Exportiere...", "Abbrechen", 0, 0, self)
-                pgn = backend.export_pgn(None, transpos, lambda c: p.setValue(c) or p.wasCanceled(), max_l, language=lang)
+                start_fen = None
+                if scope == "current":
+                    if hasattr(backend, "window") and backend.window and hasattr(backend.window, "board_widget"):
+                        start_fen = backend.window.board_widget.board.fen()
+
+                p = QProgressDialog(tr_ui("export.progress_label", "Exportiere Züge..."), tr_ui("export.btn_cancel", "Abbrechen"), 0, est_total or 0, self)
+                p.setWindowModality(Qt.WindowModality.WindowModal)
+                p.setMinimumDuration(300)
+
+                def update_progress(count):
+                    if est_total > 0:
+                        p.setValue(min(count, est_total))
+                        p.setLabelText(tr_ui("export.progress_label", "Exportiere Züge ({curr} / {total})...", curr=f"{count:,}", total=f"{est_total:,}"))
+                    else:
+                        p.setValue(count)
+                    return p.wasCanceled()
+
+                pgn = backend.export_pgn(start_fen, transpos, update_progress, max_l, language=lang)
                 if pgn:
                     path, _ = QFileDialog.getSaveFileName(self, "Export Speichern", f"{backend.active_repo_name}.pgn", "PGN (*.pgn)")
                     if path:
@@ -4104,7 +4414,15 @@ class UnifiedSettingsDialog(QDialog):
     # ─── PAGE 4.5: Different Tools (Creator) ────────────────────────────────
 
     def init_page_creator_tools(self, page):
-        layout = QVBoxLayout(page)
+        scroll = QScrollArea(page)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+
+        content = QWidget()
+        content.setStyleSheet("background: transparent;")
+        layout = QVBoxLayout(content)
         layout.setSpacing(scale(20))
         layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
 
@@ -4120,32 +4438,87 @@ class UnifiedSettingsDialog(QDialog):
         v_clean.addWidget(btn_dedupe); v_clean.addWidget(btn_brackets); v_clean.addWidget(btn_trans)
         layout.addWidget(g_clean)
 
-        # ⚡ Priority Leveling & Global Moves
-        g_prio = QGroupBox(tr_widget("repo_settings.tools_prio_title", "⚡ Prio-Leveling & Massen-Zuweisung"))
+        # ⚡ Card 1: Priority Leveling (Smart Promotion)
+        g_prio = QGroupBox(tr_widget("repo_settings.prio_leveling_title", "⚡ Prio-Leveling (Intelligente Hochstufung)"))
         v_prio = QVBoxLayout(g_prio)
+        v_prio.setSpacing(scale(12))
+
+        lbl_prio_desc = QLabel(tr_ui("repo_settings.tools_prio_desc",
+            "Stuft häufig gespielte Züge (Prio-Score ≥ Schwellenwert) aus tieferen Leveln automatisch in das gewählte Ziel-Level hoch. Folgevarianten werden zur Wahrung der Konsistenz angepasst."))
+        lbl_prio_desc.setWordWrap(True)
+        lbl_prio_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(13)}px;")
+        v_prio.addWidget(lbl_prio_desc)
+
         f_prio = QFormLayout()
-        self.spin_prio_threshold = NoWheelSpinBox(); self.spin_prio_threshold.setRange(1, 100); self.spin_prio_threshold.setValue(10)
+        f_prio.setSpacing(scale(10))
+        self.spin_prio_threshold = NoWheelSpinBox()
+        self.spin_prio_threshold.setRange(1, 100)
+        self.spin_prio_threshold.setValue(10)
+        self.spin_prio_threshold.setSuffix(" %")
         self.combo_prio_target = NoWheelComboBox()
-        f_prio.addRow(tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio > X%):"), self.spin_prio_threshold)
+        f_prio.addRow(tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio ≥ X%):"), self.spin_prio_threshold)
         f_prio.addRow(tr_ui("repo_settings.target_level_label", "Ziel-Level:"), self.combo_prio_target)
         v_prio.addLayout(f_prio)
 
         h_prio = QHBoxLayout()
         btn_p_prev = AutoAdjustButton(tr_widget("repo_settings.btn_prio_preview", "🔍 Vorschau"))
-        btn_p_prev.clicked.connect(lambda: QMessageBox.information(self, tr_ui("repo_settings.dlg_preview_title", "Vorschau"), f"{self.ensure_backend_for_active_repo().get_priority_level_impact(self.spin_prio_threshold.value(), self.combo_prio_target.currentData())} Züge betroffen."))
+        btn_p_prev.clicked.connect(self._preview_prio_level_impact)
         btn_p_app = AutoAdjustButton(tr_widget("repo_settings.btn_prio_apply", "🚀 Level anpassen"))
         btn_p_app.setProperty("class", "Primary")
-        btn_p_app.clicked.connect(lambda: (self.ensure_backend_for_active_repo().apply_priority_level_update(self.spin_prio_threshold.value(), self.combo_prio_target.currentData()), self.refresh_creator_info(), QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), "Level angepasst.")))
-        h_prio.addWidget(btn_p_prev); h_prio.addWidget(btn_p_app)
+        btn_p_app.clicked.connect(self._apply_prio_level_adjustment)
+        h_prio.addWidget(btn_p_prev)
+        h_prio.addWidget(btn_p_app)
         v_prio.addLayout(h_prio)
+        layout.addWidget(g_prio)
+
+        # 🏗️ Card 2: Bulk Level Assignment (Assign All Moves)
+        g_glob = QGroupBox(tr_widget("repo_settings.global_leveling_title", "🏗️ Globale Zuweisung (Alle Züge)"))
+        v_glob = QVBoxLayout(g_glob)
+        v_glob.setSpacing(scale(12))
+
+        lbl_glob_desc = QLabel(tr_ui("repo_settings.global_leveling_desc",
+            "Weist ausnahmslos allen Zügen dieses Repertoires ein einheitliches Level zu. Ideal zum Verflachen oder Neuaufbau der Level-Struktur vor einer Reorganisation."))
+        lbl_glob_desc.setWordWrap(True)
+        lbl_glob_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(13)}px;")
+        v_glob.addWidget(lbl_glob_desc)
+
+        # Warning banner
+        banner_glob = QFrame()
+        banner_glob.setStyleSheet(f"""
+            QFrame {{
+                background-color: #fff9db;
+                border: 1px solid #f59f00;
+                border-radius: {scale(6)}px;
+                padding: {scale(6)}px {scale(10)}px;
+            }}
+        """)
+        h_banner = QHBoxLayout(banner_glob)
+        h_banner.setContentsMargins(0, 0, 0, 0)
+        lbl_banner = QLabel(tr_ui("repo_settings.global_leveling_warning_banner",
+            "⚠️ Vorsicht: Diese Aktion überschreibt die Level-Zuordnung aller Züge im aktuellen Repertoire."))
+        lbl_banner.setWordWrap(True)
+        lbl_banner.setStyleSheet("color: #7b4700; font-size: 13px; font-weight: 500;")
+        h_banner.addWidget(lbl_banner)
+        v_glob.addWidget(banner_glob)
+
+        f_glob = QFormLayout()
+        f_glob.setSpacing(scale(10))
+        self.combo_global_level = NoWheelComboBox()
+        f_glob.addRow(tr_ui("repo_settings.global_target_level_label", "Ziel-Level für alle Züge:"), self.combo_global_level)
+        v_glob.addLayout(f_glob)
 
         h_glob = QHBoxLayout()
-        self.combo_global_level = NoWheelComboBox()
-        btn_glob = AutoAdjustButton(tr_widget("repo_settings.btn_global_apply", "Alle Züge auf dieses Level setzen"))
-        btn_glob.clicked.connect(lambda: (self.ensure_backend_for_active_repo().move_all_to_level(self.combo_global_level.currentData()), self.refresh_creator_info(), QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), "Alle Züge verschoben.")))
-        h_glob.addWidget(self.combo_global_level); h_glob.addWidget(btn_glob)
-        v_prio.addLayout(h_glob)
-        layout.addWidget(g_prio)
+        btn_glob_prev = AutoAdjustButton(tr_widget("repo_settings.btn_global_preview", "🔍 Vorschau"))
+        btn_glob_prev.clicked.connect(self._preview_global_move_impact)
+
+        btn_glob = AutoAdjustButton(tr_widget("repo_settings.btn_global_apply", "⚠️ Alle Züge auf dieses Level setzen"))
+        btn_glob.setProperty("class", "Danger")
+        btn_glob.clicked.connect(self._apply_global_move_assignment)
+
+        h_glob.addWidget(btn_glob_prev)
+        h_glob.addWidget(btn_glob)
+        v_glob.addLayout(h_glob)
+        layout.addWidget(g_glob)
 
         # 🗑️ Mass Prune
         g_prune = QGroupBox(tr_widget("repo_settings.tools_prune_title", "🗑️ Massen-Löschung nach Popularität"))
@@ -4168,6 +4541,161 @@ class UnifiedSettingsDialog(QDialog):
         layout.addWidget(g_prune)
 
         layout.addStretch()
+        scroll.setWidget(content)
+
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll)
+
+    def _preview_prio_level_impact(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name:
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
+            return
+        threshold = self.spin_prio_threshold.value()
+        target_data = self.combo_prio_target.currentData()
+        target_text = self.combo_prio_target.currentText()
+        if target_data is None:
+            return
+
+        count = backend.get_priority_level_impact(threshold, target_data)
+        if count == 0:
+            msg = tr_ui(
+                "repo_settings.dlg_prio_preview_zero",
+                "Keine Züge mit Priorität ≥ {threshold}% in tieferen Leveln gefunden.\nAlle qualifizierten Züge sind bereits auf oder über '{target}'.",
+                threshold=threshold,
+                target=target_text
+            )
+        else:
+            msg = tr_ui(
+                "repo_settings.dlg_prio_preview_msg",
+                "{count} Züge mit Priorität ≥ {threshold}% in tieferen Leveln gefunden.\n\nDurch das Anwenden werden diese Züge (sowie deren Folgevarianten) auf das Level '{target}' hochgestuft.",
+                count=count,
+                threshold=threshold,
+                target=target_text
+            )
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_prio_preview_title", "Prio-Leveling Vorschau"), msg)
+
+    def _apply_prio_level_adjustment(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name:
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
+            return
+        threshold = self.spin_prio_threshold.value()
+        target_data = self.combo_prio_target.currentData()
+        target_text = self.combo_prio_target.currentText()
+        if target_data is None:
+            return
+
+        modified = backend.apply_priority_level_update(threshold, target_data)
+        self.refresh_creator_info()
+        if modified > 0:
+            msg = tr_ui("repo_settings.dlg_prio_applied", "{count} Züge erfolgreich auf '{target}' angepasst.", count=modified, target=target_text)
+        else:
+            msg = tr_ui("repo_settings.dlg_prio_no_changes", "Keine Züge mussten angepasst werden.")
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), msg)
+
+    def _preview_global_move_impact(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name:
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
+            return
+        target_data = self.combo_global_level.currentData()
+        target_text = self.combo_global_level.currentText()
+        if target_data is None:
+            return
+
+        impact = backend.get_move_all_to_level_impact(target_data)
+        if impact['total_moves'] == 0:
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_global_preview_title", "Globale Zuweisung – Vorschau"),
+                tr_ui("repo_settings.dlg_global_no_moves", "Das Repertoire enthält keine Züge.")
+            )
+            return
+
+        breakdown_lines = []
+        for item in impact['distribution']:
+            if item['is_target']:
+                breakdown_lines.append(f"  • {item['name']}: {item['count']} Züge (bleiben unverändert)")
+            else:
+                breakdown_lines.append(f"  • {item['name']}: {item['count']} Züge ➔ wechseln zu {target_text}")
+        breakdown_str = "\n".join(breakdown_lines)
+
+        msg = tr_ui(
+            "repo_settings.dlg_global_preview_msg",
+            "Vorschau für Repertoire '{repo}':\n\nZiel-Level: {target}\nGesamtzahl Züge: {total}\n\nAktuelle Verteilung:\n{breakdown}\n\nAuswirkung:\n• {changing} Züge wechseln zu '{target}'\n• {unchanged} Züge befinden sich bereits auf '{target}'",
+            repo=backend.active_repo_name,
+            target=target_text,
+            total=impact['total_moves'],
+            breakdown=breakdown_str,
+            changing=impact['moves_changing'],
+            unchanged=impact['moves_unchanged']
+        )
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_global_preview_title", "Globale Zuweisung – Vorschau"), msg)
+
+    def _apply_global_move_assignment(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name:
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
+            return
+        target_data = self.combo_global_level.currentData()
+        target_text = self.combo_global_level.currentText()
+        if target_data is None:
+            return
+
+        impact = backend.get_move_all_to_level_impact(target_data)
+        if impact['total_moves'] == 0:
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_done", "Fertig"),
+                tr_ui("repo_settings.dlg_global_no_moves", "Das Repertoire enthält keine Züge.")
+            )
+            return
+
+        if impact['moves_changing'] == 0:
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_done", "Fertig"),
+                tr_ui("repo_settings.dlg_global_all_already", "Alle {total} Züge befinden sich bereits auf '{target}'. Keine Änderungen erforderlich.", total=impact['total_moves'], target=target_text)
+            )
+            return
+
+        breakdown_lines = []
+        for item in impact['distribution']:
+            if item['is_target']:
+                breakdown_lines.append(f"  • {item['name']}: {item['count']} Züge (bleiben unverändert)")
+            else:
+                breakdown_lines.append(f"  • {item['name']}: {item['count']} Züge ➔ wechseln zu {target_text}")
+        breakdown_str = "\n".join(breakdown_lines)
+
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Warning)
+        msg_box.setWindowTitle(tr_ui("repo_settings.dlg_global_confirm_title", "⚠️ Warnung: Alle Züge zuweisen"))
+        msg_box.setText(tr_ui(
+            "repo_settings.dlg_global_confirm_msg",
+            "Möchtest du wirklich alle {total} Züge im Repertoire '{repo}' auf das Level '{target}' setzen?\n\nAktuelle Verteilung:\n{breakdown}\n\nAuswirkung:\n• {changing} Züge wechseln zu '{target}'\n• {unchanged} Züge befinden sich bereits auf '{target}'\n\n⚠️ ACHTUNG: Die bisherige Level-Einteilung dieses Repertoires geht dabei unwiderruflich verloren!",
+            total=impact['total_moves'],
+            repo=backend.active_repo_name,
+            target=target_text,
+            breakdown=breakdown_str,
+            changing=impact['moves_changing'],
+            unchanged=impact['moves_unchanged']
+        ))
+        btn_confirm = msg_box.addButton(tr_ui("repo_settings.dlg_global_btn_confirm", "Ja, alle Züge zuweisen"), QMessageBox.ButtonRole.AcceptRole)
+        btn_confirm.setProperty("class", "Danger")
+        btn_cancel = msg_box.addButton(tr_ui("common.cancel", "Abbrechen"), QMessageBox.ButtonRole.RejectRole)
+        msg_box.setDefaultButton(btn_cancel)
+
+        msg_box.exec()
+        if msg_box.clickedButton() == btn_confirm:
+            updated = backend.move_all_to_level(target_data)
+            self.refresh_creator_info()
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_done", "Fertig"),
+                tr_ui("repo_settings.dlg_global_done", "Alle {count} Züge wurden erfolgreich auf '{target}' gesetzt.", count=updated, target=target_text)
+            )
 
     def open_transfer_dialog(self):
         backend = self.ensure_backend_for_active_repo()
@@ -4296,6 +4824,9 @@ class UnifiedSettingsDialog(QDialog):
 
         self.chk_m_engine = QCheckBox(tr_widget("repo_settings.task_engine", "Engine Analyse (Alternativen)"))
         self.chk_m_engine.setChecked(True)
+        self.chk_m_transpos = QCheckBox(tr_widget("repo_settings.task_transpositions", "Überleitungen scannen (2-Züge)"))
+        self.chk_m_transpos.setToolTip(tr_ui("repo_settings.task_transpositions_tip", "Sucht mit der Engine nach 2-zügigen Überleitungen und speichert sie im Repertoire. Im Creator können sie anschließend sofort über 🔄 ohne Rechenzeit angezeigt werden."))
+        self.chk_m_transpos.setChecked(False)
         self.chk_m_lichess = QCheckBox(tr_widget("repo_settings.task_lichess", "Lichess Import (Trend-Daten)"))
         self.chk_m_lichess.setChecked(True)
 
@@ -4333,11 +4864,13 @@ class UnifiedSettingsDialog(QDialog):
         self.chk_m_stats.setChecked(True)
 
         self.chk_m_engine.toggled.connect(self._update_idle_progress_format)
+        self.chk_m_transpos.toggled.connect(self._update_idle_progress_format)
         self.chk_m_lichess.toggled.connect(self._update_idle_progress_format)
         self.chk_m_cleanup.toggled.connect(self._update_idle_progress_format)
         self.chk_m_stats.toggled.connect(self._update_idle_progress_format)
 
         v_tasks.addWidget(self.chk_m_engine)
+        v_tasks.addWidget(self.chk_m_transpos)
         v_tasks.addWidget(self.chk_m_lichess)
         v_tasks.addLayout(h_batch_reuse)
         v_tasks.addWidget(self.chk_m_cleanup)
@@ -4358,6 +4891,11 @@ class UnifiedSettingsDialog(QDialog):
         self.spin_m_engine_depth.setValue(18)
         self.spin_m_engine_depth.setSuffix(f" {tr_ui('repo_settings.moves_unit', 'Züge')}")
 
+        self.spin_m_transpos_depth = NoWheelSpinBox()
+        self.spin_m_transpos_depth.setRange(10, 50)
+        self.spin_m_transpos_depth.setValue(25)
+        self.spin_m_transpos_depth.setSuffix(f" {tr_ui('repo_settings.moves_unit', 'Züge')}")
+
         self.combo_m_engine_threads = NoWheelComboBox()
         max_cpu = multiprocessing.cpu_count()
         for i in range(1, max_cpu + 1):
@@ -4369,6 +4907,7 @@ class UnifiedSettingsDialog(QDialog):
             self.combo_m_engine_threads.setCurrentIndex(idx_def)
 
         f_eng.addRow(tr_ui("repo_settings.engine_depth_label", "Engine-Tiefe:"), self.spin_m_engine_depth)
+        f_eng.addRow(tr_ui("repo_settings.transpos_depth_label", "Überleitungen-Tiefe:"), self.spin_m_transpos_depth)
         f_eng.addRow(tr_ui("repo_settings.engine_threads_label", "Threads:"), self.combo_m_engine_threads)
         v_engine.addLayout(f_eng)
 
@@ -4377,7 +4916,16 @@ class UnifiedSettingsDialog(QDialog):
         v_engine.addWidget(lbl_eng_hint)
         v_engine.addStretch()
 
-        self.chk_m_engine.toggled.connect(self.grp_m_engine.setEnabled)
+        def _update_engine_group_enabled():
+            eng_on = self.chk_m_engine.isChecked()
+            trans_on = self.chk_m_transpos.isChecked()
+            self.grp_m_engine.setEnabled(eng_on or trans_on)
+            self.spin_m_engine_depth.setEnabled(eng_on)
+            self.spin_m_transpos_depth.setEnabled(trans_on)
+
+        self.chk_m_engine.toggled.connect(lambda _: _update_engine_group_enabled())
+        self.chk_m_transpos.toggled.connect(lambda _: _update_engine_group_enabled())
+        _update_engine_group_enabled()
 
         h_config.addWidget(grp_tasks, stretch=1)
         h_config.addWidget(self.grp_m_engine, stretch=1)
@@ -4462,6 +5010,7 @@ class UnifiedSettingsDialog(QDialog):
             return
         total_tasks = sum([
             self.chk_m_engine.isChecked(),
+            self.chk_m_transpos.isChecked() if hasattr(self, 'chk_m_transpos') else False,
             self.chk_m_lichess.isChecked(),
             self.chk_m_cleanup.isChecked(),
             self.chk_m_stats.isChecked()
@@ -4494,6 +5043,7 @@ class UnifiedSettingsDialog(QDialog):
         worker_data = []
         total_tasks = sum([
             self.chk_m_engine.isChecked(),
+            self.chk_m_transpos.isChecked() if hasattr(self, 'chk_m_transpos') else False,
             self.chk_m_lichess.isChecked(),
             self.chk_m_cleanup.isChecked(),
             self.chk_m_stats.isChecked()
@@ -4617,6 +5167,7 @@ class UnifiedSettingsDialog(QDialog):
 
         tasks = {
             'engine': self.chk_m_engine.isChecked(),
+            'transpositions': self.chk_m_transpos.isChecked() if hasattr(self, 'chk_m_transpos') else False,
             'lichess': self.chk_m_lichess.isChecked(),
             'cleanup': self.chk_m_cleanup.isChecked(),
             'stats': self.chk_m_stats.isChecked(),
@@ -4629,7 +5180,7 @@ class UnifiedSettingsDialog(QDialog):
             return
 
         engine_path = self.get_config().get("engine_path", "")
-        if tasks['engine']:
+        if tasks['engine'] or tasks['transpositions']:
             from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
             ep = prompt_engine_if_missing(self, self.get_config())
             if not ep:
@@ -4638,17 +5189,19 @@ class UnifiedSettingsDialog(QDialog):
             self.set_setting("engine_path", ep)
 
         depth = self.spin_m_engine_depth.value()
+        transpos_depth = self.spin_m_transpos_depth.value() if hasattr(self, 'spin_m_transpos_depth') else 25
         threads = int(self.combo_m_engine_threads.currentData() or self.combo_m_engine_threads.currentText().split()[0])
-        settings = {'depth': depth, 'threads': threads, 'path': engine_path}
+        settings = {'depth': depth, 'transpos_depth': transpos_depth, 'threads': threads, 'path': engine_path}
 
-        active_tasks = [t for t in ['cleanup', 'lichess', 'stats', 'engine'] if tasks.get(t)]
+        active_tasks = [t for t in ['cleanup', 'lichess', 'stats', 'engine', 'transpositions'] if tasks.get(t)]
         total_tasks_count = len(active_tasks)
 
         task_labels = {
             'cleanup': ('🧹', tr_ui("repo_settings.task_lbl_cleanup", "Bereinigung")),
             'lichess': ('🌐', tr_ui("repo_settings.task_lbl_lichess", "Lichess-Import")),
             'engine': ('🤖', tr_ui("repo_settings.task_lbl_engine", "Engine-Analyse")),
-            'stats': ('📊', tr_ui("repo_settings.task_lbl_stats", "Statistiken & Prio"))
+            'stats': ('📊', tr_ui("repo_settings.task_lbl_stats", "Statistiken & Prio")),
+            'transpositions': ('🔄', tr_ui("repo_settings.task_lbl_transpos", "Überleitungen (2-Züge)"))
         }
 
         completed_tasks = {cfg['name']: set() for cfg in configs}
@@ -4668,8 +5221,13 @@ class UnifiedSettingsDialog(QDialog):
                     pb.setToolTip(f"0 von {total_tasks_count} Aufgaben erledigt")
 
                 cell_a = self._get_row_dual_cell(r, 3)
-                if cell_a and tasks.get('engine'):
-                    cell_a.setToolTip(tr_ui("repo_settings.engine_queued_tooltip", "In Warteschlange für Analyse (Ziel-Tiefe: {depth})", depth=depth))
+                if cell_a:
+                    if tasks.get('engine') and tasks.get('transpositions'):
+                        cell_a.setToolTip(f"In Warteschlange (Analyse: Tiefe {depth}, Überleitungen: Tiefe {transpos_depth})")
+                    elif tasks.get('engine'):
+                        cell_a.setToolTip(tr_ui("repo_settings.engine_queued_tooltip", "In Warteschlange für Analyse (Ziel-Tiefe: {depth})", depth=depth))
+                    elif tasks.get('transpositions'):
+                        cell_a.setToolTip(f"In Warteschlange für Überleitungen (Ziel-Tiefe: {transpos_depth})")
 
                 cell_c = self._get_row_dual_cell(r, 4)
                 if cell_c and tasks.get('lichess'):
@@ -4718,6 +5276,15 @@ class UnifiedSettingsDialog(QDialog):
                         else:
                             depth_str = tr_ui("analysis.depth", "Tiefe: {depth}", depth=depth)
                             cell_a.show_text(f"{depth_str} ✓", tr_ui("repo_settings.engine_done_tooltip", "Engine-Analyse abgeschlossen ({depth_str})", depth_str=depth_str))
+            elif task_type == "transpositions":
+                cell_a = self._get_row_dual_cell(r, 3)
+                if cell_a:
+                    if pct < 100:
+                        fmt = f"{pct}% ({status_text})" if status_text and status_text != "Überleitungen..." else f"{pct}%"
+                        cell_a.show_progress(pct, f"{tr_ui('repo_settings.task_lbl_transpos', 'Überleitungen (2-Züge)')}: {pct}% ({status_text})", format_str=fmt)
+                    elif not tasks.get('engine'):
+                        depth_str = tr_ui("analysis.depth", "Tiefe: {depth}", depth=transpos_depth)
+                        cell_a.show_text(f"{depth_str} ✓", f"Überleitungen abgeschlossen ({depth_str})")
 
             # 2. Coverage column (Col 4)
             if task_type == "lichess":
@@ -4832,7 +5399,7 @@ class UnifiedSettingsDialog(QDialog):
                     done_set = completed_tasks.get(name, set())
 
                     cell_a = self._get_row_dual_cell(r, 3)
-                    if cell_a and ('engine' not in done_set or cell_a.label.isHidden()):
+                    if cell_a and (('engine' not in done_set and 'transpositions' not in done_set) or cell_a.label.isHidden()):
                         cell_a.show_text(tr_ui("analysis.loading", "Laden..."), tr_ui("analysis.loading", "Laden..."))
 
                     cell_c = self._get_row_dual_cell(r, 4)

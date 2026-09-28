@@ -2,6 +2,24 @@
  
 All notable changes to this project will be documented in this file.
  
+## [1.2.3] - 2026-09-28
+
+### Fixed & Improved
+- **Sequential Background Enrichment Queue & Freeze Prevention**: Replaced unbounded parallel background enrichment thread spawning with a single-worker FIFO queue and retry-backed database commits (`commit_with_retry`). Eliminates CPU exhaustion from multiple concurrent Stockfish engine instances and avoids SQLite write lock contention that previously caused application freezes when rapidly adding multi-move transpositions.
+- **Dedicated Unanswered Moves ("Unbeantwortete Züge") Search Mode**: Added a dedicated scan mode in the Search Mode tab to identify positions where the repertoire ends without an answer on our turn (positions where it is our turn and no move exists in the repertoire). Removed the "Min. Popularity" threshold to scan all repertoire leaves without cutoff, and streamlined the table to 2 clean columns: `Letzter Zug` and `🎯 Antwort finden`.
+- **Engine Eval Loss Column & Depth Selector**: In "unanalysierte populäre Züge", replaced the redundant "Typ" column with "Engine-Verlust", calculating centipawn loss against the top engine move. Added an in-tab engine depth selector (default: 18) leveraging the thread configuration from the Analysis tab.
+- **One-Click Level Buttons & Tab Switching**: Added `+ L1`, `+ L2` level buttons to each unanalyzed move row; clicking adds the move to the selected level, removes the row, advances the board, and jumps to the Analysis tab to input our answer.
+- **Automatic Level Recommendations & Rules Modal**: Configurable automatic level recommendations marked with `⭐`, with customizable popularity thresholds per level and an engine evaluation loss threshold (routing moves with loss >= 2.00 to the highest level) configured in `⚙️ Regeln...`.
+- **Search Mode Cancellation & Dynamic Mode Switching**: Fixed an issue where switching search modes during an active scan left the background thread running and inserted misaligned results into the newly selected mode. The search button now remains active during execution, dynamically switches to `⏹ Abbrechen` (Stop/Cancel) with danger styling, and clicking it immediately cancels the running scan. Switching the search mode or changing levels/thresholds now safely cancels ongoing tasks, resets UI headers, and protects against delayed or out-of-order worker thread signals.
+- **Search Tab Design Overhaul**: Sleek glassmorphism toolbar, unified parameter layout, and responsive table styling matching the Transpositions tab.
+
+## [1.2.2] - 2026-09-24
+
+### Added & Improved
+- **Flexible Level Placement & Visual Live Preview**: Users can now insert new repertoire levels at any position (at the beginning, between existing levels, or at the end).
+- **Interactive Move Assignment Strategy**: When inserting at an existing level position, users can choose between transferring existing moves to the new level (so the shifted level starts empty) or starting the new level empty while existing levels keep their moves.
+- **Dynamic Level Structure Preview Table**: Real-time visual feedback in the "Add Level" dialog showing projected order, level names, target ELO, and move assignment badges ("⭐ Neu", "Verschoben", etc.).
+
 ## [1.2.1] - 2026-09-23
 
 ### Added & Improved

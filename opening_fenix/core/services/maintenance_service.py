@@ -9,6 +9,7 @@ from opening_fenix.core.db.meta_utils import get_meta
 from opening_fenix.core.services.analysis_service import run_db_analysis
 from opening_fenix.core.services.lichess_service import run_lichess_import, run_lichess_orphan_cleanup
 from opening_fenix.core.services.priority_service import calculate_priority_scores
+from opening_fenix.core.services.hole_finder_service import find_repertoire_transpositions, save_cached_transpositions
 from opening_fenix.core.logger import logger
 
 def get_repertoire_elo(repo_name):
@@ -71,12 +72,13 @@ class MaintenanceOrchestrator:
         self.repo_status_cb = repo_status_callback # (repo_name, task_type, progress, status)
         self.check_cancel = check_cancel
         
-        self.active_tasks = [t for t in ['cleanup', 'lichess', 'engine', 'stats'] if self.tasks.get(t)]
+        self.active_tasks = [t for t in ['cleanup', 'lichess', 'engine', 'transpositions', 'stats'] if self.tasks.get(t)]
         self.tasks_done = {cfg['name']: set() for cfg in repo_configs}
         self.lock = threading.Lock()
         self.completed_repos = set()
         self.total_repos = len(repo_configs)
         self._is_aborted = False
+        self.stats_queue = queue.Queue()
 
     def _check_repo_done(self, name):
         with self.lock:
@@ -97,31 +99,97 @@ class MaintenanceOrchestrator:
                 self._is_aborted = True
                 break
             name = cfg['name']
-            if self.repo_status_cb:
-                self.repo_status_cb(name, "engine", 0, "Analysiere...")
+            elo = cfg.get('elo', 'high')
 
-            def on_engine_progress(pct, *args):
-                if not self.repo_status_cb: return
-                if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
-                    cur, total = args[0], args[1]
-                    status_text = f"{cur}/{total}"
-                elif len(args) == 1 and isinstance(args[0], str):
-                    status_text = args[0]
-                else:
-                    status_text = "Analysiere..."
-                self.repo_status_cb(name, "engine", pct, status_text)
+            # 1. Engine Analysis
+            if self.tasks.get('engine') and not self._is_aborted:
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "engine", 0, "Analysiere...")
 
-            success, msg = run_db_analysis(
-                name, self.engine_settings.get('path', ''), self.engine_settings.get('depth', 18), self.engine_settings.get('threads', 1),
-                progress_callback=on_engine_progress,
-                check_cancel=self.check_cancel
-            )
-            if self._is_aborted or (self.check_cancel and self.check_cancel()):
-                self._is_aborted = True
-                break
-            if self.repo_status_cb:
-                self.repo_status_cb(name, "engine", 100, "Fertig" if success else "Fehlgeschlagen")
-            self._mark_task_finished(name, "engine")
+                def on_engine_progress(pct, *args):
+                    if not self.repo_status_cb: return
+                    if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
+                        cur, total = args[0], args[1]
+                        status_text = f"{cur}/{total}"
+                    elif len(args) == 1 and isinstance(args[0], str):
+                        status_text = args[0]
+                    else:
+                        status_text = "Analysiere..."
+                    self.repo_status_cb(name, "engine", pct, status_text)
+
+                success, msg = run_db_analysis(
+                    name, self.engine_settings.get('path', ''), self.engine_settings.get('depth', 18), self.engine_settings.get('threads', 1),
+                    progress_callback=on_engine_progress,
+                    check_cancel=self.check_cancel
+                )
+                if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "engine", 100, "Fertig" if success else "Fehlgeschlagen")
+                self._mark_task_finished(name, "engine")
+                time.sleep(0.01)
+
+            # 2. 2-Move Transposition Scan
+            if self.tasks.get('transpositions') and not self._is_aborted:
+                if self.check_cancel and self.check_cancel():
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "transpositions", 0, "Überleitungen...")
+
+                def on_transpos_progress(curr, total, msg=None):
+                    if not self.repo_status_cb: return
+                    pct = int((curr / max(1, total)) * 100) if total > 0 else 0
+                    status_text = f"{curr}/{total}" if total > 0 else (msg or "Überleitungen...")
+                    self.repo_status_cb(name, "transpositions", pct, status_text)
+
+                transpos_success = False
+                try:
+                    db_path = get_repertoire_db_path(name)
+                    if os.path.exists(db_path):
+                        db_m = DatabaseManager(db_path)
+                        sess = db_m.get_session()
+                        try:
+                            eng_path = self.engine_settings.get('path', '')
+                            eng_depth = self.engine_settings.get('transpos_depth') or self.engine_settings.get('depth', 25)
+                            eng_threads = self.engine_settings.get('threads', 1)
+
+                            candidates = find_repertoire_transpositions(
+                                sess,
+                                elo_range=elo,
+                                engine_path=eng_path,
+                                threads_count=eng_threads,
+                                depth=eng_depth,
+                                progress_callback=on_transpos_progress,
+                                cancel_check=self.check_cancel
+                            )
+                            two_move_candidates = [
+                                h for h in (candidates or [])
+                                if isinstance(h, dict) and h.get("depth", 1) == 2
+                            ]
+                            save_cached_transpositions(sess, two_move_candidates, merge=True)
+                            transpos_success = True
+                        except Exception as e:
+                            logger.error(f"Transpositions scan failed for {name}: {e}")
+                        finally:
+                            sess.close()
+                            db_m.close()
+                except Exception as e:
+                    logger.error(f"Transpositions DB error for {name}: {e}")
+
+                if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                    self._is_aborted = True
+                    break
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "transpositions", 100, "Fertig" if transpos_success else "Fehler")
+                self._mark_task_finished(name, "transpositions")
+                time.sleep(0.01)
+
+            time.sleep(0.01)
 
     def _data_worker(self):
         for cfg in self.repo_configs:
@@ -187,25 +255,52 @@ class MaintenanceOrchestrator:
                 self._mark_task_finished(name, "lichess")
                 time.sleep(0.01)  # Yield GIL between stages
 
-            # 3. Stats & Prio (Runs strictly AFTER Lichess import for this course!)
+            # Pipelining: As soon as Lichess/cleanup finishes for this course, queue it for Stats!
+            # The next course can immediately start downloading Lichess in parallel with this course calculating stats.
             if self.tasks.get('stats') and not self._is_aborted:
-                if self.check_cancel and self.check_cancel():
-                    self._is_aborted = True
-                    break
-                if self.repo_status_cb:
-                    self.repo_status_cb(name, "stats", 0, "Statistiken...")
-                try:
-                    calculate_priority_scores(name, elo)
-                    if self.repo_status_cb:
-                        self.repo_status_cb(name, "stats", 100, "Fertig")
-                except Exception as e:
-                    logger.error(f"Stats failed for {name}: {e}")
-                    if self.repo_status_cb:
-                        self.repo_status_cb(name, "stats", 100, "Fehler")
-                self._mark_task_finished(name, "stats")
-                time.sleep(0.01)  # Yield GIL between stages
+                self.stats_queue.put(cfg)
 
             time.sleep(0.01)  # Yield GIL between repertoires
+
+        # Signal completion to _stats_worker
+        if self.tasks.get('stats'):
+            self.stats_queue.put(None)
+
+    def _stats_worker(self):
+        while not self._is_aborted:
+            if self.check_cancel and self.check_cancel():
+                self._is_aborted = True
+                break
+            try:
+                cfg = self.stats_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            if cfg is None:
+                self.stats_queue.task_done()
+                break
+
+            if self._is_aborted or (self.check_cancel and self.check_cancel()):
+                self._is_aborted = True
+                self.stats_queue.task_done()
+                break
+
+            name = cfg['name']
+            elo = cfg.get('elo', 'high')
+
+            if self.repo_status_cb:
+                self.repo_status_cb(name, "stats", 0, "Statistiken...")
+            try:
+                calculate_priority_scores(name, elo)
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "stats", 100, "Fertig")
+            except Exception as e:
+                logger.error(f"Stats failed for {name}: {e}")
+                if self.repo_status_cb:
+                    self.repo_status_cb(name, "stats", 100, "Fehler")
+            self._mark_task_finished(name, "stats")
+            self.stats_queue.task_done()
+            time.sleep(0.01)
 
     def run(self):
         if self.check_cancel and self.check_cancel():
@@ -215,19 +310,30 @@ class MaintenanceOrchestrator:
             return True, "Wartung erfolgreich abgeschlossen."
 
         threads = []
-        if self.tasks.get('engine'):
+        if self.tasks.get('engine') or self.tasks.get('transpositions'):
             t_eng = threading.Thread(target=self._engine_worker, daemon=True)
             threads.append(t_eng)
             t_eng.start()
 
-        if any(self.tasks.get(t) for t in ['cleanup', 'lichess', 'stats']):
+        if any(self.tasks.get(t) for t in ['cleanup', 'lichess']):
             t_data = threading.Thread(target=self._data_worker, daemon=True)
             threads.append(t_data)
             t_data.start()
+        elif self.tasks.get('stats'):
+            # If neither cleanup nor lichess is running, enqueue all repos directly for stats
+            for cfg in self.repo_configs:
+                self.stats_queue.put(cfg)
+            self.stats_queue.put(None)
+
+        if self.tasks.get('stats'):
+            t_stats = threading.Thread(target=self._stats_worker, daemon=True)
+            threads.append(t_stats)
+            t_stats.start()
 
         while any(t.is_alive() for t in threads):
             if self.check_cancel and self.check_cancel():
                 self._is_aborted = True
+                self.stats_queue.put(None)
                 break
             time.sleep(0.1)
 

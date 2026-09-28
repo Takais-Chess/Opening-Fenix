@@ -51,6 +51,20 @@ def test_creator_bulk_move():
         
         print("Initial state: Move e2e4 is at level 1.")
         
+        # Test impact preview before move
+        impact_before = backend.get_move_all_to_level_impact(2)
+        assert impact_before['total_moves'] == 1, f"Expected 1 total move, got {impact_before['total_moves']}"
+        assert impact_before['moves_changing'] == 1, f"Expected 1 changing move, got {impact_before['moves_changing']}"
+        assert impact_before['moves_unchanged'] == 0, f"Expected 0 unchanged moves, got {impact_before['moves_unchanged']}"
+        assert impact_before['target_level_name'] == "Advanced", f"Expected Advanced, got {impact_before['target_level_name']}"
+        print(f"Impact preview verified: {impact_before}")
+
+        # Test impact preview if target is same level (1)
+        impact_same = backend.get_move_all_to_level_impact(1)
+        assert impact_same['moves_changing'] == 0
+        assert impact_same['moves_unchanged'] == 1
+        print("Same level impact preview verified (0 changing, 1 unchanged).")
+
         # Test bulk move
         target_level = 2
         print(f"Moving all moves to level {target_level}...")
@@ -63,6 +77,13 @@ def test_creator_bulk_move():
             print(f"Verification SUCCESS: Move is now at level {updated_rm.level}.")
         else:
             print(f"Verification FAILED: Move is at level {updated_rm.level}.")
+            raise AssertionError(f"Expected level {target_level}, got {updated_rm.level}")
+
+        # Test impact preview after move
+        impact_after = backend.get_move_all_to_level_impact(2)
+        assert impact_after['moves_changing'] == 0
+        assert impact_after['moves_unchanged'] == 1
+        print("Post-move impact preview verified.")
             
     finally:
         if backend.session: backend.session.close()

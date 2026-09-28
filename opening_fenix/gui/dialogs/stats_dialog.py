@@ -1,32 +1,111 @@
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QScrollArea, QWidget, QProgressBar, QFrame,
-    QSizePolicy, QGridLayout
+    QSizePolicy, QGridLayout, QComboBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRectF
+from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon
-from opening_fenix.core.translation import tr_ui
-from opening_fenix.core.services.statistics_service import calculate_repertoire_statistics
-from opening_fenix.core.utils import get_elo_display
+from opening_fenix.core.translation import tr_ui, tr_widget
+from opening_fenix.core.services.statistics_service import (
+    calculate_repertoire_statistics,
+    get_available_profiles,
+    get_profile_box_statistics
+)
+from opening_fenix.core.utils import get_elo_display, get_last_active_profile_name
+
+
+class BoxDistributionBar(QWidget):
+    """
+    A segmented horizontal bar showing proportions of moves across Boxes 1-7 and Unlearned.
+    """
+    BOX_COLORS = {
+        1: QColor("#ef4444"),  # Red (Box 1)
+        2: QColor("#f97316"),  # Orange (Box 2)
+        3: QColor("#f59e0b"),  # Amber (Box 3)
+        4: QColor("#eab308"),  # Yellow (Box 4)
+        5: QColor("#84cc16"),  # Lime (Box 5)
+        6: QColor("#22c55e"),  # Green (Box 6)
+        7: QColor("#10b981"),  # Emerald (Box 7)
+        "unlearned": QColor("#e2e8f0")  # Slate Gray (Unlearned)
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(scale(16))
+        self.box_counts: Dict[int, int] = {i: 0 for i in range(1, 8)}
+        self.unlearned_count: int = 0
+        self.total_trainable: int = 0
+
+    def update_distribution(self, box_counts: Dict[int, int], unlearned: int, total_trainable: int):
+        self.box_counts = dict(box_counts)
+        self.unlearned_count = max(0, unlearned)
+        self.total_trainable = max(0, total_trainable)
+
+        # Build informative tooltip
+        total = sum(self.box_counts.values()) + self.unlearned_count
+        parts = []
+        if total > 0:
+            for b in range(1, 8):
+                c = self.box_counts.get(b, 0)
+                if c > 0:
+                    pct = (c / total) * 100.0
+                    parts.append(f"Box {b}: {c:,} ({pct:.1f}%)")
+            if self.unlearned_count > 0:
+                pct = (self.unlearned_count / total) * 100.0
+                parts.append(f"{tr_ui('stats.stat_unlearned', 'Ungelernt:')} {self.unlearned_count:,} ({pct:.1f}%)")
+            self.setToolTip(" • ".join(parts))
+        else:
+            self.setToolTip(tr_ui("stats.no_training_data", "Noch keine Züge trainiert"))
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = float(self.width())
+        h = float(self.height())
+        r = h / 2.0
+
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, w, h), r, r)
+        painter.setClipPath(path)
+
+        total = sum(self.box_counts.values()) + self.unlearned_count
+        if total <= 0:
+            painter.fillRect(QRectF(0, 0, w, h), QColor("#f1f5f9"))
+            return
+
+        cur_x = 0.0
+        for b in range(1, 8):
+            cnt = self.box_counts.get(b, 0)
+            if cnt > 0:
+                seg_w = (cnt / total) * w
+                painter.fillRect(QRectF(cur_x, 0, seg_w, h), self.BOX_COLORS[b])
+                cur_x += seg_w
+
+        if self.unlearned_count > 0:
+            seg_w = (self.unlearned_count / total) * w
+            painter.fillRect(QRectF(cur_x, 0, seg_w, h), self.BOX_COLORS["unlearned"])
 
 
 class StatisticsWorker(QThread):
     """Background worker to calculate statistics without blocking the GUI."""
     stats_ready = pyqtSignal(dict)
 
-    def __init__(self, repo_name: str, is_test: Optional[bool] = None, elo_range: Optional[str] = None):
+    def __init__(self, repo_name: str, is_test: Optional[bool] = None, elo_range: Optional[str] = None, profile_name: Optional[str] = None):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
         self.elo_range = elo_range
+        self.profile_name = profile_name
 
     def run(self):
-        data = calculate_repertoire_statistics(self.repo_name, self.is_test, self.elo_range)
+        data = calculate_repertoire_statistics(self.repo_name, self.is_test, self.elo_range, self.profile_name)
         self.stats_ready.emit(data)
 
 
@@ -36,19 +115,22 @@ class RepertoireStatisticsDialog(QDialog):
     - Scope detection (e.g. specialized against 1.e4 vs complete repertoire)
     - 3 Key score badges: Effectiveness, Soundness, and Learnability
     - Repertoire size breakdown by Level (Level 1, Level 2, Level 3, Total)
+    - Profile Leitner box breakdown (Boxes 1-7, unlearned, due moves)
     - 1-step interval opponent coverage curve (Move 1, 2, 3...)
     """
-    def __init__(self, parent=None, repo_name: str = "", is_test: Optional[bool] = None):
+    def __init__(self, parent=None, repo_name: str = "", is_test: Optional[bool] = None, profile_name: Optional[str] = None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("stats.window_title", "Repertoire-Statistiken & Insights"))
-        self.setMinimumSize(scale(740), scale(680))
-        self.resize(scale(760), scale(710))
+        self.setMinimumSize(scale(820), scale(700))
+        self.resize(scale(880), scale(760))
 
         self.repo_name = repo_name
         self.is_test = is_test
+        self.selected_profile = profile_name or get_last_active_profile_name()
         self.worker: Optional[StatisticsWorker] = None
+        self.box_tile_widgets: Dict[int, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
 
         self.init_ui()
         self.load_statistics()
@@ -154,6 +236,17 @@ class RepertoireStatisticsDialog(QDialog):
 
         main_layout.addWidget(header_widget)
 
+        # --- SCROLLABLE DASHBOARD CONTENT ---
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+        scroll_content = QWidget()
+        content_layout = QVBoxLayout(scroll_content)
+        content_layout.setContentsMargins(0, scale(4), scale(6), 0)
+        content_layout.setSpacing(scale(14))
+
         # --- 2. TOP METRIC SECTION ---
         cards_layout = QHBoxLayout()
         cards_layout.setSpacing(scale(12))
@@ -209,7 +302,7 @@ class RepertoireStatisticsDialog(QDialog):
 
         cards_layout.addWidget(self.card_wip, 2)
 
-        main_layout.addLayout(cards_layout)
+        content_layout.addLayout(cards_layout)
 
         # --- 3. REPERTOIRE SIZE BY LEVEL (Dynamic level tiles + summary) ---
         grp_levels = QGroupBox(f"📁  {tr_ui('stats.levels_group', 'Repertoire-Größe nach Stufen')}")
@@ -243,9 +336,137 @@ class RepertoireStatisticsDialog(QDialog):
         """)
         layout_levels.addWidget(self.lbl_total_summary)
 
-        main_layout.addWidget(grp_levels)
+        content_layout.addWidget(grp_levels)
 
-        # --- 4. PRACTICAL REPERTOIRE COVERAGE PLACEHOLDER ---
+        # --- 4. PROFILE LEITNER BOXES GROUP ---
+        self.grp_boxes = QGroupBox(f"🗃️  {tr_widget('stats.box_distribution_group', 'Trainings-Fortschritt & Leitner-Boxen nach Profil')}")
+        layout_boxes = QVBoxLayout(self.grp_boxes)
+        layout_boxes.setContentsMargins(scale(16), scale(14), scale(16), scale(14))
+        layout_boxes.setSpacing(scale(10))
+
+        # Top Profile, Level & KPI Row
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(scale(8))
+
+        lbl_prof = QLabel(tr_ui("stats.profile_label", "Profil:"))
+        lbl_prof.setStyleSheet(f"font-size: {scale(12)}px; font-weight: 700; color: #334155; border: none; background: transparent;")
+        ctrl_row.addWidget(lbl_prof)
+
+        self.combo_profile = QComboBox()
+        self.combo_profile.setFixedHeight(scale(32))
+        self.combo_profile.setMinimumWidth(scale(130))
+        self.combo_profile.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_profile.setStyleSheet(f"""
+            QComboBox {{
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: {scale(6)}px;
+                padding: 0 {scale(10)}px;
+                font-weight: 600;
+                font-size: {scale(12)}px;
+            }}
+            QComboBox:hover {{
+                border-color: #94a3b8;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: {scale(20)}px;
+            }}
+        """)
+
+        # Populate profiles
+        available_profiles = get_available_profiles()
+        self.combo_profile.addItems(available_profiles)
+
+        if self.selected_profile and self.selected_profile in available_profiles:
+            self.combo_profile.setCurrentText(self.selected_profile)
+        elif available_profiles:
+            self.selected_profile = available_profiles[0]
+            self.combo_profile.setCurrentIndex(0)
+
+        self.combo_profile.currentTextChanged.connect(self._on_profile_selected)
+        ctrl_row.addWidget(self.combo_profile)
+
+        # Level selector
+        self.lbl_level = QLabel(tr_ui("stats.level_label", "Stufe:"))
+        self.lbl_level.setStyleSheet(f"font-size: {scale(12)}px; font-weight: 700; color: #334155; border: none; background: transparent;")
+        ctrl_row.addWidget(self.lbl_level)
+
+        self.combo_level = QComboBox()
+        self.combo_level.setFixedHeight(scale(32))
+        self.combo_level.setMinimumWidth(scale(165))
+        self.combo_level.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.combo_level.setStyleSheet(f"""
+            QComboBox {{
+                background-color: #ffffff;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: {scale(6)}px;
+                padding: 0 {scale(10)}px;
+                font-weight: 600;
+                font-size: {scale(12)}px;
+            }}
+            QComboBox:hover {{
+                border-color: #94a3b8;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+                width: {scale(20)}px;
+            }}
+        """)
+        self.combo_level.currentIndexChanged.connect(self._on_level_selected)
+        ctrl_row.addWidget(self.combo_level)
+
+        ctrl_row.addSpacing(scale(4))
+
+        # KPI Badges: Elo, Learned, Due, Unlearned
+        self.lbl_stat_elo = self._create_kpi_badge("🎓", tr_ui("stats.stat_elo", "Elo:"), "--")
+        self.lbl_stat_learned = self._create_kpi_badge("🎯", tr_ui("stats.stat_learned", "Gelernt:"), "--")
+        self.lbl_stat_due = self._create_kpi_badge("⏳", tr_ui("stats.stat_due", "Fällig:"), "--")
+        self.lbl_stat_unlearned = self._create_kpi_badge("⚪", tr_ui("stats.stat_unlearned", "Ungelernt:"), "--")
+
+        ctrl_row.addWidget(self.lbl_stat_elo)
+        ctrl_row.addWidget(self.lbl_stat_learned)
+        ctrl_row.addWidget(self.lbl_stat_due)
+        ctrl_row.addWidget(self.lbl_stat_unlearned)
+        ctrl_row.addStretch()
+
+        layout_boxes.addLayout(ctrl_row)
+
+        # Leitner Box 1..7 Cards Row
+        self.boxes_row = QHBoxLayout()
+        self.boxes_row.setSpacing(scale(8))
+
+        colors = [
+            "#ef4444",  # Box 1 (Red)
+            "#f97316",  # Box 2 (Orange)
+            "#f59e0b",  # Box 3 (Amber)
+            "#eab308",  # Box 4 (Yellow)
+            "#84cc16",  # Box 5 (Lime)
+            "#22c55e",  # Box 6 (Green)
+            "#10b981",  # Box 7 (Emerald)
+        ]
+        default_intervals = ["5m", "1d", "3d", "9d", "21d", "63d", "180d"]
+
+        for b in range(1, 8):
+            tile, lbl_cnt, lbl_due, lbl_int = self._create_box_tile(
+                box_num=b,
+                default_interval=default_intervals[b-1],
+                color_hex=colors[b-1]
+            )
+            self.box_tile_widgets[b] = (tile, lbl_cnt, lbl_due, lbl_int)
+            self.boxes_row.addWidget(tile, 1)
+
+        layout_boxes.addLayout(self.boxes_row)
+
+        # Visual Segmented Distribution Bar
+        self.dist_bar = BoxDistributionBar()
+        layout_boxes.addWidget(self.dist_bar)
+
+        content_layout.addWidget(self.grp_boxes)
+
+        # --- 5. PRACTICAL REPERTOIRE COVERAGE PLACEHOLDER ---
         grp_cov = QGroupBox(f"📊  {tr_ui('stats.coverage_group', 'Repertoire-Abdeckung in der Praxis')}")
         layout_cov = QVBoxLayout(grp_cov)
         layout_cov.setContentsMargins(scale(16), scale(12), scale(16), scale(12))
@@ -300,9 +521,12 @@ class RepertoireStatisticsDialog(QDialog):
         ph_layout.addWidget(lbl_ph_body)
 
         layout_cov.addWidget(card_placeholder)
-        main_layout.addWidget(grp_cov)
+        content_layout.addWidget(grp_cov)
 
-        # --- 5. BOTTOM BUTTON BAR ---
+        self.scroll_area.setWidget(scroll_content)
+        main_layout.addWidget(self.scroll_area, 1)
+
+        # --- 6. BOTTOM BUTTON BAR ---
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(scale(12))
 
@@ -429,14 +653,185 @@ class RepertoireStatisticsDialog(QDialog):
 
         return tile, lbl_val
 
+    def _create_kpi_badge(self, icon: str, label_text: str, default_val: str) -> QLabel:
+        lbl = QLabel(f"{icon} {label_text} <b>{default_val}</b>")
+        lbl.setStyleSheet(f"""
+            QLabel {{
+                font-size: {scale(11)}px;
+                color: #334155;
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(6)}px;
+                padding: {scale(4)}px {scale(8)}px;
+            }}
+        """)
+        return lbl
+
+    def _create_box_tile(self, box_num: int, default_interval: str, color_hex: str):
+        tile = QFrame()
+        tile.setObjectName(f"BoxTile_{box_num}")
+        tile.setFixedHeight(scale(76))
+        tile.setStyleSheet(f"""
+            QFrame#BoxTile_{box_num} {{
+                background-color: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(8)}px;
+            }}
+            QFrame#BoxTile_{box_num} QLabel {{
+                border: none;
+                background: transparent;
+            }}
+        """)
+        layout = QVBoxLayout(tile)
+        layout.setContentsMargins(scale(8), 0, scale(8), scale(6))
+        layout.setSpacing(scale(2))
+
+        # Colored top bar
+        top_bar = QFrame()
+        top_bar.setFixedHeight(scale(3))
+        top_bar.setStyleSheet(f"""
+            background-color: {color_hex};
+            border-top-left-radius: {scale(7)}px;
+            border-top-right-radius: {scale(7)}px;
+            border: none;
+        """)
+        layout.addWidget(top_bar)
+        layout.addSpacing(scale(3))
+
+        # Header: Box X on left, interval on right
+        h_box = QHBoxLayout()
+        h_box.setSpacing(scale(4))
+        lbl_b = QLabel(f"Box {box_num}")
+        lbl_b.setStyleSheet(f"font-size: {scale(11)}px; font-weight: 700; color: #475569;")
+        h_box.addWidget(lbl_b)
+        h_box.addStretch()
+        lbl_int = QLabel(default_interval)
+        lbl_int.setStyleSheet(f"font-size: {scale(10)}px; color: #94a3b8; font-weight: 500;")
+        h_box.addWidget(lbl_int)
+        layout.addLayout(h_box)
+
+        # Main count
+        lbl_cnt = QLabel("--")
+        lbl_cnt.setStyleSheet(f"font-size: {scale(16)}px; font-weight: 800; color: #0f172a;")
+        layout.addWidget(lbl_cnt)
+
+        # Due sub-label
+        lbl_due = QLabel("0 " + tr_ui("stats.due_suffix", "fällig"))
+        lbl_due.setStyleSheet(f"font-size: {scale(10)}px; font-weight: 500; color: #94a3b8;")
+        layout.addWidget(lbl_due)
+
+        layout.addStretch()
+        return tile, lbl_cnt, lbl_due, lbl_int
+
+    def _on_profile_selected(self, profile_name: str):
+        if not profile_name:
+            return
+        self.selected_profile = profile_name
+        self.load_profile_box_statistics(profile_name, level_filter=None)
+
+    def _on_level_selected(self, idx: int):
+        if not hasattr(self, 'combo_level') or self.combo_level.signalsBlocked():
+            return
+        lvl = self.combo_level.currentData()
+        active_prof = self.combo_profile.currentText() if hasattr(self, 'combo_profile') else self.selected_profile
+        self.load_profile_box_statistics(active_prof, level_filter=lvl)
+
+    def load_profile_box_statistics(self, profile_name: str, level_filter: Optional[int] = None):
+        if not profile_name or not self.repo_name:
+            return
+        prof_data = get_profile_box_statistics(self.repo_name, profile_name, self.is_test, selected_level=level_filter)
+        self.update_profile_box_ui(prof_data)
+
+    def update_profile_box_ui(self, prof_data: Dict[str, Any]):
+        if not prof_data:
+            return
+
+        tot_trainable = prof_data.get("total_trainable", 0)
+        tot_learned = prof_data.get("total_learned", 0)
+        tot_unlearned = prof_data.get("total_unlearned", 0)
+        tot_due = prof_data.get("total_due", 0)
+        learned_pct = prof_data.get("learned_pct", 0.0)
+        box_counts = prof_data.get("box_counts", {})
+        box_due_counts = prof_data.get("box_due_counts", {})
+        box_intervals_short = prof_data.get("box_intervals_short", {})
+        avail_levels = prof_data.get("available_levels", [])
+        active_lvl = prof_data.get("active_level", 1)
+        selected_lvl = prof_data.get("selected_level")
+        rating = prof_data.get("rating", 800)
+
+        # Update Level selector if available
+        if hasattr(self, 'combo_level') and avail_levels:
+            self.combo_level.blockSignals(True)
+            prev_data = self.combo_level.currentData() if self.combo_level.count() > 0 else None
+            self.combo_level.clear()
+            self.combo_level.addItem(tr_ui("stats.all_levels", "Alle Stufen (Gesamt)"), None)
+            
+            select_idx = 0
+            for i, ld in enumerate(avail_levels):
+                ord_num = ld.get("order", 1)
+                name = ld.get("name", f"Level {ord_num}")
+                m_cnt = ld.get("moves", 0)
+                item_label = tr_ui("stats.level_fmt", f"Stufe {ord_num}: {name} ({m_cnt} Züge)", order=ord_num, name=name, count=m_cnt)
+                self.combo_level.addItem(item_label, ord_num)
+
+                if selected_lvl is not None and selected_lvl == ord_num:
+                    select_idx = i + 1
+                elif selected_lvl is None and prev_data is not None and prev_data == ord_num:
+                    select_idx = i + 1
+
+            self.combo_level.setCurrentIndex(select_idx)
+            self.combo_level.blockSignals(False)
+            self.combo_level.setVisible(True)
+            if hasattr(self, 'lbl_level'):
+                self.lbl_level.setVisible(True)
+
+        # KPI labels
+        if hasattr(self, 'lbl_stat_elo'):
+            self.lbl_stat_elo.setText(f"🎓 {tr_ui('stats.stat_elo', 'Elo:')} <b>{rating:,}</b>")
+        self.lbl_stat_learned.setText(
+            f"🎯 {tr_ui('stats.stat_learned', 'Gelernt:')} <b>{tot_learned:,}</b> / {tot_trainable:,} ({learned_pct:.1f}%)"
+        )
+        self.lbl_stat_due.setText(
+            f"⏳ {tr_ui('stats.stat_due', 'Fällig:')} <b>{tot_due:,}</b>"
+        )
+        self.lbl_stat_unlearned.setText(
+            f"⚪ {tr_ui('stats.stat_unlearned', 'Ungelernt:')} <b>{tot_unlearned:,}</b>"
+        )
+
+        # Update tiles 1..7
+        due_suffix = tr_ui("stats.due_suffix", "fällig")
+        for b in range(1, 8):
+            if b in self.box_tile_widgets:
+                _, lbl_cnt, lbl_due, lbl_int = self.box_tile_widgets[b]
+                cnt = box_counts.get(b, 0)
+                due = box_due_counts.get(b, 0)
+                interval_str = box_intervals_short.get(b, "")
+                if interval_str:
+                    lbl_int.setText(interval_str)
+                lbl_cnt.setText(f"{cnt:,}")
+                if due > 0:
+                    lbl_due.setText(f"{due:,} {due_suffix}")
+                    lbl_due.setStyleSheet(f"font-size: {scale(10)}px; font-weight: 600; color: #d97706; border: none; background: transparent;")
+                else:
+                    lbl_due.setText(f"0 {due_suffix}")
+                    lbl_due.setStyleSheet(f"font-size: {scale(10)}px; font-weight: 500; color: #94a3b8; border: none; background: transparent;")
+
+        # Update distribution bar
+        self.dist_bar.update_distribution(box_counts, tot_unlearned, tot_trainable)
+
     def load_statistics(self):
         """Starts background worker to calculate statistics."""
         self.btn_refresh.setEnabled(False)
         self.lbl_scope.setText(tr_ui("stats.calculating", "⏳ Statistiken werden berechnet..."))
 
-        self.worker = StatisticsWorker(self.repo_name, self.is_test)
+        active_prof = self.combo_profile.currentText() if hasattr(self, 'combo_profile') else self.selected_profile
+        self.worker = StatisticsWorker(self.repo_name, self.is_test, profile_name=active_prof)
         self.worker.stats_ready.connect(self.on_statistics_ready)
         self.worker.start()
+
+        lvl = self.combo_level.currentData() if hasattr(self, 'combo_level') and self.combo_level.count() > 0 else None
+        if active_prof:
+            self.load_profile_box_statistics(active_prof, level_filter=lvl)
 
     def on_statistics_ready(self, data: Dict[str, Any]):
         """Populates the dialog UI with the calculated statistics data."""
@@ -498,3 +893,7 @@ class RepertoireStatisticsDialog(QDialog):
             f"📦 <b>{tr_ui('stats.total_positions', 'Gesamt-Stellungen:')}</b> {tot_pos:,} {pos_str}  "
             f"<span style='color: #64748b;'>({tot_moves:,} {tr_ui('stats.active_moves', 'aktive Züge')})</span>"
         )
+
+        # 4. Profile Box Stats (if included)
+        if "profile_stats" in data and data["profile_stats"]:
+            self.update_profile_box_ui(data["profile_stats"])

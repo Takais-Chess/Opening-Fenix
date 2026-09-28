@@ -249,7 +249,7 @@ def get_scrollbar_style():
 def get_tooltip_style():
     """Consistent, sharp tooltip styling across the entire application to prevent blacked-out OS dark mode glitches."""
     return f"""
-    QToolTip {{
+    QToolTip, QLabel#qtooltip_label {{
         background-color: #ffffff;
         color: {COLORS['brown_text']};
         border: 1px solid rgba(0, 0, 0, 0.25);

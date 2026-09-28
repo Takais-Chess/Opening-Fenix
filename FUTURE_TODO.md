@@ -6,10 +6,6 @@ This document tracks planned features, community feature requests, and architect
 
 ## 📌 Upcoming & Active Feature Requests
 
-### 🌐 23. Online Version Checker
-**Concept:**
-Add an automatic or manual online update checker. The application contacts the GitHub repository / release API to notify the user when a newer version of Opening Fenix is available.
-
 ### ♟️ 24. Lichess Game Analysis & Repertoire Recommendations
 **Concept:**
 Analyze your own recent Lichess games against your active repertoire. The system will:
@@ -57,9 +53,6 @@ When navigating deep into opening theory, the active database (especially Liches
 - GitHub Actions pipeline to run `pytest` on Windows runners for every pull request.
 - Granular tests for Creator sub-tabs (Analysis, Hole Finder) and screenshot visual testing.
 
-### 16. Custom Repertoire Cover Images
-- Allow users to place a `cover.png` or `cover.jpg` inside `repertoires/{name}/` to display visual thumbnails in the Repertoire Selection grid.
-
 ### 18. Built-in Example Repertoire(s)
 - Ship one or two high-quality example repertoires (e.g., *"The Italian Game - Core Lines"*) for new users to start training immediately.
 
@@ -88,7 +81,9 @@ When navigating deep into opening theory, the active database (especially Liches
 | **12** | **Dynamic Rating System (Opening Elo)** | 2026-03-30 |
 | **13** | **Priority-Based Level Reclassification** | 2026-04-01 |
 | **15** | **Course Introduction & First-Time User Experience** | 2026-04-02 |
+| **16** | **Custom Repertoire Cover Images** | 2026-07-18 |
 | **17** | **Directory-Based Repertoire Storage (`repertoires/{name}/`)** | 2026-04-03 |
+| **23** | **Online Version Checker & In-App Updater** | 2026-07-27 |
 | **26** | **Multilingual Repertoire Comments** | 2026-07-27 |
 | **28** | **Custom Storage Directory & Cloud Sync (Google Drive / Multi-PC)** | 2026-08-19 |
 | **25** | **Lichess Game Blocking (Fair Play Lockout for Creator)** | 2026-09-03 |

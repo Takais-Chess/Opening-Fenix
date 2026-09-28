@@ -35,6 +35,7 @@ from sqlalchemy import or_, func, desc, text
 from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
+from opening_fenix.core.db.database import commit_with_retry
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
 from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
@@ -45,13 +46,14 @@ from opening_fenix.gui.widgets.board_widget import ChessBoardWidget, THEMES
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.widgets.common import AspectRatioFrame
 from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+from opening_fenix.gui.dialogs.hole_recommendation_dialog import HoleRecommendationSettingsDialog
 from opening_fenix.gui.widgets.lichess_lockout_overlay import LichessLockoutOverlay
 from opening_fenix.core.services.lichess_lockout_service import LichessLockoutWorker
 from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
@@ -81,6 +83,7 @@ class LocalizedExporter(chess.pgn.StringExporter):
 # --- BACKEND ---
 class CreatorBackend:
     def __init__(self, is_test=None):
+        self.window = None
         self.db_manager = None
         self.session = None
         self.active_repo_name = None
@@ -149,6 +152,12 @@ class CreatorBackend:
         self._ui_cache = {}
         self._outgoing_transpositions_cache = {}
         self._min_reachable_level_cache = None
+        if hasattr(self, "window") and self.window:
+            if hasattr(self.window, "clear_transposition_caches"):
+                try:
+                    self.window.clear_transposition_caches()
+                except Exception:
+                    pass
         if self.session:
             try:
                 self.session.rollback()
@@ -1007,6 +1016,65 @@ class CreatorBackend:
         self.clear_cache()
         return updated_count
 
+    def get_move_all_to_level_impact(self, target_level: int) -> dict:
+        """
+        Returns impact metrics for moving all moves to target_level:
+        - total_moves: total active repertoire moves
+        - target_level: target level integer
+        - target_level_name: name of target level
+        - distribution: list of dicts with level order, name, count, is_target
+        - moves_changing: count of moves that will change
+        - moves_unchanged: count of moves already on target level
+        """
+        if not self.session:
+            return {
+                'total_moves': 0,
+                'target_level': target_level,
+                'target_level_name': str(target_level),
+                'distribution': [],
+                'moves_changing': 0,
+                'moves_unchanged': 0
+            }
+        from opening_fenix.core.models import RepertoireMove
+        from sqlalchemy import func
+
+        levels = self.get_repertoire_levels()
+        levels_map = {lvl['order']: lvl['name'] for lvl in levels}
+        target_name = levels_map.get(target_level, f"Level {target_level}")
+
+        rows = self.session.query(RepertoireMove.level, func.count(RepertoireMove.id))\
+            .group_by(RepertoireMove.level)\
+            .order_by(RepertoireMove.level)\
+            .all()
+
+        total = 0
+        changing = 0
+        unchanged = 0
+        distribution = []
+
+        for lvl_order, count in rows:
+            name = levels_map.get(lvl_order, f"Level {lvl_order}")
+            total += count
+            if lvl_order == target_level:
+                unchanged += count
+            else:
+                changing += count
+            distribution.append({
+                'order': lvl_order,
+                'name': name,
+                'count': count,
+                'is_target': (lvl_order == target_level)
+            })
+
+        return {
+            'total_moves': total,
+            'target_level': target_level,
+            'target_level_name': target_name,
+            'distribution': distribution,
+            'moves_changing': changing,
+            'moves_unchanged': unchanged
+        }
+
     def toggle_move_active(self, move_id):
         if not self.session: return False
         rep_move = self.session.query(RepertoireMove).filter_by(move_id=move_id).first()
@@ -1170,7 +1238,7 @@ class CreatorBackend:
             self.session.add(RepertoireMove(move_id=db_move.id, level=final_level))
         elif level_order is not None and level_order < rep_move.level:
             rep_move.level = level_order
-        self.session.commit()
+        commit_with_retry(self.session)
         self.clear_cache()
 
     def get_delete_impact(self, from_pos_id, uci):
@@ -1635,6 +1703,131 @@ class CreatorBackend:
         from opening_fenix.core.data_tools import delete_repertoire_db
         return delete_repertoire_db(n)
 
+    def estimate_pgn_export(self, start=None, transpos_mode=2, max_l=None):
+        """Fast DAG / tree size estimation for PGN export without building chess.pgn objects."""
+        if not self.session:
+            return {
+                "estimated_moves": 0,
+                "transposition_cuts": 0,
+                "expansion_factor": 1.0,
+                "estimated_size_mb": 0.0,
+                "risk_level": "safe",
+                "base_moves": 0
+            }
+        if start is None:
+            start = chess.STARTING_FEN
+        clean_start = " ".join(start.strip().split()[:4])
+        pos = self.session.query(Position).filter_by(fen=clean_start).first()
+        if not pos:
+            pos = self.session.query(Position).filter(Position.fen.op('GLOB')(f"{clean_start}*")).first()
+            if not pos:
+                return {
+                    "estimated_moves": 0,
+                    "transposition_cuts": 0,
+                    "expansion_factor": 1.0,
+                    "estimated_size_mb": 0.0,
+                    "risk_level": "safe",
+                    "base_moves": 0
+                }
+
+        all_moves = self.session.query(Move.id, Move.from_position_id, Move.to_position_id).all()
+        rep_moves = self.session.query(RepertoireMove.move_id, RepertoireMove.level).all()
+        rep_cache = {rm[0]: rm[1] for rm in rep_moves}
+
+        moves_by_from = {}
+        for mid, fid, tid in all_moves:
+            moves_by_from.setdefault(fid, []).append((mid, tid))
+
+        repo_c = self.get_repertoire_color()
+
+        start_is_white = True
+        parts = start.split()
+        if len(parts) > 1 and parts[1] == 'b':
+            start_is_white = False
+
+        def is_move_allowed(mid, to_pid, is_white):
+            if max_l is None:
+                return True
+            is_player = (is_white and repo_c == 'w') or ((not is_white) and repo_c == 'b')
+            if is_player:
+                lvl = rep_cache.get(mid)
+                return lvl is not None and lvl <= max_l
+            else:
+                for cmid, _ in moves_by_from.get(to_pid, []):
+                    clvl = rep_cache.get(cmid)
+                    if clvl is not None and clvl <= max_l:
+                        return True
+                return False
+
+        visited_global = set()
+        cuts = 0
+        m2_nodes = 0
+
+        def traverse_m2(pid, is_white):
+            nonlocal cuts, m2_nodes
+            if pid in visited_global:
+                cuts += 1
+                return
+            visited_global.add(pid)
+            for mid, tid in moves_by_from.get(pid, []):
+                if not is_move_allowed(mid, tid, is_white):
+                    continue
+                m2_nodes += 1
+                traverse_m2(tid, not is_white)
+
+        traverse_m2(pos.id, start_is_white)
+
+        if transpos_mode in (1, 2):
+            est_size_mb = (m2_nodes * 68) / (1024 * 1024)
+            return {
+                "estimated_moves": m2_nodes,
+                "transposition_cuts": cuts,
+                "expansion_factor": 1.0,
+                "estimated_size_mb": round(est_size_mb, 2),
+                "risk_level": "safe",
+                "base_moves": m2_nodes
+            }
+
+        # transpos_mode == 0: Full DAG tree expansion via memoized DP
+        dp = {}
+        visiting = set()
+
+        def get_subtree(pid, is_white):
+            key = (pid, is_white)
+            if key in dp:
+                return dp[key]
+            if key in visiting:
+                return 0  # cycle back-edge cutoff
+            visiting.add(key)
+            tot = 0
+            for mid, tid in moves_by_from.get(pid, []):
+                if not is_move_allowed(mid, tid, is_white):
+                    continue
+                tot += 1 + get_subtree(tid, not is_white)
+            visiting.remove(key)
+            dp[key] = tot
+            return tot
+
+        expanded_nodes = get_subtree(pos.id, start_is_white)
+        expansion_factor = expanded_nodes / max(m2_nodes, 1)
+        est_size_mb = (expanded_nodes * 65) / (1024 * 1024)
+
+        if expanded_nodes > 100_000 or expansion_factor > 3.0 or est_size_mb > 10.0:
+            risk = "critical"
+        elif expanded_nodes > 25_000 or expansion_factor > 1.5 or est_size_mb > 2.0:
+            risk = "moderate"
+        else:
+            risk = "safe"
+
+        return {
+            "estimated_moves": expanded_nodes,
+            "transposition_cuts": cuts,
+            "expansion_factor": round(expansion_factor, 1),
+            "estimated_size_mb": round(est_size_mb, 1),
+            "risk_level": risk,
+            "base_moves": m2_nodes
+        }
+
     def export_pgn(self, start=None, transpos_mode=2, cb=None, max_l=None, language='en'):
         if not self.session: return None
         if start is None: start = chess.STARTING_FEN
@@ -2019,35 +2212,56 @@ class CreatorBackend:
             logger.error(f"Error seeding default levels: {e}")
             self.session.rollback()
 
-    def add_repertoire_level(self, name, idx=None):
+    def add_repertoire_level(self, name, idx=None, target_elo=1500, take_moves=True):
         if not self.session: return False, "Kein Repertoire geladen."
         
         try:
+            max_order = self.session.query(func.max(RepertoireLevel.order)).scalar()
+            max_order = max_order if max_order is not None else 0
+
             if idx is None:
                 # Append at the end (Legacy behavior from first definition)
-                max_order = self.session.query(func.max(RepertoireLevel.order)).scalar()
-                idx = (max_order if max_order is not None else 0) + 1
+                idx = max_order + 1
+                take_moves = False
+            else:
+                idx = max(1, int(idx))
+                if idx > max_order:
+                    take_moves = False
 
-            # 1. Update Levels (one by one to avoid unique constraint violations in SQLite)
+            # 1. Update Levels (one by one in descending order to avoid unique constraint violations in SQLite)
             levels_to_shift = self.session.query(RepertoireLevel).filter(RepertoireLevel.order >= idx).order_by(desc(RepertoireLevel.order)).all()
             for lvl in levels_to_shift:
                 lvl.order += 1
                 self.session.flush()
 
             # 2. Update Moves
-            self.session.query(RepertoireMove).filter(RepertoireMove.level >= idx).update(
-                {RepertoireMove.level: RepertoireMove.level + 1},
-                synchronize_session=False
-            )
+            if take_moves:
+                # Moves strictly above idx shift up by 1 (retaining their levels with the shifted higher levels)
+                # Moves currently at idx remain at idx (so they now belong to the newly created level at idx)
+                # The shifted level at idx + 1 will therefore have 0 moves (empty)
+                self.session.query(RepertoireMove).filter(RepertoireMove.level > idx).update(
+                    {RepertoireMove.level: RepertoireMove.level + 1},
+                    synchronize_session=False
+                )
+            else:
+                # All moves at or above idx shift up by 1 (staying with their original shifted levels)
+                # The new level at idx starts with 0 moves (empty)
+                self.session.query(RepertoireMove).filter(RepertoireMove.level >= idx).update(
+                    {RepertoireMove.level: RepertoireMove.level + 1},
+                    synchronize_session=False
+                )
+            self.session.flush()
 
             # 3. Add new level
-            new_lvl = RepertoireLevel(name=name, order=idx)
+            new_lvl = RepertoireLevel(name=name, order=idx, target_elo=target_elo)
             self.session.add(new_lvl)
             self.session.commit()
+            self.clear_cache()
 
             # 4. Update User Profiles (active_level shift)
             try:
-                self._update_profiles_level_shift(self.active_repo_name, idx, 1)
+                threshold = (idx + 1) if take_moves else idx
+                self._update_profiles_level_shift(self.active_repo_name, threshold, 1)
             except Exception as e:
                 print(f"Warning: Could not update profiles: {e}")
 
@@ -2098,6 +2312,295 @@ class CreatorBackend:
         self.session.commit()
         self.clear_cache()
         return modified
+
+    def get_priority_level_change_impact(self, mode: str, current_level: int, threshold_pct: float) -> dict:
+        """
+        Calculates how many positions and moves would change level if promotion/demotion is applied.
+        mode: 'priority' (promotion) or 'level_down' (demotion)
+        Returns:
+            {
+                'qualifying_moves': int,
+                'positions_changed': int,
+                'moves_changed': int,
+                'target_level': int or None
+            }
+        """
+        if not self.session or current_level is None:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+
+        levels = self.get_repertoire_levels()
+        orders = [lvl['order'] for lvl in levels]
+        if current_level not in orders:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+
+        idx = orders.index(current_level)
+        if mode == "priority":
+            if idx == 0:
+                return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+            target_level = orders[idx - 1]
+            find_rare = False
+        elif mode == "level_down":
+            if idx >= len(orders) - 1:
+                return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+            target_level = orders[idx + 1]
+            find_rare = True
+        else:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+
+        threshold = threshold_pct / 100.0
+        m = self.session.query(Metadata).filter_by(key="color").first()
+        player_color = m.value[0].lower() if (m and m.value) else 'w'
+
+        clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+        root_pos = self.session.query(Position).filter_by(fen=clean_root).first()
+        if not root_pos:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        all_positions = self.session.query(Position.id, Position.fen).all()
+        fen_by_id = {p_id: p_fen for p_id, p_fen in all_positions if p_fen}
+
+        rep_moves = (
+            self.session.query(Move.id, Move.from_position_id, Move.to_position_id, Move.priority_score, RepertoireMove.level)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(RepertoireMove.is_active == True)
+            .all()
+        )
+
+        incoming = collections.defaultdict(list)
+        outgoing = collections.defaultdict(list)
+        move_levels = {}
+        move_to_pos = {}
+        qualifying_move_ids = []
+
+        for mid, from_id, to_id, prio, lvl in rep_moves:
+            prio_val = prio or 0.0
+            lvl_val = lvl if lvl is not None else 1
+            move_levels[mid] = lvl_val
+            move_to_pos[mid] = to_id
+            incoming[to_id].append((from_id, mid))
+            outgoing[from_id].append((to_id, mid))
+
+            if lvl_val == current_level:
+                op = (prio_val <= threshold) if find_rare else (prio_val >= threshold)
+                if op:
+                    from_fen = fen_by_id.get(from_id)
+                    if from_fen:
+                        parts = from_fen.strip().split()
+                        turn = parts[1].lower() if len(parts) > 1 else 'w'
+                        if turn != player_color:
+                            qualifying_move_ids.append(mid)
+
+        if not qualifying_move_ids:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        sim_levels = dict(move_levels)
+        for q_mid in qualifying_move_ids:
+            sim_levels[q_mid] = target_level
+
+        visited = set()
+        stack = [move_to_pos[q_mid] for q_mid in qualifying_move_ids if q_mid in move_to_pos]
+        while stack:
+            pos_id = stack.pop()
+            if pos_id in visited:
+                continue
+            visited.add(pos_id)
+            inc = incoming.get(pos_id, [])
+            if not inc:
+                continue
+            effective = min(sim_levels.get(mid, 1) for _, mid in inc)
+            out = outgoing.get(pos_id, [])
+            if not out:
+                continue
+            if len(out) > 1:
+                for to_id, mid in out:
+                    if sim_levels.get(mid, 1) < effective:
+                        sim_levels[mid] = effective
+                        stack.append(to_id)
+            else:
+                to_id, mid = out[0]
+                if sim_levels.get(mid, 1) != effective:
+                    sim_levels[mid] = effective
+                    stack.append(to_id)
+                else:
+                    stack.append(to_id)
+
+        changed_moves_list = [mid for mid, lvl in move_levels.items() if sim_levels.get(mid) != lvl]
+        changed_positions = len({move_to_pos[mid] for mid in changed_moves_list if mid in move_to_pos})
+
+        return {
+            'qualifying_moves': len(qualifying_move_ids),
+            'positions_changed': changed_positions,
+            'moves_changed': len(changed_moves_list),
+            'target_level': target_level
+        }
+
+    def apply_priority_level_change(self, mode: str, current_level: int, threshold_pct: float) -> dict:
+        """
+        Applies promotion or demotion to qualifying moves in current_level, cascading changes downstream.
+        Returns impact metrics dict.
+        """
+        if not self.session or current_level is None:
+            return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': None}
+
+        impact = self.get_priority_level_change_impact(mode, current_level, threshold_pct)
+        target_level = impact['target_level']
+        if not target_level or impact['qualifying_moves'] == 0:
+            return impact
+
+        threshold = threshold_pct / 100.0
+        find_rare = (mode == "level_down")
+        m = self.session.query(Metadata).filter_by(key="color").first()
+        player_color = m.value[0].lower() if (m and m.value) else 'w'
+
+        op = Move.priority_score <= threshold if find_rare else Move.priority_score >= threshold
+
+        moves_with_rm = self.session.query(Move, RepertoireMove).join(
+            RepertoireMove, Move.id == RepertoireMove.move_id
+        ).options(joinedload(Move.from_position)).filter(
+            RepertoireMove.is_active == True,
+            RepertoireMove.level == current_level,
+            op
+        ).all()
+
+        qualifying = []
+        for move, rm in moves_with_rm:
+            if not move.from_position or not move.from_position.fen:
+                continue
+            parts = move.from_position.fen.strip().split()
+            move_turn = parts[1].lower() if len(parts) > 1 else 'w'
+            if move_turn == player_color:
+                continue
+            qualifying.append((move, rm))
+
+        if not qualifying:
+            return impact
+
+        for move, rm in qualifying:
+            rm.level = target_level
+            self.session.flush()
+            self._update_level_recursive(move.to_position_id, set(), target_level)
+
+        self.session.commit()
+        self.clear_cache()
+
+        return impact
+
+    def get_repertoire_graph_snapshot(self):
+        """Builds an in-memory graph representation for fast simulations."""
+        if not self.session:
+            return None
+
+        rep_moves = (
+            self.session.query(Move.id, Move.from_position_id, Move.to_position_id, Move.priority_score, RepertoireMove.level)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(RepertoireMove.is_active == True)
+            .all()
+        )
+
+        incoming = collections.defaultdict(list)
+        outgoing = collections.defaultdict(list)
+        move_levels = {}
+        move_to_pos = {}
+
+        for mid, from_id, to_id, prio, lvl in rep_moves:
+            lvl_val = lvl if lvl is not None else 1
+            move_levels[mid] = lvl_val
+            move_to_pos[mid] = to_id
+            incoming[to_id].append((from_id, mid))
+            outgoing[from_id].append((to_id, mid))
+
+        return {
+            'incoming': incoming,
+            'outgoing': outgoing,
+            'move_levels': move_levels,
+            'move_to_pos': move_to_pos,
+        }
+
+    def get_single_move_level_change_impact(self, move_id: int, target_level: int, _snapshot=None) -> dict:
+        """
+        Simulates the effect of changing a single move's level to target_level (with downstream propagation).
+        Returns exact counts of positions and moves that change level.
+        """
+        snapshot = _snapshot or self.get_repertoire_graph_snapshot()
+        if not snapshot or move_id not in snapshot['move_levels']:
+            return {'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        incoming = snapshot['incoming']
+        outgoing = snapshot['outgoing']
+        move_levels = snapshot['move_levels']
+        move_to_pos = snapshot['move_to_pos']
+
+        if move_levels.get(move_id) == target_level:
+            return {'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        sim_levels = {move_id: target_level}
+        changed_mids = {move_id}
+
+        visited = set()
+        stack = [move_to_pos[move_id]] if move_id in move_to_pos else []
+        while stack:
+            pos_id = stack.pop()
+            if pos_id in visited:
+                continue
+            visited.add(pos_id)
+            inc = incoming.get(pos_id, [])
+            if not inc:
+                continue
+            effective = min(sim_levels.get(mid, move_levels.get(mid, 1)) for _, mid in inc)
+            out = outgoing.get(pos_id, [])
+            if not out:
+                continue
+            if len(out) > 1:
+                for to_id, mid in out:
+                    curr = sim_levels.get(mid, move_levels.get(mid, 1))
+                    if curr < effective:
+                        sim_levels[mid] = effective
+                        changed_mids.add(mid)
+                        stack.append(to_id)
+            else:
+                to_id, mid = out[0]
+                curr = sim_levels.get(mid, move_levels.get(mid, 1))
+                if curr != effective:
+                    sim_levels[mid] = effective
+                    changed_mids.add(mid)
+                    stack.append(to_id)
+
+        changed_moves_list = [mid for mid in changed_mids if sim_levels.get(mid, move_levels[mid]) != move_levels[mid]]
+        changed_pos_ids = {move_to_pos[mid] for mid in changed_moves_list if mid in move_to_pos}
+        pos_count = len(changed_pos_ids)
+        if pos_count == 0 and move_id in move_to_pos and move_levels.get(move_id) != target_level:
+            pos_count = 1
+
+        return {
+            'positions_changed': pos_count,
+            'moves_changed': max(1, len(changed_moves_list)) if move_levels.get(move_id) != target_level else len(changed_moves_list),
+            'target_level': target_level
+        }
+
+    def apply_single_move_level_change(self, move_id: int, target_level: int) -> dict:
+        """Applies level change to a single move and propagates downstream responses."""
+        if not self.session:
+            return {'success': False, 'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        rm = self.session.query(RepertoireMove).filter_by(move_id=move_id).first()
+        move = self.session.query(Move).filter_by(id=move_id).first()
+        if not rm or not move:
+            return {'success': False, 'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
+
+        impact = self.get_single_move_level_change_impact(move_id, target_level)
+
+        rm.level = target_level
+        self.session.flush()
+        self._update_level_recursive(move.to_position_id, set(), target_level)
+        self.session.commit()
+        self.clear_cache()
+
+        return {
+            'success': True,
+            'positions_changed': impact.get('positions_changed', 0),
+            'moves_changed': impact.get('moves_changed', 0),
+            'target_level': target_level
+        }
 
     def _update_profiles_level_shift(self, repo_name, threshold, delta):
         from opening_fenix.core.models import UserBase, UserRepertoireSettings
@@ -2714,6 +3217,130 @@ class ActiveRepoButton(QPushButton):
         """)
 
 
+class ElidedStatusLabel(QLabel):
+    """Single-line status label that elides long text with '...' without expanding the toolbar,
+    and displays the complete message via tooltip."""
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self._raw_text = text
+        self.setWordWrap(False)
+        self.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter)
+
+    def setStyleSheet(self, style):
+        # Always scope rules to QLabel so top-level tooltip popup doesn't inherit background-color / color
+        if "QLabel" not in style and "{" not in style:
+            styled = f"QLabel {{ {style} }}\n{get_tooltip_style()}"
+        else:
+            styled = f"{style}\n{get_tooltip_style()}"
+        super().setStyleSheet(styled)
+
+    def setText(self, text):
+        self._raw_text = text or ""
+        self.setToolTip(self._raw_text if self._raw_text else "")
+        self.updateGeometry()
+        self._apply_elided()
+
+    def text(self):
+        return self._raw_text if hasattr(self, "_raw_text") and self._raw_text is not None else super().text()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._apply_elided()
+
+    def sizeHint(self):
+        if not self._raw_text:
+            return QSize(0, 0)
+        fm = self.fontMetrics()
+        w = min(fm.horizontalAdvance(self._raw_text) + scale(24), scale(180))
+        return QSize(w, scale(26))
+
+    def minimumSizeHint(self):
+        if not self._raw_text:
+            return QSize(0, 0)
+        return QSize(scale(60), scale(26))
+
+    def _apply_elided(self):
+        if not self._raw_text:
+            super().setText("")
+            return
+        fm = self.fontMetrics()
+        target_w = self.width() if self.width() > scale(30) else self.sizeHint().width()
+        avail = max(10, target_w - scale(22))
+        super().setText(fm.elidedText(self._raw_text, Qt.TextElideMode.ElideRight, avail))
+
+
+class AutoShrinkPillButton(QPushButton):
+    """A GlassPill button that dynamically adjusts its font size (up to 50% smaller)
+    when horizontal space is constrained, preventing button text clipping."""
+    def __init__(self, text="", parent=None, base_size=12, min_ratio=0.5):
+        super().__init__(text, parent)
+        self.setProperty("class", "GlassPill")
+        self._base_size = scale(base_size)
+        self._min_size = max(scale(6), int(self._base_size * min_ratio))
+        self._current_size = self._base_size
+        self._raw_text = text or ""
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(scale(28))
+        self._apply_style(self._base_size)
+
+    def setText(self, text):
+        self._raw_text = text or ""
+        super().setText(text)
+        self.updateGeometry()
+        self._recalculate_font()
+
+    def text(self):
+        return self._raw_text if hasattr(self, "_raw_text") and self._raw_text is not None else super().text()
+
+    def _apply_style(self, sz):
+        self._current_size = sz
+        self.setStyleSheet(f"""
+            QPushButton {{
+                padding: {scale(3)}px {scale(4)}px;
+                font-size: {sz}px;
+                font-weight: 600;
+            }}
+            {get_tooltip_style()}
+        """)
+
+    def minimumSizeHint(self):
+        f = QFont(self.font())
+        f.setPixelSize(self._min_size)
+        fm = QFontMetrics(f)
+        return QSize(fm.horizontalAdvance(self.text()) + scale(10), scale(28))
+
+    def sizeHint(self):
+        f = QFont(self.font())
+        f.setPixelSize(self._base_size)
+        fm = QFontMetrics(f)
+        return QSize(fm.horizontalAdvance(self.text()) + scale(12), scale(28))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._recalculate_font()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._recalculate_font()
+
+    def _recalculate_font(self):
+        txt = self.text()
+        if not txt:
+            return
+        avail = max(10, self.width() - scale(14))
+        best_sz = self._min_size
+        for sz in range(self._base_size, self._min_size - 1, -1):
+            f = QFont(self.font())
+            f.setPixelSize(sz)
+            fm = QFontMetrics(f)
+            if fm.horizontalAdvance(txt) <= avail:
+                best_sz = sz
+                break
+        if best_sz != self._current_size:
+            self._apply_style(best_sz)
+
+
+
 class CreatorWindow(QMainWindow):
     closed = pyqtSignal()
 
@@ -2756,6 +3383,7 @@ class CreatorWindow(QMainWindow):
                 pass
 
         self.backend = CreatorBackend(is_test=is_test)
+        self.backend.window = self
         self.active_repo_name = None
         self.training_manager = training_manager
         self.profile_name = getattr(training_manager, 'profile_name', None) if training_manager else None
@@ -2764,6 +3392,7 @@ class CreatorWindow(QMainWindow):
         self.engine_thread = None
         self.sounds, self.piece_icons = {}, {}
         self.enrichment_threads = []
+        self.enrichment_queue = []
         self._auto_size_board = True
         
         # UI references for guards
@@ -3525,7 +4154,18 @@ class CreatorWindow(QMainWindow):
         if widget == self.tab_analysis:
             self.resize_common_moves_columns()
             QTimer.singleShot(0, self.resize_common_moves_columns)
+        if widget == self.tab_holes:
+            self.update_hole_level_combo()
+            self.on_hole_mode_change()
         if widget == self.tab_kontrolle:
+            levels = self.backend.get_repertoire_levels() if self.backend else []
+            current_combo_levels = [
+                (self.combo_overhaul_level.itemData(i), self.combo_overhaul_level.itemText(i))
+                for i in range(1, self.combo_overhaul_level.count())
+            ] if hasattr(self, "combo_overhaul_level") else []
+            db_levels = [(lvl.get("order"), f"Level {lvl.get('order')} ({lvl.get('name')})") for lvl in levels]
+            if current_combo_levels != db_levels:
+                self.init_management_slots()
             self.update_overhaul_progress()
 
         QTimer.singleShot(0, self.trigger_board_adjust)
@@ -3809,6 +4449,8 @@ class CreatorWindow(QMainWindow):
             return
         
         # Disconnect running enrichment threads to avoid race condition with previous Elo
+        if hasattr(self, 'enrichment_queue'):
+            self.enrichment_queue.clear()
         if hasattr(self, 'enrichment_threads'):
             for t in list(self.enrichment_threads):
                 try:
@@ -3998,34 +4640,75 @@ class CreatorWindow(QMainWindow):
 
     def trigger_background_enrichment(self, fen):
         """
-        Starts a background thread to fetch Lichess data, run engine analysis,
-        and update priority scores for the given FEN.
+        Queues the given FEN for background enrichment (Lichess data, engine analysis,
+        and local priority scores) using a single-worker queue to prevent CPU starvation
+        and SQLite write lock contention.
         """
-        if not self.backend.active_repo_name: return
-        
-        ep = self.config.get("engine_path")
-        cat = self.combo_lichess_cat.currentText()
-        
-        # Check if already running for this FEN to avoid duplicates
+        if not self.backend or not self.backend.active_repo_name:
+            return
+        if not hasattr(self, 'enrichment_queue'):
+            self.enrichment_queue = []
+        if not hasattr(self, 'enrichment_threads'):
+            self.enrichment_threads = []
+
+        clean_fen = " ".join(fen.strip().split()[:4]) if fen else ""
+        if not clean_fen:
+            return
+
+        # Check if currently running for this FEN
         for t in self.enrichment_threads:
-            if t.fen == fen: return
-            
+            if getattr(t, "fen", None) and " ".join(t.fen.strip().split()[:4]) == clean_fen:
+                return
+
+        # Check if already in queue
+        for queued_fen in self.enrichment_queue:
+            if " ".join(queued_fen.strip().split()[:4]) == clean_fen:
+                return
+
+        self.enrichment_queue.append(fen)
+        self._process_next_enrichment()
+
+    def _process_next_enrichment(self):
+        """Processes the next FEN in the enrichment queue if no enrichment thread is currently active."""
+        if not hasattr(self, 'enrichment_threads'):
+            self.enrichment_threads = []
+        if not hasattr(self, 'enrichment_queue'):
+            self.enrichment_queue = []
+
+        # Ensure only 1 worker thread runs at a time
+        if self.enrichment_threads:
+            running = [t for t in self.enrichment_threads if t.isRunning()]
+            self.enrichment_threads = running
+            if running:
+                return
+
+        if not self.enrichment_queue:
+            return
+
+        if not self.backend or not self.backend.active_repo_name:
+            self.enrichment_queue.clear()
+            return
+
+        fen = self.enrichment_queue.pop(0)
+        ep = self.config.get("engine_path")
+        cat = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
+
         t = BackgroundEnrichmentThread(self.backend.active_repo_name, fen, cat, ep, 10)
-        
+
         def on_finished(success, msg, thread=t):
             if thread in self.enrichment_threads:
                 self.enrichment_threads.remove(thread)
             if success:
-                # Clear UI cache to ensure we see updated data from the DB
-                self.backend.clear_cache()
-                
-                # Silently refresh the UI to show updated priority scores/good moves
-                # We only refresh if we are still on the same position or nearby
-                self.update_ui_from_fen()
-        
+                if hasattr(self, 'backend') and self.backend:
+                    self.backend.clear_cache()
+                if hasattr(self, 'update_ui_from_fen'):
+                    self.update_ui_from_fen()
+            # Process next position sequentially with a short breather for UI event loop
+            QTimer.singleShot(50, self._process_next_enrichment)
+
         t.finished_signal.connect(on_finished)
         self.enrichment_threads.append(t)
-        t.start()
+        t.start(QThread.Priority.LowPriority)
 
     def on_back_button_clicked(self):
         self.save_current_details_now()
@@ -4501,7 +5184,7 @@ class CreatorWindow(QMainWindow):
             self.update_structure_tree()
             self.update_overhaul_progress()
             # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too
-            if self.tabs.currentIndex() == 2: # KONTROLLE
+            if hasattr(self, 'tabs') and hasattr(self, 'tab_kontrolle') and self.tabs.currentWidget() == self.tab_kontrolle:
                 self.init_management_slots()
             self.details_changed = False
 
@@ -4852,6 +5535,19 @@ class CreatorWindow(QMainWindow):
             except Exception:
                 pass
             self._load_saved_elo_or_autoselect()
+
+        # Invalidate in-memory levels and transposition caches, and refresh slots across all search tabs
+        from opening_fenix.core.services.repertoire_core_service import invalidate_repertoire_levels_cache
+        if hasattr(self, 'backend') and self.backend:
+            invalidate_repertoire_levels_cache(getattr(self.backend, 'active_repo_name', None))
+            self.backend.clear_cache()
+        self.clear_transposition_caches()
+        self.init_management_slots()
+        self.update_structure_tree()
+        if hasattr(self, "tabs") and hasattr(self, "tab_transpositions") and self.tabs.currentWidget() == self.tab_transpositions:
+            self.update_transpositions_tab()
+        elif hasattr(self, "tabs") and hasattr(self, "tab_kontrolle") and self.tabs.currentWidget() == self.tab_kontrolle:
+            self.update_overhaul_progress()
 
         # Update the load button cover image in case cover was added or removed
         self.refresh_active_repo_cover()
@@ -5490,7 +6186,15 @@ class CreatorWindow(QMainWindow):
             return
         
         from opening_fenix.gui.dialogs.stats_dialog import RepertoireStatisticsDialog
-        dlg = RepertoireStatisticsDialog(parent=self, repo_name=repo_name, is_test=self.backend.is_test)
+        active_prof = getattr(self, 'profile_name', None)
+        if not active_prof and hasattr(self, 'training_manager') and self.training_manager:
+            active_prof = getattr(self.training_manager, 'profile_name', None)
+        dlg = RepertoireStatisticsDialog(
+            parent=self,
+            repo_name=repo_name,
+            is_test=self.backend.is_test,
+            profile_name=active_prof
+        )
         dlg.exec()
 
     def closeEvent(self, event):
@@ -5508,7 +6212,6 @@ class CreatorWindow(QMainWindow):
         # Main Container (no hover effect)
         self.card_hole_main = QFrame()
         self.card_hole_main.setObjectName("HoleFinderMainCard")
-        # Custom styling to mimic GlassPill without the hover effect that causes issues
         self.card_hole_main.setStyleSheet(f"""
             #HoleFinderMainCard {{
                 background-color: {COLORS['glass_bg']};
@@ -5518,64 +6221,51 @@ class CreatorWindow(QMainWindow):
         """)
         main_layout = QVBoxLayout(self.card_hole_main)
         main_layout.setContentsMargins(scale(10), scale(10), scale(10), scale(10))
-        main_layout.setSpacing(scale(15))
+        main_layout.setSpacing(scale(12))
         
-        # --- MODE SELECTION ---
-        mode_layout = QVBoxLayout()
-        mode_layout.setSpacing(scale(5))
+        # --- UNIFIED CONTROLS TOOLBAR (2 Rows) ---
+        # Row 1: Search Mode dropdown (expanding) + prominent Search button
+        toolbar_row1 = QHBoxLayout()
+        toolbar_row1.setSpacing(scale(10))
         
-        # Scan Button (Defined early to be placed in combo_layout)
-        self.btn_hole_scan = QPushButton(tr_ui("creator.hole_btn_scan", "🔎 Suchen"))
-        self.btn_hole_scan.setMinimumHeight(scale(40))
-        self.btn_hole_scan.setProperty("class", "GlassPill")
-        self.repolish(self.btn_hole_scan)
-        self.btn_hole_scan.clicked.connect(self.run_hole_scan)
-        
-        # Scan Results Label (Empty initially)
-        self.lbl_hole_scan_res = QLabel("")
-        self.lbl_hole_scan_res.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-weight: bold;")
-        self.lbl_hole_scan_res.setWordWrap(True)
-        
-        combo_layout = QHBoxLayout()
         lbl_search_mode = QLabel(tr_ui("creator.hole_search_mode_label", "<b>Such-Modus:</b>"))
-        lbl_search_mode.setWordWrap(True)
-        combo_layout.addWidget(lbl_search_mode)
+        lbl_search_mode.setWordWrap(False)
+        toolbar_row1.addWidget(lbl_search_mode)
         
         self.combo_hole_mode = QComboBox()
+        self.combo_hole_mode.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_unanalyzed", "unanalysierte populäre Züge finden"), "holes")
+        self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_unanswered", "unbeantwortete Züge finden"), "unanswered")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_priority", "Level Aufstieg prüfen"), "priority")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_down", "Level Abstieg prüfen"), "level_down")
         self.combo_hole_mode.addItem(tr_ui("creator.hole_mode_level_check", "Level Gesundheits Check"), "level_check")
         
         self.combo_hole_mode.setItemData(0, tr_ui("creator.hole_mode_unanalyzed_tooltip", "Sucht nach Zügen, die noch nicht im Repertoire sind."), Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(1, tr_ui("creator.hole_mode_priority_tooltip", "Prüft, ob Züge im Repertoire das richtige Level haben."), Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(2, tr_ui("creator.hole_mode_level_down_tooltip", "Findet Züge, die abstellen sollten, weil sie selten vorkommen."), Qt.ItemDataRole.ToolTipRole)
-        self.combo_hole_mode.setItemData(3, tr_ui("creator.hole_mode_level_check_tooltip", "Findet Repertoire-Lücken zwischen Leveln."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(1, tr_ui("creator.hole_mode_unanswered_tooltip", "Findet Stellungen, in denen das Repertoire nach einem Gegnerzug endet und noch keine eigene Antwort vorliegt."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(2, tr_ui("creator.hole_mode_priority_tooltip", "Prüft, ob Züge im Repertoire das richtige Level haben."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(3, tr_ui("creator.hole_mode_level_down_tooltip", "Findet Züge, die abstellen sollten, weil sie selten vorkommen."), Qt.ItemDataRole.ToolTipRole)
+        self.combo_hole_mode.setItemData(4, tr_ui("creator.hole_mode_level_check_tooltip", "Findet Repertoire-Lücken zwischen Leveln."), Qt.ItemDataRole.ToolTipRole)
+        toolbar_row1.addWidget(self.combo_hole_mode, 1)
         
-        combo_layout.addWidget(self.combo_hole_mode)
-        combo_layout.addStretch()
-        combo_layout.addWidget(self.btn_hole_scan)
-        mode_layout.addLayout(combo_layout)
+        self.btn_hole_scan = QPushButton(tr_ui("creator.hole_btn_scan", "🔎 Suchen"))
+        self.btn_hole_scan.setMinimumHeight(scale(34))
+        self.btn_hole_scan.setMinimumWidth(scale(110))
+        self.btn_hole_scan.setProperty("class", "GlassPill")
+        self.repolish(self.btn_hole_scan)
+        self.btn_hole_scan.clicked.connect(self.run_hole_scan)
+        toolbar_row1.addWidget(self.btn_hole_scan)
         
-        status_row = QHBoxLayout()
-        self.lbl_mode_desc = QLabel(tr_ui("creator.hole_mode_desc", "Findet Züge, die in Master/Lichess Partien oft gespielt werden, aber im Repertoire fehlen."))
-        self.lbl_mode_desc.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; margin-left: 10px;")
-        self.lbl_mode_desc.setWordWrap(True)
-        status_row.addWidget(self.lbl_mode_desc, 1)
-        status_row.addWidget(self.lbl_hole_scan_res, 0)
-        mode_layout.addLayout(status_row)
-        main_layout.addLayout(mode_layout)
+        main_layout.addLayout(toolbar_row1)
         
-        # --- PARAMETERS ---
-        # Parameters Grid/Row 1
-        param_row1 = QHBoxLayout()
-        param_row1.setSpacing(scale(20))
+        # Row 2: Parameters & Settings (Popularity, Engine Depth, Level, Rules)
+        toolbar_row2 = QHBoxLayout()
+        toolbar_row2.setSpacing(scale(10))
         
-        # Threshold
-        h_threshold = QHBoxLayout()
+        # Popularity Threshold
         self.lbl_hole_threshold = QLabel(tr_ui("creator.hole_label_popularity", "Min. Popularität:"))
-        self.lbl_hole_threshold.setWordWrap(True)
+        self.lbl_hole_threshold.setWordWrap(False)
         self.combo_hole_threshold = QComboBox()
+        self.combo_hole_threshold.setFixedWidth(scale(95))
         self.combo_hole_threshold.addItem("0.1%", 0.1)
         self.combo_hole_threshold.addItem("0.5%", 0.5)
         self.combo_hole_threshold.addItem("1.0%", 1.0)
@@ -5583,62 +6273,125 @@ class CreatorWindow(QMainWindow):
         self.combo_hole_threshold.addItem("5.0%", 5.0)
         self.combo_hole_threshold.addItem("10.0%", 10.0)
         self.combo_hole_threshold.setCurrentText("1.0%")
-        h_threshold.addWidget(self.lbl_hole_threshold)
-        h_threshold.addWidget(self.combo_hole_threshold)
-        param_row1.addLayout(h_threshold)
+        toolbar_row2.addWidget(self.lbl_hole_threshold)
+        toolbar_row2.addWidget(self.combo_hole_threshold)
         
-        # Level
-        h_level = QHBoxLayout()
-        self.lbl_hole_level = QLabel(tr_ui("creator.hole_label_level", "Ziel-Level:"))
-        self.lbl_hole_level.setWordWrap(True)
+        # Engine Depth (for holes mode)
+        self.lbl_hole_engine_depth = QLabel(tr_ui("creator.hole_engine_depth_label", "⚙️ Tiefe:"))
+        self.lbl_hole_engine_depth.setToolTip(tr_ui("creator.hole_engine_depth_tooltip", "Stockfish-Rechentiefe für die Verlust-Analyse unanalysierter Gegnerzüge."))
+        self.lbl_hole_engine_depth.setWordWrap(False)
+        self.combo_hole_engine_depth = QComboBox()
+        self.combo_hole_engine_depth.setFixedWidth(scale(80))
+        self.combo_hole_engine_depth.addItems(["10", "12", "14", "16", "18", "20", "22", "25"])
+        saved_depth = str(self.config.get("hole_engine_depth", "18"))
+        if self.combo_hole_engine_depth.findText(saved_depth) != -1:
+            self.combo_hole_engine_depth.setCurrentText(saved_depth)
+        else:
+            self.combo_hole_engine_depth.setCurrentText("18")
+        self.combo_hole_engine_depth.currentTextChanged.connect(self._on_hole_engine_depth_changed)
+        toolbar_row2.addWidget(self.lbl_hole_engine_depth)
+        toolbar_row2.addWidget(self.combo_hole_engine_depth)
+        
+        # Recommendation Rules Button
+        self.btn_hole_rec_settings = QPushButton(tr_ui("creator.hole_btn_rec_settings", "⚙️ Regeln..."))
+        self.btn_hole_rec_settings.setToolTip(tr_ui("creator.hole_btn_rec_settings_tooltip", "Regeln für automatische Level-Empfehlungen konfigurieren (Schwellenwerte für Popularität & Engine-Verlust)"))
+        self.btn_hole_rec_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_hole_rec_settings.setFixedHeight(scale(30))
+        self.btn_hole_rec_settings.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(0, 0, 0, 0.05);
+                color: {COLORS['brown_text']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(8)}px;
+                padding: 0 {scale(10)}px;
+                font-weight: bold;
+                font-size: {scale(11)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(0, 0, 0, 0.10);
+                border-color: {COLORS['burnt_orange']};
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(0, 0, 0, 0.15);
+            }}
+        """)
+        self.btn_hole_rec_settings.clicked.connect(self.open_hole_recommendation_settings_dialog)
+        toolbar_row2.addWidget(self.btn_hole_rec_settings)
+        
+        # Level selector (for priority/level_down mode, initially hidden)
+        self.lbl_hole_level = QLabel(tr_ui("creator.hole_label_level", "Level:"))
+        self.lbl_hole_level.setWordWrap(False)
         self.combo_hole_level = QComboBox()
-        h_level.addWidget(self.lbl_hole_level)
-        h_level.addWidget(self.combo_hole_level)
-        param_row1.addLayout(h_level)
+        self.combo_hole_level.setMinimumWidth(scale(120))
+        self.combo_hole_level.currentIndexChanged.connect(self._on_hole_level_or_threshold_changed)
+        self.combo_hole_threshold.currentIndexChanged.connect(self._on_hole_level_or_threshold_changed)
+        self.lbl_hole_level.setVisible(False)
+        self.combo_hole_level.setVisible(False)
+        toolbar_row2.addWidget(self.lbl_hole_level)
+        toolbar_row2.addWidget(self.combo_hole_level)
         
-        param_row1.addStretch()
-        main_layout.addLayout(param_row1)
+        toolbar_row2.addStretch()
         
-        # Parameters Grid/Row 2
-        param_row2 = QHBoxLayout()
-        param_row2.setSpacing(scale(20))
+        main_layout.addLayout(toolbar_row2)
         
-        self.chk_prio_rare = QCheckBox(tr_ui("creator.hole_chk_rare", "Seltene Züge prüfen"))
-        self.chk_prio_rare.setVisible(False)
-        param_row2.addWidget(self.chk_prio_rare)
+        # --- SUBTITLE & STATUS ROW ---
+        status_row = QHBoxLayout()
+        self.lbl_mode_desc = QLabel(tr_ui("creator.hole_mode_holes_desc", "Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben."))
+        self.lbl_mode_desc.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; margin-left: {scale(4)}px;")
+        self.lbl_mode_desc.setWordWrap(True)
+        status_row.addWidget(self.lbl_mode_desc, 1)
         
-        param_row2.addStretch()
+        self.lbl_hole_scan_res = QLabel("")
+        self.lbl_hole_scan_res.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-weight: bold;")
+        self.lbl_hole_scan_res.setWordWrap(True)
+        status_row.addWidget(self.lbl_hole_scan_res, 0)
+        main_layout.addLayout(status_row)
         
-        main_layout.addLayout(param_row2)
-        
-        # Connect mode change
-        self.combo_hole_mode.currentIndexChanged.connect(self.on_hole_mode_change)
-        
-        # Initial state setup
-        self.on_hole_mode_change()
+        # Parameters Grid/Row 2 (Recheck unadded, hidden by default unless transpositions)
+        self.chk_recheck_unadded = QCheckBox(tr_ui("creator.transpos_btn_recheck_unadded", "🔄 Nicht übernommene Züge prüfen"))
+        self.chk_recheck_unadded.setToolTip(tr_ui("creator.transpos_tooltip_recheck_unadded", "Prüft nicht übernommene Züge mit der Engine nach, ob sie solide Überleitungen sind (≤ 10 cp Verlust) — auch wenn die Stellung bereits im Cache ist."))
+        self.chk_recheck_unadded.setChecked(bool(self.config.get("transpos_recheck_unadded", False)))
+        self.chk_recheck_unadded.setVisible(False)
+        self.chk_recheck_unadded.toggled.connect(self._on_chk_recheck_unadded_toggled)
+        main_layout.addWidget(self.chk_recheck_unadded)
         
         # --- TABLE ---
-        self.table_holes = QTableWidget(0, 3)
+        self.table_holes = QTableWidget(0, 4)
         self.table_holes.setWordWrap(True)
-        self.table_holes.setHorizontalHeaderLabels([
-            tr_ui("creator.hole_header_pop", "Pop %"),
-            tr_ui("creator.hole_header_type", "Typ"),
-            tr_ui("creator.hole_header_move", "Zug")
-        ])
         self.table_holes.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table_holes.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        hdr = self.table_holes.horizontalHeader()
-        hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table_holes.verticalHeader().setVisible(False)
+        self.table_holes.verticalHeader().setDefaultSectionSize(scale(38))
+        self.table_holes.verticalHeader().setMinimumSectionSize(scale(36))
+        self.table_holes.setAlternatingRowColors(True)
         self.table_holes.setShowGrid(False)
         self.table_holes.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_holes.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.table_holes.itemDoubleClicked.connect(self.on_hole_double_click)
         self.table_holes.itemClicked.connect(self.on_hole_click)
-        main_layout.addWidget(self.table_holes)
+        self.table_holes.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: transparent;
+                border: none;
+                outline: none;
+                selection-background-color: rgba(211, 84, 0, 0.15);
+                selection-color: {COLORS['brown_text']};
+            }}
+            QTableWidget::item {{
+                border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+                padding: {scale(4)}px;
+                border-radius: 0px;
+            }}
+            QTableWidget::item:hover {{
+                background-color: rgba(211, 84, 0, 0.08);
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['brown_text']};
+                border-radius: 0px;
+            }}
+        """)
+        main_layout.addWidget(self.table_holes, 1)
         
         # --- BOTTOM ROW ---
         h_btm = QHBoxLayout()
@@ -5651,64 +6404,206 @@ class CreatorWindow(QMainWindow):
         h_btm.addStretch()
         main_layout.addLayout(h_btm)
         
-        layout.addWidget(self.card_hole_main)
- 
+        layout.addWidget(self.card_hole_main, 1)
+        
+        # Connect mode change
+        self.combo_hole_mode.currentIndexChanged.connect(self.on_hole_mode_change)
+        
+        # Initial state setup
+        self.on_hole_mode_change()
+
+    def _set_hole_table_headers_for_mode(self, mode: str):
+        if not hasattr(self, "table_holes") or not self.table_holes:
+            return
+        self.table_holes.setRowCount(0)
+        self.table_holes.setColumnHidden(0, False)
+        hdr = self.table_holes.horizontalHeader()
+        hdr.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        if mode == "holes":
+            self.table_holes.setColumnCount(4)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_pop", "Pop %"),
+                tr_ui("creator.hole_header_move", "Zug"),
+                tr_ui("creator.hole_header_eval_loss", "Engine-Verlust"),
+                tr_ui("creator.hole_header_action_level", "Zu Level")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        elif mode == "unanswered":
+            self.table_holes.setColumnCount(2)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_last_move", "Letzter Zug"),
+                tr_ui("creator.hole_header_action", "Aktion")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        elif mode == "transpositions":
+            self.table_holes.setColumnCount(3)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_quality", "Qualität"),
+                tr_ui("creator.hole_header_depth_type", "Tiefe / Typ"),
+                tr_ui("creator.hole_header_move", "Zug")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        elif mode == "level_check":
+            self.table_holes.setColumnCount(3)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.tree_col_info", "Info"),
+                tr_ui("creator.tree_col_analysis", "Analyse"),
+                tr_ui("creator.tree_col_our_move", "Unser Zug")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        elif mode in ("priority", "level_down"):
+            self.table_holes.setColumnCount(4)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_pop", "Frequenz"),
+                tr_ui("creator.hole_header_status", "Status"),
+                tr_ui("creator.hole_header_move", "Zug"),
+                tr_ui("creator.hole_header_action_level_change", "Level ändern")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        else:
+            self.table_holes.setColumnCount(3)
+            self.table_holes.setHorizontalHeaderLabels([
+                tr_ui("creator.hole_header_pop", "Frequenz"),
+                tr_ui("creator.hole_header_status", "Status"),
+                tr_ui("creator.hole_header_move", "Zug")
+            ])
+            hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+            hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+
+    def _on_hole_engine_depth_changed(self, text: str):
+        """Saves user-selected Stockfish engine depth for hole finder."""
+        self.set_setting("hole_engine_depth", text)
+
     def on_hole_mode_change(self):
-        if hasattr(self, "table_holes") and self.table_holes:
-            self.table_holes.setColumnHidden(0, False)
-        mode = self.combo_hole_mode.currentData()
-        can_exempt = mode in ("holes", "transpositions")
+        mode = self.combo_hole_mode.currentData() if hasattr(self, "combo_hole_mode") and self.combo_hole_mode else None
+        prev_mode = getattr(self, "_active_hole_mode", None)
+        mode_changed = (prev_mode != mode)
+        self._active_hole_mode = mode
+
+        if mode_changed:
+            if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
+                self.stop_hole_scan(silent=True)
+            if hasattr(self, "lbl_hole_scan_res") and self.lbl_hole_scan_res:
+                self.lbl_hole_scan_res.setText("")
+
+        can_exempt = mode in ("holes", "unanswered", "transpositions")
         if hasattr(self, "btn_hole_exempt") and self.btn_hole_exempt:
             self.btn_hole_exempt.setVisible(can_exempt)
         if hasattr(self, "btn_hole_clear_exempt") and self.btn_hole_clear_exempt:
             self.btn_hole_clear_exempt.setVisible(can_exempt)
-        
+        if hasattr(self, "chk_recheck_unadded") and self.chk_recheck_unadded:
+            self.chk_recheck_unadded.setVisible(mode == "transpositions")
+
+        is_holes = (mode == "holes")
+        is_prio_or_down = (mode in ("priority", "level_down"))
+        is_level_check = (mode == "level_check")
+
+        has_threshold = mode in ("holes", "priority", "level_down")
+        if hasattr(self, "lbl_hole_threshold") and self.lbl_hole_threshold:
+            self.lbl_hole_threshold.setVisible(has_threshold)
+            if mode == "level_down":
+                self.lbl_hole_threshold.setText(tr_ui("creator.hole_label_max_popularity", "Max. Popularität:"))
+            else:
+                self.lbl_hole_threshold.setText(tr_ui("creator.hole_label_popularity", "Min. Popularität:"))
+        if hasattr(self, "combo_hole_threshold") and self.combo_hole_threshold:
+            self.combo_hole_threshold.setVisible(has_threshold)
+
+        if hasattr(self, "lbl_hole_engine_depth") and self.lbl_hole_engine_depth:
+            self.lbl_hole_engine_depth.setVisible(is_holes)
+        if hasattr(self, "combo_hole_engine_depth") and self.combo_hole_engine_depth:
+            self.combo_hole_engine_depth.setVisible(is_holes)
+
+        if hasattr(self, "btn_hole_rec_settings") and self.btn_hole_rec_settings:
+            self.btn_hole_rec_settings.setVisible(is_holes)
+
+        if hasattr(self, "lbl_hole_level") and self.lbl_hole_level:
+            self.lbl_hole_level.setVisible(is_prio_or_down)
+        if hasattr(self, "combo_hole_level") and self.combo_hole_level:
+            self.combo_hole_level.setVisible(is_prio_or_down)
+
+        if is_prio_or_down:
+            self.update_hole_level_combo()
+
         if mode == "holes":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_holes_desc", "Sucht unbekannte Züge, welche laut Datenbank eine gewisse Popularität haben."))
-            self.combo_hole_level.setVisible(False)
-            self.lbl_hole_level.setVisible(False)
-            self.lbl_hole_threshold.setVisible(True)
-            self.combo_hole_threshold.setVisible(True)
-            self.chk_prio_rare.setVisible(False)
+        elif mode == "unanswered":
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_unanswered_desc", "Findet Stellungen, in denen der Gegner gezogen hat, du aber noch keine Antwort im Repertoire hinterlegt hast."))
         elif mode == "priority":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_priority_desc", "Findet Züge in einem Level, die häufiger als die angegebene Popularität gespielt werden."))
-            self.combo_hole_level.setVisible(True)
-            self.lbl_hole_level.setVisible(True)
-            self.lbl_hole_threshold.setVisible(True)
-            self.combo_hole_threshold.setVisible(True)
-            self.chk_prio_rare.setVisible(True)
         elif mode == "level_down":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_down_desc", "Findet Züge in einem Level, die seltener als die angegebene Popularität gespielt werden."))
-            self.combo_hole_level.setVisible(True)
-            self.lbl_hole_level.setVisible(True)
-            self.lbl_hole_threshold.setVisible(True)
-            self.combo_hole_threshold.setVisible(True)
-            self.chk_prio_rare.setVisible(False)
         elif mode == "level_check":
             self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_level_check_desc", "Findet Probleme mit der Level einstufung"))
-            self.combo_hole_level.setVisible(False)
-            self.lbl_hole_level.setVisible(False)
-            self.lbl_hole_threshold.setVisible(False)
-            self.combo_hole_threshold.setVisible(False)
-            self.chk_prio_rare.setVisible(False)
+        elif mode == "transpositions":
+            self.lbl_mode_desc.setText(tr_ui("creator.hole_mode_transpositions_desc", "Findet 1- und 2-zügige Überleitungen im gesamten Repertoire, die noch nicht verknüpft sind."))
+
+        if mode_changed:
+            self._set_hole_table_headers_for_mode(mode)
+
+    def stop_hole_scan(self, silent: bool = False):
+        """Stops the active hole/search scan thread, resets button state and timer safely."""
+        if hasattr(self, "hole_thread") and self.hole_thread:
+            thread = self.hole_thread
+            self.hole_thread = None
+            try:
+                thread.finished_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                thread.item_found_signal.disconnect()
+            except Exception:
+                pass
+            try:
+                thread.progress_signal.disconnect()
+            except Exception:
+                pass
+            thread.stop()
+            if thread.isRunning():
+                if not hasattr(self, "_dying_hole_threads"):
+                    self._dying_hole_threads = set()
+                self._dying_hole_threads.add(thread)
+                thread.finished.connect(lambda t=thread: self._dying_hole_threads.discard(t))
+                thread.wait(150)
+
+        if hasattr(self, "hole_anim_timer") and self.hole_anim_timer.isActive():
+            self.hole_anim_timer.stop()
+
+        self._hole_scan_streamed = False
+        self._hole_cached_levels = None
+        self._hole_cached_rules = None
+
+        if hasattr(self, "btn_hole_scan") and self.btn_hole_scan:
+            self.btn_hole_scan.setEnabled(True)
+            self.btn_hole_scan.setText(tr_ui("creator.hole_btn_scan", "🔎 Suchen"))
+            self.btn_hole_scan.setToolTip("")
+            self.btn_hole_scan.setStyleSheet("")
+            self.btn_hole_scan.setProperty("class", "GlassPill")
+            self.repolish(self.btn_hole_scan)
+
+        if not silent and hasattr(self, "lbl_hole_scan_res") and self.lbl_hole_scan_res:
+            row_count = self.table_holes.rowCount() if hasattr(self, "table_holes") and self.table_holes else 0
+            if row_count > 0:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.scan_cancelled_with_count", "Scan abgebrochen ({count} Ergebnisse).", count=row_count))
+            else:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.scan_cancelled", "Scan abgebrochen."))
 
     def clear_search_tab(self):
         """Clears search results, stops active scan threads, and resets search tab UI state."""
-        if hasattr(self, 'hole_thread') and self.hole_thread and self.hole_thread.isRunning():
-            try:
-                self.hole_thread.finished_signal.disconnect()
-            except Exception:
-                pass
-            self.hole_thread.requestInterruption()
-            self.hole_thread.wait(500)
-            self.hole_thread = None
-
-        if hasattr(self, 'hole_anim_timer') and self.hole_anim_timer.isActive():
-            self.hole_anim_timer.stop()
-
-        if hasattr(self, 'btn_hole_scan') and self.btn_hole_scan:
-            self.btn_hole_scan.setEnabled(True)
-            self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
+        self.stop_hole_scan(silent=True)
+        self._active_hole_mode = None
 
         if hasattr(self, 'lbl_hole_scan_res') and self.lbl_hole_scan_res:
             self.lbl_hole_scan_res.setText("")
@@ -5735,10 +6630,15 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, '_global_transpos_batch_timer'):
             self._global_transpos_batch_timer.stop()
         self._pending_global_transpos = []
-        if hasattr(self, '_transpos_suggestion_cache'):
-            self._transpos_suggestion_cache.clear()
+        self.clear_transposition_caches()
 
         self._global_transpos_results = []
+        btn_unadded = getattr(self, 'btn_show_unadded', None) or getattr(self, 'btn_recheck_unadded', None)
+        if btn_unadded:
+            btn_unadded.blockSignals(True)
+            btn_unadded.setChecked(False)
+            self._update_show_unadded_btn_style(False)
+            btn_unadded.blockSignals(False)
         if hasattr(self, 'table_global_transpositions') and self.table_global_transpositions:
             self.table_global_transpositions.setRowCount(0)
             self.table_global_transpositions.setColumnHidden(3, True)
@@ -5754,6 +6654,277 @@ class CreatorWindow(QMainWindow):
             else:
                 self.board_widget.last_move = None
             self.board_widget.update()
+
+    def update_hole_level_combo(self):
+        """Populates combo_hole_level filtering out redundant levels based on active mode."""
+        if not hasattr(self, "combo_hole_level") or self.combo_hole_level is None:
+            return
+
+        mode = self.combo_hole_mode.currentData() if hasattr(self, "combo_hole_mode") and self.combo_hole_mode is not None else None
+        levels = self.backend.get_repertoire_levels() if self.backend else []
+
+        if mode == "priority":
+            # Promotion: cannot promote the first level (e.g. Level 1)
+            avail_levels = levels[1:] if len(levels) > 1 else []
+        elif mode == "level_down":
+            # Demotion: cannot demote the last level
+            avail_levels = levels[:-1] if len(levels) > 1 else []
+        else:
+            avail_levels = levels
+
+        target_items = [(lvl['order'], f"Level {lvl['order']} ({lvl['name']})") for lvl in avail_levels]
+        curr_items = [
+            (self.combo_hole_level.itemData(i), self.combo_hole_level.itemText(i))
+            for i in range(self.combo_hole_level.count())
+            if self.combo_hole_level.itemData(i) is not None
+        ]
+        current_data = self.combo_hole_level.currentData()
+
+        if curr_items == target_items and (current_data in [item[0] for item in target_items] or current_data is None):
+            return
+
+        self.combo_hole_level.blockSignals(True)
+        self.combo_hole_level.clear()
+
+        if not target_items:
+            no_level_text = (
+                tr_ui("creator.hole_no_promotion_levels", "Kein Aufstiegs-Level verfügbar")
+                if mode == "priority"
+                else tr_ui("creator.hole_no_demotion_levels", "Kein Abstiegs-Level verfügbar")
+                if mode == "level_down"
+                else tr_ui("creator.hole_no_levels", "Keine Level verfügbar")
+            )
+            self.combo_hole_level.addItem(no_level_text, userData=None)
+        else:
+            self.combo_hole_level.addItem(tr_ui("creator.hole_choose_level", "Wähle Level..."), userData=None)
+            for order, text in target_items:
+                self.combo_hole_level.addItem(text, userData=order)
+
+            idx_to_select = 0
+            if current_data is not None:
+                for i in range(self.combo_hole_level.count()):
+                    if self.combo_hole_level.itemData(i) == current_data:
+                        idx_to_select = i
+                        break
+            self.combo_hole_level.setCurrentIndex(idx_to_select)
+
+        self.combo_hole_level.blockSignals(False)
+
+    def get_target_level_for_mode(self, mode: str, current_level: int = None) -> Optional[int]:
+        """Calculates the target level for promotion or demotion based on the current level."""
+        if not self.backend:
+            return None
+        if current_level is None:
+            if hasattr(self, "combo_hole_level") and self.combo_hole_level:
+                current_level = self.combo_hole_level.currentData()
+            if current_level is None:
+                return None
+
+        levels = self.backend.get_repertoire_levels()
+        orders = [lvl['order'] for lvl in levels]
+        if current_level not in orders:
+            return None
+
+        idx = orders.index(current_level)
+        if mode == "priority":
+            if idx == 0:
+                return None
+            return orders[idx - 1]
+        elif mode == "level_down":
+            if idx >= len(orders) - 1:
+                return None
+            return orders[idx + 1]
+        return None
+
+    def _create_priority_action_cell(self, data: dict, mode: str) -> QWidget:
+        """Creates a cell container widget with promote/demote button and position change info for a specific move row."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(scale(4), scale(2), scale(4), scale(2))
+        layout.setSpacing(scale(8))
+        layout.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        curr_lvl = data.get('current_level')
+        if curr_lvl is None and hasattr(self, "combo_hole_level") and self.combo_hole_level:
+            curr_lvl = self.combo_hole_level.currentData()
+
+        target_level = data.get('target_level')
+        if target_level is None and curr_lvl is not None:
+            target_level = self.get_target_level_for_mode(mode, curr_lvl)
+
+        impact = data.get('impact')
+        if impact is None and self.backend and data.get('move_id') and target_level is not None:
+            impact = self.backend.get_single_move_level_change_impact(data['move_id'], target_level)
+
+        pos_cnt = impact.get('positions_changed', 0) if impact else 0
+        mov_cnt = impact.get('moves_changed', 0) if impact else 0
+
+        btn = QPushButton()
+        btn.setFixedHeight(scale(22))
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+
+        is_prio = (mode == "priority")
+        if target_level is not None:
+            btn_icon = "⬆️" if is_prio else "⬇️"
+            btn.setText(f"{btn_icon} L{target_level}")
+            btn.setEnabled(True)
+            if is_prio:
+                btn_tip = tr_ui(
+                    "creator.hole_tooltip_promote_row",
+                    "Diesen Zug zu Level {target} aufsteigen ({count} Stellungen ändern das Level)",
+                    target=target_level,
+                    count=pos_cnt
+                )
+            else:
+                btn_tip = tr_ui(
+                    "creator.hole_tooltip_demote_row",
+                    "Diesen Zug zu Level {target} abstufen ({count} Stellungen ändern das Level)",
+                    target=target_level,
+                    count=pos_cnt
+                )
+        else:
+            btn.setText("—")
+            btn.setEnabled(False)
+            btn_tip = ""
+
+        btn.setToolTip(btn_tip)
+
+        if not hasattr(self, "_prio_btn_promote_style") or self._prio_btn_promote_style is None:
+            self._prio_btn_promote_style = f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #27ae60, stop:1 #2ecc71);
+                    color: white;
+                    font-weight: bold;
+                    font-size: {scale(10)}px;
+                    border-radius: {scale(11)}px;
+                    padding: 0 {scale(8)}px;
+                    border: none;
+                }}
+                QPushButton:hover {{
+                    background: #219150;
+                }}
+                QPushButton:pressed {{
+                    background: #196f3d;
+                }}
+                QPushButton:disabled {{
+                    background: rgba(0, 0, 0, 0.1);
+                    color: rgba(0, 0, 0, 0.3);
+                }}
+            """
+            self._prio_btn_demote_style = f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #e67e22, stop:1 #d35400);
+                    color: white;
+                    font-weight: bold;
+                    font-size: {scale(10)}px;
+                    border-radius: {scale(11)}px;
+                    padding: 0 {scale(8)}px;
+                    border: none;
+                }}
+                QPushButton:hover {{
+                    background: #ba4a00;
+                }}
+                QPushButton:pressed {{
+                    background: #a04000;
+                }}
+                QPushButton:disabled {{
+                    background: rgba(0, 0, 0, 0.1);
+                    color: rgba(0, 0, 0, 0.3);
+                }}
+            """
+            self._prio_lbl_style = f"""
+                QLabel {{
+                    color: {COLORS['brown_text']};
+                    font-size: {scale(11)}px;
+                    font-weight: bold;
+                }}
+            """
+
+        if is_prio:
+            btn.setStyleSheet(self._prio_btn_promote_style)
+        else:
+            btn.setStyleSheet(self._prio_btn_demote_style)
+
+        btn_min_w = btn.fontMetrics().horizontalAdvance(btn.text()) + scale(18)
+        btn.setMinimumWidth(max(scale(55), btn_min_w))
+
+        if target_level is not None:
+            btn.clicked.connect(lambda checked, d=data, tl=target_level, m=mode: self.apply_single_move_level_action(d, tl, m))
+
+        lbl_info = QLabel()
+        if pos_cnt == 1:
+            lbl_text = tr_ui("creator.hole_level_change_pos_one", "1 Stellung")
+        else:
+            lbl_text = tr_ui("creator.hole_level_change_pos_many", "{count} Stellungen", count=pos_cnt)
+
+        lbl_info.setText(lbl_text)
+        lbl_info.setStyleSheet(self._prio_lbl_style)
+        if target_level is not None:
+            detail_tip = tr_ui(
+                "creator.hole_level_action_tooltip",
+                "Bei Anwendung werden {pos_count} Stellungen ({move_count} Züge) von Level {curr} zu Level {target} verschoben.",
+                pos_count=pos_cnt,
+                move_count=mov_cnt,
+                curr=curr_lvl,
+                target=target_level
+            )
+            lbl_info.setToolTip(detail_tip)
+
+        layout.addWidget(btn)
+        layout.addWidget(lbl_info)
+        layout.addStretch()
+
+        return container
+
+    def _on_hole_level_or_threshold_changed(self):
+        if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
+            self.stop_hole_scan(silent=True)
+        if hasattr(self, "combo_hole_mode") and self.combo_hole_mode:
+            mode = self.combo_hole_mode.currentData()
+            if mode in ("priority", "level_down"):
+                if hasattr(self, "table_holes") and self.table_holes:
+                    self.table_holes.setRowCount(0)
+                if hasattr(self, "lbl_hole_scan_res") and self.lbl_hole_scan_res:
+                    self.lbl_hole_scan_res.setText("")
+
+    def apply_single_move_level_action(self, data: dict, target_level: int, mode: str):
+        """Applies level change to a single move from a table row, refreshes the repertoire, and updates UI."""
+        if not data or not self.backend:
+            return
+
+        move_id = data.get("move_id")
+        if not move_id or target_level is None:
+            return
+
+        res = self.backend.apply_single_move_level_change(move_id, target_level)
+        if not res.get("success", False):
+            return
+
+        # Update board and repertoire tree/views
+        self.update_ui_from_fen()
+        if hasattr(self, "update_structure_tree"):
+            self.update_structure_tree()
+
+        # Remove the row corresponding to this move from table_holes
+        if hasattr(self, "table_holes") and self.table_holes:
+            row_to_del = -1
+            for r in range(self.table_holes.rowCount()):
+                it0 = self.table_holes.item(r, 0)
+                if not it0:
+                    continue
+                row_data = it0.data(Qt.ItemDataRole.UserRole + 10)
+                if isinstance(row_data, dict) and row_data.get("move_id") == move_id:
+                    row_to_del = r
+                    break
+            if row_to_del >= 0:
+                self.table_holes.removeRow(row_to_del)
+
+            remaining = self.table_holes.rowCount()
+            if remaining == 0:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.all_priority_moves_handled", "✓ Alle Züge wurden angepasst."))
+            else:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.hole_results_found", f"✓ {remaining} Ergebnisse gefunden.", count=remaining))
 
     def init_kontrolle_tab(self):
         layout = QVBoxLayout(self.tab_kontrolle)
@@ -5891,7 +7062,7 @@ class CreatorWindow(QMainWindow):
 
         # ── Single-Line Header Toolbar ──────────────────────────────────
         h_toolbar = QHBoxLayout()
-        h_toolbar.setSpacing(scale(8))
+        h_toolbar.setSpacing(scale(4))
 
         # Left: Info Button + Status
         self.btn_transpos_info = QPushButton("ℹ️")
@@ -5910,30 +7081,22 @@ class CreatorWindow(QMainWindow):
                 background-color: {COLORS['burnt_orange']};
                 color: white;
             }}
+            {get_tooltip_style()}
         """)
         self.btn_transpos_info.clicked.connect(self.show_transpositions_info_dialog)
         h_toolbar.addWidget(self.btn_transpos_info)
 
-        self.lbl_transpos_status = QLabel("")
+        self.lbl_transpos_status = ElidedStatusLabel("")
         self.lbl_transpos_status.setStyleSheet(f"color: {COLORS['light_text']}; font-size: {scale(12)}px; background: transparent; border: none;")
-        self.lbl_transpos_status.setWordWrap(True)
-        self.lbl_transpos_status.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.lbl_transpos_status.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.lbl_transpos_status.setMaximumWidth(scale(180))
         h_toolbar.addWidget(self.lbl_transpos_status)
         h_toolbar.addStretch(1)
         self.lbl_global_transpos_status = self.lbl_transpos_status
 
         # Right: Local action (Deep Search) + Global action (Engine Depth & Scan Repertoire)
-        self.btn_deep_transpos = QPushButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefensuche"))
-        self.btn_deep_transpos.setMinimumHeight(scale(28))
-        self.btn_deep_transpos.setProperty("class", "GlassPill")
+        self.btn_deep_transpos = AutoShrinkPillButton(tr_ui("creator.transpositions_btn_start", "🔍 Tiefensuche"))
         self.btn_deep_transpos.setToolTip(tr_ui("creator.transpositions_btn_start_tooltip", "Sucht nach 3-, 4- und mehrzügigen Zugfolgen, die aus dieser Stellung zurück ins Repertoire führen."))
-        self.btn_deep_transpos.setStyleSheet(f"""
-            QPushButton {{
-                padding: {scale(4)}px {scale(8)}px;
-                font-size: {scale(12)}px;
-                font-weight: 600;
-            }}
-        """)
         self.repolish(self.btn_deep_transpos)
         self.btn_deep_transpos.setEnabled(False)
         self.btn_deep_transpos.clicked.connect(self.on_deep_transpos_button_clicked)
@@ -5947,7 +7110,7 @@ class CreatorWindow(QMainWindow):
 
         depth_tooltip = tr_ui("creator.transpos_engine_depth_tooltip", "Stockfish-Rechentiefe: Bestimmt, wie gründlich die Engine prüft, ob 2-zügige Überleitungen taktisch solide sind.")
         lbl_transpos_depth = QLabel(tr_ui("creator.transpos_engine_depth_label", "⚙️ Tiefe:"))
-        lbl_transpos_depth.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(13)}px; font-weight: 600;")
+        lbl_transpos_depth.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(13)}px; font-weight: 600;\n{get_tooltip_style()}")
         lbl_transpos_depth.setToolTip(depth_tooltip)
         h_toolbar.addWidget(lbl_transpos_depth)
 
@@ -5971,31 +7134,27 @@ class CreatorWindow(QMainWindow):
         self.combo_transpos_depth.currentTextChanged.connect(self._on_transpos_depth_changed)
         h_toolbar.addWidget(self.combo_transpos_depth)
 
-        self.btn_global_transpos_scan = QPushButton(tr_ui("creator.transpos_btn_scan", "🔎 Alles scannen"))
-        self.btn_global_transpos_scan.setMinimumHeight(scale(28))
-        self.btn_global_transpos_scan.setProperty("class", "GlassPill")
-        self.btn_global_transpos_scan.setStyleSheet(f"""
-            QPushButton {{
-                padding: {scale(4)}px {scale(8)}px;
-                font-size: {scale(12)}px;
-                font-weight: 600;
-            }}
-        """)
+        self.btn_global_transpos_scan = AutoShrinkPillButton(tr_ui("creator.transpos_btn_scan", "🔎 Alles scannen"))
+        self.btn_global_transpos_scan.setToolTip(tr_ui("creator.transpos_btn_scan_tooltip", "Scannt das gesamte Repertoire nach möglichen Überleitungen und Zugumstellungen."))
         self.repolish(self.btn_global_transpos_scan)
         self.btn_global_transpos_scan.clicked.connect(self.run_global_transpos_scan)
         h_toolbar.addWidget(self.btn_global_transpos_scan)
 
-        self.btn_add_all_1move = QPushButton(tr_ui("creator.transpos_btn_add_all_1move", "⭐ Alle 1-Zug"))
-        self.btn_add_all_1move.setMinimumHeight(scale(28))
-        self.btn_add_all_1move.setProperty("class", "GlassPill")
+        self.btn_show_unadded = QPushButton("🔄")
+        self.btn_show_unadded.setCheckable(True)
+        self.btn_show_unadded.setMinimumHeight(scale(28))
+        self.btn_show_unadded.setProperty("class", "GlassPill")
+        self.btn_show_unadded.setToolTip(tr_ui("creator.transpos_tooltip_show_unadded", "🔄 Nicht übernommene Züge anzeigen\n\nZeigt gespeicherte, bisher nicht übernommene Überleitungen sofort an, ohne das Repertoire erneut scannen zu müssen."))
+        self.btn_show_unadded.setChecked(False)
+        self._update_show_unadded_btn_style(False)
+        self.btn_show_unadded.toggled.connect(self._on_show_unadded_toggled)
+        h_toolbar.addWidget(self.btn_show_unadded)
+
+        # Backwards compatibility alias for tests and legacy callers
+        self.btn_recheck_unadded = self.btn_show_unadded
+
+        self.btn_add_all_1move = AutoShrinkPillButton(tr_ui("creator.transpos_btn_add_all_1move", "⭐ Alle 1-Zug"))
         self.btn_add_all_1move.setToolTip(tr_ui("creator.transpos_btn_add_all_1move_tooltip", "Fügt alle 1-Zug-Überleitungen zu ihren empfohlenen Repertoire-Levels hinzu."))
-        self.btn_add_all_1move.setStyleSheet(f"""
-            QPushButton {{
-                padding: {scale(4)}px {scale(8)}px;
-                font-size: {scale(12)}px;
-                font-weight: 600;
-            }}
-        """)
         self.repolish(self.btn_add_all_1move)
         self.btn_add_all_1move.clicked.connect(self.add_all_1move_transpositions)
         h_toolbar.addWidget(self.btn_add_all_1move)
@@ -6063,6 +7222,8 @@ class CreatorWindow(QMainWindow):
         self.table_global_transpositions = self.table_transpositions
         self.transpos_splitter = None
 
+        self._adjust_transposition_table_columns()
+
         outer.addWidget(self.card_transpos_main, 1)
 
         # Results & BFS state
@@ -6086,6 +7247,161 @@ class CreatorWindow(QMainWindow):
         self._bfs_running = False
 
         # FEN index is built lazily after each repertoire load (see load_repertoire)
+
+    def _is_move_in_repertoire(self, fen: str, uci: str) -> bool:
+        """Checks if a move (uci) from fen is currently active in the repertoire."""
+        if not fen or not uci or not self.backend:
+            return False
+        clean_fen = " ".join(fen.strip().split()[:4])
+        from opening_fenix.core.utils import normalize_castling_uci, CASTLING_ALT
+        norm_uci = normalize_castling_uci(uci)
+        alt_uci = CASTLING_ALT.get(norm_uci, "")
+
+        # 1. Fast check via in-memory repo_adjacency
+        repo_adj = getattr(self.backend, "_repo_adjacency", None)
+        if repo_adj and clean_fen in repo_adj:
+            moves = repo_adj[clean_fen]
+            if norm_uci in moves or (alt_uci and alt_uci in moves) or uci in moves:
+                return True
+
+        # 2. Database check via session if available
+        if self.backend.session:
+            try:
+                from opening_fenix.core.db.models import Position, Move, RepertoireMove
+                db_pos = self.backend.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+                if db_pos:
+                    check_ucis = [norm_uci, uci]
+                    if alt_uci:
+                        check_ucis.append(alt_uci)
+                    rep = (
+                        self.backend.session.query(RepertoireMove)
+                        .join(Move, RepertoireMove.move_id == Move.id)
+                        .filter(
+                            Move.from_position_id == db_pos.id,
+                            Move.uci.in_(check_ucis),
+                            RepertoireMove.is_active == True
+                        )
+                        .first()
+                    )
+                    if rep:
+                        return True
+            except Exception:
+                pass
+        return False
+
+    def _is_transposition_path_in_repertoire(self, item: dict) -> bool:
+        """Returns True if all moves along the transposition path are already in the repertoire."""
+        if not self.backend or not self.backend.session:
+            return False
+        from opening_fenix.core.services.hole_finder_service import is_transposition_path_in_repertoire
+        return is_transposition_path_in_repertoire(self.backend.session, item)
+
+    def _save_cached_transpositions(self, items: list, merge: bool = False):
+        """Saves unadded transposition items to repertoire metadata, pruning already-added moves."""
+        if not self.backend or not self.backend.session:
+            return
+        from opening_fenix.core.services.hole_finder_service import save_cached_transpositions
+        save_cached_transpositions(self.backend.session, items, merge=merge)
+
+    def _load_cached_transpositions(self) -> list:
+        """Loads saved unadded transpositions from repertoire metadata, pruning any already added."""
+        if not self.backend or not self.backend.session:
+            return []
+        from opening_fenix.core.services.hole_finder_service import load_cached_transpositions
+        return load_cached_transpositions(self.backend.session)
+
+    def _update_show_unadded_btn_style(self, checked):
+        btn = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
+        if not btn:
+            return
+        if not checked:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    padding: {scale(3)}px {scale(8)}px;
+                    font-size: {scale(13)}px;
+                    font-weight: 600;
+                    background-color: {COLORS['glass_bg']};
+                    border: 1px solid {COLORS['glass_border']};
+                    border-radius: {scale(15)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(255, 255, 255, 0.7);
+                }}
+                {get_tooltip_style()}
+            """)
+        else:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    padding: {scale(3)}px {scale(8)}px;
+                    font-size: {scale(13)}px;
+                    font-weight: 700;
+                    background-color: rgba(243, 156, 18, 0.22);
+                    color: #d35400;
+                    border: 1px solid #f39c12;
+                    border-radius: {scale(15)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(243, 156, 18, 0.32);
+                    border-color: #f39c12;
+                }}
+                {get_tooltip_style()}
+            """)
+
+    def _update_recheck_unadded_btn_style(self, checked):
+        self._update_show_unadded_btn_style(checked)
+
+    def _on_show_unadded_toggled(self, checked):
+        self._update_show_unadded_btn_style(checked)
+        self.config["transpos_show_unadded"] = checked
+        self.config["transpos_recheck_unadded"] = checked
+        if hasattr(self, "chk_recheck_unadded") and self.chk_recheck_unadded.isChecked() != checked:
+            self.chk_recheck_unadded.blockSignals(True)
+            self.chk_recheck_unadded.setChecked(checked)
+            self.chk_recheck_unadded.blockSignals(False)
+        self.save_config()
+
+        if checked:
+            cached_items = self._load_cached_transpositions()
+            if cached_items:
+                self._global_transpos_results = list(cached_items)
+                self._render_transpositions_table(rebuild_global=True)
+                if hasattr(self, "lbl_global_transpos_status"):
+                    self.lbl_global_transpos_status.setText(
+                        tr_ui("creator.transpos_status_loaded_unadded", f"✓ {len(cached_items)} nicht übernommene Überleitung(en) angezeigt.", count=len(cached_items))
+                    )
+                    self.lbl_global_transpos_status.setStyleSheet(
+                        f"background-color: rgba(46, 125, 50, 0.12); color: #2e7d32; "
+                        f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(46, 125, 50, 0.25);"
+                    )
+            else:
+                self._global_transpos_results = []
+                self._render_transpositions_table(rebuild_global=True)
+                if hasattr(self, "lbl_global_transpos_status"):
+                    self.lbl_global_transpos_status.setText(
+                        tr_ui("creator.transpos_status_no_unadded_cached", "Keine gespeicherten nicht übernommenen Überleitungen vorhanden. Führe zuerst einen Scan durch.")
+                    )
+                    self.lbl_global_transpos_status.setStyleSheet(
+                        f"background-color: rgba(0, 0, 0, 0.05); color: #555555; "
+                        f"font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(0, 0, 0, 0.14);"
+                    )
+        else:
+            self._global_transpos_results = []
+            self._render_transpositions_table(rebuild_global=True)
+            if hasattr(self, "lbl_global_transpos_status"):
+                self.lbl_global_transpos_status.setText("")
+                self.lbl_global_transpos_status.setStyleSheet("background: transparent; border: none;")
+
+    def _on_recheck_unadded_toggled(self, checked):
+        self._on_show_unadded_toggled(checked)
+
+    def _on_chk_recheck_unadded_toggled(self, checked):
+        btn = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
+        if btn and btn.isChecked() != checked:
+            btn.setChecked(checked)
+        else:
+            self.config["transpos_show_unadded"] = checked
+            self.config["transpos_recheck_unadded"] = checked
+            self.save_config()
 
     def show_transpositions_info_dialog(self):
         """Displays a clean informational dialog explaining transpositions and search features."""
@@ -6137,6 +7453,10 @@ class CreatorWindow(QMainWindow):
 
         # Check for preset transposition from Hole Finder / Move Finder
         preset = getattr(self, "_preset_transposition", None)
+        from_global = getattr(self, "_from_global_click", False)
+        saved_scroll = getattr(self, "_global_click_scroll_val", None)
+        active_row_data = getattr(self, "_global_click_row_data", None)
+
         if preset and isinstance(preset, dict):
             p_fen = " ".join(preset.get('fen', '').strip().split()[:4])
             curr_fen = " ".join(fen.strip().split()[:4])
@@ -6151,31 +7471,52 @@ class CreatorWindow(QMainWindow):
 
                 u1 = p_ucis[0] if p_ucis else None
                 found_row = -1
+
+                sep_row = -1
                 for r in range(self.table_transpositions.rowCount()):
-                    it0 = self.table_transpositions.item(r, 0)
-                    if not it0:
-                        continue
-                    data = it0.data(Qt.ItemDataRole.UserRole)
-                    if data and isinstance(data, dict):
-                        if p_depth == 1:
-                            if (u1 and data.get('move_uci') == u1) or data.get('move_san') == p_move_san:
-                                found_row = r
-                                break
-                        else:
-                            if data.get('path_ucis') == p_ucis or (p_sans and data.get('path_sans') == p_sans):
-                                found_row = r
-                                break
-                    h_data = it0.data(Qt.ItemDataRole.UserRole + 10)
-                    if h_data and isinstance(h_data, dict):
-                        if p_depth == 1:
-                            h_u = h_data.get('move_uci') or (h_data.get('path_ucis') and h_data.get('path_ucis')[0])
-                            if (u1 and h_u == u1) or h_data.get('move_san') == p_move_san:
-                                found_row = r
-                                break
-                        else:
-                            if h_data.get('path_ucis') == p_ucis or (p_sans and h_data.get('path_sans') == p_sans) or h_data.get('move_san') == p_move_san:
-                                found_row = r
-                                break
+                    it_s = self.table_transpositions.item(r, 0)
+                    if it_s and it_s.data(Qt.ItemDataRole.UserRole) == "__separator__":
+                        sep_row = r
+                        break
+
+                if from_global and sep_row != -1:
+                    search_ranges = [range(sep_row + 1, self.table_transpositions.rowCount()), range(0, sep_row)]
+                else:
+                    search_ranges = [range(self.table_transpositions.rowCount())]
+
+                for r_range in search_ranges:
+                    for r in r_range:
+                        it0 = self.table_transpositions.item(r, 0)
+                        if not it0:
+                            continue
+                        h_data = it0.data(Qt.ItemDataRole.UserRole + 10)
+                        if h_data and isinstance(h_data, dict):
+                            if active_row_data:
+                                if h_data == active_row_data:
+                                    found_row = r
+                                    break
+                                continue
+                            if p_depth == 1:
+                                h_u = h_data.get('move_uci') or (h_data.get('path_ucis') and h_data.get('path_ucis')[0])
+                                if (u1 and h_u == u1 and (not p_move_san or h_data.get('move_san') == p_move_san)) or h_data.get('move_san') == p_move_san:
+                                    found_row = r
+                                    break
+                            else:
+                                if h_data.get('path_ucis') == p_ucis or (p_sans and h_data.get('path_sans') == p_sans) or h_data.get('move_san') == p_move_san:
+                                    found_row = r
+                                    break
+                        data = it0.data(Qt.ItemDataRole.UserRole)
+                        if not active_row_data and data and isinstance(data, dict):
+                            if p_depth == 1:
+                                if (u1 and data.get('move_uci') == u1 and (not p_move_san or data.get('move_san') == p_move_san)) or data.get('move_san') == p_move_san:
+                                    found_row = r
+                                    break
+                            else:
+                                if data.get('path_ucis') == p_ucis or (p_sans and data.get('path_sans') == p_sans):
+                                    found_row = r
+                                    break
+                    if found_row != -1:
+                        break
 
                 if found_row == -1:
                     if self.table_transpositions.rowCount() == 1 and self.table_transpositions.columnSpan(0, 0) > 1:
@@ -6281,8 +7622,14 @@ class CreatorWindow(QMainWindow):
 
                 if found_row >= 0:
                     self.table_transpositions.selectRow(found_row)
+                    if from_global and saved_scroll is not None:
+                        self.table_transpositions.verticalScrollBar().setValue(saved_scroll)
             else:
                 self._preset_transposition = None
+
+        self._from_global_click = False
+        self._global_click_scroll_val = None
+        self._global_click_row_data = None
         
         # MultiPV engine analysis for 1-move transpositions is disabled
         if hasattr(self, "_instant_multipv_thread") and self._instant_multipv_thread and self._instant_multipv_thread.isRunning():
@@ -6486,10 +7833,15 @@ class CreatorWindow(QMainWindow):
             # Fast path: if not rebuild_global, and separator exists, and we have global_items:
             # We ONLY update rows 0 to sep_row - 1 without touching or recreating global rows!
             if not rebuild_global and global_items and sep_row != -1:
+                # Save scrollbar position
+                saved_scroll = getattr(self, "_global_click_scroll_val", None)
+                if saved_scroll is None:
+                    saved_scroll = self.table_transpositions.verticalScrollBar().value()
+
                 # Save currently selected global item if any
                 sel_rows = self.table_transpositions.selectionModel().selectedRows() if self.table_transpositions.selectionModel() else []
-                selected_global_data = None
-                if sel_rows and sel_rows[0].row() > sep_row:
+                selected_global_data = getattr(self, "_global_click_row_data", None)
+                if not selected_global_data and sel_rows and sel_rows[0].row() > sep_row:
                     it_sel = self.table_transpositions.item(sel_rows[0].row(), 0)
                     if it_sel:
                         selected_global_data = it_sel.data(Qt.ItemDataRole.UserRole + 10)
@@ -6516,6 +7868,9 @@ class CreatorWindow(QMainWindow):
                         if it_chk and it_chk.data(Qt.ItemDataRole.UserRole + 10) == selected_global_data:
                             self.table_transpositions.selectRow(r)
                             break
+
+                if saved_scroll is not None:
+                    self.table_transpositions.verticalScrollBar().setValue(saved_scroll)
 
                 self._adjust_transposition_table_columns()
                 return
@@ -7088,6 +8443,16 @@ class CreatorWindow(QMainWindow):
 
     # ── Level Suggestion & Addition for Transpositions ─────────────────────────
 
+    def clear_transposition_caches(self):
+        """Clears all in-memory transposition level suggestion and target level caches."""
+        if hasattr(self, "_transpos_suggestion_cache"):
+            self._transpos_suggestion_cache.clear()
+        if hasattr(self, "_target_level_cache"):
+            self._target_level_cache.clear()
+        if hasattr(self, "backend") and self.backend:
+            self.backend._min_reachable_level_cache = None
+            self.backend._outgoing_transpositions_cache = {}
+
     def suggest_transposition_level(self, data: dict):
         """
         Suggests an optimal repertoire level for a transposition based on:
@@ -7228,7 +8593,12 @@ class CreatorWindow(QMainWindow):
             reason = tr_ui("creator.transpositions_reason_low_freq", "Schließt an Level {base_level} an, aber Häufigkeit < 5% → Level {level}", base_level=x_base, level=x_suggested)
         else:
             x_suggested = x_base
-            reason = tr_ui("creator.transpositions_reason_target_match", "Schließt an Level {level} Züge in der Zielstellung an", level=x_suggested)
+            if l_target is not None and (l_origin is None or l_target >= l_origin):
+                reason = tr_ui("creator.transpositions_reason_target_match", "Schließt an Level {level} Züge in der Zielstellung an", level=x_suggested)
+            elif l_origin is not None:
+                reason = tr_ui("creator.transpositions_reason_origin_match", "Entspricht Level {level} der Ausgangsstellung", level=x_suggested)
+            else:
+                reason = tr_ui("creator.transpositions_reason_target_match", "Schließt an Level {level} Züge in der Zielstellung an", level=x_suggested)
 
         if not hasattr(self, "_transpos_suggestion_cache"):
             self._transpos_suggestion_cache = {}
@@ -7345,6 +8715,7 @@ class CreatorWindow(QMainWindow):
                     and (h.get("target_fen") == data.get("target_fen") or h.get("move_san") == move_label)
                 )
             ]
+        self._save_cached_transpositions(getattr(self, "_global_transpos_results", []), merge=False)
 
         # Remove matching transposition from table_global_transpositions if present
         if hasattr(self, "table_global_transpositions") and self.table_global_transpositions:
@@ -7384,12 +8755,8 @@ class CreatorWindow(QMainWindow):
 
             self._adjust_transposition_table_columns()
 
-        # Invalidate target level cache for this target if cached
-        clean_tgt = " ".join(data.get("target_fen", "").strip().split()[:4]) if data.get("target_fen") else None
-        if clean_tgt and hasattr(self, "_target_level_cache"):
-            self._target_level_cache.pop(clean_tgt, None)
-        if self.backend:
-            self.backend._min_reachable_level_cache = None
+        # Invalidate transposition caches
+        self.clear_transposition_caches()
 
         # Feedback & UI updates
         self.play_sound("move")
@@ -7544,14 +8911,10 @@ class CreatorWindow(QMainWindow):
                 return (h_fen, h_uci) in added_pairs or (h_fen, h_san) in added_pairs
 
             self._global_transpos_results = [h for h in self._global_transpos_results if not was_added(h)]
+            self._save_cached_transpositions(self._global_transpos_results, merge=False)
 
         # Clear suggestion cache
-        if hasattr(self, "_transpos_suggestion_cache"):
-            self._transpos_suggestion_cache = {}
-        if hasattr(self, "_target_level_cache"):
-            self._target_level_cache = {}
-        if self.backend:
-            self.backend._min_reachable_level_cache = None
+        self.clear_transposition_caches()
 
         # Re-render table and update tree/board
         curr_fen = self.board_widget.board.fen() if hasattr(self, "board_widget") and self.board_widget else None
@@ -7601,13 +8964,23 @@ class CreatorWindow(QMainWindow):
         levels = self.backend.get_repertoire_levels() if self.backend else []
         levels_count = max(1, len(levels))
         
-        # Suggested button width (~90px) + (N-1) standard buttons (~58px each) + spacing + cell padding
-        needed_buttons_w = scale(90) + (levels_count - 1) * scale(58) + (levels_count - 1) * scale(6) + scale(36)
-        
+        # Check actual cell widget sizes if populated
+        max_cell_w = 0
+        for r in range(min(15, self.table_transpositions.rowCount())):
+            w = self.table_transpositions.cellWidget(r, 4)
+            if w:
+                max_cell_w = max(max_cell_w, w.sizeHint().width())
+
+        if max_cell_w > 0:
+            needed_buttons_w = max_cell_w + scale(10)
+        else:
+            # Compact formula: suggested button (~48px) + standard buttons (~30px each) + spacing + margins
+            needed_buttons_w = scale(48) + (levels_count - 1) * scale(30) + (levels_count - 1) * scale(3) + scale(12)
+
         hdr_item = self.table_transpositions.horizontalHeaderItem(4)
         hdr_text = hdr_item.text() if hdr_item else "Zu Level"
-        hdr_w = self.table_transpositions.fontMetrics().horizontalAdvance(hdr_text) + scale(32)
-        
+        hdr_w = self.table_transpositions.fontMetrics().horizontalAdvance(hdr_text) + scale(18)
+
         final_w = max(needed_buttons_w, hdr_w)
         self.table_transpositions.setColumnWidth(4, int(final_w))
 
@@ -7922,11 +9295,16 @@ class CreatorWindow(QMainWindow):
             self._global_transpos_batch_timer.stop()
         self._pending_global_transpos = []
         self._global_transpos_results = []
+        self.clear_transposition_caches()
+        if self.backend:
+            self.backend.clear_cache()
         self._render_transpositions_table()
 
         elo = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
         ep = self.config.get("engine_path", "")
         threads = int(self.combo_threads.currentText()) if hasattr(self, "combo_threads") else 1
+        btn_unadded = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
+        recheck = btn_unadded.isChecked() if btn_unadded else bool(self.config.get("transpos_recheck_unadded", False))
 
         self.global_transpos_thread = HoleFinderThread(
             self.backend.active_repo_name,
@@ -7937,6 +9315,7 @@ class CreatorWindow(QMainWindow):
             engine_path=ep,
             threads_count=threads,
             depth=depth_val,
+            recheck_unadded=recheck,
         )
         self.global_transpos_thread.item_found_signal.connect(self._on_global_transpos_item_found)
         self.global_transpos_thread.progress_signal.connect(self._on_global_transpos_progress)
@@ -8021,6 +9400,17 @@ class CreatorWindow(QMainWindow):
             f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(46, 125, 50, 0.25);"
         )
 
+        self._save_cached_transpositions(self._global_transpos_results, merge=True)
+        btn_unadded = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
+        if btn_unadded:
+            btn_unadded.blockSignals(True)
+            btn_unadded.setChecked(True)
+            self._update_show_unadded_btn_style(True)
+            btn_unadded.blockSignals(False)
+            self.config["transpos_show_unadded"] = True
+            self.config["transpos_recheck_unadded"] = True
+            self.save_config()
+
     def on_global_transposition_activated(self, item):
         row = item.row()
         item0 = self.table_global_transpositions.item(row, 0)
@@ -8063,6 +9453,11 @@ class CreatorWindow(QMainWindow):
         else:
             self._transposition_highlight_fen = None
             self._transposition_highlight_move = None
+
+        self._from_global_click = True
+        self._global_click_scroll_val = self.table_transpositions.verticalScrollBar().value()
+        self._global_click_row_data = h_data if (h_data and isinstance(h_data, dict)) else None
+
         self.set_board_to_fen(fen)
 
 
@@ -8116,25 +9511,20 @@ class CreatorWindow(QMainWindow):
         self.update_overhaul_progress()
 
     def init_management_slots(self):
+        curr_hole_lvl = self.combo_hole_level.currentData() if hasattr(self, "combo_hole_level") and self.combo_hole_level else None
+        curr_overhaul_lvl = self.combo_overhaul_level.currentData() if hasattr(self, "combo_overhaul_level") and self.combo_overhaul_level else None
+
         self.combo_overhaul_level.blockSignals(True)
         self.combo_overhaul_level.clear()
-        self.combo_hole_level.blockSignals(True)
-        self.combo_hole_level.clear()
-        
-        levels = self.backend.get_repertoire_levels()
         self.combo_overhaul_level.addItem("Alle Level (1-99)", userData=99)
-        self.combo_hole_level.addItem("Wähle Level...", userData=None)
-        
+        levels = self.backend.get_repertoire_levels() if self.backend else []
         if not levels:
             self.combo_overhaul_level.addItem("Standard (Level 1)", userData=1)
-            self.combo_hole_level.addItem("Level 1", userData=1)
         else:
             for lvl in levels:
                 self.combo_overhaul_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
-                self.combo_hole_level.addItem(f"Level {lvl['order']} ({lvl['name']})", userData=lvl['order'])
-        
         self.combo_overhaul_level.blockSignals(False)
-        self.combo_hole_level.blockSignals(False)
+        self.update_hole_level_combo()
         
         # Overhaul V3: Hierarchical Variation Filter (Parent -> Child)
         self.combo_overhaul_variation.blockSignals(True)
@@ -8142,7 +9532,7 @@ class CreatorWindow(QMainWindow):
         self.combo_overhaul_variation.addItem("Alle Varianten", userData=None)
         
         # Build tree structure
-        structure = self.backend.get_variation_structure()
+        structure = self.backend.get_variation_structure() if self.backend else {}
         for v1, v2_list in structure.items():
             # Add Parent
             self.combo_overhaul_variation.addItem(v1, userData=(v1, None))
@@ -8153,12 +9543,13 @@ class CreatorWindow(QMainWindow):
         self.combo_overhaul_variation.blockSignals(False)
         
         # Persistence Restore: Load from metadata
-        saved_lvl = self.backend.get_meta("overhaul_selected_level", "99")
-        saved_var_json = self.backend.get_meta("overhaul_selected_variation_v2", "All")
+        saved_lvl = self.backend.get_meta("overhaul_selected_level", "99") if self.backend else "99"
+        saved_var_json = self.backend.get_meta("overhaul_selected_variation_v2", "All") if self.backend else "All"
         
-        # Restore Level index
+        # Restore Level index (prefer currently active selection if valid, otherwise saved_lvl)
+        restore_lvl = curr_overhaul_lvl if curr_overhaul_lvl is not None else saved_lvl
         for i in range(self.combo_overhaul_level.count()):
-            if str(self.combo_overhaul_level.itemData(i)) == str(saved_lvl):
+            if str(self.combo_overhaul_level.itemData(i)) == str(restore_lvl):
                 self.combo_overhaul_level.setCurrentIndex(i)
                 break
         
@@ -8185,7 +9576,8 @@ class CreatorWindow(QMainWindow):
             self._update_overhaul_ui_state()
 
     def run_hole_scan(self):
-        if self.hole_thread and self.hole_thread.isRunning():
+        if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
+            self.stop_hole_scan()
             return
             
         if not self.backend.active_repo_name:
@@ -8194,58 +9586,69 @@ class CreatorWindow(QMainWindow):
             
         mode = self.combo_hole_mode.currentData()
         
-        threshold = self.combo_hole_threshold.currentData() if self.combo_hole_threshold.isVisible() else 1.0
-        
-        if self.combo_hole_level.isVisible():
-            level = self.combo_hole_level.currentData()
-            if mode == "priority" and level is None:
-                QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), "Bitte wähle zuerst ein Level aus.")
+        if mode in ("priority", "level_down", "holes"):
+            threshold = self.combo_hole_threshold.currentData() if hasattr(self, "combo_hole_threshold") and self.combo_hole_threshold else 1.0
+        elif mode == "unanswered":
+            threshold = 0.0
+        else:
+            threshold = 1.0
+
+        if mode in ("priority", "level_down"):
+            level = self.combo_hole_level.currentData() if hasattr(self, "combo_hole_level") and self.combo_hole_level else None
+            if level is None:
+                QMessageBox.warning(self, tr_ui("creator.dlg_error", "Fehler"), tr_ui("creator.dlg_select_level_first", "Bitte wähle zuerst ein Level aus."))
                 return
+        elif mode == "holes":
+            level = self.combo_hole_level.currentData() if hasattr(self, "combo_hole_level") and self.combo_hole_level else None
         else:
             level = None
 
-        self.btn_hole_scan.setEnabled(False)
-        self.btn_hole_scan.setText(tr_ui("creator.scanning", "Scannend"))
+        self.btn_hole_scan.setEnabled(True)
+        self.btn_hole_scan.setText(tr_ui("creator.hole_btn_stop", "⏹ Abbrechen"))
+        self.btn_hole_scan.setToolTip(tr_ui("creator.hole_btn_stop_tooltip", "Laufende Suche abbrechen"))
+        self.btn_hole_scan.setStyleSheet(f"""
+            QPushButton {{
+                background-color: rgba(231, 76, 60, 0.15);
+                color: {COLORS['error_red']};
+                border: 1px solid {COLORS['error_red']};
+                border-radius: {scale(15)}px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(231, 76, 60, 0.25);
+            }}
+        """)
         self._hole_dots = 0
         self.hole_anim_timer.start(500)
         self.lbl_hole_scan_res.setText(tr_ui("creator.scan_running", "Scan läuft..."))
-        self.table_holes.setRowCount(0)
         
         # Pre-set headers and reset rows immediately so streaming items populate correctly
-        if mode == "transpositions":
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels([
-                tr_ui("creator.hole_header_quality", "Qualität"),
-                tr_ui("creator.hole_header_depth_type", "Tiefe / Typ"),
-                tr_ui("creator.hole_header_move", "Zug")
-            ])
-            self.btn_hole_exempt.setVisible(True)
-            self.btn_hole_clear_exempt.setVisible(True)
-        elif mode == "holes":
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Pop %", "Typ", "Zug"])
-            self.btn_hole_exempt.setVisible(True)
-            self.btn_hole_clear_exempt.setVisible(True)
-        elif mode == "level_check":
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Info", "Analyse", "Unser Zug"])
-            self.btn_hole_exempt.setVisible(False)
-            self.btn_hole_clear_exempt.setVisible(False)
-        else:
-            self.table_holes.setColumnHidden(0, False)
-            self.table_holes.setHorizontalHeaderLabels(["Frequenz", "Status", "Zug"])
-            self.btn_hole_exempt.setVisible(False)
-            self.btn_hole_clear_exempt.setVisible(False)
+        self._set_hole_table_headers_for_mode(mode)
 
-        # We don't have the elo combo box anymore in the UI redesign, we default to the globally selected Lichess Category
+        # Elo category and engine parameters
         elo = self.combo_lichess_cat.currentText()
-        
         ep = self.config.get("engine_path", "")
         threads = int(self.combo_threads.currentText()) if hasattr(self, "combo_threads") else 1
 
+        try:
+            hole_depth = int(self.combo_hole_engine_depth.currentText()) if hasattr(self, "combo_hole_engine_depth") else 18
+        except (ValueError, TypeError):
+            hole_depth = 18
+
         if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
-            self.hole_thread.stop()
-            self.hole_thread.wait(500)
+            self.stop_hole_scan(silent=True)
+
+        if self.backend and self.backend.session:
+            try:
+                self.backend.session.commit()
+            except Exception:
+                pass
+
+        btn_unadded = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
+        recheck = (btn_unadded.isChecked() if btn_unadded else bool(self.config.get("transpos_recheck_unadded", False))) if mode == "transpositions" else False
+
+        self._hole_cached_levels = self.backend.get_repertoire_levels() if self.backend else []
+        self._hole_cached_rules = self.get_hole_recommendation_rules()
 
         self.hole_thread = HoleFinderThread(
             self.backend.active_repo_name,
@@ -8254,25 +9657,115 @@ class CreatorWindow(QMainWindow):
             elo,
             mode,
             level,
-            find_rare=(mode == "level_down" or (mode == "priority" and self.chk_prio_rare.isChecked())),
+            find_rare=(mode == "level_down"),
             engine_path=ep,
+            depth=hole_depth,
             threads_count=threads,
+            recheck_unadded=recheck,
         )
         self.hole_thread.item_found_signal.connect(self._on_hole_item_found)
         self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)
-        self._hole_scan_streamed = (mode == "transpositions")
+        self._hole_scan_streamed = (mode in ("transpositions", "holes", "unanswered"))
         self.hole_thread.start()
 
     def _animate_hole_button(self):
         self._hole_dots = (self._hole_dots + 1) % 4
-        dots = "." * self._hole_dots
-        self.btn_hole_scan.setText(f"{tr_ui('creator.scanning', 'Scannend')}{dots}")
+        dots = "." * (self._hole_dots + 1)
+        if hasattr(self, "lbl_hole_scan_res") and self.lbl_hole_scan_res:
+            count = self.table_holes.rowCount() if hasattr(self, "table_holes") and self.table_holes else 0
+            if count == 0:
+                self.lbl_hole_scan_res.setText(f"{tr_ui('creator.scan_running_base', 'Scan läuft')}{dots}")
 
-    def _add_hole_row(self, h, mode):
-        row = self.table_holes.rowCount()
-        self.table_holes.insertRow(row)
+    def _add_hole_row(self, h, mode, cached_levels=None, cached_rules=None, row=None):
+        if row is None:
+            row = self.table_holes.rowCount()
+            self.table_holes.insertRow(row)
 
-        if h.get('type') in ('transposition_1', 'transposition_2'):
+        if mode == "holes":
+            pop_val = h.get('popularity', 0)
+            item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
+            item_pop.setData(Qt.ItemDataRole.UserRole, h.get('fen'))
+            item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
+            if 'move_san' in h:
+                item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
+            item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_holes.setItem(row, 0, item_pop)
+
+            raw_move = h.get('move_san', '—')
+            fen = h.get('fen', '')
+            disp_move = format_move_notation(fen, raw_move, ply_depth=h.get('ply_depth'))
+            it_move = QTableWidgetItem(disp_move)
+            f = it_move.font()
+            f.setBold(True)
+            it_move.setFont(f)
+            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+            self.table_holes.setItem(row, 1, it_move)
+
+            loss = h.get('eval_loss') if h.get('eval_loss') is not None else h.get('engine_loss')
+            if loss is not None:
+                loss_text = f"+{loss:.2f}" if loss > 0 else f"{loss:.2f}"
+                it_loss = QTableWidgetItem(loss_text)
+                if loss <= 0.20:
+                    it_loss.setForeground(QBrush(QColor(COLORS['success_green'])))
+                elif loss <= 0.60:
+                    it_loss.setForeground(QBrush(QColor("#f1c40f")))
+                elif loss <= 1.50:
+                    it_loss.setForeground(QBrush(QColor("#e67e22")))
+                else:
+                    it_loss.setForeground(QBrush(QColor(COLORS['error_red'])))
+            else:
+                it_loss = QTableWidgetItem("—")
+                it_loss.setForeground(QBrush(QColor(COLORS['light_text'])))
+            it_loss.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_loss.setData(Qt.ItemDataRole.UserRole + 10, h)
+            self.table_holes.setItem(row, 2, it_loss)
+
+            cell_widget = self._create_hole_level_cell(h, cached_levels=cached_levels, cached_rules=cached_rules)
+            self.table_holes.setCellWidget(row, 3, cell_widget)
+
+        elif mode == "unanswered":
+            last_move = h.get('last_move_san', '—')
+            fen = h.get('fen', '')
+            from_fen = h.get('from_fen', fen)
+            disp_move = format_move_notation(from_fen, last_move, ply_depth=h.get('ply_depth')) if last_move != '—' else '—'
+            it_last_move = QTableWidgetItem(str(disp_move))
+            f = it_last_move.font()
+            f.setBold(True)
+            it_last_move.setFont(f)
+            it_last_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_last_move.setData(Qt.ItemDataRole.UserRole, fen)
+            it_last_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+            if 'last_move_san' in h:
+                it_last_move.setData(Qt.ItemDataRole.UserRole + 1, h['last_move_san'])
+            self.table_holes.setItem(row, 0, it_last_move)
+
+            btn_answer = QPushButton(tr_ui("creator.btn_find_answer", "🎯 Antwort finden"))
+            btn_answer.setFixedHeight(scale(26))
+            btn_answer.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_answer.setStyleSheet(f"""
+                QPushButton {{
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {COLORS['burnt_orange']}, stop:1 #e67e22);
+                    color: white;
+                    font-weight: bold;
+                    font-size: {scale(11)}px;
+                    border-radius: {scale(13)}px;
+                    padding: 0 {scale(10)}px;
+                    border: none;
+                }}
+                QPushButton:hover {{
+                    background: #d35400;
+                }}
+            """)
+            btn_answer.clicked.connect(lambda checked, d=h: self.go_to_unanswered_hole(d))
+            container = QWidget()
+            c_layout = QHBoxLayout(container)
+            c_layout.setContentsMargins(scale(4), scale(2), scale(4), scale(2))
+            c_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            c_layout.addWidget(btn_answer)
+            self.table_holes.setCellWidget(row, 1, container)
+
+        elif h.get('type') in ('transposition_1', 'transposition_2'):
             d = h.get('depth', 1)
             q = h.get('quality', '')
             q_label = h.get('quality_label', '')
@@ -8306,40 +9799,47 @@ class CreatorWindow(QMainWindow):
             disp_move = format_move_notation(fen, move_seq, ply_depth=h.get('ply_depth'))
             it_move = QTableWidgetItem(disp_move)
             it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
+
+            item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_holes.setItem(row, 0, item_pop)
+            self.table_holes.setItem(row, 1, item_type)
+            self.table_holes.setItem(row, 2, it_move)
+
         else:
             pop_val = h.get('popularity', 0)
             item_pop = QTableWidgetItem(f"{pop_val:.1f}%")
-            item_pop.setData(Qt.ItemDataRole.UserRole, h['fen'])
+            item_pop.setData(Qt.ItemDataRole.UserRole, h.get('fen'))
             item_pop.setData(Qt.ItemDataRole.UserRole + 10, h)
             if 'move_san' in h:
                 item_pop.setData(Qt.ItemDataRole.UserRole + 1, h['move_san'])
             
-            item_type = QTableWidgetItem(h['type'].upper())
-            if h['type'] == 'user':
+            item_type = QTableWidgetItem(h.get('type', '').upper())
+            if h.get('type') == 'user':
                 item_type.setForeground(QBrush(QColor(COLORS['success_green'])))
                 item_type.setText(tr_ui("creator.tag_user", "BENUTZER"))
-            elif h['type'] == 'opponent':
+            elif h.get('type') == 'opponent':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
                 item_type.setText(tr_ui("creator.tag_opponent", "GEGNER"))
-            elif h['type'] == 'priority_check':
+            elif h.get('type') == 'priority_check':
                 if mode == "level_down":
                     item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
                     item_type.setText(tr_ui("creator.tag_too_rare", "ZU SELTEN?"))
                 else:
-                    item_type.setForeground(QBrush(QColor("#f39c12"))) # Orange for check
+                    item_type.setForeground(QBrush(QColor("#f39c12")))
                     item_type.setText(tr_ui("creator.tag_too_important", "ZU WICHTIG?"))
-            elif h['type'] == 'level_mismatch':
-                item_type.setForeground(QBrush(QColor("#9b59b6"))) # Purple for level transitions
+            elif h.get('type') == 'level_mismatch':
+                item_type.setForeground(QBrush(QColor("#9b59b6")))
                 item_type.setText(tr_ui("creator.tag_promotion", "AUFSTIEG"))
-            elif h['type'] == 'orphaned_move':
+            elif h.get('type') == 'orphaned_move':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
                 item_type.setText(tr_ui("creator.tag_isolated", "ISOLIERT"))
                 item_pop.setText(tr_ui("creator.tag_inconsistent", "Unstimmig"))
-                # Add diagnostic level info to the move text
                 if 'from_level' in h and 'to_level' in h:
                     move_text = h.get('move_san', '—')
                     h['move_san'] = f"{move_text} (L{h['from_level']}→L{h['to_level']})"
-            elif h['type'] == 'repertoire_gap':
+            elif h.get('type') == 'repertoire_gap':
                 item_type.setForeground(QBrush(QColor(COLORS['error_red'])))
                 item_type.setText(tr_ui("creator.tag_gap", "LÜCKE"))
                 item_pop.setText(tr_ui("creator.tag_unfinished", "Unfertig"))
@@ -8350,15 +9850,26 @@ class CreatorWindow(QMainWindow):
             it_move = QTableWidgetItem(disp_move)
             it_move.setData(Qt.ItemDataRole.UserRole + 10, h)
 
-        item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.table_holes.setItem(row, 0, item_pop)
-        self.table_holes.setItem(row, 1, item_type)
-        self.table_holes.setItem(row, 2, it_move)
+            item_pop.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            item_type.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it_move.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table_holes.setItem(row, 0, item_pop)
+            self.table_holes.setItem(row, 1, item_type)
+            self.table_holes.setItem(row, 2, it_move)
+
+            if mode in ("priority", "level_down"):
+                cell_action = self._create_priority_action_cell(h, mode)
+                self.table_holes.setCellWidget(row, 3, cell_action)
 
     def _on_hole_item_found(self, h, mode):
-        self._add_hole_row(h, mode)
+        if hasattr(self, "combo_hole_mode") and self.combo_hole_mode:
+            current_mode = self.combo_hole_mode.currentData()
+            if current_mode != mode:
+                return
+
+        cached_levels = getattr(self, "_hole_cached_levels", None)
+        cached_rules = getattr(self, "_hole_cached_rules", None)
+        self._add_hole_row(h, mode, cached_levels=cached_levels, cached_rules=cached_rules)
         count = self.table_holes.rowCount()
         if mode == "transpositions":
             has_deep_transpos = any(
@@ -8367,37 +9878,82 @@ class CreatorWindow(QMainWindow):
             )
             self.table_holes.setColumnHidden(0, not has_deep_transpos)
             self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_streaming_status", f"Scan läuft... {count} Transposition(en) gefunden.", count=count))
+        elif mode == "unanswered":
+            self.lbl_hole_scan_res.setText(tr_ui("creator.unanswered_streaming_status", f"Scan läuft... {count} unbeantwortete Stellung(en) gefunden.", count=count))
         else:
             self.lbl_hole_scan_res.setText(f"Scan läuft... {count} Ergebnisse gefunden.")
 
     def _on_hole_scan_finished(self, holes, mode):
+        self.hole_thread = None
         self.hole_anim_timer.stop()
-        self.btn_hole_scan.setEnabled(True)
-        self.btn_hole_scan.setText(tr_ui("creator.btn_search", "🔎 Suchen"))
+        try:
+            if hasattr(self, "combo_hole_mode") and self.combo_hole_mode:
+                current_mode = self.combo_hole_mode.currentData()
+                if current_mode != mode:
+                    return
 
-        streamed = getattr(self, "_hole_scan_streamed", False)
-        self._hole_scan_streamed = False
+            streamed = getattr(self, "_hole_scan_streamed", False)
+            self._hole_scan_streamed = False
 
-        if not streamed or self.table_holes.rowCount() == 0:
-            self.table_holes.setRowCount(0)
-            if holes:
-                self.table_holes.setUpdatesEnabled(False)
-                try:
-                    for h in holes:
-                        self._add_hole_row(h, mode)
-                finally:
-                    self.table_holes.setUpdatesEnabled(True)
+            if not streamed or self.table_holes.rowCount() == 0:
+                self.table_holes.setRowCount(0)
+                if holes:
+                    self.table_holes.setUpdatesEnabled(False)
+                    try:
+                        self.table_holes.setRowCount(len(holes))
+                        cached_levels = getattr(self, "_hole_cached_levels", None) or (self.backend.get_repertoire_levels() if self.backend else [])
+                        cached_rules = getattr(self, "_hole_cached_rules", None) or self.get_hole_recommendation_rules()
+                        if mode in ("priority", "level_down") and self.backend:
+                            curr_lvl = self.combo_hole_level.currentData() if hasattr(self, "combo_hole_level") and self.combo_hole_level else None
+                            needs_impact = [h for h in holes if isinstance(h, dict) and ('impact' not in h or 'target_level' not in h) and h.get('move_id')]
+                            if needs_impact:
+                                snapshot = self.backend.get_repertoire_graph_snapshot()
+                                for h in needs_impact:
+                                    h_lvl = h.get('current_level', curr_lvl)
+                                    target_lvl = self.get_target_level_for_mode(mode, h_lvl)
+                                    h['target_level'] = target_lvl
+                                    if target_lvl is not None and 'impact' not in h:
+                                        h['impact'] = self.backend.get_single_move_level_change_impact(h['move_id'], target_lvl, _snapshot=snapshot)
+                            else:
+                                for h in holes:
+                                    if isinstance(h, dict) and 'target_level' not in h:
+                                        h_lvl = h.get('current_level', curr_lvl)
+                                        h['target_level'] = self.get_target_level_for_mode(mode, h_lvl)
 
-        count = self.table_holes.rowCount()
-        if mode == "transpositions":
-            has_deep_transpos = any(
-                h.get('depth', 1) > 1 for h in holes if isinstance(h, dict) and h.get('type') in ('transposition_1', 'transposition_2')
-            )
-            self.table_holes.setColumnHidden(0, not has_deep_transpos)
-            self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_found_count", f"✓ {count} Transposition(en) gefunden.", count=count))
-        else:
-            self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
+                        for idx, h in enumerate(holes):
+                            self._add_hole_row(h, mode, cached_levels=cached_levels, cached_rules=cached_rules, row=idx)
+                            if (idx + 1) % 100 == 0:
+                                QApplication.processEvents()
+                    finally:
+                        self.table_holes.setUpdatesEnabled(True)
+                        self.table_holes.viewport().update()
+                        self.table_holes.update()
+            else:
+                self.table_holes.viewport().update()
+                self.table_holes.update()
 
+            self._hole_cached_levels = None
+            self._hole_cached_rules = None
+
+            count = self.table_holes.rowCount()
+            if mode == "transpositions":
+                has_deep_transpos = any(
+                    h.get('depth', 1) > 1 for h in holes if isinstance(h, dict) and h.get('type') in ('transposition_1', 'transposition_2')
+                )
+                self.table_holes.setColumnHidden(0, not has_deep_transpos)
+                self.lbl_hole_scan_res.setText(tr_ui("creator.transpositions_found_count", f"✓ {count} Transposition(en) gefunden.", count=count))
+                self._save_cached_transpositions(holes, merge=True)
+            elif mode == "unanswered":
+                self.lbl_hole_scan_res.setText(tr_ui("creator.unanswered_found_count", f"✓ {count} unbeantwortete Stellung(en) gefunden.", count=count))
+            else:
+                self.lbl_hole_scan_res.setText(tr_ui("creator.hole_results_found", f"✓ {count} Ergebnisse gefunden.", count=count))
+        finally:
+            self.btn_hole_scan.setEnabled(True)
+            self.btn_hole_scan.setText(tr_ui("creator.hole_btn_scan", "🔎 Suchen"))
+            self.btn_hole_scan.setToolTip("")
+            self.btn_hole_scan.setStyleSheet("")
+            self.btn_hole_scan.setProperty("class", "GlassPill")
+            self.repolish(self.btn_hole_scan)
 
     def on_hole_click(self, item):
         self._handle_hole_item_activated(item)
@@ -8416,13 +9972,16 @@ class CreatorWindow(QMainWindow):
             return
 
         mode = self.combo_hole_mode.currentData()
+        if mode == "unanswered":
+            self.go_to_unanswered_hole(h_data or {"fen": fen})
+            return
+
         is_transpos = (
             mode == "transpositions" or
             (h_data and isinstance(h_data, dict) and h_data.get('type') in ('transposition_1', 'transposition_2'))
         )
 
         if is_transpos:
-            # 1. Ensure Transpositions Tab is visible
             active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
             if "TRANSPOSITIONS" not in active_tabs:
                 active_tabs.append("TRANSPOSITIONS")
@@ -8431,7 +9990,6 @@ class CreatorWindow(QMainWindow):
                 if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog and hasattr(self.repo_settings_dialog, 'sync_creator_tab_checkboxes'):
                     self.repo_settings_dialog.sync_creator_tab_checkboxes()
 
-            # 2. Store preset transposition
             if h_data and isinstance(h_data, dict):
                 self._preset_transposition = h_data
             else:
@@ -8467,23 +10025,19 @@ class CreatorWindow(QMainWindow):
                 self._transposition_highlight_fen = None
                 self._transposition_highlight_move = None
 
-            # 3. Set board to starting position
             self.set_board_to_fen(fen)
 
-            # 4. Open Transpositions Tab
             idx = self.tabs.indexOf(self.tab_transpositions)
             if idx != -1:
                 self.tabs.setCurrentIndex(idx)
             else:
                 self.tabs.setCurrentWidget(self.tab_transpositions)
 
-            # 5. Populate and show transposition in the tab
             self.update_transpositions_tab()
         else:
             self._transposition_highlight_fen = None
             self._transposition_highlight_move = None
 
-            # Resolve candidate move to highlight on the board
             move_uci = None
             if h_data and isinstance(h_data, dict):
                 move_uci = h_data.get('move_uci')
@@ -8506,8 +10060,12 @@ class CreatorWindow(QMainWindow):
                                 pass
             if not move_uci:
                 move_san_val = item0.data(Qt.ItemDataRole.UserRole + 1)
-                if not move_san_val and self.table_holes.item(row, 2):
-                    move_san_val = self.table_holes.item(row, 2).text()
+                if not move_san_val:
+                    for c_idx in (1, 2):
+                        c_it = self.table_holes.item(row, c_idx)
+                        if c_it and c_it.text():
+                            move_san_val = c_it.text()
+                            break
                 if move_san_val:
                     san_clean = str(move_san_val).split("(")[0].strip()
                     if san_clean and san_clean != "—":
@@ -8542,17 +10100,335 @@ class CreatorWindow(QMainWindow):
                 self.board_widget.last_move = self._search_highlight_move
                 self.board_widget.update()
 
-            active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
-            if "ANALYSIS" not in active_tabs:
-                active_tabs.append("ANALYSIS")
-                self.set_setting("creator_active_tabs", active_tabs)
-                self.apply_tab_visibility()
+            if mode not in ("priority", "level_down"):
+                active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+                if "ANALYSIS" not in active_tabs:
+                    active_tabs.append("ANALYSIS")
+                    self.set_setting("creator_active_tabs", active_tabs)
+                    self.apply_tab_visibility()
 
-            idx = self.tabs.indexOf(self.tab_analysis)
-            if idx != -1:
-                self.tabs.setCurrentIndex(idx)
+                idx = self.tabs.indexOf(self.tab_analysis)
+                if idx != -1:
+                    self.tabs.setCurrentIndex(idx)
+                else:
+                    self.tabs.setCurrentWidget(self.tab_analysis)
+
+    def get_hole_recommendation_rules(self) -> dict:
+        """Retrieves user-configured recommendation rules from config."""
+        rules = self.config.get("hole_recommendation_rules")
+        if isinstance(rules, dict):
+            return rules
+        return {
+            "max_engine_loss_enabled": True,
+            "max_engine_loss": 2.0,
+            "level_thresholds": {
+                "1": 1.0,
+                "2": 0.5,
+                "3": 0.1
+            }
+        }
+
+    def open_hole_recommendation_settings_dialog(self):
+        """Opens the dialog to configure level recommendation rules."""
+        from opening_fenix.gui.dialogs.hole_recommendation_dialog import HoleRecommendationSettingsDialog
+        current_rules = self.get_hole_recommendation_rules()
+        dlg = HoleRecommendationSettingsDialog(
+            parent=self,
+            backend=self.backend,
+            current_rules=current_rules,
+            on_save_callback=self._on_hole_recommendation_rules_saved
+        )
+        dlg.exec()
+
+    def _on_hole_recommendation_rules_saved(self, new_rules: dict):
+        """Saves recommendation rules to config and refreshes displayed recommendations."""
+        self.set_setting("hole_recommendation_rules", new_rules)
+        if self.combo_hole_mode.currentData() == "holes" and hasattr(self, "table_holes") and self.table_holes.rowCount() > 0:
+            cached_levels = self.backend.get_repertoire_levels() if self.backend else []
+            for r in range(self.table_holes.rowCount()):
+                it0 = self.table_holes.item(r, 0)
+                if it0:
+                    d = it0.data(Qt.ItemDataRole.UserRole + 10)
+                    if d and isinstance(d, dict):
+                        cell_w = self._create_hole_level_cell(d, cached_levels=cached_levels, cached_rules=new_rules)
+                        self.table_holes.setCellWidget(r, 3, cell_w)
+
+    def suggest_hole_level(self, data: dict, rules: dict = None, levels: list = None, min_reach_level: int = None) -> tuple:
+        """Determines the recommended level order and explanation reason for an unanalyzed move."""
+        rules = rules or getattr(self, "_hole_cached_rules", None) or self.get_hole_recommendation_rules()
+        if levels is None:
+            levels = getattr(self, "_hole_cached_levels", None) or (self.backend.get_repertoire_levels() if self.backend else [])
+        if not levels:
+            levels = [{"name": "Level 1", "order": 1}]
+        sorted_levels = sorted(levels, key=lambda x: x.get("order", 1))
+        max_order = sorted_levels[-1].get("order", 1)
+
+        origin_fen = data.get("fen")
+        if min_reach_level is None:
+            min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if (self.backend and origin_fen) else 1
+
+        # 1. Engine Eval Loss Rule
+        loss = data.get("eval_loss") if data.get("eval_loss") is not None else data.get("engine_loss")
+        max_loss_enabled = bool(rules.get("max_engine_loss_enabled", True))
+        max_loss_thresh = float(rules.get("max_engine_loss", 2.0))
+
+        if max_loss_enabled and loss is not None and loss >= max_loss_thresh:
+            target_order = max(max_order, min_reach_level)
+            reason = tr_ui(
+                "creator.hole_reason_eval_loss",
+                "Engine-Verlust ({loss:.2f}) ≥ {thresh:.2f} → Höchstes Level",
+                loss=loss,
+                thresh=max_loss_thresh
+            )
+            return target_order, reason
+
+        # 2. Popularity Rule
+        pop = float(data.get("popularity", 0.0))
+        saved_threshs = rules.get("level_thresholds", {})
+
+        target_order = max_order
+        found_match = False
+        for lvl in sorted_levels:
+            order = lvl.get("order", 1)
+            default_val = 1.0 if order == 1 else (0.5 if order == 2 else (0.1 if order == 3 else 0.05))
+            thresh = float(saved_threshs.get(str(order), default_val))
+            if pop >= thresh:
+                target_order = order
+                found_match = True
+                break
+
+        if target_order < min_reach_level:
+            target_order = min_reach_level
+
+        if found_match:
+            reason = tr_ui(
+                "creator.hole_reason_popularity",
+                "Popularität ({pop:.1f}%) ≥ Schwellenwert für Level {level}",
+                pop=pop,
+                level=target_order
+            )
+        else:
+            reason = tr_ui(
+                "creator.hole_reason_low_popularity",
+                "Popularität ({pop:.1f}%) unter Schwellenwert → Level {level}",
+                pop=pop,
+                level=target_order
+            )
+
+        return target_order, reason
+
+    def _create_hole_level_cell(self, data: dict, cached_levels: list = None, cached_rules: dict = None) -> QWidget:
+        """Creates a container widget with '+ L1', '⭐ + L2' level assignment buttons for unanalyzed moves."""
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(scale(2), scale(1), scale(2), scale(1))
+        layout.setSpacing(scale(4))
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        origin_fen = data.get("fen")
+        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if (self.backend and origin_fen) else 1
+
+        levels = cached_levels if cached_levels is not None else getattr(self, "_hole_cached_levels", None)
+        if levels is None:
+            levels = self.backend.get_repertoire_levels() if self.backend else []
+        if not levels:
+            levels = [{"name": "Level 1", "order": 1}]
+
+        available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
+        if not available_levels:
+            available_levels = levels
+
+        rules = cached_rules or getattr(self, "_hole_cached_rules", None)
+        suggested_order, suggested_reason = self.suggest_hole_level(
+            data,
+            rules=rules,
+            levels=levels,
+            min_reach_level=min_reach_level,
+        )
+
+        style_suggested = f"""
+            QPushButton {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f39c12, stop:1 #e67e22);
+                color: #111111;
+                font-weight: bold;
+                font-size: {scale(10)}px;
+                border-radius: {scale(12)}px;
+                padding: 0 {scale(6)}px;
+                border: 1px solid #f1c40f;
+            }}
+            QPushButton:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #f1c40f, stop:1 #f39c12);
+            }}
+            QPushButton:pressed {{
+                background: #d35400;
+            }}
+        """
+        style_normal = f"""
+            QPushButton {{
+                background-color: rgba(0, 0, 0, 0.07);
+                color: {COLORS['brown_text']};
+                font-weight: bold;
+                font-size: {scale(10)}px;
+                border-radius: {scale(12)}px;
+                padding: 0 {scale(6)}px;
+                border: 1px solid rgba(0, 0, 0, 0.18);
+            }}
+            QPushButton:hover {{
+                background-color: rgba(0, 0, 0, 0.14);
+                color: #000000;
+                border-color: rgba(0, 0, 0, 0.35);
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(0, 0, 0, 0.22);
+            }}
+        """
+
+        for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
+            order = lvl.get("order", 1)
+            name = lvl.get("name", f"Level {order}")
+            btn = QPushButton()
+            btn.setFixedHeight(scale(24))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+
+            if order == suggested_order:
+                btn.setText(f"⭐ + L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.hole_tooltip_suggested",
+                        "Empfohlen: Level {order} ({name}) — {reason}",
+                        order=order,
+                        name=name,
+                        reason=suggested_reason,
+                    )
+                )
+                btn.setStyleSheet(style_suggested)
             else:
-                self.tabs.setCurrentWidget(self.tab_analysis)
+                btn.setText(f"+ L{order}")
+                btn.setToolTip(
+                    tr_ui(
+                        "creator.hole_tooltip_level",
+                        "Diesen Zug zu Level {order} ({name}) hinzufügen",
+                        order=order,
+                        name=name,
+                    )
+                )
+                btn.setStyleSheet(style_normal)
+
+            btn_min_w = btn.fontMetrics().horizontalAdvance(btn.text()) + scale(18)
+            btn.setMinimumWidth(btn_min_w)
+            btn.clicked.connect(lambda checked, d=data, o=order: self.add_unanalyzed_move_to_level(d, o))
+            layout.addWidget(btn)
+
+        return container
+
+    def add_unanalyzed_move_to_level(self, data: dict, level_order: int):
+        """Adds an unanalyzed opponent move to the chosen level, sets the board, and switches to the Analysis tab."""
+        if not data or not self.backend:
+            return
+            
+        origin_fen = data.get("fen")
+        move_uci = data.get("move_uci")
+        move_san = data.get("move_san")
+        
+        if not origin_fen:
+            return
+
+        if not move_uci and move_san:
+            try:
+                b = chess.Board(origin_fen)
+                san_clean = move_san.split()[-1]
+                m = b.parse_san(san_clean)
+                move_uci = m.uci()
+            except Exception:
+                try:
+                    b = chess.Board(origin_fen)
+                    m = b.parse_san(move_san)
+                    move_uci = m.uci()
+                except Exception:
+                    pass
+
+        if not move_uci:
+            return
+
+        self.backend.add_move(origin_fen, move_uci, move_san or move_uci, level_order=level_order)
+
+        target_fen = None
+        try:
+            b = chess.Board(origin_fen)
+            m = chess.Move.from_uci(move_uci)
+            if m in b.legal_moves:
+                b.push(m)
+                target_fen = b.fen()
+        except Exception:
+            pass
+
+        if hasattr(self, "table_holes") and self.table_holes:
+            for r in range(self.table_holes.rowCount()):
+                it0 = self.table_holes.item(r, 0)
+                if it0:
+                    d = it0.data(Qt.ItemDataRole.UserRole + 10)
+                    if d and isinstance(d, dict) and d.get("fen") == origin_fen and (d.get("move_uci") == move_uci or d.get("move_san") == move_san):
+                        self.table_holes.removeRow(r)
+                        break
+            count = self.table_holes.rowCount()
+            if hasattr(self, "lbl_hole_scan_res") and self.lbl_hole_scan_res:
+                self.lbl_hole_scan_res.setText(f"✓ {count} Ergebnisse gefunden.")
+
+        if target_fen:
+            self.set_board_to_fen(target_fen)
+            if hasattr(self, "board_widget") and self.board_widget:
+                try:
+                    self.board_widget.last_move = chess.Move.from_uci(move_uci)
+                    self.board_widget.update()
+                except Exception:
+                    pass
+            self.trigger_background_enrichment(target_fen)
+
+        self.play_sound("move")
+        self.update_ui_from_fen()
+
+        active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+        if "ANALYSIS" not in active_tabs:
+            active_tabs.append("ANALYSIS")
+            self.set_setting("creator_active_tabs", active_tabs)
+            self.apply_tab_visibility()
+        idx = self.tabs.indexOf(self.tab_analysis)
+        if idx != -1:
+            self.tabs.setCurrentIndex(idx)
+        else:
+            self.tabs.setCurrentWidget(self.tab_analysis)
+
+    def go_to_unanswered_hole(self, data: dict):
+        """Navigates to the unanswered position and opens the Analysis tab."""
+        if not data:
+            return
+        fen = data.get("fen")
+        if not fen:
+            return
+            
+        self.set_board_to_fen(fen)
+        last_uci = data.get("last_move_uci")
+        if last_uci and hasattr(self, "board_widget") and self.board_widget:
+            try:
+                self._search_highlight_fen = " ".join(fen.strip().split()[:4])
+                self._search_highlight_move = chess.Move.from_uci(last_uci)
+                self.board_widget.last_move = self._search_highlight_move
+                self.board_widget.update()
+            except Exception:
+                pass
+        self.update_ui_from_fen()
+
+        active_tabs = self.config.get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
+        if "ANALYSIS" not in active_tabs:
+            active_tabs.append("ANALYSIS")
+            self.set_setting("creator_active_tabs", active_tabs)
+            self.apply_tab_visibility()
+        idx = self.tabs.indexOf(self.tab_analysis)
+        if idx != -1:
+            self.tabs.setCurrentIndex(idx)
+        else:
+            self.tabs.setCurrentWidget(self.tab_analysis)
 
     def exempt_selected_hole(self):
         row = self.table_holes.currentRow()
@@ -8705,6 +10581,18 @@ class CreatorWindow(QMainWindow):
                 self.global_transpos_thread.stop()
                 self.global_transpos_thread.wait(200)
             except: pass
+
+        if hasattr(self, 'enrichment_queue'):
+            self.enrichment_queue.clear()
+        if hasattr(self, 'enrichment_threads'):
+            for t in list(self.enrichment_threads):
+                try:
+                    t.finished_signal.disconnect()
+                    if t.isRunning():
+                        t.wait(100)
+                except Exception:
+                    pass
+            self.enrichment_threads.clear()
             
         if hasattr(self, 'backend') and self.backend:
             try:

@@ -2,15 +2,17 @@ import os
 import json
 import sqlite3
 import collections
+import datetime
 from typing import Dict, Any, Optional, List
-from opening_fenix.core.utils import get_repertoire_db_path
+from opening_fenix.core.utils import get_repertoire_db_path, get_user_dir
 from opening_fenix.core.logger import logger
 from opening_fenix.core.translation import tr_ui
 
 def calculate_repertoire_statistics(
     repo_name: str, 
     is_test: Optional[bool] = None, 
-    elo_range: Optional[str] = None
+    elo_range: Optional[str] = None,
+    profile_name: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Computes comprehensive statistics for a repertoire:
@@ -22,8 +24,9 @@ def calculate_repertoire_statistics(
     - 1-step opponent coverage curve (Move 1, Move 2, Move 3...)
     """
     db_path = get_repertoire_db_path(repo_name, is_test)
+    prof_data = get_profile_box_statistics(repo_name, profile_name, is_test) if profile_name else None
     if not os.path.exists(db_path):
-        return _empty_stats_result(repo_name)
+        return _empty_stats_result(repo_name, profile_stats=prof_data)
 
     try:
         with sqlite3.connect(db_path, timeout=10) as conn:
@@ -132,7 +135,8 @@ def calculate_repertoire_statistics(
                     scope={"name": tr_ui("stats.scope_full", "Gesamtes Repertoire"), "global_freq": 100.0, "is_specialized": False},
                     soundness={"score": 90, "evaluated_count": 0},
                     effectiveness={"win_rate": 50.0, "grade": 80},
-                    coverage_curve=[]
+                    coverage_curve=[],
+                    profile_stats=prof_data
                 )
 
             root_id, root_fen = root_row
@@ -433,12 +437,13 @@ def calculate_repertoire_statistics(
                     "win_rate": eff_win_rate,
                     "grade": eff_grade
                 },
-                coverage_curve=coverage_by_move
+                coverage_curve=coverage_by_move,
+                profile_stats=prof_data
             )
 
     except Exception as e:
         logger.error(f"Error calculating repertoire statistics for {repo_name}: {e}", exc_info=True)
-        return _empty_stats_result(repo_name)
+        return _empty_stats_result(repo_name, profile_stats=prof_data)
 
 def _get_learnability_rating(total_positions: int, l1_count: int) -> Dict[str, Any]:
     """Evaluates the memory footprint and learnability of the repertoire."""
@@ -477,7 +482,8 @@ def _build_stats_result(
     scope: Dict[str, Any],
     soundness: Dict[str, Any],
     effectiveness: Dict[str, Any],
-    coverage_curve: List[Dict[str, Any]]
+    coverage_curve: List[Dict[str, Any]],
+    profile_stats: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
     return {
         "repo_name": repo_name,
@@ -495,10 +501,11 @@ def _build_stats_result(
         "scope": scope,
         "soundness": soundness,
         "effectiveness": effectiveness,
-        "coverage_curve": coverage_curve
+        "coverage_curve": coverage_curve,
+        "profile_stats": profile_stats
     }
 
-def _empty_stats_result(repo_name: str) -> Dict[str, Any]:
+def _empty_stats_result(repo_name: str, profile_stats: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
         "repo_name": repo_name,
         "color": "w",
@@ -508,5 +515,143 @@ def _empty_stats_result(repo_name: str) -> Dict[str, Any]:
         "scope": {"name": tr_ui("stats.scope_full", "Gesamtes Repertoire"), "global_freq": 100.0, "is_specialized": False},
         "soundness": {"score": 100, "evaluated_count": 0},
         "effectiveness": {"win_rate": 50.0, "grade": 80},
-        "coverage_curve": []
+        "coverage_curve": [],
+        "profile_stats": profile_stats
     }
+
+def get_available_profiles() -> List[str]:
+    """Returns a sorted list of all existing user profiles."""
+    profiles_dir = os.path.join(get_user_dir(), "profiles")
+    if not os.path.exists(profiles_dir):
+        return ["Default"]
+    
+    profiles = set()
+    try:
+        for f in os.listdir(profiles_dir):
+            if f.endswith(".db"):
+                profiles.add(f[:-3])
+            elif f.endswith(".json") and not f.endswith("_settings.json"):
+                profiles.add(f[:-5])
+            elif f.endswith("_settings.json"):
+                profiles.add(f[:-14])
+    except Exception as e:
+        logger.warning(f"Error reading profiles directory: {e}")
+
+    filtered = [p for p in profiles if p and not p.startswith(".")]
+    if not filtered:
+        return ["Default"]
+    return sorted(filtered, key=lambda s: s.lower())
+
+def get_profile_box_statistics(
+    repo_name: str, 
+    profile_name: str, 
+    is_test: Optional[bool] = None,
+    selected_level: Optional[int] = None
+) -> Dict[str, Any]:
+    """
+    Computes accurate Leitner box statistics for a specific user profile and repertoire:
+    - Box distribution (Boxes 1 to 7) for reachable player moves
+    - Due moves count (per box and total)
+    - Unlearned moves count (total trainable player moves - learned moves)
+    - Total trainable moves and mastery percentage
+    - Supports level filtering (e.g. Level 1, Level 2, or All Levels)
+    - Includes current profile Elo rating and active level
+    """
+    from opening_fenix.core.services.training_service import DEFAULT_BOX_INTERVALS, TrainingManager
+    from opening_fenix.core.services.repertoire_service import RepertoireManager
+
+    # 1. Intervals lookup for Boxes 1-7
+    box_intervals = {}
+    box_intervals_short = {}
+    custom_intervals = {}
+
+    settings_path = os.path.join(get_user_dir(), "profiles", f"{profile_name}_settings.json")
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                p_cfg = json.load(f)
+                custom_intervals = p_cfg.get("custom_intervals", {})
+        except Exception:
+            pass
+
+    for b in range(1, 8):
+        val, unit = (1, "days")
+        if str(b) in custom_intervals:
+            entry = custom_intervals[str(b)]
+            val = entry.get("value", 1)
+            unit = entry.get("unit", "days")
+        elif b in custom_intervals:
+            entry = custom_intervals[b]
+            val = entry.get("value", 1)
+            unit = entry.get("unit", "days")
+        else:
+            val, unit = DEFAULT_BOX_INTERVALS["standard"].get(b, (1, "days"))
+
+        short_u = "m" if "min" in unit else ("h" if "hour" in unit or "stund" in unit else ("mo" if "month" in unit or "monat" in unit else "d"))
+        box_intervals_short[b] = f"{val}{short_u}"
+        box_intervals[b] = f"{val} {unit}"
+
+    # Default fallback values
+    box_counts = {i: 0 for i in range(1, 8)}
+    box_due_counts = {i: 0 for i in range(1, 8)}
+    total_trainable = 0
+    total_learned = 0
+    total_unlearned = 0
+    total_due = 0
+    learned_pct = 0.0
+    active_level = 1
+    current_elo = 800
+    available_levels = []
+
+    try:
+        rm = RepertoireManager()
+        rm.set_active_repertoire(repo_name, is_test=is_test)
+        tm = TrainingManager(profile_name, rm)
+
+        active_level = tm.get_active_level()
+        current_elo = tm.get_current_elo(use_cache=False)
+
+        # Get level metadata with trainable move counts
+        cached_levels = tm._get_cached_levels()
+        for lvl in cached_levels:
+            ord_num = lvl.get('order', 1)
+            m_cnt = len(tm._moves_by_level.get(ord_num, [])) if tm._moves_by_level else 0
+            available_levels.append({
+                "order": ord_num,
+                "name": lvl.get("name", f"Level {ord_num}"),
+                "target_elo": lvl.get("target_elo", 1500),
+                "moves": m_cnt
+            })
+
+        box_stats = tm.get_box_statistics(max_lvl=selected_level)
+        total_trainable = box_stats.get("total_trainable", 0)
+        total_learned = box_stats.get("total_learned", 0)
+        total_unlearned = box_stats.get("total_unlearned", 0)
+        total_due = box_stats.get("total_due", 0)
+        learned_pct = box_stats.get("learned_pct", 0.0)
+        box_counts = box_stats.get("box_counts", box_counts)
+        box_due_counts = box_stats.get("box_due_counts", box_due_counts)
+
+        tm.close()
+        rm.close()
+    except Exception as e:
+        logger.warning(f"Error computing box statistics for '{repo_name}' / profile '{profile_name}': {e}")
+
+    return {
+        "repo_name": repo_name,
+        "profile_name": profile_name,
+        "selected_level": selected_level,
+        "active_level": active_level,
+        "rating": current_elo,
+        "available_levels": available_levels,
+        "total_trainable": total_trainable,
+        "total_learned": total_learned,
+        "total_unlearned": total_unlearned,
+        "total_due": total_due,
+        "learned_pct": round(learned_pct, 1),
+        "box_counts": box_counts,
+        "box_due_counts": box_due_counts,
+        "box_intervals": box_intervals,
+        "box_intervals_short": box_intervals_short
+    }
+

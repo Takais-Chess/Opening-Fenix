@@ -756,6 +756,11 @@ def test_transposition_tab_unified_layout(creator_window, qapp):
     assert hasattr(creator_window, "btn_deep_transpos")
     assert hasattr(creator_window, "combo_transpos_depth")
     assert hasattr(creator_window, "btn_global_transpos_scan")
+    assert hasattr(creator_window, "btn_show_unadded")
+    assert hasattr(creator_window, "btn_recheck_unadded")
+    assert creator_window.btn_show_unadded.text() == "🔄"
+    tooltip = creator_window.btn_show_unadded.toolTip()
+    assert "Nicht übernommene Züge anzeigen" in tooltip or "Show Unadded Moves" in tooltip
 
     # Verify unified 5-column table
     assert hasattr(creator_window, "table_transpositions")
@@ -769,6 +774,136 @@ def test_transposition_tab_unified_layout(creator_window, qapp):
 
     # Verify table_global_transpositions alias for backward compatibility
     assert creator_window.table_global_transpositions is creator_window.table_transpositions
+
+
+def test_recheck_unadded_button_state_and_thread_launch(creator_window, monkeypatch, qapp):
+    """Test that btn_recheck_unadded / btn_show_unadded toggles, persists to config, and passes flag to HoleFinderThread."""
+    assert hasattr(creator_window, "btn_show_unadded")
+    assert creator_window.btn_show_unadded.isCheckable()
+    assert creator_window.btn_recheck_unadded is creator_window.btn_show_unadded
+
+    # Toggle to True
+    creator_window.btn_show_unadded.setChecked(True)
+    qapp.processEvents()
+    assert creator_window.config.get("transpos_recheck_unadded") is True
+
+    # Capture HoleFinderThread init args
+    captured_kwargs = {}
+    from opening_fenix.core.threads import HoleFinderThread
+    orig_init = HoleFinderThread.__init__
+    def mock_init(self, *args, **kwargs):
+        captured_kwargs.update(kwargs)
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(HoleFinderThread, "__init__", mock_init)
+    monkeypatch.setattr(HoleFinderThread, "start", lambda *args, **kwargs: None)
+
+    creator_window.run_global_transpos_scan()
+    assert captured_kwargs.get("recheck_unadded") is True
+
+    # Toggle to False
+    creator_window.btn_show_unadded.setChecked(False)
+    qapp.processEvents()
+    assert creator_window.config.get("transpos_recheck_unadded") is False
+
+    creator_window.run_global_transpos_scan()
+    assert captured_kwargs.get("recheck_unadded") is False
+
+
+def test_show_unadded_cached_moves_lifecycle(creator_window, qapp):
+    """Test that show unadded moves button:
+    1. Defaults to unchecked and does not display unadded moves automatically.
+    2. Instantly loads and displays saved moves from metadata when toggled ON.
+    3. Hides them when toggled OFF.
+    4. Automatically prunes moves that have already been added to the repertoire.
+    5. Saves pruned cache on move addition.
+    """
+    assert hasattr(creator_window, "btn_show_unadded")
+    btn = creator_window.btn_show_unadded
+    assert not btn.isChecked()
+    assert len(creator_window._global_transpos_results) == 0
+
+    assert creator_window.backend is not None
+    assert creator_window.backend.session is not None
+
+    fen1 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    fen2 = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+
+    test_unadded = [
+        {
+            "fen": fen1,
+            "target_fen": fen2,
+            "move_san": "c5",
+            "path_sans": ["c5"],
+            "path_ucis": ["c7c5"],
+            "depth": 1,
+            "type": "direct",
+            "turn": "opponent",
+            "priority_score": 0.08,
+            "pos_prio": 0.08,
+            "popularity": 8.0,
+        },
+        {
+            "fen": fen1,
+            "target_fen": "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+            "move_san": "e5",
+            "path_sans": ["e5"],
+            "path_ucis": ["e7e5"],
+            "depth": 1,
+            "type": "direct",
+            "turn": "opponent",
+            "priority_score": 0.12,
+            "pos_prio": 0.12,
+            "popularity": 12.0,
+        }
+    ]
+
+    # Save to metadata cache
+    creator_window._save_cached_transpositions(test_unadded)
+
+    # Verify that before clicking button, results are still not loaded into UI
+    assert len(creator_window._global_transpos_results) == 0
+
+    # Toggle ON -> loads cached moves immediately without computing anything
+    btn.setChecked(True)
+    qapp.processEvents()
+
+    assert len(creator_window._global_transpos_results) == 2
+    # Verify table has separator and rows
+    has_separator = False
+    for r in range(creator_window.table_transpositions.rowCount()):
+        it = creator_window.table_transpositions.item(r, 0)
+        if it and it.data(Qt.ItemDataRole.UserRole) == "__separator__":
+            has_separator = True
+            break
+    assert has_separator
+
+    # Toggle OFF -> hides unadded moves
+    btn.setChecked(False)
+    qapp.processEvents()
+    assert len(creator_window._global_transpos_results) == 0
+
+    # Re-toggle ON -> loads them back
+    btn.setChecked(True)
+    qapp.processEvents()
+    assert len(creator_window._global_transpos_results) == 2
+
+    # Add one transposition (c5) to Level 1
+    c5_item = creator_window._global_transpos_results[0]
+    creator_window.add_transposition_to_level(c5_item, level_order=1)
+    qapp.processEvents()
+
+    # Now only 1 unadded move remains in _global_transpos_results and database
+    assert len(creator_window._global_transpos_results) == 1
+    assert creator_window._global_transpos_results[0]["move_san"] == "e5"
+
+    loaded_from_db = creator_window._load_cached_transpositions()
+    assert len(loaded_from_db) == 1
+    assert loaded_from_db[0]["move_san"] == "e5"
+
+    # Reset
+    btn.setChecked(False)
+    qapp.processEvents()
 
 
 def test_global_transposition_quality_column_hidden_until_2m(creator_window, qapp):
@@ -919,7 +1054,7 @@ def test_transpos_depth_selector_and_move_number_formatting(creator_window, qapp
         "ply_depth": 0,
     }
     creator_window._add_hole_row(mock_hole_white, mode="holes")
-    assert creator_window.table_holes.item(0, 2).text() == "1.e4"
+    assert creator_window.table_holes.item(0, 1).text() == "1.e4"
 
     mock_hole_black = {
         "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
@@ -929,7 +1064,7 @@ def test_transpos_depth_selector_and_move_number_formatting(creator_window, qapp
         "ply_depth": 1,
     }
     creator_window._add_hole_row(mock_hole_black, mode="holes")
-    assert creator_window.table_holes.item(1, 2).text() == "1...c5"
+    assert creator_window.table_holes.item(1, 1).text() == "1...c5"
 
     # 2. table_global_transpositions formatting
     creator_window.table_global_transpositions.setRowCount(0)
@@ -1060,17 +1195,72 @@ def test_table_transpositions_click_highlights_move(creator_window, qapp):
 
 
 def test_transposition_header_responsive_layout(creator_window, qapp):
-    """Verify that transpositions tab headers have word wrap enabled and compact layout."""
+    """Verify that transpositions tab status has single-line layout to prevent text clipping,
+    show unadded button matches scan all height, and column 4 is compact."""
     assert hasattr(creator_window, "lbl_transpos_status")
-    assert creator_window.lbl_transpos_status.wordWrap() is True
+    assert creator_window.lbl_transpos_status.wordWrap() is False
 
     assert hasattr(creator_window, "lbl_global_transpos_status")
-    assert creator_window.lbl_global_transpos_status.wordWrap() is True
+    assert creator_window.lbl_global_transpos_status.wordWrap() is False
 
     # Card bottom should have minimum width 0 to prevent pushing the splitter
     card_bot = creator_window.table_global_transpositions.parentWidget()
     assert card_bot is not None
     assert card_bot.minimumWidth() == 0
+
+    # Verify show unadded button height matches scan all button
+    assert creator_window.btn_show_unadded.minimumHeight() == creator_window.btn_global_transpos_scan.minimumHeight()
+    
+    # Test active and inactive styles for show unadded button
+    creator_window.btn_show_unadded.setChecked(True)
+    qapp.processEvents()
+    assert "#f39c12" in creator_window.btn_show_unadded.styleSheet()
+
+    creator_window.btn_show_unadded.setChecked(False)
+    qapp.processEvents()
+    assert "GlassPill" in creator_window.btn_show_unadded.property("class")
+
+    # Column 4 width should be compact (less than 200px for typical repertoire levels)
+    col4_w = creator_window.table_transpositions.columnWidth(4)
+    assert col4_w < 200, f"Column 4 width ({col4_w}px) is too wide"
+
+
+def test_transposition_buttons_auto_shrink_and_tooltip_style(creator_window, qapp):
+    """Verify that transposition action buttons are AutoShrinkPillButton instances,
+    scale font down to 50% when constrained, and tooltips have white background."""
+    from opening_fenix.creator.creator_window import AutoShrinkPillButton, ElidedStatusLabel
+    from PyQt6.QtWidgets import QToolTip
+    from PyQt6.QtCore import QPoint
+
+    assert isinstance(creator_window.btn_deep_transpos, AutoShrinkPillButton)
+    assert isinstance(creator_window.btn_global_transpos_scan, AutoShrinkPillButton)
+    assert isinstance(creator_window.btn_add_all_1move, AutoShrinkPillButton)
+
+    # Test dynamic font reduction down to 50%
+    btn = creator_window.btn_deep_transpos
+    base_sz = btn._base_size
+    min_sz = btn._min_size
+    assert min_sz <= int(base_sz * 0.5) + 1
+
+    # Simulate narrow container
+    btn.resize(50, 28)
+    btn._recalculate_font()
+    assert btn._current_size < base_sz
+    assert btn._current_size >= min_sz
+
+    # Verify status label tooltip has light theme styling (white background, not black)
+    status_lbl = creator_window.lbl_transpos_status
+    assert isinstance(status_lbl, ElidedStatusLabel)
+    status_lbl.setText("Scan running... (Depth 25)")
+    status_lbl.setStyleSheet("background-color: rgba(0, 0, 0, 0.05); color: #555555; font-weight: bold;")
+    qapp.processEvents()
+
+    QToolTip.showText(QPoint(100, 100), "Scan running... (Depth 25)", status_lbl)
+    qapp.processEvents()
+    tip = next((t for t in qapp.topLevelWidgets() if t.objectName() == "qtooltip_label"), None)
+    if tip:
+        assert tip.palette().color(tip.palette().ColorRole.Window).name() == "#ffffff"
+        assert tip.palette().color(tip.palette().ColorRole.Text).name() == "#3e2723"
 
 
 def test_board_auto_adjust_preserves_square_on_resize(creator_window, qapp):
@@ -1514,9 +1704,9 @@ def test_level_buttons_not_squished_and_column_interactive(creator_window, qapp)
         text_adv = btn.fontMetrics().horizontalAdvance(btn.text())
         assert btn.minimumWidth() >= text_adv + 10
 
-    # Column 4 width must be ample (>= 200px)
+    # Column 4 width must be ample (>= 120px)
     creator_window._adjust_transposition_table_columns()
-    assert creator_window.table_transpositions.columnWidth(4) >= 200
+    assert creator_window.table_transpositions.columnWidth(4) >= 120
 
 
 def test_global_transposition_progress_updates_status(creator_window, qapp):
@@ -1760,6 +1950,398 @@ def test_add_all_1move_transpositions_none_found(creator_window, qapp, monkeypat
     # Fast scan will find 0 transpositions on an empty dummy repo
     creator_window.add_all_1move_transpositions()
     assert len(info_called) == 1 or "Keine" in creator_window.lbl_transpos_status.text() or "No" in creator_window.lbl_transpos_status.text()
+
+
+def test_global_transposition_click_preserves_scroll_and_selection(creator_window, qapp):
+    """Verify clicking a move near the bottom of the transposition table does not jump to row 0 and preserves selection."""
+    creator_window.tabs.setCurrentWidget(creator_window.tab_transpositions)
+    qapp.processEvents()
+
+    # Create 25 mock global items
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_items = []
+    for i in range(25):
+        mock_items.append({
+            "fen": start_fen,
+            "target_fen": f"rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+            "move_san": f"move_{i}",
+            "path_sans": [f"m{i}"],
+            "path_ucis": ["c7c5"],
+            "depth": 1,
+            "type": "transposition_1",
+            "priority_score": 0.1,
+            "pos_prio": 0.1,
+        })
+
+    creator_window._on_global_transpos_scan_finished(mock_items, mode="transpositions")
+    qapp.processEvents()
+
+    # Verify rows exist (1 separator + 25 items = 26 rows)
+    assert creator_window.table_transpositions.rowCount() == 26
+
+    # Scroll down and record scroll position (QTableWidget default scroll mode scrolls by row)
+    max_scroll = creator_window.table_transpositions.verticalScrollBar().maximum()
+    target_scroll = min(15, max_scroll)
+    creator_window.table_transpositions.verticalScrollBar().setValue(target_scroll)
+    assert creator_window.table_transpositions.verticalScrollBar().value() == target_scroll
+
+    # Click a move near the bottom (Row 20)
+    item_row_20 = creator_window.table_transpositions.item(20, 0)
+    creator_window.on_transposition_clicked(item_row_20)
+    qapp.processEvents()
+
+    # 1. Selected row must NOT jump to row 0! It must remain on the clicked global row!
+    sel_rows = creator_window.table_transpositions.selectionModel().selectedRows()
+    assert len(sel_rows) == 1
+    assert sel_rows[0].row() == 20
+
+    # 2. Scrollbar must NOT have jumped to 0!
+    assert creator_window.table_transpositions.verticalScrollBar().value() == target_scroll
+
+
+def test_transposition_cache_invalidation_and_origin_reason(creator_window, qapp):
+    """Verify that level changes invalidate transposition caches and that reason reflects origin vs target."""
+    from opening_fenix.core.models import Position, Move, RepertoireMove, RepertoireLevel
+
+    session = creator_window.backend.session
+
+    session.query(RepertoireLevel).delete()
+    session.add(RepertoireLevel(name="Level 1", order=1, target_elo=1500))
+    session.add(RepertoireLevel(name="Level 2", order=2, target_elo=1800))
+    session.add(RepertoireLevel(name="Level 3", order=3, target_elo=2000))
+    session.commit()
+
+    # Create root and origin position reached via Level 3 move
+    clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+    root_pos = session.query(Position).filter_by(fen=clean_root).first()
+    if not root_pos:
+        root_pos = Position(fen=clean_root)
+        session.add(root_pos)
+        session.flush()
+
+    orig_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    clean_orig = " ".join(orig_fen.split()[:4])
+    orig_pos = Position(fen=clean_orig)
+    session.add(orig_pos)
+    session.flush()
+
+    m_in = Move(from_position_id=root_pos.id, to_position_id=orig_pos.id, uci="e2e4", san="e4")
+    session.add(m_in)
+    session.flush()
+    rm_in = RepertoireMove(move_id=m_in.id, level=3, is_active=True)
+    session.add(rm_in)
+    session.commit()
+
+    # Target position has Level 2 outgoing move
+    tgt_fen = "rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"
+    clean_tgt = " ".join(tgt_fen.split()[:4])
+    tgt_pos = Position(fen=clean_tgt)
+    session.add(tgt_pos)
+    session.flush()
+
+    next_pos = Position(fen="rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -")
+    session.add(next_pos)
+    session.flush()
+    m_out = Move(from_position_id=tgt_pos.id, to_position_id=next_pos.id, uci="b8c6", san="Nc6")
+    session.add(m_out)
+    session.flush()
+    rm_out = RepertoireMove(move_id=m_out.id, level=2, is_active=True)
+    session.add(rm_out)
+    session.commit()
+
+    creator_window.clear_transposition_caches()
+
+    data = {
+        "type": "direct",
+        "search_fen": orig_fen,
+        "target_fen": tgt_fen,
+        "move_uci": "g1f3",
+        "move_san": "Nf3",
+        "depth": 1,
+    }
+
+    # 1. Origin reachability is 3, target move is 2 -> base level is max(3, 2) = 3
+    # Since origin (3) > target (2), reason MUST say origin position match, NOT target match!
+    order1, reason1 = creator_window.suggest_transposition_level(data)
+    assert order1 == 3
+    assert "Ausgangsstellung" in reason1 or "origin position" in reason1
+    assert "Zielstellung" not in reason1 and "target position" not in reason1
+
+    # 2. Verify cached
+    cache_key = (clean_orig, clean_tgt, "g1f3")
+    assert cache_key in creator_window._transpos_suggestion_cache
+
+    # 3. Now update the incoming move to Level 2
+    creator_window.backend.update_move_level(m_in.id, 2)
+    # Backend update_move_level calls clear_cache(), which automatically invalidates window caches!
+    assert cache_key not in creator_window._transpos_suggestion_cache
+    assert clean_tgt not in getattr(creator_window, "_target_level_cache", {})
+
+    # 4. Now suggest again -> should immediately reflect Level 2!
+    order2, reason2 = creator_window.suggest_transposition_level(data)
+    assert order2 == 2
+    # Since l_target (2) >= l_origin (2), reason reports target match
+    assert "Zielstellung" in reason2 or "target position" in reason2
+
+
+def test_search_tabs_level_dropdown_sync_on_settings_close_and_tab_switch(creator_window, qapp):
+    """Verify that Hole Finder and Kontrolle level dropdowns synchronize automatically on settings close and tab switch."""
+    from opening_fenix.core.models import RepertoireLevel
+
+    session = creator_window.backend.session
+    session.query(RepertoireLevel).delete()
+    session.add(RepertoireLevel(name="Basis", order=1, target_elo=1500))
+    session.add(RepertoireLevel(name="Fortgeschritten", order=2, target_elo=1800))
+    session.commit()
+
+    # Initial slot sync
+    creator_window.init_management_slots()
+    qapp.processEvents()
+
+    # Check initial dropdown items
+    hole_orders = [creator_window.combo_hole_level.itemData(i) for i in range(1, creator_window.combo_hole_level.count())]
+    assert hole_orders == [1, 2]
+
+    overhaul_orders = [creator_window.combo_overhaul_level.itemData(i) for i in range(1, creator_window.combo_overhaul_level.count())]
+    assert overhaul_orders == [1, 2]
+
+    # Select Level 2 in combo_hole_level
+    idx_l2 = creator_window.combo_hole_level.findData(2)
+    assert idx_l2 != -1
+    creator_window.combo_hole_level.setCurrentIndex(idx_l2)
+    assert creator_window.combo_hole_level.currentData() == 2
+
+    # Simulate user adding Level 3 in settings
+    session.add(RepertoireLevel(name="Meister", order=3, target_elo=2200))
+    session.commit()
+
+    # Closing settings should immediately refresh dropdowns and preserve active selection (Level 2)
+    creator_window._on_settings_closed()
+    qapp.processEvents()
+
+    new_hole_orders = [creator_window.combo_hole_level.itemData(i) for i in range(1, creator_window.combo_hole_level.count())]
+    assert new_hole_orders == [1, 2, 3]
+    assert creator_window.combo_hole_level.currentData() == 2  # Selection preserved!
+
+    new_overhaul_orders = [creator_window.combo_overhaul_level.itemData(i) for i in range(1, creator_window.combo_overhaul_level.count())]
+    assert new_overhaul_orders == [1, 2, 3]
+
+    # Simulate level rename in database
+    lvl3 = session.query(RepertoireLevel).filter_by(order=3).first()
+    lvl3.name = "Experte"
+    session.commit()
+
+    # Switching to Holes tab should detect the rename and sync dropdowns
+    idx_holes = creator_window.tabs.indexOf(creator_window.tab_holes)
+    if idx_holes != -1:
+        creator_window._on_tab_changed(idx_holes)
+        qapp.processEvents()
+        assert "Experte" in creator_window.combo_hole_level.itemText(3)
+
+
+def test_hole_recommendation_settings_dialog(creator_window, qapp):
+    """Test configuring level recommendation rules in HoleRecommendationSettingsDialog."""
+    from opening_fenix.gui.dialogs.hole_recommendation_dialog import HoleRecommendationSettingsDialog
+    saved_rules = {}
+    def on_save(rules):
+        saved_rules.update(rules)
+
+    dlg = HoleRecommendationSettingsDialog(
+        parent=creator_window,
+        backend=creator_window.backend,
+        current_rules={
+            "max_engine_loss_enabled": True,
+            "max_engine_loss": 2.0,
+            "level_thresholds": {"1": 1.0, "2": 0.5}
+        },
+        on_save_callback=on_save
+    )
+    assert 1 in dlg.level_spins
+    assert dlg.level_spins[1].value() == 1.0
+    assert dlg.chk_loss.isChecked() is True
+    assert dlg.spin_loss.value() == 2.0
+
+    # Modify settings
+    dlg.level_spins[1].setValue(3.5)
+    dlg.spin_loss.setValue(1.8)
+    dlg.chk_loss.setChecked(False)
+
+    # Save
+    dlg.save()
+    assert saved_rules["max_engine_loss_enabled"] is False
+    assert saved_rules["max_engine_loss"] == 1.8
+    assert saved_rules["level_thresholds"]["1"] == 3.5
+    dlg.close()
+
+
+def test_suggest_hole_level_and_cell_creation(creator_window, qapp):
+    """Test automatic level recommendations and level cell generation with ⭐ marker."""
+    data_high_pop = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "popularity": 5.0,
+        "eval_loss": 0.10,
+        "move_san": "c5",
+        "move_uci": "c7c5",
+    }
+    lvl, reason = creator_window.suggest_hole_level(data_high_pop)
+    assert lvl == 1
+
+    data_bad_move = {
+        "fen": "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
+        "popularity": 8.0,
+        "eval_loss": 2.50,
+        "move_san": "h5",
+        "move_uci": "h7h5",
+    }
+    lvl_bad, reason_bad = creator_window.suggest_hole_level(data_bad_move)
+    levels = creator_window.backend.get_repertoire_levels()
+    max_order = max(l["order"] for l in levels) if levels else 1
+    assert lvl_bad == max_order
+
+    cell = creator_window._create_hole_level_cell(data_high_pop)
+    assert cell is not None
+    buttons = cell.findChildren(QPushButton)
+    assert any("⭐" in b.text() for b in buttons)
+
+
+def test_add_unanalyzed_move_to_level_action(creator_window, qapp):
+    """Test adding an unanalyzed opponent move to a level and switching to Analysis tab."""
+    start_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"
+    mock_hole = {
+        "fen": start_fen,
+        "move_san": "c5",
+        "move_uci": "c7c5",
+        "popularity": 45.0,
+        "eval_loss": 0.05,
+    }
+    creator_window.combo_hole_mode.setCurrentIndex(creator_window.combo_hole_mode.findData("holes"))
+    creator_window.table_holes.setRowCount(0)
+    creator_window._add_hole_row(mock_hole, mode="holes")
+    qapp.processEvents()
+
+    assert creator_window.table_holes.rowCount() == 1
+
+    # Add move to Level 1
+    creator_window.add_unanalyzed_move_to_level(mock_hole, level_order=1)
+    qapp.processEvents()
+
+    # Row must be removed from table_holes
+    assert creator_window.table_holes.rowCount() == 0
+
+    # Tab must switch to tab_analysis
+    assert creator_window.tabs.currentWidget() == creator_window.tab_analysis
+
+
+def test_go_to_unanswered_hole_action(creator_window, qapp):
+    """Test clicking action for an unanswered move positions board and switches to Analysis tab."""
+    leaf_fen = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"
+    mock_unanswered = {
+        "fen": leaf_fen,
+        "last_move_san": "c5",
+        "last_move_uci": "c7c5",
+        "status_key": "our_move_missing",
+        "popularity": 50.0,
+    }
+    creator_window.combo_hole_mode.setCurrentIndex(creator_window.combo_hole_mode.findData("unanswered"))
+    # Verify Min. Popularity controls are hidden in unanswered mode
+    assert not creator_window.combo_hole_threshold.isVisible()
+    assert not creator_window.lbl_hole_threshold.isVisible()
+
+    creator_window.table_holes.setRowCount(0)
+    creator_window._add_hole_row(mock_unanswered, mode="unanswered")
+    qapp.processEvents()
+
+    assert creator_window.table_holes.rowCount() == 1
+    # Verify Status and Pop % columns are removed: exactly 2 columns (Letzter Zug, Aktion)
+    assert creator_window.table_holes.columnCount() == 2
+    assert "c5" in creator_window.table_holes.item(0, 0).text()
+    assert creator_window.table_holes.cellWidget(0, 1) is not None
+
+    # Call go_to_unanswered_hole
+    creator_window.go_to_unanswered_hole(mock_unanswered)
+    qapp.processEvents()
+
+    clean_curr = " ".join(creator_window.board_widget.board.fen().split()[:4])
+    assert clean_curr == leaf_fen
+    assert creator_window.tabs.currentWidget() == creator_window.tab_analysis
+    assert creator_window.board_widget.last_move == chess.Move.from_uci("c7c5")
+
+
+def test_background_enrichment_queue_sequential(creator_window, qtbot, monkeypatch):
+    """Verify that multiple rapid trigger_background_enrichment calls are queued and processed sequentially."""
+    created_threads = []
+
+    class MockThread:
+        def __init__(self, repo_name, fen, cat, ep, depth):
+            self.fen = fen
+            self._running = True
+            from PyQt6.QtCore import pyqtSignal, QObject
+            class Emitter(QObject):
+                sig = pyqtSignal(bool, str)
+            self._emitter = Emitter()
+            self.finished_signal = self._emitter.sig
+            created_threads.append(self)
+
+        def isRunning(self):
+            return self._running
+
+        def start(self, priority=None):
+            pass
+
+        def finish(self, success=True, msg=""):
+            self._running = False
+            self.finished_signal.emit(success, msg)
+
+    monkeypatch.setattr("opening_fenix.creator.creator_window.BackgroundEnrichmentThread", MockThread)
+
+    fens = [
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -",
+        "rnbqkbnr/pp2pppp/3p4/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -",
+    ]
+
+    # Rapidly trigger 4 enrichments
+    for f in fens:
+        creator_window.trigger_background_enrichment(f)
+
+    # Only 1 thread should be active initially, remaining 3 in queue
+    assert len(created_threads) == 1
+    assert len(creator_window.enrichment_queue) == 3
+
+    # Finish thread 1
+    created_threads[0].finish()
+    qtbot.wait(100)
+
+    # Thread 2 should now be running
+    assert len(created_threads) == 2
+    assert len(creator_window.enrichment_queue) == 2
+
+    # Finish thread 2
+    created_threads[1].finish()
+    qtbot.wait(100)
+
+    # Thread 3 should now be running
+    assert len(created_threads) == 3
+    assert len(creator_window.enrichment_queue) == 1
+
+    # Finish thread 3
+    created_threads[2].finish()
+    qtbot.wait(100)
+
+    # Thread 4 should now be running, queue empty
+    assert len(created_threads) == 4
+    assert len(creator_window.enrichment_queue) == 0
+
+    # Finish thread 4
+    created_threads[3].finish()
+    qtbot.wait(100)
+    assert len(creator_window.enrichment_threads) == 0
+
+
+
+
+
 
 
 

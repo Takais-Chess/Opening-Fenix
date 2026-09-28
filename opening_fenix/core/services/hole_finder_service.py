@@ -6,15 +6,17 @@ import subprocess
 import time
 import chess
 import chess.engine
+from typing import Optional, Callable, Dict, Any, List
 from sqlalchemy.orm import Session
-from opening_fenix.core.models import Position, Move, RepertoireMove, LichessData, Metadata
-from opening_fenix.core.db.database import DatabaseManager
+from opening_fenix.core.models import Position, Move, RepertoireMove, RepertoireLevel, LichessData, Metadata
+from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTLING_SANS
+from opening_fenix.core.services.engine_cache_service import EngineCacheService
 from opening_fenix.core.logger import logger
 
 def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                         engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
-                        depth=25, progress_callback=None):
+                        depth=18, progress_callback=None, recheck_unadded: bool = False):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -25,9 +27,25 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
     
     try:
         if mode == "holes":
-            return find_repertoire_holes(session, threshold, elo_range)
+            return find_repertoire_holes(
+                session, threshold, elo_range,
+                include_user_gaps=False,
+                engine_path=engine_path,
+                threads_count=threads_count,
+                depth=depth,
+                item_callback=item_callback,
+                cancel_check=cancel_check
+            )
+        elif mode == "unanswered":
+            return find_unanswered_moves(
+                session,
+                threshold=threshold,
+                cancel_check=cancel_check,
+                item_callback=item_callback,
+                progress_callback=progress_callback
+            )
         elif mode == "level_check":
-            return find_level_mismatches(session)
+            return find_level_mismatches(session, cancel_check=cancel_check)
         elif mode == "transpositions":
             return find_repertoire_transpositions(
                 session,
@@ -38,15 +56,24 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 cancel_check=cancel_check,
                 engine=engine,
                 depth=depth,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                recheck_unadded=recheck_unadded,
             )
         else:
-            return find_priority_mismatches(session, level, threshold, find_rare=find_rare)
+            return find_priority_mismatches(session, level, threshold, find_rare=find_rare, cancel_check=cancel_check)
     finally:
         session.close()
         db_manager.close()
 
-def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
+def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "high",
+                          include_user_gaps: bool = True,
+                          engine_path: Optional[str] = None,
+                          threads_count: int = 1,
+                          depth: int = 18,
+                          item_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                          cancel_check: Optional[Callable[[], bool]] = None,
+                          engine: Optional[Any] = None,
+                          cache_service: Optional[EngineCacheService] = None):
     """Ported logic from CreatorBackend.find_repertoire_holes"""
     threshold_val = threshold / 100.0
     
@@ -151,18 +178,16 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
             rep_moves = rep_moves_from.get(pid, [])
             
             # --- FEATURE: REPERTOIRE GAP DETECTION (User turn but no moves) ---
-            # These should show up regardless of threshold_val
+            # These should show up regardless of threshold_val when user gaps are requested
             if is_user and not rep_moves:
-                if not is_exempt:
-                   holes.append({
+                if include_user_gaps and not is_exempt:
+                    holes.append({
                         "fen": clean_fen,
                         "move_san": "—",
                         "type": "repertoire_gap",
                         "popularity": p_reach * 100,
                         "ply_depth": d,
                     })
-                # We skip candidate move search if it's a gap (user should decide what to play first)
-                # or we can continue if we want to show Lichess suggestions too. 
 
             if p_reach < threshold_val:
                 continue
@@ -170,7 +195,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
             if is_user:
                 if not rep_moves:
                     # User candidate logic (Lichess suggestions)
-                    if not is_exempt:
+                    if include_user_gaps and not is_exempt:
                         lichess_moves = lichess_cache.get(clean_fen, {})
                         total_games = sum(v.get('total', 0) for v in lichess_moves.values())
                         if total_games > 0:
@@ -179,7 +204,6 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                                 p_move = move_total / total_games
                                 p_total = p_reach * p_move
                                 if p_total >= threshold_val:
-                                    # Calculate SAN if missing
                                     move_san = stats.get('san')
                                     if not move_san:
                                         try:
@@ -230,7 +254,6 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                                 break
                     else:
                         if p_total >= threshold_val and not is_exempt:
-                            # Calculate SAN if missing
                             move_san = stats.get('san')
                             if not move_san:
                                 try:
@@ -243,18 +266,307 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str):
                             holes.append({
                                 "fen": clean_fen,
                                 "move_san": move_san,
+                                "move_uci": norm_uci,
                                 "type": "opponent",
                                 "popularity": p_total * 100,
                                 "ply_depth": d,
+                                "eval_loss": None,
+                                "eval_loss_cp": None,
+                                "best_move_uci": None,
                             })
-    return sorted(holes, key=lambda x: x['popularity'], reverse=True)
 
-def find_level_mismatches(session: Session):
+    holes.sort(key=lambda x: x['popularity'], reverse=True)
+
+    # Engine loss evaluation & live streaming
+    if (engine or (engine_path and os.path.exists(engine_path))) and holes:
+        if cache_service is None:
+            cache_service = EngineCacheService()
+        active_engine = engine
+        creationflags = 0
+        if sys.platform == "win32":
+            creationflags = 0x08000000 | 0x00004000  # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS
+
+        fen_to_holes = collections.defaultdict(list)
+        for h in holes:
+            if h.get("move_uci"):
+                fen_to_holes[h["fen"]].append(h)
+
+        try:
+            for fen, f_holes in fen_to_holes.items():
+                if cancel_check and cancel_check():
+                    break
+                clean_fen = " ".join(fen.split(" ")[:4])
+
+                # Check Engine Cache first
+                cached_eval = cache_service.get_eval_data(clean_fen, min_depth=depth)
+                all_cached = False
+                if cached_eval and "moves" in cached_eval and cached_eval.get("best_score") is not None:
+                    all_cached = all(h.get("move_uci") in cached_eval["moves"] for h in f_holes)
+
+                if all_cached:
+                    best_score = cached_eval["best_score"]
+                    best_uci = cached_eval.get("best_uci")
+                    for h in f_holes:
+                        m_u = h.get("move_uci")
+                        score_m = cached_eval["moves"].get(m_u)
+                        if score_m is not None and best_score is not None:
+                            loss_cp = max(0, best_score - score_m)
+                            h["eval_loss"] = round(loss_cp / 100.0, 2)
+                            h["eval_loss_cp"] = loss_cp
+                        h["best_move_uci"] = best_uci
+                        if item_callback:
+                            item_callback(h)
+                    continue
+
+                # Launch engine on demand
+                if active_engine is None:
+                    try:
+                        active_engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
+                        if "Threads" in active_engine.options:
+                            active_engine.configure({"Threads": threads_count})
+                    except Exception as e:
+                        logger.warning(f"Could not start engine for hole eval: {e}")
+                        break
+
+                try:
+                    board = chess.Board(clean_fen)
+                except Exception:
+                    continue
+
+                legal_count = board.legal_moves.count()
+                if legal_count == 0:
+                    continue
+
+                mpv_count = min(5, legal_count)
+                try:
+                    mpv_infos = active_engine.analyse(
+                        board,
+                        chess.engine.Limit(depth=depth),
+                        multipv=mpv_count
+                    )
+                except Exception as e:
+                    logger.debug(f"Engine analysis error on FEN {clean_fen}: {e}")
+                    continue
+
+                if not isinstance(mpv_infos, list):
+                    mpv_infos = [mpv_infos]
+
+                best_uci = None
+                best_score = None
+                move_scores = {}
+                for info_item in mpv_infos:
+                    pv = info_item.get("pv", [])
+                    if pv:
+                        m_u = pv[0].uci().lower()
+                        s_obj = info_item.get("score")
+                        s = s_obj.relative.score(mate_score=10000) if s_obj else None
+                        move_scores[m_u] = s
+                        if best_uci is None:
+                            best_uci = m_u
+                            best_score = s
+                        elif s is not None and (best_score is None or s > best_score):
+                            best_score = s
+                            best_uci = m_u
+
+                # Targeted root_moves analysis for candidate moves not in MultiPV
+                for h in f_holes:
+                    if cancel_check and cancel_check():
+                        break
+                    m_u = h.get("move_uci", "").lower()
+                    if m_u and m_u not in move_scores:
+                        try:
+                            m_obj = chess.Move.from_uci(m_u)
+                            if m_obj in board.legal_moves:
+                                res = active_engine.analyse(
+                                    board,
+                                    chess.engine.Limit(depth=depth),
+                                    root_moves=[m_obj]
+                                )
+                                if res and isinstance(res, list) and res[0].get("score"):
+                                    s_val = res[0]["score"].relative.score(mate_score=10000)
+                                    move_scores[m_u] = s_val
+                        except Exception:
+                            pass
+
+                if best_uci:
+                    eval_payload = {
+                        "best_uci": best_uci,
+                        "best_score": best_score,
+                        "moves": move_scores,
+                    }
+                    try:
+                        cache_service.set_eval_data(clean_fen, depth, best_uci, eval_payload)
+                    except Exception:
+                        pass
+
+                for h in f_holes:
+                    m_u = h.get("move_uci", "").lower()
+                    score_m = move_scores.get(m_u)
+                    if score_m is not None and best_score is not None:
+                        loss_cp = max(0, best_score - score_m)
+                        h["eval_loss"] = round(loss_cp / 100.0, 2)
+                        h["eval_loss_cp"] = loss_cp
+                    h["best_move_uci"] = best_uci
+                    if item_callback:
+                        item_callback(h)
+        finally:
+            if active_engine and active_engine is not engine:
+                try:
+                    active_engine.quit()
+                except Exception:
+                    pass
+    elif item_callback:
+        for h in holes:
+            if cancel_check and cancel_check():
+                break
+            item_callback(h)
+
+    return holes
+
+def find_unanswered_moves(session: Session, threshold: float = 0.0,
+                          cancel_check: Optional[Callable[[], bool]] = None,
+                          item_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+                          progress_callback: Optional[Callable[[int, int, str], None]] = None) -> List[Dict[str, Any]]:
+    """
+    Finds positions where it is our turn and we have no move in the repertoire
+    (unanswered branches where our response is missing).
+    """
+    threshold_val = threshold / 100.0 if threshold > 0 else 0.0
+
+    m = session.query(Metadata).filter_by(key="color").first()
+    user_turn_char = m.value[0].lower() if (m and m.value) else 'w'
+
+    all_positions = session.query(Position).all()
+    id_to_fen = {p.id: p.fen for p in all_positions}
+
+    rep_moves_db = session.query(Move).join(
+        RepertoireMove, Move.id == RepertoireMove.move_id
+    ).filter(RepertoireMove.is_active == True).all()
+
+    rep_moves_from = collections.defaultdict(list)
+    for rm in rep_moves_db:
+        rep_moves_from[rm.from_position_id].append(rm)
+
+    exempt_fens = {
+        " ".join(row[0].split(" ")[:4])
+        for row in session.query(Position.fen).filter(Position.is_hole_exempt == True).all()
+    }
+
+    # Root position
+    sp = session.query(Position.id).filter(
+        Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+    ).first()
+    if not sp:
+        return []
+    root_id = sp[0]
+
+    reach_probs = {root_id: 1.0}
+    depth_map = {root_id: 0}
+    incoming_move_map = {}
+
+    bfs_queue = collections.deque([(root_id, 0)])
+    bfs_visited = set()
+    pos_by_depth = []
+
+    while bfs_queue:
+        if cancel_check and cancel_check():
+            return []
+        pid, d = bfs_queue.popleft()
+        if pid in bfs_visited:
+            continue
+        bfs_visited.add(pid)
+        if d > 150:
+            continue
+
+        while len(pos_by_depth) <= d:
+            pos_by_depth.append([])
+        pos_by_depth[d].append(pid)
+
+        nexts = rep_moves_from.get(pid, [])
+        for m_obj in nexts:
+            if m_obj.to_position_id:
+                if m_obj.to_position_id not in incoming_move_map:
+                    incoming_move_map[m_obj.to_position_id] = m_obj
+                if m_obj.to_position_id not in bfs_visited:
+                    bfs_queue.append((m_obj.to_position_id, d + 1))
+                    depth_map[m_obj.to_position_id] = d + 1
+
+    # Probability propagation
+    for d, depth_list in enumerate(pos_by_depth):
+        for pid in depth_list:
+            p_reach = reach_probs.get(pid, 0.0)
+            nexts = rep_moves_from.get(pid, [])
+            if nexts:
+                p_next = p_reach / len(nexts)
+                for m_obj in nexts:
+                    if m_obj.to_position_id:
+                        reach_probs[m_obj.to_position_id] = reach_probs.get(m_obj.to_position_id, 0.0) + p_next
+
+    results = []
+    for d, depth_list in enumerate(pos_by_depth):
+        for pid in depth_list:
+            if cancel_check and cancel_check():
+                break
+            fen = id_to_fen.get(pid)
+            if not fen:
+                continue
+            clean_fen = " ".join(fen.split(" ")[:4])
+            if clean_fen in exempt_fens:
+                continue
+
+            parts = clean_fen.split(" ")
+            is_user = len(parts) > 1 and parts[1].lower() == user_turn_char
+            if not is_user:
+                continue
+
+            rep_moves = rep_moves_from.get(pid, [])
+            p_reach = reach_probs.get(pid, 0.0)
+
+            if p_reach < threshold_val:
+                continue
+
+            if not rep_moves:
+                inc_m = incoming_move_map.get(pid)
+                last_san = inc_m.san if inc_m else "—"
+                last_uci = inc_m.uci if inc_m else None
+                from_pid = inc_m.from_position_id if inc_m else None
+                from_fen = id_to_fen.get(from_pid, clean_fen) if from_pid else clean_fen
+
+                item = {
+                    "fen": clean_fen,
+                    "from_fen": from_fen,
+                    "move_san": last_san,
+                    "last_move_san": last_san,
+                    "move_uci": last_uci,
+                    "last_move_uci": last_uci,
+                    "is_user_turn": True,
+                    "status_key": "our_move_missing",
+                    "type": "unanswered_user",
+                    "popularity": p_reach * 100,
+                    "ply_depth": d,
+                }
+                results.append(item)
+
+    # Sort results: by popularity descending
+    results.sort(key=lambda x: x["popularity"], reverse=True)
+
+    if item_callback:
+        for it in results:
+            if cancel_check and cancel_check():
+                break
+            item_callback(it)
+
+    return results
+
+def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], bool]] = None):
     """
     Finds:
     1. Level Mismatches (Gaps): Positions reached at Path Level L where ALL user moves are Level > L.
     2. Orphaned Moves: Moves that are assigned a level < Path Level L (e.g., Level 1 move trapped behind Level 3).
     """
+    if cancel_check and cancel_check():
+        return []
+
     m = session.query(Metadata).filter_by(key="color").first()
     player_color = m.value if m else 'w'
 
@@ -286,6 +598,8 @@ def find_level_mismatches(session: Session):
     bfs_queue = collections.deque([(root_id, 0)])
     
     while bfs_queue:
+        if cancel_check and cancel_check():
+            return []
         curr_id, curr_depth = bfs_queue.popleft()
         curr_fen = id_to_fen.get(curr_id)
         if not curr_fen: continue
@@ -313,6 +627,8 @@ def find_level_mismatches(session: Session):
     seen_mismatches = set() # (fen_norm, move_san, type)
     
     for curr_id, out_moves in moves_from.items():
+        if cancel_check and cancel_check():
+            return []
         curr_fen = id_to_fen.get(curr_id)
         if not curr_fen: continue
         curr_norm = " ".join(curr_fen.split(" ")[:4])
@@ -364,16 +680,24 @@ def find_level_mismatches(session: Session):
 
     return mismatches
 
-def find_priority_mismatches(session: Session, level: int, threshold_pct: float, find_rare: bool = False):
-    """Ported logic from CreatorBackend.find_priority_mismatches"""
+def find_priority_mismatches(session: Session, level: int, threshold_pct: float, find_rare: bool = False, only_opponent: bool = True, cancel_check: Optional[Callable[[], bool]] = None):
+    """Ported logic from CreatorBackend.find_priority_mismatches with pre-simulated impact and cancellation check."""
+    if cancel_check and cancel_check():
+        return []
+
     threshold = threshold_pct / 100.0
     
+    # Get Repertoire Color (level changes only occur on opponent moves)
+    m = session.query(Metadata).filter_by(key="color").first()
+    player_color = m.value[0].lower() if (m and m.value) else 'w'
+
     mismatches = []
     
-    # Selection criteria: >= threshold (too important) OR <= threshold (too rare)
-    op = Move.priority_score <= threshold if find_rare else Move.priority_score >= threshold
-
+    from sqlalchemy import or_
     from sqlalchemy.orm import joinedload
+    # Selection criteria: >= threshold (too important) OR <= threshold (too rare, including 0/NULL priority)
+    op = or_(Move.priority_score <= threshold, Move.priority_score == None) if find_rare else Move.priority_score >= threshold
+
     # Query for RepertoireMoves joined with Moves
     moves_with_rm = session.query(Move, RepertoireMove).join(
         RepertoireMove, Move.id == RepertoireMove.move_id
@@ -382,6 +706,77 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
         RepertoireMove.level == level,
         op
     ).all()
+
+    if cancel_check and cancel_check():
+        return []
+
+    # Target level calculation
+    levels = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+    orders = [lvl.order for lvl in levels]
+    target_level = None
+    if level in orders:
+        idx = orders.index(level)
+        if find_rare:
+            target_level = orders[idx + 1] if idx < len(orders) - 1 else None
+        else:
+            target_level = orders[idx - 1] if idx > 0 else None
+
+    # Pre-build in-memory graph for lightning-fast downstream impact simulation
+    rep_moves = (
+        session.query(Move.id, Move.from_position_id, Move.to_position_id, RepertoireMove.level)
+        .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+        .filter(RepertoireMove.is_active == True)
+        .all()
+    )
+    incoming = collections.defaultdict(list)
+    outgoing = collections.defaultdict(list)
+    move_levels = {}
+    move_to_pos = {}
+    for mid, from_id, to_id, lvl in rep_moves:
+        lvl_val = lvl if lvl is not None else 1
+        move_levels[mid] = lvl_val
+        move_to_pos[mid] = to_id
+        incoming[to_id].append((from_id, mid))
+        outgoing[from_id].append((to_id, mid))
+
+    def simulate_move_impact(m_id, t_lvl):
+        if t_lvl is None or m_id not in move_levels:
+            return 0, 0
+        if move_levels[m_id] == t_lvl:
+            return 0, 0
+        sim_levels = {m_id: t_lvl}
+        changed_mids = {m_id}
+        visited_rec = set()
+        stack = [move_to_pos[m_id]] if m_id in move_to_pos else []
+        while stack:
+            pos_id = stack.pop()
+            if pos_id in visited_rec:
+                continue
+            visited_rec.add(pos_id)
+            inc = incoming.get(pos_id, [])
+            if not inc:
+                continue
+            effective = min(sim_levels.get(mid, move_levels.get(mid, 1)) for _, mid in inc)
+            out = outgoing.get(pos_id, [])
+            if not out:
+                continue
+            if len(out) > 1:
+                for to_id, mid in out:
+                    curr = sim_levels.get(mid, move_levels.get(mid, 1))
+                    if curr < effective:
+                        sim_levels[mid] = effective
+                        changed_mids.add(mid)
+                        stack.append(to_id)
+            else:
+                to_id, mid = out[0]
+                curr = sim_levels.get(mid, move_levels.get(mid, 1))
+                if curr != effective:
+                    sim_levels[mid] = effective
+                    changed_mids.add(mid)
+                    stack.append(to_id)
+        final_changed = {mid for mid in changed_mids if sim_levels.get(mid, move_levels[mid]) != move_levels[mid]}
+        changed_pos = {move_to_pos[mid] for mid in final_changed if mid in move_to_pos}
+        return max(1, len(changed_pos)), max(1, len(final_changed))
 
     # Pre-build in-memory parent map to construct path strings for UI context without query overhead
     parent_map = {}
@@ -393,29 +788,61 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
 
     # Build path strings in memory
     def get_path_to_pos(pid, visited=None):
-        if visited is None: visited = set()
-        if pid in visited: return "..."
-        visited.add(pid)
-        
-        parent_info = parent_map.get(pid)
-        if not parent_info: return "Start"
-        parent_id, san, _ = parent_info
-        return get_path_to_pos(parent_id, visited) + " -> " + san
+        seen = set()
+        sans = []
+        curr = pid
+        while curr and curr not in seen:
+            seen.add(curr)
+            parent_info = parent_map.get(curr)
+            if not parent_info:
+                break
+            sans.append(parent_info[1])
+            curr = parent_info[0]
+        sans.reverse()
+        return "Start" if not sans else "Start -> " + " -> ".join(sans)
 
     def get_depth_to_pos(pid, visited=None):
-        if visited is None: visited = set()
-        if pid in visited: return 0
-        visited.add(pid)
-        parent_info = parent_map.get(pid)
-        if not parent_info: return 0
-        return get_depth_to_pos(parent_info[0], visited) + 1
+        seen = set()
+        depth = 0
+        curr = pid
+        while curr and curr not in seen:
+            seen.add(curr)
+            parent_info = parent_map.get(curr)
+            if not parent_info:
+                break
+            depth += 1
+            curr = parent_info[0]
+        return depth
 
     for move, rm in moves_with_rm:
+        if cancel_check and cancel_check():
+            return []
+        if only_opponent:
+            if not move.from_position or not move.from_position.fen:
+                continue
+            parts = move.from_position.fen.strip().split()
+            move_turn = parts[1].lower() if len(parts) > 1 else 'w'
+            if move_turn == player_color:
+                continue  # Level changes only happen on opponent's moves
+
+        pos_cnt, mov_cnt = simulate_move_impact(move.id, target_level) if target_level is not None else (0, 0)
+
         mismatches.append({
             "fen": move.from_position.fen if move.from_position else None,
             "move_san": move.san,
+            "move_uci": move.uci,
+            "move_id": move.id,
+            "current_level": rm.level,
+            "target_level": target_level,
+            "impact": {
+                "positions_changed": pos_cnt,
+                "moves_changed": mov_cnt,
+                "target_level": target_level,
+            },
+            "from_position_id": move.from_position_id,
+            "to_position_id": move.to_position_id,
             "type": "priority_check",
-            "popularity": move.priority_score * 100,
+            "popularity": (move.priority_score or 0.0) * 100,
             "path": get_path_to_pos(move.from_position_id),
             "ply_depth": get_depth_to_pos(move.from_position_id),
         })
@@ -428,7 +855,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                    item_callback = None, cancel_check = None,
                                    engine = None, max_transpositions: int = None,
                                    cache_service = None, depth: int = 25,
-                                   progress_callback = None, only_1move: bool = False):
+                                   progress_callback = None, only_1move: bool = False,
+                                   recheck_unadded: bool = False):
     """
     Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
     Filters strictly for sound/good lines:
@@ -911,86 +1339,102 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                     quality_label = "🟢 Ausgezeichnet"
 
                                     eval_data = engine_eval_cache.get(inter_fen)
-                                    if eval_data is None:
+                                    if eval_data is None and cache_service:
                                         # 1. Check persistent global cache
-                                        cached_move = cache_service.get_best_move(inter_fen, min_depth=target_engine_depth) if cache_service else None
-                                        if cached_move is not None:
-                                            eval_data = {
-                                                "best_uci": cached_move,
-                                                "best_score": None,
-                                                "moves": {cached_move: 0}
-                                            }
-                                            engine_eval_cache[inter_fen] = eval_data
-                                        elif active_engine is not None:
+                                        cached_eval = cache_service.get_eval_data(inter_fen, min_depth=target_engine_depth)
+                                        if cached_eval is not None:
+                                            has_scores = cached_eval.get("best_score") is not None
+                                            u2_in_cache = (u2 == cached_eval.get("best_uci")) or (u2 in cached_eval.get("moves", {}))
+                                            if has_scores and u2_in_cache:
+                                                eval_data = cached_eval
+                                                engine_eval_cache[inter_fen] = eval_data
+                                            elif not recheck_unadded:
+                                                eval_data = cached_eval
+                                                engine_eval_cache[inter_fen] = eval_data
+
+                                    need_engine_eval = False
+                                    if eval_data is None:
+                                        need_engine_eval = (active_engine is not None)
+                                    elif recheck_unadded and active_engine is not None:
+                                        if eval_data.get("best_score") is None:
+                                            need_engine_eval = True
+                                        elif u2 not in eval_data.get("moves", {}):
+                                            best_s = eval_data.get("best_score")
+                                            moves_dict = eval_data.get("moves", {})
+                                            worst_s = min(moves_dict.values()) if moves_dict else None
+                                            if best_s is not None and worst_s is not None and (best_s - worst_s) <= 10:
+                                                need_engine_eval = True
+
+                                    if need_engine_eval and active_engine is not None:
+                                        if cancel_check and cancel_check():
+                                            break
+                                        # Incremental MultiPV: start small, increase only if needed.
+                                        # This ensures all move scores come from the same search context
+                                        # (avoids root_moves hash-table interference that can misreport cp loss).
+                                        eval_data = None
+                                        for mpv_count in (3, 6, 10):
                                             if cancel_check and cancel_check():
                                                 break
-                                            # Incremental MultiPV: start small, increase only if needed.
-                                            # This ensures all move scores come from the same search context
-                                            # (avoids root_moves hash-table interference that can misreport cp loss).
-                                            eval_data = None
-                                            for mpv_count in (3, 6, 10):
-                                                if cancel_check and cancel_check():
-                                                    break
-                                                try:
-                                                    eval_board = chess.Board(inter_fen + " 0 1")
-                                                    mpv_infos = active_engine.analyse(
-                                                        eval_board,
-                                                        chess.engine.Limit(depth=target_engine_depth),
-                                                        multipv=mpv_count
-                                                    )
-                                                    if not isinstance(mpv_infos, list):
-                                                        mpv_infos = [mpv_infos]
+                                            try:
+                                                eval_board = chess.Board(inter_fen + " 0 1")
+                                                mpv_infos = active_engine.analyse(
+                                                    eval_board,
+                                                    chess.engine.Limit(depth=target_engine_depth),
+                                                    multipv=mpv_count
+                                                )
+                                                if not isinstance(mpv_infos, list):
+                                                    mpv_infos = [mpv_infos]
 
-                                                    best_uci = None
-                                                    best_score = None
-                                                    move_scores = {}
-                                                    worst_score = None
-                                                    for info_item in mpv_infos:
-                                                        pv = info_item.get("pv", [])
-                                                        if pv:
-                                                            m_uci = pv[0].uci().lower()
-                                                            s_obj = info_item.get("score")
-                                                            s = s_obj.relative.score(mate_score=10000) if s_obj else None
-                                                            # Always track the move; first PV = best by rank order
-                                                            move_scores[m_uci] = s
-                                                            if best_uci is None:
+                                                best_uci = None
+                                                best_score = None
+                                                move_scores = {}
+                                                worst_score = None
+                                                for info_item in mpv_infos:
+                                                    pv = info_item.get("pv", [])
+                                                    if pv:
+                                                        m_uci = pv[0].uci().lower()
+                                                        s_obj = info_item.get("score")
+                                                        s = s_obj.relative.score(mate_score=10000) if s_obj else None
+                                                        # Always track the move; first PV = best by rank order
+                                                        move_scores[m_uci] = s
+                                                        if best_uci is None:
+                                                            best_uci = m_uci
+                                                        if s is not None:
+                                                            if best_score is None or s > best_score:
+                                                                best_score = s
                                                                 best_uci = m_uci
-                                                            if s is not None:
-                                                                if best_score is None or s > best_score:
-                                                                    best_score = s
-                                                                    best_uci = m_uci
-                                                                worst_score = s  # last scored item is lowest-ranked
+                                                            worst_score = s  # last scored item is lowest-ranked
 
-                                                    eval_data = {
-                                                        "best_uci": best_uci,
-                                                        "best_score": best_score,
-                                                        "moves": move_scores,
-                                                    }
+                                                eval_data = {
+                                                    "best_uci": best_uci,
+                                                    "best_score": best_score,
+                                                    "moves": move_scores,
+                                                }
 
-                                                    if best_uci and cache_service:
-                                                        cache_service.set_best_move(inter_fen, target_engine_depth, best_uci)
+                                                if best_uci and cache_service:
+                                                    cache_service.set_eval_data(inter_fen, target_engine_depth, best_uci, eval_data)
 
-                                                    # Early exit conditions:
-                                                    # 1) Our move u2 is already in the scored moves → done
-                                                    if u2 in move_scores:
-                                                        logger.info(f"[Transpos-2M] MultiPV={mpv_count}: found u2={u2} at score {move_scores[u2]} cp (best={best_score} cp)")
-                                                        break
-                                                    # 2) The worst-ranked move in this batch is already >10 cp
-                                                    #    below best → u2 (ranked even lower) must be worse → done
-                                                    if best_score is not None and worst_score is not None and (best_score - worst_score) > 10:
-                                                        logger.info(f"[Transpos-2M] MultiPV={mpv_count}: spread {best_score - worst_score} cp > 10 cp, u2={u2} not in top {mpv_count} → rejected")
-                                                        break
-                                                    # Otherwise: u2 might still be within 10 cp → widen search
-                                                    logger.info(f"[Transpos-2M] MultiPV={mpv_count}: u2={u2} not found, spread {best_score - worst_score if (best_score is not None and worst_score is not None) else '?'} cp ≤ 10 cp → widening")
-
-                                                    # Yield to OS so the PC stays responsive between engine calls.
-                                                    time.sleep(0)
-                                                except Exception as e:
-                                                    logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen} (MultiPV={mpv_count}): {e}")
-                                                    eval_data = None
+                                                # Early exit conditions:
+                                                # 1) Our move u2 is already in the scored moves → done
+                                                if u2 in move_scores:
+                                                    logger.info(f"[Transpos-2M] MultiPV={mpv_count}: found u2={u2} at score {move_scores[u2]} cp (best={best_score} cp)")
                                                     break
+                                                # 2) The worst-ranked move in this batch is already >10 cp
+                                                #    below best → u2 (ranked even lower) must be worse → done
+                                                if best_score is not None and worst_score is not None and (best_score - worst_score) > 10:
+                                                    logger.info(f"[Transpos-2M] MultiPV={mpv_count}: spread {best_score - worst_score} cp > 10 cp, u2={u2} not in top {mpv_count} → rejected")
+                                                    break
+                                                # Otherwise: u2 might still be within 10 cp → widen search
+                                                logger.info(f"[Transpos-2M] MultiPV={mpv_count}: u2={u2} not found, spread {best_score - worst_score if (best_score is not None and worst_score is not None) else '?'} cp ≤ 10 cp → widening")
 
-                                            engine_eval_cache[inter_fen] = eval_data
+                                                # Yield to OS so the PC stays responsive between engine calls.
+                                                time.sleep(0)
+                                            except Exception as e:
+                                                logger.warning(f"[Transpos-2M] Engine error analyzing {inter_fen} (MultiPV={mpv_count}): {e}")
+                                                eval_data = None
+                                                break
+
+                                        engine_eval_cache[inter_fen] = eval_data
 
                                     if eval_data:
                                         best_uci = eval_data.get("best_uci")
@@ -1088,6 +1532,121 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
         return (d_val, q_val, -item.get("popularity", 0))
 
     return sorted(results, key=sort_key)
+
+
+def is_transposition_path_in_repertoire(session: Session, item: dict) -> bool:
+    """Returns True if all moves along the transposition path are already active in the repertoire."""
+    if not item or not isinstance(item, dict):
+        return False
+    search_fen = item.get("fen") or item.get("search_fen")
+    path_ucis = item.get("path_ucis") or ([item.get("move_uci")] if item.get("move_uci") else [])
+    if not search_fen or not path_ucis:
+        return False
+
+    try:
+        board = chess.Board(search_fen)
+        for uci in path_ucis:
+            if not uci:
+                return False
+            curr_fen = board.fen()
+            clean_fen = " ".join(curr_fen.strip().split()[:4])
+            db_pos = session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+            if not db_pos:
+                return False
+            norm_uci = uci.strip().lower()
+            alt_uci = CASTLING_ALT.get(norm_uci)
+            check_ucis = [norm_uci, uci]
+            if alt_uci:
+                check_ucis.append(alt_uci)
+            rep = (
+                session.query(RepertoireMove)
+                .join(Move, RepertoireMove.move_id == Move.id)
+                .filter(
+                    Move.from_position_id == db_pos.id,
+                    Move.uci.in_(check_ucis),
+                    RepertoireMove.is_active == True
+                )
+                .first()
+            )
+            if not rep:
+                return False
+            m = chess.Move.from_uci(uci)
+            if m not in board.legal_moves:
+                return False
+            board.push(m)
+        return True
+    except Exception:
+        return False
+
+
+def save_cached_transpositions(session: Session, items: list, merge: bool = True) -> int:
+    """
+    Saves unadded transposition items to repertoire metadata, pruning already-added moves.
+    Returns the count of saved items.
+    """
+    try:
+        from opening_fenix.core.db.meta_utils import get_meta, set_meta
+        candidate_items = []
+        if merge:
+            raw = get_meta(session, "cached_unadded_transpositions")
+            if raw:
+                try:
+                    existing = json.loads(raw)
+                    if isinstance(existing, list):
+                        candidate_items.extend(existing)
+                except Exception:
+                    pass
+        if items:
+            candidate_items.extend(items)
+
+        dedup = {}
+        for h in candidate_items:
+            if not isinstance(h, dict):
+                continue
+            if is_transposition_path_in_repertoire(session, h):
+                continue
+            f = " ".join((h.get("fen") or h.get("search_fen") or "").strip().split()[:4])
+            ucis = tuple(h.get("path_ucis") or ([h.get("move_uci")] if h.get("move_uci") else []))
+            key = (f, ucis, h.get("target_fen", ""))
+            dedup[key] = h
+
+        valid_items = list(dedup.values())
+        set_meta(session, "cached_unadded_transpositions", json.dumps(valid_items))
+        commit_with_retry(session)
+        return len(valid_items)
+    except Exception as e:
+        logger.warning(f"save_cached_transpositions error: {e}")
+        return 0
+
+
+def load_cached_transpositions(session: Session) -> list:
+    """Loads saved unadded transpositions from repertoire metadata, pruning any already added."""
+    try:
+        from opening_fenix.core.db.meta_utils import get_meta, set_meta
+        raw = get_meta(session, "cached_unadded_transpositions")
+        if not raw:
+            return []
+        items = json.loads(raw)
+        if not isinstance(items, list):
+            return []
+
+        valid_items = []
+        pruned_count = 0
+        for h in items:
+            if isinstance(h, dict):
+                if is_transposition_path_in_repertoire(session, h):
+                    pruned_count += 1
+                else:
+                    valid_items.append(h)
+
+        if pruned_count > 0:
+            set_meta(session, "cached_unadded_transpositions", json.dumps(valid_items))
+            session.commit()
+        return valid_items
+    except Exception as e:
+        logger.warning(f"load_cached_transpositions error: {e}")
+        return []
+
 
 
 

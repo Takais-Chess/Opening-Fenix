@@ -58,7 +58,8 @@ def _apply_mock_user_dir(monkeypatch, temp_dir):
         "opening_fenix.core.services.repertoire_core_service.get_user_dir",
         "opening_fenix.core.services.tree_navigation_service.get_user_dir",
         "opening_fenix.core.services.explorer_service.get_user_dir",
-        "opening_fenix.core.services.profile_service.get_user_dir"
+        "opening_fenix.core.services.profile_service.get_user_dir",
+        "opening_fenix.core.services.statistics_service.get_user_dir"
     ]
     for path in paths_to_mock:
         try:
@@ -178,11 +179,12 @@ def silence_ui(monkeypatch):
     # Mock QInputDialog.getText to return a fixed name and True
     monkeypatch.setattr(QInputDialog, "getText", lambda *args, **kwargs: ("Test Name", True))
 
-    # Mock RepoSettingsDialog and DiagnosticDialog exec to prevent hangs
+    # Mock RepoSettingsDialog, DiagnosticDialog and AddLevelDialog exec to prevent hangs
     try:
-        from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog
+        from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog, DiagnosticDialog, AddLevelDialog
         monkeypatch.setattr(RepoSettingsDialog, "exec", lambda *args, **kwargs: QDialog.DialogCode.Accepted)
         monkeypatch.setattr(DiagnosticDialog, "exec", lambda *args, **kwargs: QDialog.DialogCode.Accepted)
+        monkeypatch.setattr(AddLevelDialog, "exec", lambda *args, **kwargs: QDialog.DialogCode.Accepted)
     except (ImportError, AttributeError):
         pass
 

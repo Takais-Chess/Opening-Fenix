@@ -443,6 +443,57 @@ class RepertoireService:
         self.repo_session.commit()
         return updated_count
 
+    def get_move_all_to_level_impact(self, target_level: int) -> Dict[str, Any]:
+        if not self.repo_session:
+            return {
+                'total_moves': 0,
+                'target_level': target_level,
+                'target_level_name': str(target_level),
+                'distribution': [],
+                'moves_changing': 0,
+                'moves_unchanged': 0
+            }
+        from opening_fenix.core.db.models import RepertoireMove
+        from sqlalchemy import func
+
+        levels = self.get_repertoire_levels()
+        levels_map = {lvl['order']: lvl['name'] for lvl in levels}
+        target_name = levels_map.get(target_level, f"Level {target_level}")
+
+        rows = self.repo_session.query(RepertoireMove.level, func.count(RepertoireMove.id))\
+            .filter(RepertoireMove.is_active == True)\
+            .group_by(RepertoireMove.level)\
+            .order_by(RepertoireMove.level)\
+            .all()
+
+        total = 0
+        changing = 0
+        unchanged = 0
+        distribution = []
+
+        for lvl_order, count in rows:
+            name = levels_map.get(lvl_order, f"Level {lvl_order}")
+            total += count
+            if lvl_order == target_level:
+                unchanged += count
+            else:
+                changing += count
+            distribution.append({
+                'order': lvl_order,
+                'name': name,
+                'count': count,
+                'is_target': (lvl_order == target_level)
+            })
+
+        return {
+            'total_moves': total,
+            'target_level': target_level,
+            'target_level_name': target_name,
+            'distribution': distribution,
+            'moves_changing': changing,
+            'moves_unchanged': unchanged
+        }
+
     def check_logical_integrity(self) -> int:
         """
         Checks for orphaned moves in the database (moves pointing to missing positions).

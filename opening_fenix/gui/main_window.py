@@ -726,8 +726,21 @@ class MainWindow(QMainWindow):
             repo_data.append((repo_name, stats))
         
         if self.sorted_repo_names is None:
-            # Sort by due moves (stats[1]) descending
-            repo_data.sort(key=lambda x: x[1][1], reverse=True)
+            # Primary sort: due moves (stats[1]) descending
+            # Secondary sort: Elo rating descending (highest Elo first)
+            # Tertiary sort: repertoire name ascending (alphabetical tie-breaker)
+            ratings = (
+                self.training_manager.get_ratings_for_all_repertoires()
+                if hasattr(self.training_manager, "get_ratings_for_all_repertoires")
+                else {}
+            )
+            repo_data.sort(
+                key=lambda x: (
+                    -int(x[1][1] if x[1] and len(x[1]) > 1 else 0),
+                    -float(ratings.get(x[0], 800.0)),
+                    str(x[0])
+                )
+            )
             self.sorted_repo_names = [rd[0] for rd in repo_data]
         else:
             # Use cached order, new ones at the end

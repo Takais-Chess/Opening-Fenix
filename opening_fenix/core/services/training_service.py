@@ -95,6 +95,10 @@ class TrainingManager:
         # O(1) index caches for hot-path lookups
         self._move_by_id_cache: Optional[Dict[int, Move]] = None
         self._move_by_fen_uci_cache: Optional[Dict[Tuple[str, str], Move]] = None
+        self._fen_uci_to_move_id: Optional[Dict[Tuple[str, str], int]] = None
+        self._moves_by_level: Optional[Dict[int, List[int]]] = None
+        self._levels_cache: Optional[List[Dict[str, Any]]] = None
+        self._cached_elo: Optional[int] = None
         
         # New: Stat Caching
         self._reachable_moves_cache = None # List of (fen, uci) reachable for current repo/level
@@ -256,6 +260,7 @@ class TrainingManager:
             self._rep_move_cache = None
             self._last_stats_cache = None
             self._user_settings_cache = settings
+            self._cached_elo = None
         self._td_cache = None
         
     def close(self) -> None:
@@ -276,6 +281,10 @@ class TrainingManager:
         self._td_cache = None
         self._move_by_id_cache = None
         self._move_by_fen_uci_cache = None
+        self._fen_uci_to_move_id = None
+        self._moves_by_level = None
+        self._levels_cache = None
+        self._cached_elo = None
         self._reachable_moves_cache = None
         self._last_stats_cache = None
         self._user_settings_cache = None
@@ -340,11 +349,12 @@ class TrainingManager:
         if not self.repertoire_manager.repo_session:
             return
             
-        if self._forward_moves_cache is None:
+        if self._forward_moves_cache is None or self._fen_uci_to_move_id is None:
             self._forward_moves_cache = {}
             self._pos_cache = {}
             self._move_by_id_cache = {}
             self._move_by_fen_uci_cache = {}
+            self._fen_uci_to_move_id = {}
             self._move_parent_cache = {} # Local parent cache for training algorithms
             
             # Load all positions to memory
@@ -370,6 +380,7 @@ class TrainingManager:
                 if m.from_position_id in self._pos_cache:
                     pos_fen = self._pos_cache[m.from_position_id].fen
                     self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
+                    self._fen_uci_to_move_id[(pos_fen, m.uci)] = m.id
                     
             for k in self._forward_moves_cache:
                 self._forward_moves_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
@@ -378,9 +389,26 @@ class TrainingManager:
             for k in self._move_parent_cache:
                 self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
             
-        if self._rep_move_cache is None:
+        if self._rep_move_cache is None or self._moves_by_level is None:
             all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
             self._rep_move_cache = {rm.move_id: rm for rm in all_rep_moves}
+            self._moves_by_level = {}
+            side = (self.repertoire_manager.get_repertoire_color() or 'w').lower() if self.repertoire_manager else 'w'
+            for rm in all_rep_moves:
+                lvl = rm.level if rm.level is not None else 1
+                # Only count trainable moves (where it is the player's turn to move)
+                m = self._move_by_id_cache.get(rm.move_id) if self._move_by_id_cache else None
+                if m and m.from_position_id in self._pos_cache:
+                    fen = self._pos_cache[m.from_position_id].fen
+                    parts = fen.split()
+                    if len(parts) >= 2 and parts[1].lower() in ('w', 'b') and side in ('w', 'b'):
+                        if parts[1].lower() == side:
+                            self._moves_by_level.setdefault(lvl, []).append(rm.move_id)
+                    else:
+                        # Synthetic test fallback without full chess FEN
+                        self._moves_by_level.setdefault(lvl, []).append(rm.move_id)
+                else:
+                    self._moves_by_level.setdefault(lvl, []).append(rm.move_id)
 
     def _ensure_td_cache(self):
         if self._td_cache is not None:
@@ -425,9 +453,10 @@ class TrainingManager:
         self._reachable_moves_cache_key = cache_key
         return self._reachable_moves_cache
 
-    def _calculate_reachable_moves(self, variation_filter):
+    def _calculate_reachable_moves(self, variation_filter, max_lvl=None):
         """Internal BFS to find all reachable moves for a given configuration."""
-        max_lvl = self.get_active_level()
+        if max_lvl is None:
+            max_lvl = self.get_active_level()
         side = self.repertoire_manager.get_repertoire_color()
         self._ensure_forward_cache()
         
@@ -439,6 +468,52 @@ class TrainingManager:
         }
         
         return self.navigator.calculate_reachable_moves(variation_filter, max_lvl, side, cache_data)
+
+    def get_box_statistics(self, max_lvl: Optional[int] = None) -> Dict[str, Any]:
+        """
+        Calculates accurate Leitner box distribution and due counts for reachable player moves.
+        If max_lvl is None, evaluates all reachable moves across all levels (max_lvl=999).
+        """
+        self._ensure_forward_cache()
+        self._ensure_td_cache()
+        
+        target_lvl = max_lvl if max_lvl is not None else 999
+        reachable = self._calculate_reachable_moves(None, max_lvl=target_lvl)
+        user_map = self._td_cache or {}
+        
+        def _clean_fen(f: str) -> str:
+            return " ".join(f.split()[:4]) if f else ""
+            
+        norm_user_map = {(_clean_fen(k[0]), k[1]): v for k, v in user_map.items()}
+        
+        lookahead = datetime.datetime.now() + datetime.timedelta(minutes=5)
+        box_counts = {i: 0 for i in range(1, 8)}
+        box_due_counts = {i: 0 for i in range(1, 8)}
+        total_due = 0
+        total_learned = 0
+        
+        for fen, uci in reachable:
+            entry = user_map.get((fen, uci)) or norm_user_map.get((_clean_fen(fen), uci))
+            if entry and 1 <= entry.box <= 7:
+                box_counts[entry.box] += 1
+                total_learned += 1
+                if entry.next_due and entry.next_due <= lookahead:
+                    box_due_counts[entry.box] += 1
+                    total_due += 1
+                    
+        total_trainable = len(reachable)
+        total_unlearned = max(0, total_trainable - total_learned)
+        learned_pct = (total_learned / total_trainable * 100.0) if total_trainable > 0 else 0.0
+        
+        return {
+            "total_trainable": total_trainable,
+            "total_learned": total_learned,
+            "total_unlearned": total_unlearned,
+            "total_due": total_due,
+            "learned_pct": round(learned_pct, 1),
+            "box_counts": box_counts,
+            "box_due_counts": box_due_counts
+        }
 
     def get_stats_for_repertoire(self, repo_name: str) -> Tuple[int, int, Dict[int, int]]:
         """Fast path for checking persistent stats cache without full repertoire switch."""
@@ -476,6 +551,34 @@ class TrainingManager:
                 from opening_fenix.core.logger import logger
                 logger.error(f"Error in fast-path stats catch-up: {e}")
         return 0, 0, {}
+
+    def get_rating_for_repertoire(self, repo_name: str) -> float:
+        """Fast path to get stored rating for a repertoire."""
+        if not self.user_session:
+            return 800.0
+        if (self.repertoire_manager and 
+            self.repertoire_manager.active_repertoire_name == repo_name and 
+            self._cached_elo is not None):
+            return float(self._cached_elo)
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        if settings and settings.rating is not None:
+            return float(settings.rating)
+        return 800.0
+
+    def get_ratings_for_all_repertoires(self) -> Dict[str, float]:
+        """Returns a dict mapping repertoire_name to rating."""
+        if not self.user_session:
+            return {}
+        try:
+            settings = self.user_session.query(UserRepertoireSettings).all()
+            ratings = {s.repertoire_name: float(s.rating) if s.rating is not None else 800.0 for s in settings}
+        except Exception:
+            ratings = {}
+        if (self.repertoire_manager and 
+            self.repertoire_manager.active_repertoire_name and 
+            self._cached_elo is not None):
+            ratings[self.repertoire_manager.active_repertoire_name] = float(self._cached_elo)
+        return ratings
 
     def get_stats(self, variation_filter=None, use_cache=True, auto_commit=True):
         if not self.repertoire_manager.repo_session: return 0, 0, {}
@@ -775,87 +878,139 @@ class TrainingManager:
         return settings
 
     def _apply_rating_decay(self, settings):
-        if not settings.last_rating_update:
-            settings.last_rating_update = datetime.datetime.now()
+        """
+        Maintains settings.last_rating_update timestamp.
+        True memory decay is naturally modeled per-move in get_current_elo()
+        by treating overdue moves as acting 2 Leitner boxes down.
+        """
+        if not settings:
             return
-        
-        now = datetime.datetime.now()
-        days_passed = (now - settings.last_rating_update).total_seconds() / 86400.0
-        if days_passed < 0.1: # Only decay if at least 2.4 hours passed
-            return
+        settings.last_rating_update = datetime.datetime.now()
+
+    def _get_cached_levels(self) -> List[Dict[str, Any]]:
+        if self._levels_cache is None:
+            lvls = self.repertoire_manager.get_repertoire_levels() if self.repertoire_manager else []
+            known_orders = {l.get('order') for l in lvls if l.get('order')}
             
-        # Calculate decay factor based on box distribution
-        dist = self.get_box_distribution()
-        total = sum(dist.values())
-        if total == 0: return
-        
-        weighted_sum = sum(box * count for box, count in dist.items())
-        avg_box = weighted_sum / total
-        
-        # Base decay: 2.0 points per day.
-        # Adjusted by average box: (8 - avg_box) / 8.0
-        decay_per_day = 2.0 * ((8.0 - avg_box) / 8.0)
-        total_decay = decay_per_day * days_passed
-        
-        settings.rating = max(800.0, settings.rating - total_decay)
-        settings.last_rating_update = now
+            # Ensure every level present in moves has a level entry
+            if self._moves_by_level:
+                for lvl_ord in self._moves_by_level:
+                    if lvl_ord not in known_orders:
+                        lvls.append({
+                            "id": lvl_ord,
+                            "name": f"Level {lvl_ord}",
+                            "order": lvl_ord,
+                            "target_elo": 800 + 700 * lvl_ord
+                        })
+                        known_orders.add(lvl_ord)
+                        
+            if not lvls:
+                lvls = [{"id": 1, "name": "Standard", "order": 1, "target_elo": 1500}]
+            self._levels_cache = sorted(lvls, key=lambda x: x.get('order', 1))
+        return self._levels_cache
+
+    BOX_WEIGHTS = {
+        0: 0.0,
+        1: 0.20,
+        2: 0.40,
+        3: 0.65,
+        4: 0.85,
+        5: 1.00,  # 100% target reached
+        6: 1.05,  # 105% deep retention bonus
+        7: 1.10   # 110% permanent mastery bonus
+    }
 
     def update_rating(self, move_id, success, auto_commit=True):
-        self._ensure_forward_cache()
+        """
+        Updates the player's rating after a move is trained.
+        Recalculates the rating based on the updated Leitner box status of the repertoire.
+        """
+        self._cached_elo = None
+        new_elo = self.get_current_elo(use_cache=False)
         settings = self._get_rating_settings()
-        self._apply_rating_decay(settings)
-
-        rep_move = self._rep_move_cache.get(move_id)
-        if not rep_move: return
-        
-        level_info = self.repertoire_manager.get_level_info(rep_move.level)
-        target_elo = level_info.target_elo if (level_info and level_info.target_elo) else 1500
-        
-        # O(1) move lookup via ID index
-        move = self._move_by_id_cache.get(move_id)
-        
-        priority = move.priority_score if move else 0.5
-        priority_weight = 0.8 + (0.4 * priority)
-        
-        # Elo expected score for training
-        # User wants E=0.95 when rating = target_elo
-        # E = 1 / (1 + (1/19) * 10^((target - rating)/400))
-        current_rating = settings.rating
-        exponent = (target_elo - current_rating) / 400.0
-        expected_score = 1.0 / (1.0 + (1.0/19.0) * (10**exponent))
-        
-        # K-factor. Slow rise.
-        K = 15.0 * priority_weight
-        
-        actual_score = 1.0 if success else 0.0
-        change = K * (actual_score - expected_score)
-        
-        settings.rating += change
-        if settings.rating < 800: settings.rating = 800.0
-        settings.last_rating_update = datetime.datetime.now()
-        if auto_commit:
+        if settings:
+            settings.rating = float(new_elo)
+            settings.last_rating_update = datetime.datetime.now()
+        if auto_commit and self.user_session:
             self.user_session.commit()
 
-    def get_current_elo(self):
+    def get_current_elo(self, use_cache: bool = True) -> int:
+        """
+        Calculates the player's Elo rating using Tiered Leitner Repertoire Mastery:
+        1. Moves in Box 5 are weighted at 100% (1.00), Box 6 at 105% (1.05), Box 7 at 110% (1.10).
+        2. Overdue moves (next_due <= now) act as if they are 2 boxes down: max(0, box - 2).
+        3. Tiered Level Slicing:
+           - Level 1 moves scale rating from 800 to Level 1 Target Elo.
+           - Level 2 moves scale rating from Level 1 Target Elo to Level 2 Target Elo.
+           - Level 3 moves scale rating from Level 2 Target Elo to Level 3 Target Elo, etc.
+           This ensures no Elo drop when unlocking higher levels and automatically weights
+           foundational lower-level moves much more heavily than deep sidelines.
+        """
+        if use_cache and self._cached_elo is not None:
+            return self._cached_elo
+
+        if not self.user_session or not self.repertoire_manager or not self.repertoire_manager.active_repertoire_name:
+            return 800
+
         with self.user_session.no_autoflush:
             self._ensure_forward_cache()
             self._ensure_td_cache()
+
+            levels = self._get_cached_levels()
+            active_level = self.get_active_level()
+            now = datetime.datetime.now()
+
+            # Sum weighted scores per level for trained moves
+            level_sums: Dict[int, float] = {}
+            for lvl in levels:
+                ord_num = lvl.get('order', 1)
+                if ord_num <= active_level:
+                    level_sums[ord_num] = 0.0
+
+            if self._td_cache:
+                for (fen, uci), td in self._td_cache.items():
+                    mid = self._fen_uci_to_move_id.get((fen, uci)) if self._fen_uci_to_move_id else None
+                    if mid is None:
+                        continue
+                    rm = self._rep_move_cache.get(mid) if self._rep_move_cache else None
+                    if not rm:
+                        continue
+                    lvl_num = rm.level if rm.level is not None else 1
+                    if lvl_num not in level_sums:
+                        continue
+
+                    is_due = bool(td.next_due and td.next_due <= now)
+                    eff_box = max(0, td.box - 2) if is_due else td.box
+                    w = self.BOX_WEIGHTS.get(eff_box, 0.0)
+                    level_sums[lvl_num] += w
+
+            # Compute tiered Elo
+            elo = 800.0
+            prev_target = 800.0
+
+            for lvl in levels:
+                ord_num = lvl.get('order', 1)
+                if ord_num > active_level:
+                    break
+                target = float(lvl.get('target_elo') or 1500)
+                delta = max(50.0, target - prev_target)
+
+                moves_in_lvl = len(self._moves_by_level.get(ord_num, [])) if self._moves_by_level else 0
+                mastery = (level_sums.get(ord_num, 0.0) / moves_in_lvl) if moves_in_lvl > 0 else 0.0
+
+                elo += delta * mastery
+                prev_target = max(prev_target + 50.0, target)
+
+            calculated_elo = int(round(max(800.0, elo)))
+            self._cached_elo = calculated_elo
+
+            # Sync with settings.rating for persistence
             settings = self._get_rating_settings()
-            self._apply_rating_decay(settings)
-            
-            # Progress factor calculation
-            # Fraction of seen moves in the current level(s)
-            max_lvl = self.get_active_level()
-            total_moves_in_level = sum(1 for m in self._rep_move_cache.values() if m.level <= max_lvl)
-            if total_moves_in_level == 0: return 800
-            
-            # Count training data entries directly from in-memory cache (<0.01ms)
-            seen_moves = len(self._td_cache) if self._td_cache is not None else 0
-            
-            progress_factor = min(1.0, seen_moves / total_moves_in_level)
-            
-            # Final Elo: starting 800 + (rating - 800) * progress_factor
-            return int(800 + (settings.rating - 800) * progress_factor)
+            if settings and settings.rating != float(calculated_elo):
+                settings.rating = float(calculated_elo)
+                settings.last_rating_update = now
+
+            return calculated_elo
 
     def register_success(self, move_id, success, had_alternate_attempt=False, was_new=False):
         # In free training, if move is correct, mark it as learned for the session.
@@ -885,6 +1040,7 @@ class TrainingManager:
                 entry.next_due = datetime.datetime.max
             self.user_session.commit()
             if self._td_cache is not None: self._td_cache[(fen, move.uci)] = entry
+            self._cached_elo = None
             return
 
         self._ensure_forward_cache()
@@ -925,12 +1081,12 @@ class TrainingManager:
         entry.next_due = now + self.get_box_interval(entry.box)
         entry.last_review = now
         
-        # Update Rating in-memory (no standalone commit)
-        self.update_rating(move_id, success, auto_commit=False)
-
-        # Update cache in-place
+        # Update cache in-place FIRST so rating calculation sees updated box
         if self._td_cache is not None:
             self._td_cache[(fen, move.uci)] = entry
+
+        # Update Rating in-memory (no standalone commit)
+        self.update_rating(move_id, success, auto_commit=False)
 
         # Update persistent stats cache in-memory (no standalone commit)
         self.get_stats(use_cache=False, auto_commit=False)
