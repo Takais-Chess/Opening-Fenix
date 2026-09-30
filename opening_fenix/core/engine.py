@@ -9,6 +9,7 @@ from opening_fenix.core.logger import logger
 class EngineThread(QThread):
     info_signal = pyqtSignal(object) # Can be list of strings (status) or list of dicts (analysis)
     db_update_signal = pyqtSignal(str, int, int) # fen, depth, eval (cp)
+    analysis_finished_signal = pyqtSignal(str, int, list) # fen, depth, lines_data
 
     def __init__(self, engine_path, threads=4, depth=20, use_depth_limit=True, multipv=3, hash_size=256):
         super().__init__()
@@ -171,6 +172,20 @@ class EngineThread(QThread):
                         # even if it happened faster than our 100ms throttle timer
                         if self._target_fen == current_board_fen:
                             self._emit_current_cache(self.board)
+
+                        # If analysis reached target_depth without being aborted by moves or settings changes:
+                        if (self._target_fen == current_board_fen and 
+                            self.running and self.is_active and 
+                            self.multipv == current_multipv and 
+                            self.target_depth == current_depth):
+                            final_lines = [
+                                self.lines_cache[k].copy() 
+                                for k in sorted(self.lines_cache.keys()) 
+                                if k <= actual_multipv and self.lines_cache[k].get("pv")
+                            ]
+                            if final_lines:
+                                self.analysis_finished_signal.emit(current_board_fen, current_depth, final_lines)
+
                         self._is_analyzing = False
                         
                     except Exception as e:

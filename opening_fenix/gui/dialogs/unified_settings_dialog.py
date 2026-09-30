@@ -3662,9 +3662,17 @@ class UnifiedSettingsDialog(QDialog):
         self.chk_eng_reuse_courses.toggled.connect(lambda val: self.set_setting("engine_reuse_courses", val))
         v_eng.addWidget(self.chk_eng_reuse_courses)
 
+        h_eng_btns = QHBoxLayout()
         self.btn_start_eng_scan = QPushButton(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
         self.btn_start_eng_scan.clicked.connect(self.toggle_engine_scan)
-        v_eng.addWidget(self.btn_start_eng_scan)
+        h_eng_btns.addWidget(self.btn_start_eng_scan, stretch=2)
+
+        self.btn_reset_eng = QPushButton(tr_widget("repo_settings.btn_reset_engine", "🗑️ Analysen zurücksetzen..."))
+        self.btn_reset_eng.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_eng.setToolTip(tr_ui("repo_settings.btn_reset_engine_tip", "Setzt vorhandene Engine-Analysen (Tiefe, Alternativ-Züge) für dieses oder alle Repertoires zurück."))
+        self.btn_reset_eng.clicked.connect(self.prompt_reset_engine_analysis)
+        h_eng_btns.addWidget(self.btn_reset_eng, stretch=1)
+        v_eng.addLayout(h_eng_btns)
 
         self.pb_scan = QProgressBar()
         self.lbl_scan_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
@@ -3776,6 +3784,8 @@ class UnifiedSettingsDialog(QDialog):
         if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
             self.lbl_scan_status.setText("Engine-Analyse wird gestoppt...")
             self.btn_start_eng_scan.setEnabled(False)
+            if hasattr(self, 'btn_reset_eng'):
+                self.btn_reset_eng.setEnabled(False)
             self.w_eng.cancel()
             return
 
@@ -3814,13 +3824,146 @@ class UnifiedSettingsDialog(QDialog):
         def on_done(success, message):
             self.btn_start_eng_scan.setEnabled(True)
             self.btn_start_eng_scan.setText(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
+            if hasattr(self, 'btn_reset_eng'):
+                self.btn_reset_eng.setEnabled(True)
             self.lbl_scan_status.setText(message)
             self.refresh_creator_info()
             
         self.w_eng.finished_signal.connect(on_done)
         self.w_eng.start()
         self.btn_start_eng_scan.setText(tr_widget("repo_settings.btn_stop_scan", "🛑 Engine-Scan stoppen"))
+        if hasattr(self, 'btn_reset_eng'):
+            self.btn_reset_eng.setEnabled(False)
         self.lbl_scan_status.setText("Engine Analyse läuft...")
+
+    def prompt_reset_engine_analysis(self):
+        if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
+            QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
+                                tr_ui("repo_settings.err_analysis_running", "Bitte stoppe zuerst die laufende Engine-Analyse."))
+            return
+
+        backend = self.ensure_backend_for_active_repo()
+        active_repo = backend.active_repo_name if backend else None
+
+        from opening_fenix.core.services.repertoire_service import RepertoireService
+        all_repos = RepertoireService().get_all_repertoires()
+        if not all_repos:
+            QMessageBox.information(self, tr_ui("common.info", "Info"), tr_ui("repo_settings.no_repertoires", "Keine Repertoires gefunden."))
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr_ui("repo_settings.reset_engine_title", "⚠️ Engine-Analysen zurücksetzen"))
+        dlg.setMinimumWidth(scale(480))
+        layout = QVBoxLayout(dlg)
+        layout.setSpacing(scale(14))
+
+        # Warning Card Box
+        warn_card = QFrame()
+        warn_card.setStyleSheet("""
+            QFrame {
+                background-color: #fff8e1;
+                border: 1px solid #ffe082;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        v_warn = QVBoxLayout(warn_card)
+        lbl_warn_title = QLabel(tr_ui("repo_settings.reset_warn_heading", "<b>⚠️ Achtung: Was bewirkt das Zurücksetzen?</b>"))
+        lbl_warn_title.setStyleSheet("color: #b78103; font-size: 13px;")
+        v_warn.addWidget(lbl_warn_title)
+
+        lbl_warn_body = QLabel(tr_ui(
+            "repo_settings.reset_warn_body",
+            "• Gespeicherte Suchtiefen, Alternativ-Züge und Engine-Bewertungen werden gelöscht.<br>"
+            "• <b>Deine Repertoire-Züge, Varianten, Notizen und Trainings-Fortschritte (Leitner-Boxen) bleiben zu 100% erhalten!</b><br>"
+            "• Nach dem Zurücksetzen kannst du den Engine-Scan neu starten, um alle Stellungen mit dem neuen, vollständigen System zu analysieren."
+        ))
+        lbl_warn_body.setWordWrap(True)
+        lbl_warn_body.setStyleSheet("color: #444; font-size: 12px; line-height: 1.4;")
+        v_warn.addWidget(lbl_warn_body)
+        layout.addWidget(warn_card)
+
+        # Scope selection
+        lbl_scope = QLabel(tr_ui("repo_settings.reset_scope_label", "<b>Umfang auswählen:</b>"))
+        layout.addWidget(lbl_scope)
+
+        rb_current = QRadioButton(tr_ui("repo_settings.reset_scope_current", "Nur aktuelles Repertoire zurücksetzen ('{repo}')", repo=active_repo or "Keines"))
+        rb_all = QRadioButton(tr_ui("repo_settings.reset_scope_all", "Für ALLE Repertoires im Profil zurücksetzen ({count} Repertoires)", count=len(all_repos)))
+        if active_repo:
+            rb_current.setChecked(True)
+        else:
+            rb_current.setEnabled(False)
+            rb_all.setChecked(True)
+
+        layout.addWidget(rb_current)
+        layout.addWidget(rb_all)
+
+        # Checkbox for global engine cache
+        chk_cache = QCheckBox(tr_ui("repo_settings.reset_clear_cache", "Auch gespeicherte Alternativ-Züge aus dem globalen Engine-Cache entfernen"))
+        chk_cache.setChecked(True)
+        chk_cache.setToolTip(tr_ui("repo_settings.reset_clear_cache_tip", "Empfohlen: Stellt sicher, dass alte, unvollständige Alternativ-Züge nicht erneut übernommen werden."))
+        layout.addWidget(chk_cache)
+
+        # Dialog Buttons
+        h_btns = QHBoxLayout()
+        btn_cancel = QPushButton(tr_ui("common.cancel", "Abbrechen"))
+        btn_cancel.clicked.connect(dlg.reject)
+
+        btn_confirm = QPushButton(tr_ui("repo_settings.btn_confirm_reset", "🗑️ Jetzt zurücksetzen"))
+        btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_confirm.setStyleSheet("""
+            QPushButton {
+                background-color: #d32f2f;
+                color: white;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 6px 16px;
+            }
+            QPushButton:hover {
+                background-color: #b71c1c;
+            }
+        """)
+        btn_confirm.clicked.connect(dlg.accept)
+
+        h_btns.addStretch()
+        h_btns.addWidget(btn_cancel)
+        h_btns.addWidget(btn_confirm)
+        layout.addLayout(h_btns)
+
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        from opening_fenix.core.services.analysis_service import (
+            reset_repertoire_engine_analysis,
+            reset_all_repertoires_engine_analysis
+        )
+        clear_cache = chk_cache.isChecked()
+
+        try:
+            if rb_current.isChecked() and active_repo:
+                count = reset_repertoire_engine_analysis(active_repo)
+                if clear_cache:
+                    from opening_fenix.core.services.engine_cache_service import EngineCacheService
+                    EngineCacheService().clear_alternate_moves()
+                msg = tr_ui(
+                    "repo_settings.reset_success_single",
+                    "Die Engine-Analysen von {count} Stellungen im Repertoire '{repo}' wurden erfolgreich zurückgesetzt.",
+                    count=count, repo=active_repo
+                )
+            else:
+                total, details = reset_all_repertoires_engine_analysis(clear_global_cache=clear_cache)
+                msg = tr_ui(
+                    "repo_settings.reset_success_all",
+                    "Die Engine-Analysen von insgesamt {count} Stellungen in {num_repos} Repertoires wurden erfolgreich zurückgesetzt.",
+                    count=total, num_repos=len(all_repos)
+                )
+
+            QMessageBox.information(self, tr_ui("common.success", "Erfolg"), msg)
+            self.lbl_scan_status.setText(tr_ui("repo_settings.status_reset_done", "Analysen zurückgesetzt. Bereit für neuen Scan."))
+            self.pb_scan.setValue(0)
+            self.refresh_creator_info()
+        except Exception as e:
+            QMessageBox.critical(self, tr_ui("common.error", "Fehler"), f"Fehler beim Zurücksetzen der Analysen: {e}")
 
     def toggle_lichess_fetch(self):
         if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():

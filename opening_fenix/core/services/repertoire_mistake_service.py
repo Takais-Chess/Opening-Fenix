@@ -217,10 +217,49 @@ def audit_repertoire_mistakes(
                     if cand_move.uci() not in good_moves:
                         good_moves.append(cand_move.uci())
 
-            # Update position in DB
-            pos.good_moves = json.dumps(list(set(good_moves)))
-            pos.analysis_depth = depth
-            pos.engine_eval = best_eval_cp
+            # Check if cutoff was reached or all legal moves evaluated
+            legal_count = board.legal_moves.count()
+            evaluated_count = len(analysis_results)
+            is_exh = False
+            if evaluated_count >= legal_count:
+                is_exh = True
+            elif evaluated_count > 0:
+                worst_info = analysis_results[-1]
+                worst_rel = worst_info['score'].relative.score(mate_score=10000)
+                if (best_rel_score - worst_rel) > 50:
+                    is_exh = True
+
+            # Existing good moves in target position
+            existing_moves = []
+            if pos.good_moves:
+                try:
+                    parsed = json.loads(pos.good_moves)
+                    if isinstance(parsed, list):
+                        existing_moves = parsed
+                except Exception:
+                    pass
+
+            current_depth = pos.analysis_depth or 0
+            if is_exh and depth >= current_depth:
+                pos.good_moves = json.dumps(list(dict.fromkeys(good_moves)))
+                pos.analysis_depth = depth
+                pos.engine_eval = best_eval_cp
+                try:
+                    cache_service.set_alternate_moves(pos.fen, depth, good_moves, is_exhaustive=True, best_uci=best_uci)
+                except Exception:
+                    pass
+            else:
+                # Merge non-destructively so deeper or non-evaluated lines are preserved
+                merged = list(dict.fromkeys(existing_moves + good_moves))
+                pos.good_moves = json.dumps(merged)
+                if pos.analysis_depth is None:
+                    pos.analysis_depth = depth
+                if pos.engine_eval is None:
+                    pos.engine_eval = best_eval_cp
+                try:
+                    cache_service.set_alternate_moves(pos.fen, depth, merged, is_exhaustive=False, best_uci=best_uci)
+                except Exception:
+                    pass
 
             # Check if this move is a mistake (> threshold_pawns)
             if loss_cp > threshold_cp:

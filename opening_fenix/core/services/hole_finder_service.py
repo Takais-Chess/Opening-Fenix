@@ -10,13 +10,13 @@ from typing import Optional, Callable, Dict, Any, List
 from sqlalchemy.orm import Session
 from opening_fenix.core.models import Position, Move, RepertoireMove, RepertoireLevel, LichessData, Metadata
 from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
-from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTLING_SANS
+from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTLING_SANS, get_configured_engine_hash
 from opening_fenix.core.services.engine_cache_service import EngineCacheService
 from opening_fenix.core.logger import logger
 
 def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                         engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
-                        depth=18, progress_callback=None, recheck_unadded: bool = False):
+                        depth=18, progress_callback=None, recheck_unadded: bool = False, hash_size: Optional[int] = None):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -34,7 +34,8 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 threads_count=threads_count,
                 depth=depth,
                 item_callback=item_callback,
-                cancel_check=cancel_check
+                cancel_check=cancel_check,
+                hash_size=hash_size,
             )
         elif mode == "unanswered":
             return find_unanswered_moves(
@@ -58,6 +59,7 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 depth=depth,
                 progress_callback=progress_callback,
                 recheck_unadded=recheck_unadded,
+                hash_size=hash_size,
             )
         else:
             return find_priority_mismatches(session, level, threshold, find_rare=find_rare, cancel_check=cancel_check)
@@ -73,7 +75,8 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                           item_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
                           cancel_check: Optional[Callable[[], bool]] = None,
                           engine: Optional[Any] = None,
-                          cache_service: Optional[EngineCacheService] = None):
+                          cache_service: Optional[EngineCacheService] = None,
+                          hash_size: Optional[int] = None):
     """Ported logic from CreatorBackend.find_repertoire_holes"""
     threshold_val = threshold / 100.0
     
@@ -322,8 +325,13 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                 if active_engine is None:
                     try:
                         active_engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
+                        eng_cfg = {}
                         if "Threads" in active_engine.options:
-                            active_engine.configure({"Threads": threads_count})
+                            eng_cfg["Threads"] = threads_count
+                        if "Hash" in active_engine.options:
+                            eng_cfg["Hash"] = hash_size if hash_size is not None else get_configured_engine_hash()
+                        if eng_cfg:
+                            active_engine.configure(eng_cfg)
                     except Exception as e:
                         logger.warning(f"Could not start engine for hole eval: {e}")
                         break
@@ -856,7 +864,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                    engine = None, max_transpositions: int = None,
                                    cache_service = None, depth: int = 25,
                                    progress_callback = None, only_1move: bool = False,
-                                   recheck_unadded: bool = False):
+                                   recheck_unadded: bool = False, hash_size: Optional[int] = None):
     """
     Finds unlinked 1-move and 2-move transpositions across the entire active repertoire.
     Filters strictly for sound/good lines:
@@ -1225,7 +1233,13 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                 )
                 # Reserve 1 CPU thread for the OS / UI so the PC stays responsive.
                 scan_threads = max(1, int(threads_count) - 1)
-                active_engine.configure({"Threads": scan_threads})
+                eng_cfg = {}
+                if "Threads" in active_engine.options:
+                    eng_cfg["Threads"] = scan_threads
+                if "Hash" in active_engine.options:
+                    eng_cfg["Hash"] = hash_size if hash_size is not None else get_configured_engine_hash()
+                if eng_cfg:
+                    active_engine.configure(eng_cfg)
                 own_engine = True
             except Exception:
                 active_engine = None

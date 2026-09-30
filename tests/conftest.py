@@ -59,7 +59,8 @@ def _apply_mock_user_dir(monkeypatch, temp_dir):
         "opening_fenix.core.services.tree_navigation_service.get_user_dir",
         "opening_fenix.core.services.explorer_service.get_user_dir",
         "opening_fenix.core.services.profile_service.get_user_dir",
-        "opening_fenix.core.services.statistics_service.get_user_dir"
+        "opening_fenix.core.services.statistics_service.get_user_dir",
+        "opening_fenix.core.services.engine_cache_service.get_user_dir"
     ]
     for path in paths_to_mock:
         try:

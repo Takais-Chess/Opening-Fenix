@@ -8,6 +8,7 @@ from opening_fenix.core.services.lichess_service import run_lichess_import_and_c
 from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
 from opening_fenix.core.services.repertoire_mistake_service import audit_repertoire_mistakes
+from opening_fenix.core.utils import get_configured_engine_hash
 
 
 class AnalysisThread(QThread):
@@ -272,7 +273,8 @@ class HoleFinderThread(QThread):
     progress_signal = pyqtSignal(int, int, str)
     
     def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
-                 engine_path=None, threads_count=1, engine=None, depth=18, recheck_unadded: bool = False):
+                 engine_path=None, threads_count=1, engine=None, depth=18, recheck_unadded: bool = False,
+                 hash_size: Optional[int] = None):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
@@ -286,6 +288,7 @@ class HoleFinderThread(QThread):
         self.engine = engine
         self.depth = depth
         self.recheck_unadded = recheck_unadded
+        self.hash_size = hash_size
         self._stop_requested = False
 
     def stop(self):
@@ -321,6 +324,7 @@ class HoleFinderThread(QThread):
                 depth=self.depth,
                 progress_callback=on_progress,
                 recheck_unadded=self.recheck_unadded,
+                hash_size=self.hash_size,
             )
             if not self.isInterruptionRequested() and not self._stop_requested:
                 self.finished_signal.emit(results, self.mode)
@@ -573,12 +577,13 @@ class InstantMultiPVThread(QThread):
     """
     finished = pyqtSignal(dict)  # {move_uci: {"rank": int, "delta": float, "best_san": str}}
 
-    def __init__(self, current_fen, transposition_ucis, engine_path, threads_count=1, parent=None):
+    def __init__(self, current_fen, transposition_ucis, engine_path, threads_count=1, hash_size: Optional[int] = None, parent=None):
         super().__init__(parent)
         self.current_fen = current_fen
         self.transposition_ucis = list(transposition_ucis)
         self.engine_path = engine_path
         self.threads_count = threads_count
+        self.hash_size = hash_size
 
     def run(self):
         import chess
@@ -600,7 +605,13 @@ class InstantMultiPVThread(QThread):
             engine = chess.engine.SimpleEngine.popen_uci(
                 self.engine_path, creationflags=creationflags
             )
-            engine.configure({"Threads": self.threads_count})
+            eng_cfg = {}
+            if "Threads" in engine.options:
+                eng_cfg["Threads"] = self.threads_count
+            if "Hash" in engine.options:
+                eng_cfg["Hash"] = self.hash_size if self.hash_size is not None else get_configured_engine_hash()
+            if eng_cfg:
+                engine.configure(eng_cfg)
 
             board = chess.Board(self.current_fen)
             multipv = max(10, len(self.transposition_ucis) + 5)
@@ -682,12 +693,13 @@ class PathQualityEvalThread(QThread):
 
     THRESHOLD_CP = 50   # 0.5 pawns
 
-    def __init__(self, raw_paths, start_fen, engine_path, threads_count=1, parent=None):
+    def __init__(self, raw_paths, start_fen, engine_path, threads_count=1, hash_size: Optional[int] = None, parent=None):
         super().__init__(parent)
         self.raw_paths = raw_paths
         self.start_fen = start_fen
         self.engine_path = engine_path
         self.threads_count = threads_count
+        self.hash_size = hash_size
         self._stop = False
 
     def stop(self):
@@ -714,7 +726,13 @@ class PathQualityEvalThread(QThread):
             engine = chess.engine.SimpleEngine.popen_uci(
                 self.engine_path, creationflags=creationflags
             )
-            engine.configure({"Threads": self.threads_count})
+            eng_cfg = {}
+            if "Threads" in engine.options:
+                eng_cfg["Threads"] = self.threads_count
+            if "Hash" in engine.options:
+                eng_cfg["Hash"] = self.hash_size if self.hash_size is not None else get_configured_engine_hash()
+            if eng_cfg:
+                engine.configure(eng_cfg)
 
             # ── Step 1: Collect unique (full_fen, move_uci) pairs from all paths ──
             # full_fen → set of UCIs we need to evaluate at that position

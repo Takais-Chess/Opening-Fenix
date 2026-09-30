@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+from typing import Optional, List, Dict, Any, Tuple, Set
 from PyQt6 import sip
 import chess
 import chess.engine
@@ -677,10 +678,74 @@ class CreatorBackend:
         clean_fen = " ".join(fen.strip().split()[:4])
         # Use GLOB for case-sensitive prefix matching in SQLite
         pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
-        if pos and (pos.analysis_depth is None or depth > pos.analysis_depth):
-            pos.analysis_depth, pos.engine_eval = depth, eval_val
+        if pos and pos.engine_eval != eval_val:
+            pos.engine_eval = eval_val
             self.session.commit()
             self.clear_cache()
+
+    def handle_engine_analysis_finished(self, fen, depth, lines) -> bool:
+        """
+        Handles completion of engine analysis on a position.
+        Evaluates MultiPV lines for exhaustiveness:
+          - If EXHAUSTIVE (all legal moves evaluated, or worst line dropped > threshold):
+            Updates good_moves, analysis_depth, engine_eval, and EngineCacheService.
+          - If NON-EXHAUSTIVE:
+            Does NOT touch good_moves, and does NOT touch analysis_depth!
+            Only updates engine_eval.
+        Returns True if exhaustive, False otherwise.
+        """
+        if not self.session:
+            return False
+
+        import json
+        import chess
+        from opening_fenix.core.services.analysis_service import evaluate_multipv_exhaustiveness
+        from opening_fenix.core.services.engine_cache_service import EngineCacheService
+
+        clean_fen = " ".join(fen.strip().split()[:4])
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+
+        rep_uci = None
+        if pos:
+            rep_move = self.session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).first()
+            if rep_move:
+                rep_uci = rep_move.uci
+
+        board = chess.Board(fen)
+        good_moves, is_exhaustive, best_uci, best_score_white_cp = evaluate_multipv_exhaustiveness(
+            board=board,
+            depth=depth,
+            lines_info=lines,
+            repertoire_uci=rep_uci
+        )
+
+        cache_service = EngineCacheService()
+
+        if is_exhaustive:
+            current_depth = (pos.analysis_depth or 0) if pos else 0
+            if pos and depth >= current_depth:
+                pos.good_moves = json.dumps(list(dict.fromkeys(good_moves)))
+                pos.analysis_depth = depth
+                if best_score_white_cp is not None:
+                    pos.engine_eval = best_score_white_cp
+                self.session.commit()
+                self.clear_cache()
+
+            cache_service.set_alternate_moves(fen, depth, good_moves, is_exhaustive=True, best_uci=best_uci)
+            if best_uci:
+                cache_service.set_best_move(fen, depth, best_uci)
+            return True
+        else:
+            # NON-EXHAUSTIVE:
+            # Do NOT change good_moves, and do NOT change analysis_depth!
+            if pos and best_score_white_cp is not None and pos.engine_eval != best_score_white_cp:
+                pos.engine_eval = best_score_white_cp
+                self.session.commit()
+                self.clear_cache()
+
+            if best_uci:
+                cache_service.set_best_move(fen, depth, best_uci)
+            return False
 
     def get_candidate_moves(self, fen):
         if not self.session: return []
@@ -3868,8 +3933,13 @@ class CreatorWindow(QMainWindow):
         self.combo_depth.setEditable(True)
         self.combo_depth.lineEdit().setReadOnly(True)
         self.combo_depth.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.combo_depth.addItems([str(i) for i in range(10, 51, 2)])
-        self.combo_depth.setCurrentText("20")
+        depth_items = [str(i) for i in range(10, 21, 2)] + [str(i) for i in range(25, 51, 5)]
+        self.combo_depth.addItems(depth_items)
+        saved_depth = str(self.config.get("engine_depth", "20"))
+        if self.combo_depth.findText(saved_depth) != -1:
+            self.combo_depth.setCurrentText(saved_depth)
+        else:
+            self.combo_depth.setCurrentText("20")
         self.combo_depth.setFixedWidth(scale(34))
         self.combo_depth.view().setMinimumWidth(scale(75))
         self.combo_depth.setProperty("class", "SmallCombo")
@@ -5492,6 +5562,13 @@ class CreatorWindow(QMainWindow):
     def on_db_update(self, f, d, e):
         self.backend.update_position_analysis(f, d, e)
 
+    def on_engine_analysis_finished(self, fen, depth, lines):
+        if not self.backend:
+            return
+        is_exhaustive = self.backend.handle_engine_analysis_finished(fen, depth, lines)
+        if is_exhaustive and hasattr(self, 'update_ui_from_fen'):
+            self.update_ui_from_fen()
+
     def open_repo_settings(self):
         from PyQt6 import sip
         active_repo = getattr(self, 'active_repo_name', None) or getattr(self.backend, 'active_repo_name', None)
@@ -6034,6 +6111,7 @@ class CreatorWindow(QMainWindow):
             self.engine_thread = EngineThread(ep, threads=threads, hash_size=hash_size, multipv=multipv)
             self.engine_thread.info_signal.connect(self.update_engine_output)
             self.engine_thread.db_update_signal.connect(self.on_db_update)
+            self.engine_thread.analysis_finished_signal.connect(self.on_engine_analysis_finished)
             self.engine_thread.start()
 
     def showEvent(self, event):
@@ -8225,11 +8303,13 @@ class CreatorWindow(QMainWindow):
         self._populate_deep_table(loading_paths)
         self.lbl_transpos_status.setText(tr_ui("creator.transpositions_engine_loading", "Tiefe {depth} fertig — {count} Pfad/Pfade gefunden. Engine lädt (0 / {total})…", depth=depth, count=n, total=n))
 
+        hash_val = int(self.config.get("engine_hash", "256"))
         pq = PathQualityEvalThread(
             raw_paths,
             self._bfs_start_fen,
             ep,
             threads_count=int(self.combo_threads.currentText()),
+            hash_size=hash_val,
         )
         pq.progress.connect(self._on_path_quality_progress)
         pq.finished.connect(self._on_path_quality_ready)
@@ -9306,6 +9386,7 @@ class CreatorWindow(QMainWindow):
         btn_unadded = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
         recheck = btn_unadded.isChecked() if btn_unadded else bool(self.config.get("transpos_recheck_unadded", False))
 
+        hash_val = int(self.config.get("engine_hash", "256"))
         self.global_transpos_thread = HoleFinderThread(
             self.backend.active_repo_name,
             self.backend.is_test,
@@ -9316,6 +9397,7 @@ class CreatorWindow(QMainWindow):
             threads_count=threads,
             depth=depth_val,
             recheck_unadded=recheck,
+            hash_size=hash_val,
         )
         self.global_transpos_thread.item_found_signal.connect(self._on_global_transpos_item_found)
         self.global_transpos_thread.progress_signal.connect(self._on_global_transpos_progress)
@@ -9650,6 +9732,7 @@ class CreatorWindow(QMainWindow):
         self._hole_cached_levels = self.backend.get_repertoire_levels() if self.backend else []
         self._hole_cached_rules = self.get_hole_recommendation_rules()
 
+        hash_val = int(self.config.get("engine_hash", "256"))
         self.hole_thread = HoleFinderThread(
             self.backend.active_repo_name,
             self.backend.is_test,
@@ -9662,6 +9745,7 @@ class CreatorWindow(QMainWindow):
             depth=hole_depth,
             threads_count=threads,
             recheck_unadded=recheck,
+            hash_size=hash_val,
         )
         self.hole_thread.item_found_signal.connect(self._on_hole_item_found)
         self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)

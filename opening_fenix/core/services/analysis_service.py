@@ -4,7 +4,7 @@ import json
 import subprocess
 import chess
 import chess.engine
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, List, Dict, Any
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
@@ -14,6 +14,8 @@ from opening_fenix.core.db.meta_utils import get_meta, set_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.priority_service import calculate_local_priority_scores
 from opening_fenix.core.services.lichess_service import ELO_MAPPING, LichessData
+from opening_fenix.core.services.engine_cache_service import EngineCacheService
+from opening_fenix.core.logger import logger
 from opening_fenix.core.translation import tr_ui
 import collections
 import urllib.request
@@ -73,6 +75,260 @@ def order_positions_topologically(session: Session, positions: list) -> list:
 
     # Sort positions by BFS discovery order; unreached/orphan positions sort deterministically by id
     return sorted(positions, key=lambda p: (pos_id_order.get(p.id, 999999999), p.id))
+
+
+def extract_score_val(score_obj, board_turn: chess.Color) -> int:
+    """Extracts centipawn score relative to the moving player."""
+    if hasattr(score_obj, 'relative') and hasattr(score_obj.relative, 'score'):
+        try:
+            rel_val = score_obj.relative.score(mate_score=100000)
+            if isinstance(rel_val, (int, float)):
+                return int(rel_val)
+        except TypeError:
+            try:
+                rel_val = score_obj.relative.score(100000)
+                if isinstance(rel_val, (int, float)):
+                    return int(rel_val)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    if hasattr(score_obj, 'white') and hasattr(score_obj.white, 'score'):
+        try:
+            w_val = score_obj.white.score(mate_score=100000)
+            if isinstance(w_val, (int, float)):
+                return int(-w_val if board_turn == chess.BLACK else w_val)
+        except TypeError:
+            try:
+                w_val = score_obj.white.score(100000)
+                if isinstance(w_val, (int, float)):
+                    return int(-w_val if board_turn == chess.BLACK else w_val)
+            except Exception:
+                pass
+        except Exception:
+            pass
+    return 0
+
+
+def evaluate_multipv_exhaustiveness(
+    board: chess.Board,
+    depth: int,
+    lines_info: List[dict],
+    repertoire_uci: Optional[str] = None
+) -> Tuple[List[str], bool, Optional[str], Optional[int]]:
+    """
+    Evaluates a completed set of MultiPV lines for exhaustiveness and good moves.
+
+    A MultiPV result is exhaustive if:
+      1. len(lines_info) >= board.legal_moves.count() (all legal moves evaluated)
+      OR
+      2. The worst evaluated line drops > threshold below the best move
+         (50 cp for depth <= 17, 30 cp for depth > 17).
+         Because MultiPV lines are strictly sorted descending by score, all unevaluated lines
+         are mathematically guaranteed to also be worse than the threshold.
+
+    Returns:
+        (good_moves, is_exhaustive, best_uci, best_score_white_cp)
+    """
+    legal_moves_count = board.legal_moves.count()
+    if legal_moves_count == 0:
+        return ([repertoire_uci] if repertoire_uci else [], True, None, None)
+
+    valid_lines = [inf for inf in lines_info if inf and 'pv' in inf and inf['pv']]
+    if not valid_lines:
+        return ([repertoire_uci] if repertoire_uci else [], False, None, None)
+
+    threshold = 50 if depth <= 17 else 30
+
+    best_info = valid_lines[0]
+    best_uci = best_info['pv'][0].uci() if ('pv' in best_info and best_info['pv']) else None
+    best_rel = extract_score_val(best_info.get('score'), board.turn)
+
+    best_score_white_cp = None
+    if hasattr(best_info.get('score'), 'white') and hasattr(best_info['score'].white, 'score'):
+        try:
+            w_sc = best_info['score'].white().score(mate_score=100000)
+            if isinstance(w_sc, (int, float)):
+                best_score_white_cp = int(w_sc)
+        except Exception:
+            pass
+    if best_score_white_cp is None:
+        best_score_white_cp = -best_rel if board.turn == chess.BLACK else best_rel
+
+    good_moves = []
+    if repertoire_uci:
+        good_moves.append(repertoire_uci)
+
+    for info in valid_lines:
+        cand_uci = info['pv'][0].uci()
+        cand_rel = extract_score_val(info.get('score'), board.turn)
+        loss = best_rel - cand_rel
+        if loss <= threshold:
+            if cand_uci not in good_moves:
+                good_moves.append(cand_uci)
+
+    evaluated_count = len(valid_lines)
+    is_exhaustive = False
+
+    if evaluated_count >= legal_moves_count:
+        is_exhaustive = True
+    elif evaluated_count > 0:
+        worst_info = valid_lines[-1]
+        worst_rel = extract_score_val(worst_info.get('score'), board.turn)
+        worst_loss = best_rel - worst_rel
+        if worst_loss > threshold:
+            is_exhaustive = True
+
+    return (good_moves, is_exhaustive, best_uci, best_score_white_cp)
+
+
+def evaluate_position_alternate_moves(
+    analyse_func: Callable[[chess.Board, chess.engine.Limit, int], list],
+    board: chess.Board,
+    depth: int,
+    repertoire_uci: Optional[str] = None,
+    check_cancel: Optional[Callable[[], bool]] = None,
+    max_engine_multipv: Optional[int] = None
+) -> Tuple[List[str], bool, Optional[str], Optional[int]]:
+    """
+    Robust, uncapped adaptive MultiPV search to find all alternate good moves.
+    
+    Returns:
+        (good_moves, is_exhaustive, best_uci, best_score_white_cp)
+    """
+    legal_moves_count = board.legal_moves.count()
+    if legal_moves_count == 0:
+        return ([repertoire_uci] if repertoire_uci else [], True, None, None)
+
+    threshold = 50 if depth <= 17 else 30
+    max_possible = min(legal_moves_count, max_engine_multipv or 500)
+    current_mpv = min(3, max_possible)
+
+    is_exhaustive = False
+    best_uci = None
+    best_score_white_cp = None
+    good_moves = []
+    if repertoire_uci:
+        good_moves.append(repertoire_uci)
+
+    while True:
+        if check_cancel and check_cancel():
+            break
+
+        results = analyse_func(board, chess.engine.Limit(depth=depth), current_mpv)
+        if check_cancel and check_cancel():
+            break
+        if not results:
+            break
+
+        # Best move and score
+        best_info = results[0]
+        if 'pv' in best_info and best_info['pv']:
+            best_uci = best_info['pv'][0].uci()
+
+        best_rel = extract_score_val(best_info.get('score'), board.turn)
+        if hasattr(best_info.get('score'), 'white') and hasattr(best_info['score'].white, 'score'):
+            try:
+                w_sc = best_info['score'].white().score(mate_score=100000)
+                if isinstance(w_sc, (int, float)):
+                    best_score_white_cp = int(w_sc)
+            except Exception:
+                pass
+        if best_score_white_cp is None:
+            best_score_white_cp = -best_rel if board.turn == chess.BLACK else best_rel
+
+        # Collect moves within threshold
+        for info in results:
+            if 'pv' not in info or not info['pv']:
+                continue
+            cand_uci = info['pv'][0].uci()
+            cand_rel = extract_score_val(info.get('score'), board.turn)
+            loss = best_rel - cand_rel
+            if loss <= threshold:
+                if cand_uci not in good_moves:
+                    good_moves.append(cand_uci)
+
+        evaluated_count = len(results)
+
+        # If engine returned fewer lines than requested, it exhausted available moves (or mock finished)
+        if evaluated_count < current_mpv:
+            is_exhaustive = True
+            break
+
+        # If all legal moves of the position have been evaluated
+        if evaluated_count >= legal_moves_count:
+            is_exhaustive = True
+            break
+
+        # Check cutoff on the lowest-ranked evaluated line
+        worst_info = results[-1]
+        worst_rel = extract_score_val(worst_info.get('score'), board.turn)
+        worst_loss = best_rel - worst_rel
+
+        if worst_loss > threshold:
+            # Cutoff achieved! All remaining moves must have loss >= worst_loss > threshold
+            is_exhaustive = True
+            break
+
+        # If we reached the maximum allowable MultiPV
+        if current_mpv >= max_possible:
+            is_exhaustive = True
+            break
+
+        # Cutoff not reached: expand MultiPV (+3 lines) and continue
+        current_mpv = min(current_mpv + 3, max_possible)
+
+    return list(dict.fromkeys(good_moves)), is_exhaustive, best_uci, best_score_white_cp
+
+
+def update_position_alternate_moves(
+    pos: Position,
+    depth: int,
+    good_moves: List[str],
+    is_exhaustive: bool,
+    best_uci: Optional[str] = None,
+    best_score_cp: Optional[int] = None,
+    cache_service: Optional[EngineCacheService] = None
+):
+    """
+    Safely updates Position.good_moves and analysis_depth:
+      - Only replaces good_moves if is_exhaustive is True AND depth >= existing analysis_depth.
+      - If non-exhaustive, merges new moves non-destructively without losing existing candidates.
+      - Never downgrades analysis_depth.
+      - Updates global EngineCacheService.
+    """
+    existing_moves = []
+    if pos.good_moves:
+        try:
+            parsed = json.loads(pos.good_moves)
+            if isinstance(parsed, list):
+                existing_moves = parsed
+        except Exception:
+            pass
+
+    current_depth = pos.analysis_depth or 0
+    if is_exhaustive and depth >= current_depth:
+        # Exhaustive search: safe to overwrite
+        pos.good_moves = json.dumps(list(dict.fromkeys(good_moves)))
+        pos.analysis_depth = depth
+        if best_score_cp is not None:
+            pos.engine_eval = best_score_cp
+        if cache_service:
+            cache_service.set_alternate_moves(pos.fen, depth, good_moves, is_exhaustive=True, best_uci=best_uci)
+            if best_uci:
+                cache_service.set_best_move(pos.fen, depth, best_uci)
+    else:
+        # Non-exhaustive or lower depth: merge non-destructively
+        merged = list(dict.fromkeys(existing_moves + good_moves))
+        pos.good_moves = json.dumps(merged)
+        if pos.analysis_depth is None:
+            pos.analysis_depth = depth
+        if best_score_cp is not None and pos.engine_eval is None:
+            pos.engine_eval = best_score_cp
+        if cache_service:
+            cache_service.set_alternate_moves(pos.fen, depth, merged, is_exhaustive=False, best_uci=best_uci)
+
 
 def run_db_analysis(
     repo_name: str, 
@@ -159,6 +415,13 @@ def run_db_analysis(
                     raise
             return engine.analyse(board_to_analyse, limit, multipv=multipv)
 
+        cache_service = EngineCacheService()
+        max_mpv_engine = 500
+        if hasattr(engine, "options") and isinstance(engine.options, dict) and "MultiPV" in engine.options:
+            opt = engine.options["MultiPV"]
+            if hasattr(opt, "max") and opt.max is not None:
+                max_mpv_engine = opt.max
+
         for i, pos in enumerate(positions_to_analyze):
             if check_cancel and check_cancel():
                 try:
@@ -178,81 +441,52 @@ def run_db_analysis(
                         progress_callback(pct)
                 continue
 
-            board = chess.Board(current_pos.fen)
-            
             repertoire_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == current_pos.id).first()
             repertoire_uci = repertoire_move.uci if repertoire_move else None
 
-            try:
-                # --- STAGE 1: DISCOVERY ---
-                # Quick search to see if we actually need high MultiPV
-                discovery_depth = min(depth, 10)
-                discovery_multipv = 5
-                if "MultiPV" in engine.options:
-                    opt = engine.options["MultiPV"]
-                    max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
-                    discovery_multipv = min(5, max_allowed)
-                
-                # Fast look
-                discovery_res = analyse_with_cancel(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
-                
-                if check_cancel and check_cancel():
-                    try:
-                        commit_with_retry(session)
-                    except Exception:
-                        session.rollback()
-                    return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
+            # 1. Check global engine cache first for exhaustive alternate moves
+            cached_alt = cache_service.get_alternate_moves(current_pos.fen, min_depth=depth, require_exhaustive=True)
+            if cached_alt:
+                c_moves = list(cached_alt["good_moves"])
+                if repertoire_uci and repertoire_uci not in c_moves:
+                    c_moves.append(repertoire_uci)
+                current_pos.good_moves = json.dumps(list(dict.fromkeys(c_moves)))
+                current_pos.analysis_depth = cached_alt["depth"]
+            else:
+                # 2. Run adaptive uncapped MultiPV analysis
+                try:
+                    board = chess.Board(current_pos.fen)
+                    good_moves, is_exhaustive, best_uci, best_score_cp = evaluate_position_alternate_moves(
+                        analyse_func=analyse_with_cancel,
+                        board=board,
+                        depth=depth,
+                        repertoire_uci=repertoire_uci,
+                        check_cancel=check_cancel,
+                        max_engine_multipv=max_mpv_engine
+                    )
 
-                # --- STAGE 2: DECISION & DEEPENING ---
-                final_multipv = 1
-                if len(discovery_res) > 1:
-                    best_discover = discovery_res[0]['score'].white().score(mate_score=100000)
-                    second_discover = discovery_res[1]['score'].white().score(mate_score=100000)
-                    
-                    # If the gap is small (< 150cp), we keep looking at multiple moves.
-                    # Otherwise, we focus resources on the best move to reach depth faster.
-                    if abs(best_discover - second_discover) < 150:
-                        final_multipv = discovery_multipv
+                    if check_cancel and check_cancel():
+                        try:
+                            commit_with_retry(session)
+                        except Exception:
+                            session.rollback()
+                        return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
 
-                # Full analysis to target depth
-                result = analyse_with_cancel(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
-                
-                if check_cancel and check_cancel():
-                    try:
-                        commit_with_retry(session)
-                    except Exception:
-                        session.rollback()
-                    return False, "Analyse abgebrochen. Bisheriger Fortschritt wurde gespeichert."
-                
-                if not result:
-                    continue
+                    current_pos = session.get(Position, pos.id)
+                    if current_pos is not None:
+                        update_position_alternate_moves(
+                            pos=current_pos,
+                            depth=depth,
+                            good_moves=good_moves,
+                            is_exhaustive=is_exhaustive,
+                            best_uci=best_uci,
+                            best_score_cp=best_score_cp,
+                            cache_service=cache_service
+                        )
 
-                best_score = result[0]['score'].white()
-                
-                good_moves = []
-                if repertoire_uci:
-                    good_moves.append(repertoire_uci)
-
-                for info in result:
-                    if 'pv' not in info or not info['pv']: continue
-                    move = info['pv'][0]
-                    score = info['score'].white()
-                    # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
-                    threshold = 50 if depth <= 17 else 30
-                    if abs(best_score.score(mate_score=100000) - score.score(mate_score=100000)) <= threshold:
-                        if move.uci() not in good_moves:
-                            good_moves.append(move.uci())
-
-                current_pos = session.get(Position, pos.id)
-                if current_pos is not None:
-                    current_pos.good_moves = json.dumps(list(set(good_moves)))
-                    current_pos.analysis_depth = depth
-
-            except Exception as e:
-                print(f"Error analyzing FEN {pos.fen}: {e}")
-                current_pos = session.get(Position, pos.id)
-                if current_pos is not None:
-                    current_pos.good_moves = json.dumps([])
+                except Exception as e:
+                    logger.error(f"Error analyzing FEN {pos.fen}: {e}")
+                    # Preserve existing good_moves on error without blanking out
 
             pct = int((i + 1) * 100 / total_positions)
             if progress_callback:
@@ -477,66 +711,66 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
             )
             session.refresh(pos)
 
-        if engine_path and os.path.exists(engine_path) and (pos.analysis_depth is None or pos.analysis_depth < depth):
-            engine = None
-            try:
-                creationflags = 0
-                if sys.platform == "win32":
-                    # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
-                    creationflags = 0x08000000 | 0x00004000
-                engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
-                engine.configure({"Threads": 1})
-                board = chess.Board(pos.fen) 
-                
+        cache_service = EngineCacheService()
+        if pos.analysis_depth is None or pos.analysis_depth < depth:
+            # 1. Check global engine cache first
+            cached_alt = cache_service.get_alternate_moves(pos.fen, min_depth=depth, require_exhaustive=True)
+            if cached_alt:
+                c_moves = list(cached_alt["good_moves"])
+                rep_moves = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).all()
+                for rm in rep_moves:
+                    if rm.uci not in c_moves:
+                        c_moves.append(rm.uci)
+                pos.good_moves = json.dumps(list(dict.fromkeys(c_moves)))
+                pos.analysis_depth = cached_alt["depth"]
+                session.flush()
+            elif engine_path and os.path.exists(engine_path):
+                engine = None
                 try:
-                    # --- STAGE 1: DISCOVERY ---
-                    discovery_depth = min(depth, 10)
-                    discovery_multipv = 5
-                    if "MultiPV" in engine.options:
+                    creationflags = 0
+                    if sys.platform == "win32":
+                        # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
+                        creationflags = 0x08000000 | 0x00004000
+                    engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
+                    engine.configure({"Threads": 1})
+                    board = chess.Board(pos.fen)
+
+                    rep_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).first()
+                    repertoire_uci = rep_move.uci if rep_move else None
+
+                    max_engine_mpv = 500
+                    if hasattr(engine, "options") and isinstance(engine.options, dict) and "MultiPV" in engine.options:
                         opt = engine.options["MultiPV"]
-                        max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
-                        discovery_multipv = min(5, max_allowed)
-                    
-                    discovery_res = engine.analyse(board, chess.engine.Limit(depth=discovery_depth), multipv=discovery_multipv)
+                        if hasattr(opt, "max") and opt.max is not None:
+                            max_engine_mpv = opt.max
 
-                    # --- STAGE 2: DECISION & DEEPENING ---
-                    final_multipv = 1
-                    if len(discovery_res) > 1:
-                        best_discover = discovery_res[0]['score'].white().score(mate_score=100000)
-                        second_discover = discovery_res[1]['score'].white().score(mate_score=100000)
-                        
-                        if abs(best_discover - second_discover) < 150:
-                            final_multipv = discovery_multipv
+                    def analyse_wrapper(b, limit, mpv):
+                        res = engine.analyse(b, limit, multipv=mpv)
+                        return res if isinstance(res, list) else [res]
 
-                    result = engine.analyse(board, chess.engine.Limit(depth=depth), multipv=final_multipv)
-                    
-                    if result:
-                        best_score_info = result[0]['score'].white()
-                        best_score_val = best_score_info.score(mate_score=100000)
-                        
-                        good_moves = []
-                        rep_moves = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).all()
-                        for rm in rep_moves:
-                            good_moves.append(rm.uci)
+                    good_moves, is_exhaustive, best_uci, best_score_cp = evaluate_position_alternate_moves(
+                        analyse_func=analyse_wrapper,
+                        board=board,
+                        depth=depth,
+                        repertoire_uci=repertoire_uci,
+                        max_engine_multipv=max_engine_mpv
+                    )
 
-                        for info in result:
-                            if 'pv' not in info or not info['pv']: continue
-                            move = info['pv'][0]
-                            score = info['score'].white()
-                            score_val = score.score(mate_score=100000)
-                            # Use a more permissive threshold at lower depths (<= 17) to catch more "good" candidate moves.
-                            threshold = 50 if depth <= 17 else 30
-                            if abs(best_score_val - score_val) <= threshold:
-                                if move.uci() not in good_moves:
-                                    good_moves.append(move.uci())
-                        
-                        pos.good_moves = json.dumps(list(set(good_moves)))
-                        pos.analysis_depth = depth
-                        session.flush()
+                    update_position_alternate_moves(
+                        pos=pos,
+                        depth=depth,
+                        good_moves=good_moves,
+                        is_exhaustive=is_exhaustive,
+                        best_uci=best_uci,
+                        best_score_cp=best_score_cp,
+                        cache_service=cache_service
+                    )
+                    session.flush()
                 except Exception as e:
-                    print(f"Engine analysis failed for enrichment: {e}")
-            finally:
-                if engine: engine.quit()
+                    logger.error(f"Engine analysis failed for enrichment: {e}")
+                finally:
+                    if engine:
+                        engine.quit()
 
         parent_moves = session.query(Move).filter_by(to_position_id=pos.id).all()
         if parent_moves:
@@ -555,3 +789,71 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
     finally:
         session.close()
         db.close()
+
+
+def reset_repertoire_engine_analysis(repo_name: str) -> int:
+    """
+    Clears analysis_depth, good_moves, and engine_eval for all positions in the specified repertoire.
+    Repertoire moves, variations, comments, and training progress remain 100% untouched.
+    
+    Returns the number of positions reset.
+    """
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return 0
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    try:
+        updated = session.query(Position).filter(
+            or_(
+                Position.analysis_depth.isnot(None),
+                Position.good_moves.isnot(None),
+                Position.engine_eval.isnot(None)
+            )
+        ).update(
+            {
+                Position.analysis_depth: None,
+                Position.good_moves: None,
+                Position.engine_eval: None
+            },
+            synchronize_session=False
+        )
+        commit_with_retry(session)
+        logger.info(f"Reset engine analysis for {updated} positions in '{repo_name}'.")
+        return updated
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Failed to reset engine analysis in '{repo_name}': {e}")
+        raise
+    finally:
+        session.close()
+        db.close()
+
+
+def reset_all_repertoires_engine_analysis(clear_global_cache: bool = True) -> Tuple[int, Dict[str, int]]:
+    """
+    Clears analysis_depth, good_moves, and engine_eval across all repertoires in the active profile.
+    Optionally clears alternate moves data from the global engine cache.
+    
+    Returns (total_positions_reset, {repo_name: count_reset}).
+    """
+    from opening_fenix.core.services.repertoire_service import RepertoireService
+    repo_service = RepertoireService()
+    all_repos = repo_service.get_all_repertoires()
+    results = {}
+    total = 0
+    for r in all_repos:
+        cnt = reset_repertoire_engine_analysis(r)
+        results[r] = cnt
+        total += cnt
+
+    if clear_global_cache:
+        try:
+            cache = EngineCacheService()
+            cache.clear_alternate_moves()
+            logger.info("Cleared alternate moves data from global engine cache.")
+        except Exception as e:
+            logger.warning(f"Failed to clear alternate moves from global cache: {e}")
+
+    return total, results
+

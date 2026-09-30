@@ -546,6 +546,20 @@ def _update_lichess_delay_config(delay_value):
     except IOError:
         print("ERROR: Could not write to config.json.")
 
+def get_configured_engine_hash(default: int = 256) -> int:
+    """Reads engine_hash from config.json, returning configured MB (default 256)."""
+    try:
+        config_path = os.path.join(get_user_dir(), "config.json")
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+                val = cfg.get("engine_hash")
+                if val is not None:
+                    return max(16, int(val))
+    except Exception:
+        pass
+    return default
+
 def normalize_fen(board):
     return " ".join(board.fen().split(" ")[:4])
 

@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
  
+## [1.2.4] - 2026-09-30
+
+### Added & Improved
+- **Adaptive MultiPV Engine Analysis**: Removed hardcoded MultiPV caps and shallow Stage 1 heuristics. Engine scans dynamically expand MultiPV until candidate moves drop below the score cutoff threshold or all legal moves are checked.
+- **Strict Exhaustive Overwrite Guarantees**: Alternate moves are only overwritten if the analysis is mathematically proven exhaustive (cutoff reached or all legal moves evaluated); non-exhaustive runs merge good moves non-destructively.
+- **Engine Cache Decoupling**: Separated transposition evaluations from alternate move lists in the global engine cache database (`engine_eval_cache.db`), preventing high-depth transposition lookups from masquerading as complete alternate moves analyses.
+- **Creator Live Analysis Integration**: Interactive engine analysis in the Creator Analysis tab now evaluates exhaustiveness upon reaching target depth, safely updating alternate moves when exhaustive while preserving existing data when non-exhaustive without corrupting `analysis_depth`.
+- **Engine Analysis Reset**: Added a dedicated reset tool in Unified Settings to clear engine analysis data (`good_moves`, `analysis_depth`, `engine_eval`) for a selected repertoire or all repertoires, with an explicit safety guarantee that user moves and training progress remain 100% untouched.
+
 ## [1.2.3] - 2026-09-28
 
 ### Fixed & Improved

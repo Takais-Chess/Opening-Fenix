@@ -30,6 +30,7 @@ class EngineCacheService:
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or get_engine_cache_db_path()
         self._local_cache: Dict[str, tuple] = {}
+        self._alt_cache: Dict[str, tuple] = {}
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
@@ -49,12 +50,31 @@ class EngineCacheService:
                             depth INTEGER NOT NULL,
                             best_uci TEXT NOT NULL,
                             eval_json TEXT,
+                            alternate_moves_json TEXT,
+                            alternates_depth INTEGER,
+                            alternates_exhaustive INTEGER DEFAULT 0,
                             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         );
                     """)
                     conn.execute("CREATE INDEX IF NOT EXISTS idx_engine_evals_depth ON engine_evals (depth);")
                     try:
+                        conn.execute("CREATE INDEX IF NOT EXISTS idx_engine_evals_alt_depth ON engine_evals (alternates_depth);")
+                    except Exception:
+                        pass
+                    try:
                         conn.execute("ALTER TABLE engine_evals ADD COLUMN eval_json TEXT;")
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute("ALTER TABLE engine_evals ADD COLUMN alternate_moves_json TEXT;")
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute("ALTER TABLE engine_evals ADD COLUMN alternates_depth INTEGER;")
+                    except Exception:
+                        pass
+                    try:
+                        conn.execute("ALTER TABLE engine_evals ADD COLUMN alternates_exhaustive INTEGER DEFAULT 0;")
                     except Exception:
                         pass
                 conn.close()
@@ -239,3 +259,160 @@ class EngineCacheService:
             conn.close()
         except Exception:
             pass
+
+    def get_alternate_moves(self, fen: str, min_depth: int = 18, require_exhaustive: bool = True) -> Optional[dict]:
+        """
+        Retrieves cached alternate moves for a FEN.
+        Returns a dict {"good_moves": list, "depth": int, "is_exhaustive": bool, "best_uci": Optional[str]} or None.
+        If require_exhaustive is True, returns data only if is_exhaustive is True and depth >= min_depth.
+        """
+        if not fen:
+            return None
+        clean = " ".join(fen.strip().split()[:4])
+
+        with _lock:
+            if clean in self._alt_cache:
+                gm, d, exh, b_uci = self._alt_cache[clean]
+                if d >= min_depth and (exh or not require_exhaustive):
+                    return {"good_moves": list(gm), "depth": d, "is_exhaustive": exh, "best_uci": b_uci}
+
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT alternate_moves_json, alternates_depth, alternates_exhaustive, best_uci "
+                "FROM engine_evals WHERE fen = ? AND alternates_depth >= ?",
+                (clean, min_depth)
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                alt_json, depth, is_exh, best_uci = row[0], row[1], bool(row[2]), row[3]
+                if require_exhaustive and not is_exh:
+                    return None
+                try:
+                    moves = json.loads(alt_json)
+                    if isinstance(moves, list):
+                        with _lock:
+                            self._alt_cache[clean] = (moves, depth, is_exh, best_uci)
+                        return {
+                            "good_moves": list(moves),
+                            "depth": depth,
+                            "is_exhaustive": is_exh,
+                            "best_uci": best_uci
+                        }
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return None
+
+    def set_alternate_moves(
+        self,
+        fen: str,
+        depth: int,
+        good_moves: list,
+        is_exhaustive: bool = True,
+        best_uci: Optional[str] = None
+    ):
+        """
+        Stores or updates alternate moves evaluation for a FEN.
+        Only overwrites existing good_moves if:
+          1. New evaluation is exhaustive and previous was not, OR
+          2. New evaluation has >= depth and is at least as exhaustive as previous, OR
+          3. Previous had no alternate moves.
+        If the new evaluation is NOT exhaustive, it merges good_moves with existing cached good_moves.
+        Preserves existing targeted/transposition eval_json and best_uci.
+        """
+        if not fen or good_moves is None:
+            return
+        clean = " ".join(fen.strip().split()[:4])
+        cleaned_moves = list(dict.fromkeys(good_moves))
+        alt_json_str = json.dumps(cleaned_moves)
+        is_exh_int = 1 if is_exhaustive else 0
+
+        try:
+            conn = self._get_connection()
+            with conn:
+                cur = conn.cursor()
+                cur.execute(
+                    "SELECT alternate_moves_json, alternates_depth, alternates_exhaustive, best_uci FROM engine_evals WHERE fen = ?",
+                    (clean,)
+                )
+                row = cur.fetchone()
+                if row:
+                    prev_json, prev_depth, prev_exh, prev_best = row[0], row[1] or 0, bool(row[2]), row[3]
+                    eff_best = best_uci or prev_best or (cleaned_moves[0] if cleaned_moves else "")
+                    
+                    merged_moves = cleaned_moves
+                    if prev_json:
+                        try:
+                            prev_list = json.loads(prev_json)
+                            if isinstance(prev_list, list):
+                                if not is_exhaustive or not prev_exh or depth < prev_depth:
+                                    merged_moves = list(dict.fromkeys(prev_list + cleaned_moves))
+                                else:
+                                    merged_moves = cleaned_moves
+                                alt_json_str = json.dumps(merged_moves)
+                        except Exception:
+                            pass
+
+                    should_update = False
+                    if prev_json is None:
+                        should_update = True
+                    elif is_exhaustive and not prev_exh:
+                        should_update = True
+                    elif is_exhaustive == prev_exh and depth >= prev_depth:
+                        should_update = True
+                    elif not is_exhaustive:
+                        should_update = True
+
+                    new_exh = True if (is_exhaustive or prev_exh) else False
+                    new_depth = max(depth, prev_depth)
+
+                    if should_update:
+                        cur.execute("""
+                            UPDATE engine_evals SET
+                                alternate_moves_json = ?,
+                                alternates_depth = ?,
+                                alternates_exhaustive = ?,
+                                best_uci = CASE WHEN best_uci IS NOT NULL AND best_uci != '' THEN best_uci ELSE ? END,
+                                updated_at = CURRENT_TIMESTAMP
+                            WHERE fen = ?
+                        """, (alt_json_str, new_depth, 1 if new_exh else 0, eff_best, clean))
+
+                    with _lock:
+                        self._alt_cache[clean] = (merged_moves, new_depth, new_exh, eff_best)
+                else:
+                    eff_best = best_uci or (cleaned_moves[0] if cleaned_moves else "")
+                    cur.execute("""
+                        INSERT INTO engine_evals (fen, depth, best_uci, alternate_moves_json, alternates_depth, alternates_exhaustive, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """, (clean, depth, eff_best, alt_json_str, depth, is_exh_int))
+                    with _lock:
+                        self._alt_cache[clean] = (cleaned_moves, depth, is_exhaustive, eff_best)
+            conn.close()
+        except Exception:
+            pass
+
+    def clear_alternate_moves(self):
+        """
+        Clears alternate moves analysis data from the cache table.
+        Leaves best_uci and transposition eval_json intact.
+        """
+        with _lock:
+            self._alt_cache.clear()
+        try:
+            conn = self._get_connection()
+            with conn:
+                conn.execute("""
+                    UPDATE engine_evals SET
+                        alternate_moves_json = NULL,
+                        alternates_depth = NULL,
+                        alternates_exhaustive = 0
+                """)
+            conn.close()
+        except Exception:
+            pass
+
+
