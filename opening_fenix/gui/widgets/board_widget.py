@@ -189,9 +189,20 @@ class ChessBoardWidget(QWidget):
         self._duration_lut = {}
         self._gc_disabled_for_anim = False
         self._coord_color = QColor("#4b4b4b")
+        self._board_snapshot = None
+        self._snapshot_flipped = None
+        self._snapshot_size = None
         self.update_animation_metrics()
 
-    def update_animation_metrics(self, anim_speed=None):
+    def _invalidate_snapshot(self):
+        """Invalidates the cached static board snapshot."""
+        self._board_snapshot = None
+
+    def resizeEvent(self, event):
+        self._invalidate_snapshot()
+        super().resizeEvent(event)
+
+    def update_animation_metrics(self, anim_speed=None, target_fps=None):
         """
         Pre-calculates frame-quantized animation durations and high-precision timer interval.
         Couples animation duration to integer monitor VSync refresh cycles with square-root distance scaling.
@@ -203,7 +214,10 @@ class ChessBoardWidget(QWidget):
             else:
                 anim_speed = 200
                 
-        self.target_fps = self.get_screen_refresh_rate()
+        if target_fps is not None:
+            self.target_fps = target_fps
+        else:
+            self.target_fps = self.get_screen_refresh_rate()
         frame_interval_ms = 1000.0 / float(self.target_fps)
         self.timer_interval = max(1, int(frame_interval_ms))
         self._last_configured_anim_speed = anim_speed
@@ -249,6 +263,7 @@ class ChessBoardWidget(QWidget):
             self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
         self._light_brush = QBrush(self.light_color)
         self._dark_brush = QBrush(self.dark_color)
+        self._invalidate_snapshot()
         self.update()
 
     def set_highlight_color(self, color_name_or_color):
@@ -266,6 +281,7 @@ class ChessBoardWidget(QWidget):
             else:
                 self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
         self._highlight_brush = QBrush(self.highlight_color)
+        self._invalidate_snapshot()
         self.update()
 
     def load_pieces(self):
@@ -305,6 +321,7 @@ class ChessBoardWidget(QWidget):
         self.solution_arrow = None
         self.explorer_arrows = []
         self.clear_user_drawings()
+        self._invalidate_snapshot()
         self.update() 
 
     def get_square_from_pos(self, pos):
@@ -343,6 +360,7 @@ class ChessBoardWidget(QWidget):
         self.drawing_current_sq = None
         self.drawing_color = None
         self.drawing_highlight_color = None
+        self._invalidate_snapshot()
         if had_drawings and emit_signal:
             self.drawings_changed.emit()
 
@@ -350,6 +368,7 @@ class ChessBoardWidget(QWidget):
         """Clears all user-drawn arrows."""
         if self.user_arrows:
             self.user_arrows.clear()
+            self._invalidate_snapshot()
             self.update()
             self.drawings_changed.emit()
 
@@ -357,6 +376,7 @@ class ChessBoardWidget(QWidget):
         """Clears all user-drawn square highlights."""
         if self.user_highlights:
             self.user_highlights.clear()
+            self._invalidate_snapshot()
             self.update()
             self.drawings_changed.emit()
 
@@ -364,6 +384,7 @@ class ChessBoardWidget(QWidget):
         """Programmatically adds or updates an arrow between two squares."""
         col = USER_ARROW_COLORS.get(color, color) if isinstance(color, str) else color
         self.user_arrows[(start_sq, end_sq)] = col
+        self._invalidate_snapshot()
         self.update()
         self.drawings_changed.emit()
 
@@ -371,6 +392,7 @@ class ChessBoardWidget(QWidget):
         """Removes a user-drawn arrow."""
         if (start_sq, end_sq) in self.user_arrows:
             del self.user_arrows[(start_sq, end_sq)]
+            self._invalidate_snapshot()
             self.update()
             self.drawings_changed.emit()
 
@@ -378,6 +400,7 @@ class ChessBoardWidget(QWidget):
         """Programmatically adds or updates a square highlight."""
         col = USER_HIGHLIGHT_COLORS.get(color, color) if isinstance(color, str) else color
         self.user_highlights[sq] = col
+        self._invalidate_snapshot()
         self.update()
         self.drawings_changed.emit()
 
@@ -385,6 +408,7 @@ class ChessBoardWidget(QWidget):
         """Removes a user-drawn square highlight."""
         if sq in self.user_highlights:
             del self.user_highlights[sq]
+            self._invalidate_snapshot()
             self.update()
             self.drawings_changed.emit()
 
@@ -402,6 +426,7 @@ class ChessBoardWidget(QWidget):
             self.user_highlights[sq] = USER_HIGHLIGHT_COLORS.get(col_name, USER_HIGHLIGHT_COLORS["green"])
         for from_sq, to_sq, col_name in parsed["arrows"]:
             self.user_arrows[(from_sq, to_sq)] = USER_ARROW_COLORS.get(col_name, USER_ARROW_COLORS["green"])
+        self._invalidate_snapshot()
         self.update()
 
     def get_chessbase_annotation_tags(self) -> str:
@@ -415,10 +440,12 @@ class ChessBoardWidget(QWidget):
             if self.is_animating: # Fallback if no skip handler is connected
                 if self.animating_piece_data:
                     self.move_anim.stop()
+                    self.precise_anim_timer.stop()
                     move = self.animating_piece_data['move']
                     self.board.push(move)
                     self.last_move = move
                     self.animating_piece_data = None
+                    self._invalidate_snapshot()
                     self.is_animating = False
                     if getattr(self, '_gc_disabled_for_anim', False):
                         gc.enable()
@@ -598,17 +625,25 @@ class ChessBoardWidget(QWidget):
     #   PAINT SYSTEM — Split into static board rendering + animation overlay
     # ──────────────────────────────────────────────────────────────────────
 
-    def _paint_board_base(self, painter, square_size):
-        """Draws squares, coordinates, and last-move highlight."""
-        # 1. Squares
+    def _paint_squares(self, painter, square_size):
+        """Draws the 8x8 squares and last-move highlight."""
         painter.setPen(Qt.PenStyle.NoPen)
         for row in range(8):
             for col in range(8):
                 brush = self._light_brush if (row + col) % 2 == 0 else self._dark_brush
                 painter.setBrush(brush)
                 painter.drawRect(QRectF(col * square_size, row * square_size, square_size, square_size))
-        
-        # 2. Coordinates
+
+        if self.last_move:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._highlight_brush)
+            for sq in [self.last_move.from_square, self.last_move.to_square]:
+                f, r = chess.square_file(sq), chess.square_rank(sq)
+                rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+                painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+
+    def _paint_coordinates(self, painter, square_size):
+        """Draws coordinates (rank numbers and file letters) with native font antialiasing."""
         painter.setPen(self._coord_color)
         font = painter.font()
         font.setBold(True)
@@ -626,15 +661,11 @@ class ChessBoardWidget(QWidget):
             file_char = chr(ord('h') - i if self.flipped else ord('a') + i)
             x_center = (i + 0.5) * square_size
             painter.drawText(QPointF(x_center - fm.horizontalAdvance(file_char) / 2.0, baseline_y), file_char)
-        
-        # 3. Last move highlight
-        if self.last_move:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(self._highlight_brush)
-            for sq in [self.last_move.from_square, self.last_move.to_square]:
-                f, r = chess.square_file(sq), chess.square_rank(sq)
-                rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
-                painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+
+    def _paint_board_base(self, painter, square_size):
+        """Draws squares, last-move highlight, and coordinates."""
+        self._paint_squares(painter, square_size)
+        self._paint_coordinates(painter, square_size)
 
     def _draw_circle(self, painter, square, color, square_size):
         """Draws a clean, crisp hollow circle around the square/piece (ChessBase style)."""
@@ -666,14 +697,68 @@ class ChessBoardWidget(QWidget):
 
     def _paint_pieces(self, painter, square_size, skip_square=None):
         """Draws all pieces, optionally skipping one square (the animating piece's origin)."""
-        for row in range(8):
-            for col in range(8):
-                rank, file = (row if self.flipped else 7 - row), (7 - col if self.flipped else col)
-                sq = chess.square(file, rank)
-                if skip_square is not None and sq == skip_square: continue
-                if self.drag_start_square == sq and self.dragging_piece: continue
-                piece = self.board.piece_at(sq)
-                if piece: self.draw_piece(painter, piece, col, row, square_size)
+        for sq, piece in self.board.piece_map().items():
+            if skip_square is not None and sq == skip_square:
+                continue
+            if self.drag_start_square == sq and self.dragging_piece:
+                continue
+            f = chess.square_file(sq)
+            r = chess.square_rank(sq)
+            col = 7 - f if self.flipped else f
+            row = r if self.flipped else 7 - r
+            self.draw_piece(painter, piece, col, row, square_size)
+
+    def _build_board_snapshot(self, rem_dx_phys=None, rem_dy_phys=None):
+        """
+        Renders the static board elements (squares, last-move highlight,
+        stationary pieces, user circles, and arrows) to a high-resolution off-screen QPixmap.
+        Eliminates thousands of redundant draw calls per second during piece slide animations.
+        Aligns sub-pixel deviceTransform phase (rem_dx_phys, rem_dy_phys) with the parent window
+        backing store to guarantee 0-pixel shift/tremble across all widget positions and High-DPI factors.
+        """
+        if self.width() <= 0 or self.height() <= 0:
+            return None
+        dpr = self.devicePixelRatioF()
+        if rem_dx_phys is None or rem_dy_phys is None:
+            win = self.window()
+            if win is not None and win is not self:
+                pos = self.mapTo(win, QPoint(0, 0))
+                dev_dx = pos.x() * dpr
+                dev_dy = pos.y() * dpr
+                rem_dx_phys = dev_dx - round(dev_dx)
+                rem_dy_phys = dev_dy - round(dev_dy)
+            else:
+                rem_dx_phys = 0.0
+                rem_dy_phys = 0.0
+
+        w_px = max(1, round(self.width() * dpr)) + 2
+        h_px = max(1, round(self.height() * dpr)) + 2
+        snapshot = QPixmap(w_px, h_px)
+        snapshot.setDevicePixelRatio(dpr)
+        snapshot.fill(Qt.GlobalColor.transparent)
+
+        painter = QPainter(snapshot)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        side, square_size, x_offset, y_offset = self.get_metrics()
+        self._update_pixmap_cache(square_size)
+
+        skip_square = None
+        if self.animating_piece_data:
+            skip_square = self.animating_piece_data['from_square']
+
+        painter.translate(rem_dx_phys / dpr + x_offset, rem_dy_phys / dpr + y_offset)
+        self._paint_squares(painter, square_size)
+        self._paint_pieces(painter, square_size, skip_square=skip_square)
+        self._paint_circles(painter, square_size)
+        self._paint_arrows(painter, square_size)
+        painter.end()
+
+        self._snapshot_flipped = self.flipped
+        self._snapshot_size = self.size()
+        self._snapshot_phase = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
+        return snapshot
 
     def _paint_arrows(self, painter, square_size):
         """Draws all arrows (hint, solution, explorer, user)."""
@@ -723,21 +808,34 @@ class ChessBoardWidget(QWidget):
         is_drag = self.dragging_piece is not None
         is_anim = self.is_animating and self.animating_piece_data
         
-        skip_square = None
         if is_anim:
-            skip_square = self.animating_piece_data['from_square']
-        elif is_drag:
-            skip_square = self.drag_start_square
+            # High-performance 2-draw-call pipeline:
+            # 1. Blit pre-rendered static board snapshot (squares + static pieces + annotations)
+            dt = painter.deviceTransform()
+            dpr = dt.m11() if dt.m11() > 0 else self.devicePixelRatioF()
+            dev_dx, dev_dy = dt.dx(), dt.dy()
+            rem_dx_phys = dev_dx - round(dev_dx)
+            rem_dy_phys = dev_dy - round(dev_dy)
+            phase_key = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
 
-        # Unified coordinate origin for all states (idle, dragging, animating)
-        # Guarantees zero pixel/sub-pixel shifting when picking up, dragging, or dropping pieces
-        painter.translate(x_offset, y_offset)
-        self._paint_board_base(painter, square_size)
-        self._paint_pieces(painter, square_size, skip_square=skip_square)
-        self._paint_circles(painter, square_size)
-        self._paint_arrows(painter, square_size)
+            if (self._board_snapshot is None or 
+                getattr(self, '_snapshot_flipped', None) != self.flipped or
+                getattr(self, '_snapshot_size', None) != self.size() or
+                getattr(self, '_snapshot_phase', None) != phase_key):
+                self._board_snapshot = self._build_board_snapshot(rem_dx_phys, rem_dy_phys)
 
-        if is_anim:
+            if self._board_snapshot is not None:
+                painter.drawPixmap(QPointF(-rem_dx_phys / dpr, -rem_dy_phys / dpr), self._board_snapshot)
+                painter.translate(x_offset, y_offset)
+                self._paint_coordinates(painter, square_size)
+            else:
+                painter.translate(x_offset, y_offset)
+                self._paint_board_base(painter, square_size)
+                self._paint_pieces(painter, square_size, skip_square=self.animating_piece_data['from_square'])
+                self._paint_circles(painter, square_size)
+                self._paint_arrows(painter, square_size)
+
+            # 2. Draw moving piece at interpolated position
             self._anim_frame_times.append(time.perf_counter())
             d = self.animating_piece_data
             p = d['progress']
@@ -746,6 +844,15 @@ class ChessBoardWidget(QWidget):
             lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
             scale_factor = 1.0 + (0.15 * lift)
             self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
+
+        else:
+            skip_square = self.drag_start_square if is_drag else None
+            # Standard direct rendering when idle or dragging
+            painter.translate(x_offset, y_offset)
+            self._paint_board_base(painter, square_size)
+            self._paint_pieces(painter, square_size, skip_square=skip_square)
+            self._paint_circles(painter, square_size)
+            self._paint_arrows(painter, square_size)
 
         if is_drag:
             # Draw dragged piece centered exactly on mouse cursor with sub-pixel float precision
@@ -844,6 +951,8 @@ class ChessBoardWidget(QWidget):
         self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
         self.last_move = move
         self.is_animating = True
+        self._invalidate_snapshot()
+        self._board_snapshot = self._build_board_snapshot()
 
         # Suspend Python cyclic GC during active piece slide to prevent 30-50ms main-thread freeze
         if not getattr(self, '_gc_disabled_for_anim', False):
@@ -867,6 +976,7 @@ class ChessBoardWidget(QWidget):
             self.move_anim.stop()
             self.is_animating = False
             self.animating_piece_data = None
+            self._invalidate_snapshot()
             if getattr(self, '_gc_disabled_for_anim', False):
                 gc.enable()
                 self._gc_disabled_for_anim = False
@@ -934,6 +1044,7 @@ class ChessBoardWidget(QWidget):
         self.last_move = move
         self.last_move_was_capture = is_cap
         self.animating_piece_data = None
+        self._invalidate_snapshot()
         self.clear_user_drawings()
         self.piece_slide_finished.emit()
         self.update()
