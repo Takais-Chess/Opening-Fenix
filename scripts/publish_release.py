@@ -4,6 +4,14 @@ import subprocess
 import urllib.request
 import urllib.parse
 import json
+import ssl
+
+def get_ssl_context():
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return ssl.create_default_context()
 
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if project_root not in sys.path:
@@ -65,6 +73,7 @@ def main():
         print("Error: Could not retrieve GitHub token from git credential manager.")
         sys.exit(1)
 
+    ssl_context = get_ssl_context()
     repo = "Takais-Chess/Opening-Fenix"
     tag_name = f"v{APP_VERSION}"
     release_name = f"Opening Fenix v{APP_VERSION}"
@@ -105,7 +114,7 @@ def main():
 
     req = urllib.request.Request(create_url, data=json.dumps(payload).encode('utf-8'), headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req) as resp:
+        with urllib.request.urlopen(req, context=ssl_context) as resp:
             rel_data = json.loads(resp.read().decode('utf-8'))
             print(" -> Release created successfully!")
     except urllib.error.HTTPError as e:
@@ -113,7 +122,7 @@ def main():
         if e.code == 422 and "already_exists" in err_content:
             print(" -> Release already exists, fetching existing release...")
             get_req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/tags/{tag_name}", headers=headers)
-            with urllib.request.urlopen(get_req) as resp:
+            with urllib.request.urlopen(get_req, context=ssl_context) as resp:
                 rel_data = json.loads(resp.read().decode('utf-8'))
         else:
             print(f"HTTP Error {e.code}: {err_content}")
@@ -137,7 +146,7 @@ def main():
         if a["name"] == asset_name:
             print(f"Deleting existing asset {asset_name} (id: {a['id']})...")
             del_req = urllib.request.Request(f"https://api.github.com/repos/{repo}/releases/assets/{a['id']}", headers=headers, method="DELETE")
-            with urllib.request.urlopen(del_req) as resp:
+            with urllib.request.urlopen(del_req, context=ssl_context) as resp:
                 print(" -> Deleted old asset.")
 
     # 3. Upload asset
@@ -153,7 +162,7 @@ def main():
 
     up_req = urllib.request.Request(upload_url, data=file_data, headers=upload_headers, method="POST")
     try:
-        with urllib.request.urlopen(up_req) as resp:
+        with urllib.request.urlopen(up_req, context=ssl_context) as resp:
             up_data = json.loads(resp.read().decode('utf-8'))
             print(" -> Asset uploaded successfully!")
             print(f"Download URL: {up_data.get('browser_download_url')}")
