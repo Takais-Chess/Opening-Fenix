@@ -149,6 +149,14 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                         print(f" -> Removed non-example repertoire '{safe_item}' from '{repo_dir}'")
     print(" -> Synced example repertoires to public bundle")
 
+    # Remove any profiles from the bundle (profiles are user-created only)
+    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
+        for d in dirs:
+            if d.lower() == 'profiles':
+                p_dir = os.path.join(root_dir_path, d)
+                safe_rmtree(p_dir)
+                print(f" -> Removed profile directory '{p_dir}' from public bundle")
+
     # Remove engines from public bundle (users download Stockfish on-demand to maintain 0 GPL overhead)
     _clean_engines(dist_dir)
 
@@ -182,6 +190,11 @@ def main():
     if not do_private and not do_public:
         print("ERROR: Cannot combine --public-only and --private-only.")
         sys.exit(1)
+
+    if do_public and not do_private:
+        os.environ['FENIX_PUBLIC_ONLY'] = '1'
+    else:
+        os.environ.pop('FENIX_PUBLIC_ONLY', None)
 
     # --------------------------------------------------------
     # Step 1: PyInstaller bundle (always needed unless --skip-build)

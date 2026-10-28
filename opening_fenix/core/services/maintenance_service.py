@@ -21,14 +21,22 @@ def get_repertoire_elo(repo_name):
     try:
         db = DatabaseManager(db_path)
         session = db.get_session()
-        val = get_meta(session, "elo", "high")
+        val = get_meta(session, "elo") or get_meta(session, "lichess_elo") or "high"
         session.close()
         db.close()
         
-        val = val.lower() if val else "high"
-        if "low" in val: return "low"
-        if "mid" in val: return "mid"
-        if "masters" in val: return "masters"
+        val_str = str(val).strip()
+        from opening_fenix.core.utils import ELO_INTERNAL_MAP
+        if val_str in ELO_INTERNAL_MAP:
+            return ELO_INTERNAL_MAP[val_str]
+
+        val_lower = val_str.lower()
+        if "low" in val_lower or "hobby" in val_lower:
+            return "low"
+        if "mid" in val_lower or "verein" in val_lower:
+            return "mid"
+        if "master" in val_lower or "meister" in val_lower:
+            return "masters"
         return "high"
     except Exception as e:
         logger.debug(f"Could not fetch Elo for {repo_name}: {e}")

@@ -141,8 +141,10 @@ class RepertoireManager:
         # Priority for path retrieval: if we have a variation filter, prefer moves that lead to this position 
         # and belong to that variation.
         prio_sql = ""
+        params: Dict[str, Any] = {"pid": pos.id}
         if variation_name:
-            prio_sql = f"CASE WHEN (p.variation_1 = '{variation_name}' OR p.variation_2 = '{variation_name}' OR p.variation_3 = '{variation_name}') THEN 1 ELSE 0 END DESC,"
+            prio_sql = "CASE WHEN (p.variation_1 = :v OR p.variation_2 = :v OR p.variation_3 = :v) THEN 1 ELSE 0 END DESC,"
+            params["v"] = variation_name
 
         query = text(f"""
             SELECT m.id FROM moves m
@@ -152,7 +154,7 @@ class RepertoireManager:
             LIMIT 1
         """)
         try:
-            res = self.repo_session.execute(query, {"pid": pos.id}).fetchone()
+            res = self.repo_session.execute(query, params).fetchone()
             if not res: return []
             move_id = res[0]
             # Since get_history_for_move_recursive takes an ID, we just need the Move object or its proxy
@@ -214,10 +216,37 @@ class RepertoireManager:
     def invalidate_priority_cache(self):
         self.priority_cache = None
 
-    def check_if_alternative_good_move(self, move_obj, played_uci):
-        return bool(self.get_alternative_move_type(move_obj, played_uci))
+    def check_if_alternative_good_move(self, move_obj, played_uci, training_manager=None):
+        return bool(self.get_alternative_move_type(move_obj, played_uci, training_manager=training_manager))
 
-    def get_alternative_move_type(self, move_obj, played_uci):
+    def get_alternative_move_type(self, move_obj, played_uci, training_manager=None):
+        if not move_obj:
+            return None
+
+        # Fast O(1) in-memory cache path when TrainingManager caches are populated
+        tm = training_manager or (getattr(self.explorer, 'training_manager', None) if self.explorer else None)
+        if tm is not None:
+            fwd_cache = getattr(tm, '_forward_moves_cache', None)
+            rep_cache = getattr(tm, '_rep_move_cache', None)
+            pos_cache = getattr(tm, '_pos_cache', None)
+            if fwd_cache is not None and rep_cache is not None and pos_cache is not None:
+                for m in fwd_cache.get(move_obj.from_position_id, ()):
+                    if m.uci == played_uci and m.id in rep_cache:
+                        rm = rep_cache[m.id]
+                        if getattr(rm, 'is_active', True):
+                            return 'repertoire'
+
+                pos = pos_cache.get(move_obj.from_position_id)
+                if pos is not None:
+                    if pos.good_moves:
+                        try:
+                            good_list = json.loads(pos.good_moves)
+                            if played_uci in good_list:
+                                return 'good'
+                        except Exception as e:
+                            logger.debug(f"Error parsing good_moves in get_alternative_move_type: {e}")
+                    return None
+
         if not self.repo_session: return None
         
         # 1. Check if the move is active in the repertoire (only select the ID to keep it light)

@@ -97,16 +97,52 @@ class StatisticsWorker(QThread):
     """Background worker to calculate statistics without blocking the GUI."""
     stats_ready = pyqtSignal(dict)
 
-    def __init__(self, repo_name: str, is_test: Optional[bool] = None, elo_range: Optional[str] = None, profile_name: Optional[str] = None):
+    def __init__(
+        self,
+        repo_name: str,
+        is_test: Optional[bool] = None,
+        elo_range: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        selected_level: Optional[int] = None
+    ):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
         self.elo_range = elo_range
         self.profile_name = profile_name
+        self.selected_level = selected_level
 
     def run(self):
-        data = calculate_repertoire_statistics(self.repo_name, self.is_test, self.elo_range, self.profile_name)
+        data = calculate_repertoire_statistics(
+            self.repo_name, self.is_test, self.elo_range, self.profile_name, selected_level=self.selected_level
+        )
         self.stats_ready.emit(data)
+
+
+class ProfileBoxWorker(QThread):
+    """Background worker to calculate profile Leitner box statistics without blocking the GUI."""
+    box_stats_ready = pyqtSignal(int, dict)
+
+    def __init__(
+        self,
+        req_id: int,
+        repo_name: str,
+        profile_name: str,
+        is_test: Optional[bool] = None,
+        selected_level: Optional[int] = None
+    ):
+        super().__init__()
+        self.req_id = req_id
+        self.repo_name = repo_name
+        self.profile_name = profile_name
+        self.is_test = is_test
+        self.selected_level = selected_level
+
+    def run(self):
+        prof_data = get_profile_box_statistics(
+            self.repo_name, self.profile_name, self.is_test, selected_level=self.selected_level
+        )
+        self.box_stats_ready.emit(self.req_id, prof_data)
 
 
 class RepertoireStatisticsDialog(QDialog):
@@ -130,6 +166,8 @@ class RepertoireStatisticsDialog(QDialog):
         self.is_test = is_test
         self.selected_profile = profile_name or get_last_active_profile_name()
         self.worker: Optional[StatisticsWorker] = None
+        self.profile_worker: Optional[ProfileBoxWorker] = None
+        self._profile_req_id: int = 0
         self.box_tile_widgets: Dict[int, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
 
         self.init_ui()
@@ -739,7 +777,21 @@ class RepertoireStatisticsDialog(QDialog):
     def load_profile_box_statistics(self, profile_name: str, level_filter: Optional[int] = None):
         if not profile_name or not self.repo_name:
             return
-        prof_data = get_profile_box_statistics(self.repo_name, profile_name, self.is_test, selected_level=level_filter)
+        self._profile_req_id += 1
+        req_id = self._profile_req_id
+
+        if self.profile_worker and self.profile_worker.isRunning():
+            self.profile_worker.wait(1000)
+
+        self.profile_worker = ProfileBoxWorker(
+            req_id, self.repo_name, profile_name, self.is_test, selected_level=level_filter
+        )
+        self.profile_worker.box_stats_ready.connect(self._on_profile_box_stats_ready)
+        self.profile_worker.start()
+
+    def _on_profile_box_stats_ready(self, req_id: int, prof_data: Dict[str, Any]):
+        if req_id < self._profile_req_id:
+            return
         self.update_profile_box_ui(prof_data)
 
     def update_profile_box_ui(self, prof_data: Dict[str, Any]):
@@ -824,14 +876,16 @@ class RepertoireStatisticsDialog(QDialog):
         self.btn_refresh.setEnabled(False)
         self.lbl_scope.setText(tr_ui("stats.calculating", "⏳ Statistiken werden berechnet..."))
 
+        if self.worker and self.worker.isRunning():
+            self.worker.wait(1000)
+
         active_prof = self.combo_profile.currentText() if hasattr(self, 'combo_profile') else self.selected_profile
-        self.worker = StatisticsWorker(self.repo_name, self.is_test, profile_name=active_prof)
+        lvl = self.combo_level.currentData() if hasattr(self, 'combo_level') and self.combo_level.count() > 0 else None
+        self.worker = StatisticsWorker(
+            self.repo_name, self.is_test, profile_name=active_prof, selected_level=lvl
+        )
         self.worker.stats_ready.connect(self.on_statistics_ready)
         self.worker.start()
-
-        lvl = self.combo_level.currentData() if hasattr(self, 'combo_level') and self.combo_level.count() > 0 else None
-        if active_prof:
-            self.load_profile_box_statistics(active_prof, level_filter=lvl)
 
     def on_statistics_ready(self, data: Dict[str, Any]):
         """Populates the dialog UI with the calculated statistics data."""
@@ -894,6 +948,6 @@ class RepertoireStatisticsDialog(QDialog):
             f"<span style='color: #64748b;'>({tot_moves:,} {tr_ui('stats.active_moves', 'aktive Züge')})</span>"
         )
 
-        # 4. Profile Box Stats (if included)
-        if "profile_stats" in data and data["profile_stats"]:
+        # 4. Profile Box Stats (if included and not superseded by a newer selection)
+        if self._profile_req_id == 0 and "profile_stats" in data and data["profile_stats"]:
             self.update_profile_box_ui(data["profile_stats"])

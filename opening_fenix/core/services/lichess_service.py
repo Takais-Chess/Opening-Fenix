@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.error
 from typing import Tuple, Callable, Optional, Dict, List, Set
 
+import chess
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
 from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
@@ -116,8 +117,8 @@ def compute_position_bfs_depths(session) -> Dict[int, int]:
     while queue:
         curr_id, d = queue.popleft()
         nodes_visited += 1
-        if nodes_visited % 200 == 0:
-            time.sleep(0.001)  # Yield GIL periodically during BFS graph traversal
+        if nodes_visited % 1000 == 0:
+            time.sleep(0)  # Yield GIL periodically without incurring 15.6ms Windows timer sleep
         for next_id in outgoing.get(curr_id, []):
             if next_id not in pos_depths:
                 pos_depths[next_id] = d + 1
@@ -150,6 +151,170 @@ def compute_position_grandparents(session) -> Tuple[Dict[int, Set[int]], Dict[in
     id_to_fen = {p.id: p.fen for p in all_pos}
 
     return grandparents_map, id_to_fen
+
+
+def get_move_game_count(
+    from_fen: str,
+    uci: str,
+    san: str,
+    fen_lichess_data: Dict[str, dict]
+) -> Optional[int]:
+    """
+    Returns the total game count for a move if the origin position's Lichess data is present,
+    or None if the origin position has not been evaluated yet.
+    """
+    clean_fen = " ".join(from_fen.split(" ")[:4])
+    mdict = fen_lichess_data.get(clean_fen)
+    if mdict is None:
+        return None
+    stat = mdict.get(uci) or mdict.get(san)
+    if not stat:
+        alt_uci = None
+        if uci == 'e1c1': alt_uci = 'e1a1'
+        elif uci == 'e1g1': alt_uci = 'e1h1'
+        elif uci == 'e8c8': alt_uci = 'e8a8'
+        elif uci == 'e8g8': alt_uci = 'e8h8'
+        if alt_uci:
+            stat = mdict.get(alt_uci)
+    if stat:
+        tot = stat.get('white', 0) + stat.get('draws', 0) + stat.get('black', 0)
+        return stat.get('total', tot)
+    return 0
+
+
+def check_can_skip_position_3ply(
+    pos_id: int,
+    incoming_moves: Dict[int, List[Move]],
+    id_to_fen: Dict[int, str],
+    fen_lichess_data: Dict[str, dict]
+) -> bool:
+    """
+    Determines if a position can be safely skipped during Lichess import.
+    A position is only skipped if along ALL incoming paths of length 3:
+    1. Incoming move m1 (1 ply back) has been evaluated and has 0 games in Lichess.
+    2. Move m2 (2 plies back) has been evaluated and has 0 games.
+    3. Move m3 (3 plies back) has been evaluated and has 0 games.
+    If any incoming path has depth < 3, has un-evaluated moves, or has > 0 games,
+    the position cannot be skipped.
+    """
+    inc1 = incoming_moves.get(pos_id, [])
+    if not inc1:
+        return False  # Root or unreachable
+
+    for m1 in inc1:
+        p1_id = m1.from_position_id
+        p1_fen = id_to_fen.get(p1_id)
+        if not p1_fen:
+            return False
+        g1 = get_move_game_count(p1_fen, m1.uci, m1.san, fen_lichess_data)
+        if g1 is None or g1 > 0:
+            return False
+
+        inc2 = incoming_moves.get(p1_id, [])
+        if not inc2:
+            return False  # Path has depth < 2
+
+        for m2 in inc2:
+            p2_id = m2.from_position_id
+            p2_fen = id_to_fen.get(p2_id)
+            if not p2_fen:
+                return False
+            g2 = get_move_game_count(p2_fen, m2.uci, m2.san, fen_lichess_data)
+            if g2 is None or g2 > 0:
+                return False
+
+            inc3 = incoming_moves.get(p2_id, [])
+            if not inc3:
+                return False  # Path has depth < 3
+
+            for m3 in inc3:
+                p3_id = m3.from_position_id
+                p3_fen = id_to_fen.get(p3_id)
+                if not p3_fen:
+                    return False
+                g3 = get_move_game_count(p3_fen, m3.uci, m3.san, fen_lichess_data)
+                if g3 is None or g3 > 0:
+                    return False
+
+    return True
+
+
+def compute_estimated_position_priorities(
+    roots: List[int],
+    positions_by_depth: List[List[int]],
+    outgoing_moves: Dict[int, List[Move]],
+    id_to_fen: Dict[int, str],
+    rep_move_ids: Set[int],
+    user_turn_char: str,
+    fen_lichess_data: Dict[str, dict]
+) -> Dict[int, float]:
+    """
+    Propagates estimated occurrence probabilities across the repertoire graph.
+    - User turns: flow through active repertoire moves (or evenly across outgoing if none active).
+    - Opponent turns: if Lichess data is already cached for the position, flow proportionally
+      to move game counts; otherwise divide evenly across candidate moves.
+    """
+    id_probabilities: Dict[int, float] = {pid: 0.0 for pid in id_to_fen.keys()}
+    for r in roots:
+        id_probabilities[r] = 1.0
+
+    total_depths = len(positions_by_depth)
+    for depth in range(total_depths):
+        for pos_id in positions_by_depth[depth]:
+            curr_prob = id_probabilities.get(pos_id, 0.0)
+            if curr_prob <= 0.0:
+                continue
+
+            fen = id_to_fen.get(pos_id, "")
+            if not fen:
+                continue
+            clean_fen = " ".join(fen.split(" ")[:4])
+            tokens = clean_fen.split(" ")
+            turn_char = tokens[1] if len(tokens) > 1 else "w"
+            is_user_turn = (turn_char == user_turn_char)
+
+            out_moves = outgoing_moves.get(pos_id, [])
+            if not out_moves:
+                continue
+
+            if is_user_turn:
+                user_moves = [m for m in out_moves if m.id in rep_move_ids]
+                if user_moves:
+                    split = curr_prob / len(user_moves)
+                    for m in user_moves:
+                        if m.to_position_id:
+                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+                else:
+                    split = curr_prob / len(out_moves)
+                    for m in out_moves:
+                        if m.to_position_id:
+                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+            else:
+                ld_moves = fen_lichess_data.get(clean_fen)
+                if ld_moves is not None:
+                    total_games = sum(m_info.get('total', 0) for m_info in ld_moves.values())
+                    if total_games > 0:
+                        for m in out_moves:
+                            stat = ld_moves.get(m.uci) or ld_moves.get(m.san)
+                            if not stat:
+                                alt_uci = None
+                                if m.uci == 'e1c1': alt_uci = 'e1a1'
+                                elif m.uci == 'e1g1': alt_uci = 'e1h1'
+                                elif m.uci == 'e8c8': alt_uci = 'e8a8'
+                                elif m.uci == 'e8g8': alt_uci = 'e8h8'
+                                if alt_uci:
+                                    stat = ld_moves.get(alt_uci)
+                            m_total = stat.get('total', 0) if stat else 0
+                            if m_total > 0 and m.to_position_id:
+                                share = m_total / total_games
+                                id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + (curr_prob * share)
+                else:
+                    split = curr_prob / len(out_moves)
+                    for m in out_moves:
+                        if m.to_position_id:
+                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+
+    return id_probabilities
 
 
 class AdaptiveSlidingWindowLimiter:
@@ -423,7 +588,8 @@ def run_lichess_import(
     progress_callback: Optional[Callable[..., None]] = None,
     check_cancel: Optional[Callable[[], bool]] = None,
     reuse_other_courses: bool = False,
-    max_data_age_days: Optional[int] = 180
+    max_data_age_days: Optional[int] = 180,
+    batch_size: int = 20
 ) -> Tuple[bool, str]:
     from opening_fenix.core.db.models import LichessData # local import if needed
     db_path = get_repertoire_db_path(repo_name)
@@ -460,6 +626,48 @@ def run_lichess_import(
             if reused_count > 0:
                 logger.info(f"[Lichess Import] Reused {reused_count} positions from other courses (max age: {max_data_age_days} days).")
 
+        # Self-healing: identify positions previously saved as empty ({})
+        # where an incoming move in this repertoire actually has > 0 games in this Elo category.
+        # These were falsely skipped by earlier versions.
+        # Purge their stale empty LichessData records so they are included in positions_to_query.
+        existing_ld_rows = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
+        existing_ld_map: Dict[str, dict] = {}
+        for f_val, mjson in existing_ld_rows:
+            clean_f = " ".join(f_val.split(" ")[:4])
+            try:
+                existing_ld_map[clean_f] = json.loads(mjson)
+            except Exception:
+                existing_ld_map[clean_f] = {}
+
+        all_moves_for_heal = session.query(
+            Move.uci, Move.san, Position.fen, Move.to_position_id
+        ).join(Position, Move.from_position_id == Position.id).all()
+
+        id_to_fen_dict = dict(session.query(Position.id, Position.fen).all())
+        stale_fens_to_purge = set()
+        for uci, san, from_fen, to_pid in all_moves_for_heal:
+            to_fen = id_to_fen_dict.get(to_pid)
+            if not to_fen:
+                continue
+            to_clean = " ".join(to_fen.split(" ")[:4])
+            to_dict = existing_ld_map.get(to_clean)
+            if to_dict is not None:
+                to_games = sum(v.get('total', 0) for v in to_dict.values() if isinstance(v, dict))
+                if to_games == 0:
+                    from_clean = " ".join(from_fen.split(" ")[:4])
+                    g_count = get_move_game_count(from_clean, uci, san, existing_ld_map)
+                    if g_count is not None and g_count > 0:
+                        stale_fens_to_purge.add(to_fen)
+                        stale_fens_to_purge.add(to_clean)
+
+        if stale_fens_to_purge:
+            num_purged = session.query(LichessData).filter(
+                LichessData.elo_range == elo_category,
+                LichessData.fen.in_(stale_fens_to_purge)
+            ).delete(synchronize_session=False)
+            commit_with_retry(session)
+            logger.info(f"[Lichess Import] Self-healing: Purged {num_purged} stale empty records with valid parent games for ELO '{elo_category}'.")
+
         existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
         
         # Query positions that don't have Lichess data yet
@@ -482,19 +690,62 @@ def run_lichess_import(
             commit_with_retry(session)
             return True, f"Alle Positionen haben bereits Lichess-Daten für ELO '{elo_category}'."
 
-        # Breadth-First Prioritization: Sort by ply depth so lowest levels (plies 0, 1, 2...) are queried first
+        # Compute structural graph metadata for priority and BFS ordering
         pos_depths = compute_position_bfs_depths(session)
-        positions_to_query.sort(key=lambda p: (pos_depths.get(p.id, 9999), p.id))
-
         pos_grandparents, id_to_fen = compute_position_grandparents(session)
+
+        # Preload moves and repertoire info for fast in-memory priority estimation
+        all_moves_db = session.query(Move.id, Move.from_position_id, Move.to_position_id, Move.uci, Move.san).all()
+        outgoing_moves: Dict[int, List[Move]] = {}
+        incoming_moves: Dict[int, List[Move]] = {}
+        incoming_pos_ids = set()
+        for m in all_moves_db:
+            if m.from_position_id:
+                outgoing_moves.setdefault(m.from_position_id, []).append(m)
+            if m.to_position_id:
+                incoming_moves.setdefault(m.to_position_id, []).append(m)
+                incoming_pos_ids.add(m.to_position_id)
+
+        rep_moves_db = session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
+        rep_move_ids = {rm.move_id for rm in rep_moves_db}
+        user_turn_char = get_meta(session, "color", "w")
+
+        start_board = chess.Board()
+        start_fen_normalized = " ".join(start_board.fen().split(" ")[:4])
+        start_pos_id = None
+        for pid, fen in id_to_fen.items():
+            if " ".join(fen.split(" ")[:4]) == start_fen_normalized:
+                start_pos_id = pid
+                break
+
+        if start_pos_id is not None:
+            roots = [start_pos_id]
+        else:
+            roots = [pid for pid in id_to_fen.keys() if pid not in incoming_pos_ids]
+            if not roots and id_to_fen:
+                roots = [min(id_to_fen.keys())]
+
+        max_d = max(pos_depths.values()) if pos_depths else 0
+        positions_by_depth: List[List[int]] = [[] for _ in range(max_d + 1)]
+        for pid, d in pos_depths.items():
+            if d <= max_d:
+                positions_by_depth[d].append(pid)
+
+        fen_lichess_data: Dict[str, dict] = {}
         fen_games_count: Dict[str, int] = {}
         all_existing_data = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
         for f_val, mjson in all_existing_data:
+            clean_f = " ".join(f_val.split(" ")[:4])
             try:
                 mdict = json.loads(mjson)
-                fen_games_count[f_val] = sum(m.get('total', 0) for m in mdict.values())
+                fen_lichess_data[clean_f] = mdict
+                g_count = sum(m.get('total', 0) for m in mdict.values())
+                fen_games_count[f_val] = g_count
+                fen_games_count[clean_f] = g_count
             except Exception:
+                fen_lichess_data[clean_f] = {}
                 fen_games_count[f_val] = 0
+                fen_games_count[clean_f] = 0
 
         lichess_ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
 
@@ -504,53 +755,70 @@ def run_lichess_import(
         last_progress_emit_time = 0.0
         last_reported_429_hits = 0
 
-        def interruptible_sleep(duration):
-            remaining = duration
-            step = 0.05
-            while remaining > 0:
-                if check_cancel and check_cancel():
-                    return True
-                sleep_time = min(step, remaining)
-                time.sleep(sleep_time)
-                remaining -= sleep_time
-            return check_cancel and check_cancel() if check_cancel else False
+        remaining_pos_ids = {p.id for p in positions_to_query}
+        processed_count = 0
+        BATCH_SIZE = max(1, batch_size)
 
-        i = 0
-        while i < len(positions_to_query):
-            # Refresh position state before querying to avoid ObjectDeletedError using a new query to fetch it fresh if needed
-            pos_id = positions_to_query[i].id
-            pos = session.get(Position, pos_id)
-            if pos is None:
-                i += 1
-                continue
-                
+        while remaining_pos_ids:
             if check_cancel and check_cancel():
                 logger.info(
-                    f"[Lichess Import] Cancelled for '{repo_name}' at item {i}/{total_pos}. "
+                    f"[Lichess Import] Cancelled for '{repo_name}' at item {processed_count}/{total_pos}. "
                     f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
                 )
                 set_meta(session, "cov_cache_count", "-1")
                 commit_with_retry(session)
                 return False, "Import abgebrochen."
 
-            # Grandparent Skip Optimization (Transposition-Aware):
-            # If all grandparents (2 plies back) of this position have 0 games in the database for this Elo,
-            # then this position cannot have games. Skip network request and record empty LichessData.
-            gp_ids = pos_grandparents.get(pos.id)
-            if gp_ids:
-                all_gp_have_zero_games = True
-                for gp_id in gp_ids:
-                    gp_fen = id_to_fen.get(gp_id)
-                    if not gp_fen:
-                        all_gp_have_zero_games = False
-                        break
-                    gp_games = fen_games_count.get(gp_fen)
-                    # Grandparent must be already evaluated and have 0 games
-                    if gp_games is None or gp_games > 0:
-                        all_gp_have_zero_games = False
-                        break
+            # Best-First Prioritization: Propagate estimated occurrence probabilities across the frontier
+            estimated_probs = compute_estimated_position_priorities(
+                roots=roots,
+                positions_by_depth=positions_by_depth,
+                outgoing_moves=outgoing_moves,
+                id_to_fen=id_to_fen,
+                rep_move_ids=rep_move_ids,
+                user_turn_char=user_turn_char,
+                fen_lichess_data=fen_lichess_data
+            )
 
-                if all_gp_have_zero_games:
+            # Sort remaining positions:
+            # 1. Estimated priority descending (highest probability lines first)
+            # 2. Ply depth ascending (prefer shallower on ties)
+            # 3. Position ID ascending (deterministic tie-breaker)
+            candidate_list = list(remaining_pos_ids)
+            candidate_list.sort(key=lambda pid: (
+                -round(estimated_probs.get(pid, 0.0), 6),
+                pos_depths.get(pid, 9999),
+                pid
+            ))
+            current_batch = candidate_list[:BATCH_SIZE]
+
+            batch_idx = 0
+            while batch_idx < len(current_batch):
+                pos_id = current_batch[batch_idx]
+                pos = session.get(Position, pos_id)
+                if pos is None:
+                    remaining_pos_ids.discard(pos_id)
+                    batch_idx += 1
+                    continue
+
+                if check_cancel and check_cancel():
+                    logger.info(
+                        f"[Lichess Import] Cancelled for '{repo_name}' at item {processed_count}/{total_pos}. "
+                        f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
+                    )
+                    set_meta(session, "cov_cache_count", "-1")
+                    commit_with_retry(session)
+                    return False, "Import abgebrochen."
+
+                clean_pos_fen = " ".join(pos.fen.split(" ")[:4])
+
+                # 3-Move Lead-Up Skip Optimization (Transposition-Aware):
+                # A position is only skipped if along ALL incoming move paths:
+                # 1. Incoming move m1 (1 ply back) has been evaluated and has 0 games in Lichess.
+                # 2. Move m2 (2 plies back) has been evaluated and has 0 games.
+                # 3. Move m3 (3 plies back) has been evaluated and has 0 games.
+                # If any incoming path has depth < 3 or any move with games > 0, it is NOT skipped.
+                if check_can_skip_position_3ply(pos.id, incoming_moves, id_to_fen, fen_lichess_data):
                     new_data = LichessData(
                         fen=pos.fen,
                         elo_range=elo_category,
@@ -564,21 +832,26 @@ def run_lichess_import(
                         new_data_points_added += 1
                         uncommitted_items += 1
                         fen_games_count[pos.fen] = 0
+                        fen_games_count[clean_pos_fen] = 0
+                        fen_lichess_data[clean_pos_fen] = {}
                     except Exception:
                         pass
 
-                    i += 1
+                    remaining_pos_ids.discard(pos_id)
+                    processed_count += 1
+                    batch_idx += 1
+
                     if uncommitted_items >= 5:
                         commit_with_retry(session)
                         uncommitted_items = 0
 
-                    pct = int(i * 100 / total_pos) if total_pos > 0 else 0
+                    pct = int(processed_count * 100 / total_pos) if total_pos > 0 else 0
                     now_t = time.time()
-                    if progress_callback and (i == 1 or i == total_pos or (now_t - last_progress_emit_time) >= 0.25):
+                    if progress_callback and (processed_count == 1 or processed_count == total_pos or (now_t - last_progress_emit_time) >= 0.25):
                         last_progress_emit_time = now_t
-                        status_text = f"{i}/{total_pos} [Übersprungen: 0 Partien]"
+                        status_text = f"{processed_count}/{total_pos} [Übersprungen: 0 Partien]"
                         try:
-                            progress_callback(pct, i, total_pos)
+                            progress_callback(pct, processed_count, total_pos)
                         except TypeError:
                             try:
                                 progress_callback(pct, status_text)
@@ -587,182 +860,190 @@ def run_lichess_import(
                     time.sleep(0.001)
                     continue
 
-            # Release SQLite write transaction before waiting for rate-limit slot (prevents 2-3s locks)
+                # Release SQLite write transaction before waiting for rate-limit slot (prevents 2-3s locks)
+                if uncommitted_items > 0:
+                    commit_with_retry(session)
+                    uncommitted_items = 0
+
+                if limiter.wait_for_slot(check_cancel):
+                    logger.info(
+                        f"[Lichess Import] Cancelled while waiting for slot at item {processed_count}/{total_pos}. "
+                        f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
+                    )
+                    set_meta(session, "cov_cache_count", "-1")
+                    commit_with_retry(session)
+                    return False, "Import abgebrochen."
+
+                if elo_category == 'masters':
+                    params = {
+                        'variant': 'standard',
+                        'fen': pos.fen,
+                        'moves': 25
+                    }
+                    query_string = urllib.parse.urlencode(params)
+                    url = f"https://explorer.lichess.org/masters?{query_string}"
+                else:
+                    params = {
+                        'variant': 'standard',
+                        'fen': pos.fen,
+                        'ratings': ",".join(lichess_ratings),
+                        'speeds': 'rapid,classical',
+                        'moves': 25
+                    }
+                    query_string = urllib.parse.urlencode(params)
+                    url = f"https://explorer.lichess.org/lichess?{query_string}"
+
+                retry_same_position = False
+
+                t_req_start = time.time()
+                try:
+                    headers = {'User-Agent': 'OpeningFenix/1.0 (Python urllib)'}
+                    if lichess_token:
+                        headers['Authorization'] = f'Bearer {lichess_token}'
+
+                    resp_bytes = client.get(url, headers=headers)
+                    latency = time.time() - t_req_start
+                    limiter.record_success(latency)
+                    data = json.loads(resp_bytes.decode('utf-8'))
+                    successful_requests_in_a_row += 1
+
+                    moves_data = data.get('moves', [])
+                    # Double check to prevent race condition during long network request
+                    existing = session.query(LichessData).filter_by(fen=pos.fen, elo_range=elo_category).first()
+                    if not existing:
+                        if moves_data:
+                            moves_dict = {
+                                move['uci']: {
+                                    'white': move.get('white', 0),
+                                    'draws': move.get('draws', 0),
+                                    'black': move.get('black', 0),
+                                    'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
+                                } for move in moves_data if 'uci' in move
+                            }
+                            new_data = LichessData(
+                                fen=pos.fen,
+                                elo_range=elo_category,
+                                moves_json=json.dumps(moves_dict),
+                                fetched_at=datetime.datetime.now()
+                            )
+                            g_total = sum(m.get('total', 0) for m in moves_dict.values())
+                            fen_games_count[pos.fen] = g_total
+                            fen_games_count[clean_pos_fen] = g_total
+                            fen_lichess_data[clean_pos_fen] = moves_dict
+                        else:
+                            new_data = LichessData(
+                                fen=pos.fen,
+                                elo_range=elo_category,
+                                moves_json=json.dumps({}),
+                                fetched_at=datetime.datetime.now()
+                            )
+                            fen_games_count[pos.fen] = 0
+                            fen_games_count[clean_pos_fen] = 0
+                            fen_lichess_data[clean_pos_fen] = {}
+                        session.add(new_data)
+                        try:
+                            with session.begin_nested():
+                                session.flush()
+                            new_data_points_added += 1
+                            uncommitted_items += 1
+                        except Exception:
+                            # Ignored collision (already inserted by another thread)
+                            pass
+
+                except urllib.error.HTTPError as e:
+                    successful_requests_in_a_row = 0
+                    if e.code == 429:
+                        if uncommitted_items > 0:
+                            commit_with_retry(session)
+                            uncommitted_items = 0
+                        old_rpm, new_rpm = limiter.record_429(fen=pos.fen)
+                        window_count = limiter.get_current_window_count()
+                        logger.warning(
+                            f"[Lichess Import] HTTP 429 Rate Limit HIT #{limiter.total_429_hits}! "
+                            f"At position {processed_count+1}/{total_pos} (Total requests sent: {limiter.total_requests}, FEN: {pos.fen}). "
+                            f"Rolling 60s requests: {window_count}. RPM dropped: {old_rpm:.0f} -> {new_rpm:.0f}. "
+                            f"Entering 70s cooldown."
+                        )
+                        cooldown_remaining = 70.0
+                        cooldown_step = 0.5
+                        while cooldown_remaining > 0:
+                            if check_cancel and check_cancel():
+                                set_meta(session, "cov_cache_count", "-1")
+                                commit_with_retry(session)
+                                return False, "Import abgebrochen."
+                            if progress_callback:
+                                pct = int(processed_count * 100 / total_pos) if total_pos > 0 else 0
+                                try:
+                                    progress_callback(
+                                        pct,
+                                        f"⏳ Rate Limit (429)! Warte {int(cooldown_remaining)}s... [Hits: {limiter.total_429_hits}, RPM: {new_rpm:.0f}]"
+                                    )
+                                except TypeError:
+                                    progress_callback(pct)
+                            sleep_time = min(cooldown_step, cooldown_remaining)
+                            time.sleep(sleep_time)
+                            cooldown_remaining -= sleep_time
+                        retry_same_position = True
+                    elif e.code == 401:
+                        logger.error(f"[Lichess Import] HTTP 401 Unauthorized for FEN {pos.fen}. Invalid or expired token.")
+                        return False, "Fehler 401: Das Lichess API-Token ist ungültig oder abgelaufen. Bitte überprüfe dein Token in den Einstellungen."
+                    else:
+                        logger.warning(f"[Lichess Import] HTTP Error {e.code} for FEN {pos.fen}. Skipping.")
+                except Exception as e:
+                    successful_requests_in_a_row = 0
+                    logger.error(f"[Lichess Import] Error for FEN {pos.fen}: {e}. Skipping.")
+
+                if retry_same_position:
+                    continue
+
+                remaining_pos_ids.discard(pos_id)
+                processed_count += 1
+                batch_idx += 1
+
+                if uncommitted_items >= 5:
+                    commit_with_retry(session)
+                    uncommitted_items = 0
+
+                pct = int(processed_count * 100 / total_pos) if total_pos > 0 else 0
+
+                if processed_count > 0 and processed_count % 25 == 0:
+                    avg_lat = (sum(limiter.recent_latencies) / len(limiter.recent_latencies) * 1000) if limiter.recent_latencies else 0.0
+                    logger.debug(
+                        f"[Lichess Import] Progress: {processed_count}/{total_pos} ({pct}%) | "
+                        f"60s Window: {limiter.get_current_window_count()} reqs | "
+                        f"Target RPM: {limiter.target_rpm:.0f} | "
+                        f"Avg Latency: {avg_lat:.0f}ms | "
+                        f"429 Hits: {limiter.total_429_hits}"
+                    )
+
+                now_t = time.time()
+                is_first = (processed_count == 1)
+                is_last = (processed_count == total_pos)
+                has_429_alert = (limiter.total_429_hits > 0 and limiter.total_429_hits != last_reported_429_hits)
+                time_since_last_emit = now_t - last_progress_emit_time
+
+                if progress_callback and (is_first or is_last or has_429_alert or time_since_last_emit >= 0.25):
+                    last_progress_emit_time = now_t
+                    if has_429_alert:
+                        last_reported_429_hits = limiter.total_429_hits
+                    if limiter.total_429_hits > 0:
+                        status_text = f"{processed_count}/{total_pos} [⚠️ 429: {limiter.total_429_hits}x, RPM: {limiter.target_rpm:.0f}]"
+                    else:
+                        status_text = f"{processed_count}/{total_pos} [RPM: {limiter.target_rpm:.0f}]"
+                    try:
+                        progress_callback(pct, processed_count, total_pos)
+                    except TypeError:
+                        try:
+                            progress_callback(pct, status_text)
+                        except TypeError:
+                            progress_callback(pct)
+
+                time.sleep(0.002)
+
+            # End of batch of 20: commit database transaction
             if uncommitted_items > 0:
                 commit_with_retry(session)
                 uncommitted_items = 0
-
-            if limiter.wait_for_slot(check_cancel):
-                logger.info(
-                    f"[Lichess Import] Cancelled while waiting for slot at item {i}/{total_pos}. "
-                    f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
-                )
-                set_meta(session, "cov_cache_count", "-1")
-                commit_with_retry(session)
-                return False, "Import abgebrochen."
-
-            if elo_category == 'masters':
-                params = {
-                    'variant': 'standard',
-                    'fen': pos.fen,
-                    'moves': 25
-                }
-                query_string = urllib.parse.urlencode(params)
-                url = f"https://explorer.lichess.org/masters?{query_string}"
-            else:
-                params = {
-                    'variant': 'standard',
-                    'fen': pos.fen, 
-                    'ratings': ",".join(lichess_ratings),
-                    'speeds': 'rapid,classical',
-                    'moves': 25
-                }
-                query_string = urllib.parse.urlencode(params)
-                url = f"https://explorer.lichess.org/lichess?{query_string}"
-            
-            retry_same_position = False
-            
-            t_req_start = time.time()
-            try:
-                headers = {'User-Agent': 'OpeningFenix/1.0 (Python urllib)'}
-                if lichess_token:
-                    headers['Authorization'] = f'Bearer {lichess_token}'
-                
-                resp_bytes = client.get(url, headers=headers)
-                latency = time.time() - t_req_start
-                limiter.record_success(latency)
-                data = json.loads(resp_bytes.decode('utf-8'))
-                successful_requests_in_a_row += 1
-                
-                moves_data = data.get('moves', [])
-                # Double check to prevent race condition during long network request
-                existing = session.query(LichessData).filter_by(fen=pos.fen, elo_range=elo_category).first()
-                if not existing:
-                    if moves_data:
-                        moves_dict = {
-                            move['uci']: {
-                                'white': move.get('white', 0),
-                                'draws': move.get('draws', 0),
-                                'black': move.get('black', 0),
-                                'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
-                            } for move in moves_data if 'uci' in move
-                        }
-                        new_data = LichessData(
-                            fen=pos.fen,
-                            elo_range=elo_category,
-                            moves_json=json.dumps(moves_dict),
-                            fetched_at=datetime.datetime.now()
-                        )
-                        fen_games_count[pos.fen] = sum(m.get('total', 0) for m in moves_dict.values())
-                    else:
-                        new_data = LichessData(
-                            fen=pos.fen,
-                            elo_range=elo_category,
-                            moves_json=json.dumps({}),
-                            fetched_at=datetime.datetime.now()
-                        )
-                        fen_games_count[pos.fen] = 0
-                    session.add(new_data)
-                    try:
-                        with session.begin_nested():
-                            session.flush()
-                        new_data_points_added += 1
-                        uncommitted_items += 1
-                    except Exception:
-                        # Ignored collision (already inserted by another thread)
-                        pass
-            
-            except urllib.error.HTTPError as e:
-                successful_requests_in_a_row = 0
-                if e.code == 429:
-                    if uncommitted_items > 0:
-                        commit_with_retry(session)
-                        uncommitted_items = 0
-                    old_rpm, new_rpm = limiter.record_429(fen=pos.fen)
-                    window_count = limiter.get_current_window_count()
-                    logger.warning(
-                        f"[Lichess Import] HTTP 429 Rate Limit HIT #{limiter.total_429_hits}! "
-                        f"At position {i+1}/{total_pos} (Total requests sent: {limiter.total_requests}, FEN: {pos.fen}). "
-                        f"Rolling 60s requests: {window_count}. RPM dropped: {old_rpm:.0f} -> {new_rpm:.0f}. "
-                        f"Entering 70s cooldown."
-                    )
-                    # Live countdown in UI and log
-                    cooldown_remaining = 70.0
-                    cooldown_step = 0.5
-                    while cooldown_remaining > 0:
-                        if check_cancel and check_cancel():
-                            set_meta(session, "cov_cache_count", "-1")
-                            commit_with_retry(session)
-                            return False, "Import abgebrochen."
-                        if progress_callback:
-                            pct = int(i * 100 / total_pos) if total_pos > 0 else 0
-                            try:
-                                progress_callback(
-                                    pct,
-                                    f"⏳ Rate Limit (429)! Warte {int(cooldown_remaining)}s... [Hits: {limiter.total_429_hits}, RPM: {new_rpm:.0f}]"
-                                )
-                            except TypeError:
-                                progress_callback(pct)
-                        sleep_time = min(cooldown_step, cooldown_remaining)
-                        time.sleep(sleep_time)
-                        cooldown_remaining -= sleep_time
-                    retry_same_position = True
-                elif e.code == 401:
-                    logger.error(f"[Lichess Import] HTTP 401 Unauthorized for FEN {pos.fen}. Invalid or expired token.")
-                    return False, "Fehler 401: Das Lichess API-Token ist ungültig oder abgelaufen. Bitte überprüfe dein Token in den Einstellungen."
-                else:
-                    logger.warning(f"[Lichess Import] HTTP Error {e.code} for FEN {pos.fen}. Skipping.")
-            except Exception as e:
-                successful_requests_in_a_row = 0
-                logger.error(f"[Lichess Import] Error for FEN {pos.fen}: {e}. Skipping.")
-
-            if retry_same_position:
-                continue
-
-            i += 1
-            
-            if uncommitted_items >= 5:
-                commit_with_retry(session)
-                uncommitted_items = 0
-
-            pct = int(i * 100 / total_pos) if total_pos > 0 else 0
-
-            # Periodic diagnostic debug logging every 25 requests
-            if i > 0 and i % 25 == 0:
-                avg_lat = (sum(limiter.recent_latencies) / len(limiter.recent_latencies) * 1000) if limiter.recent_latencies else 0.0
-                logger.debug(
-                    f"[Lichess Import] Progress: {i}/{total_pos} ({pct}%) | "
-                    f"60s Window: {limiter.get_current_window_count()} reqs | "
-                    f"Target RPM: {limiter.target_rpm:.0f} | "
-                    f"Avg Latency: {avg_lat:.0f}ms | "
-                    f"429 Hits: {limiter.total_429_hits}"
-                )
-
-            now_t = time.time()
-            is_first = (i == 1)
-            is_last = (i == total_pos)
-            has_429_alert = (limiter.total_429_hits > 0 and limiter.total_429_hits != last_reported_429_hits)
-            time_since_last_emit = now_t - last_progress_emit_time
-
-            # Throttle UI progress updates to at most once per 250ms to prevent flooding the Qt event loop
-            if progress_callback and (is_first or is_last or has_429_alert or time_since_last_emit >= 0.25):
-                last_progress_emit_time = now_t
-                if has_429_alert:
-                    last_reported_429_hits = limiter.total_429_hits
-                if limiter.total_429_hits > 0:
-                    status_text = f"{i}/{total_pos} [⚠️ 429: {limiter.total_429_hits}x, RPM: {limiter.target_rpm:.0f}]"
-                else:
-                    status_text = f"{i}/{total_pos} [RPM: {limiter.target_rpm:.0f}]"
-                try:
-                    progress_callback(pct, i, total_pos)
-                except TypeError:
-                    try:
-                        progress_callback(pct, status_text)
-                    except TypeError:
-                        progress_callback(pct)
-
-            # Micro-yield GIL to keep GUI animations and user inputs completely smooth
-            time.sleep(0.002)
 
         if uncommitted_items > 0:
             commit_with_retry(session)

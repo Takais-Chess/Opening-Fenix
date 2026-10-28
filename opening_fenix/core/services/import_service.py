@@ -53,15 +53,20 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         # 2. BULK CACHE INITIALIZATION
         pos_cache = {p.fen: p.id for p in session.query(Position.fen, Position.id).all()}
         move_cache = {(m.from_position_id, m.uci): (m.id, m.nag) for m in session.query(Move.from_position_id, Move.uci, Move.id, Move.nag).all()}
-        rep_move_cache = {rm.move_id: rm.level for rm in session.query(RepertoireMove.move_id, RepertoireMove.level).all()}
+        existing_rm_rows = session.query(RepertoireMove.id, RepertoireMove.move_id, RepertoireMove.level).all()
+        rep_move_cache = {rm.move_id: rm.level for rm in existing_rm_rows}
+        rep_move_id_by_move_id = {rm.move_id: rm.id for rm in existing_rm_rows}
 
         max_pos_id = max(pos_cache.values()) if pos_cache else 0
         max_move_id = max(m_id for m_id, _ in move_cache.values()) if move_cache else 0
 
         new_positions_to_insert = {}
         new_moves_to_insert = []
+        new_moves_by_id = {}
         new_rep_moves_to_insert = []
+        new_rep_moves_by_move_id = {}
         moves_to_update_nag = {}
+        rep_moves_to_update_level = {}
         comments_to_append = {}
 
         # 3. FAST STREAMING PGN PARSING
@@ -141,27 +146,31 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             max_move_id += 1
                             move_id = max_move_id
                             move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                            new_moves_to_insert.append(
-                                Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                            )
+                            new_m = Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                            new_moves_to_insert.append(new_m)
+                            new_moves_by_id[move_id] = new_m
                         else:
                             move_id, existing_nag = move_entry
                             if incoming_nag != 0 and existing_nag != incoming_nag:
-                                moves_to_update_nag[move_id] = incoming_nag
                                 move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                                if move_id in new_moves_by_id:
+                                    new_moves_by_id[move_id].nag = incoming_nag
+                                else:
+                                    moves_to_update_nag[move_id] = incoming_nag
 
                         # REPERTOIRE MOVE LOGIC
                         if move_id not in rep_move_cache:
                             rep_move_cache[move_id] = level_order
-                            new_rep_moves_to_insert.append(
-                                RepertoireMove(move_id=move_id, level=level_order)
-                            )
+                            new_rm = RepertoireMove(move_id=move_id, level=level_order)
+                            new_rep_moves_to_insert.append(new_rm)
+                            new_rep_moves_by_move_id[move_id] = new_rm
                             new_moves_count += 1
                         elif level_order < rep_move_cache[move_id]:
                             rep_move_cache[move_id] = level_order
-                            existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                            if existing_rm:
-                                existing_rm.level = level_order
+                            if move_id in new_rep_moves_by_move_id:
+                                new_rep_moves_by_move_id[move_id].level = level_order
+                            elif move_id in rep_move_id_by_move_id:
+                                rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                 else:
                     node_stack = []
                     initial_board = game.board()
@@ -217,27 +226,31 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             max_move_id += 1
                             move_id = max_move_id
                             move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                            new_moves_to_insert.append(
-                                Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                            )
+                            new_m = Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                            new_moves_to_insert.append(new_m)
+                            new_moves_by_id[move_id] = new_m
                         else:
                             move_id, existing_nag = move_entry
                             if incoming_nag != 0 and existing_nag != incoming_nag:
-                                moves_to_update_nag[move_id] = incoming_nag
                                 move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                                if move_id in new_moves_by_id:
+                                    new_moves_by_id[move_id].nag = incoming_nag
+                                else:
+                                    moves_to_update_nag[move_id] = incoming_nag
                         
                         # REPERTOIRE MOVE LOGIC
                         if move_id not in rep_move_cache:
                             rep_move_cache[move_id] = level_order
-                            new_rep_moves_to_insert.append(
-                                RepertoireMove(move_id=move_id, level=level_order)
-                            )
+                            new_rm = RepertoireMove(move_id=move_id, level=level_order)
+                            new_rep_moves_to_insert.append(new_rm)
+                            new_rep_moves_by_move_id[move_id] = new_rm
                             new_moves_count += 1
                         elif level_order < rep_move_cache[move_id]:
                             rep_move_cache[move_id] = level_order
-                            existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                            if existing_rm:
-                                existing_rm.level = level_order
+                            if move_id in new_rep_moves_by_move_id:
+                                new_rep_moves_by_move_id[move_id].level = level_order
+                            elif move_id in rep_move_id_by_move_id:
+                                rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                         
                         for var in reversed(current_node.variations):
                             node_stack.append((var, board.copy()))
@@ -249,9 +262,18 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             session.bulk_save_objects(new_moves_to_insert)
         if new_rep_moves_to_insert:
             session.bulk_save_objects(new_rep_moves_to_insert)
+        if rep_moves_to_update_level:
+            session.bulk_update_mappings(
+                RepertoireMove,
+                [{"id": rm_id, "level": lvl} for rm_id, lvl in rep_moves_to_update_level.items()]
+            )
         if moves_to_update_nag:
-            for m_id, n in moves_to_update_nag.items():
-                session.query(Move).filter_by(id=m_id).update({'nag': n})
+            session.bulk_update_mappings(
+                Move,
+                [{"id": m_id, "nag": n} for m_id, n in moves_to_update_nag.items()]
+            )
+        session.flush()
+        session.expire_all()
         
         # 6. UPDATE COMMENTS 
         if comments_to_append:
@@ -265,7 +287,7 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                     new_c = comments_to_append[pos.fen]
                     pos.comment = combine_comments(pos.comment, new_c, default_lang=lang)
 
-        if new_moves_count > 0 or comments_to_append or moves_to_update_nag:
+        if new_moves_count > 0 or comments_to_append or moves_to_update_nag or rep_moves_to_update_level:
             # 7. AUTOMATED HEALTH REPAIR
             # This ensures no holes were created and levels are consistent.
             repair_repertoire_health(session, fast=True)

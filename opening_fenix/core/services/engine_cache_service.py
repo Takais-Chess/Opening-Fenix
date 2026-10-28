@@ -24,25 +24,76 @@ def get_engine_cache_db_path(custom_dir: Optional[str] = None) -> str:
 class EngineCacheService:
     """
     Thread-safe service to store and query engine evaluations (depth, best move, and MultiPV scores).
-    Uses a local SQLite database in the user cache directory with an in-memory L1 cache.
+    Uses a local SQLite database in the user cache directory with an in-memory L1 cache
+    and persistent thread-local SQLite connections.
     """
+    _instances: set = set()
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or get_engine_cache_db_path()
         self._local_cache: Dict[str, tuple] = {}
         self._alt_cache: Dict[str, tuple] = {}
+        self._tls = threading.local()
+        self._open_connections: list = []
+        with _lock:
+            EngineCacheService._instances.add(self)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=15.0)
+        conn = getattr(self._tls, "conn", None)
+        conn_path = getattr(self._tls, "db_path", None)
+        if conn is not None and conn_path == self.db_path:
+            try:
+                conn.execute("SELECT 1")
+                return conn
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                self._tls.conn = None
+
+        conn = sqlite3.connect(self.db_path, timeout=15.0, check_same_thread=False)
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA cache_size=-8000;")
+        self._tls.conn = conn
+        self._tls.db_path = self.db_path
+        with _lock:
+            self._open_connections.append(conn)
         return conn
+
+    def close(self) -> None:
+        """Closes all open thread-local SQLite connections for this cache instance."""
+        self._tls.conn = None
+        self._tls.db_path = None
+        with _lock:
+            conns = list(self._open_connections)
+            self._open_connections.clear()
+            EngineCacheService._instances.discard(self)
+        for c in conns:
+            try:
+                c.close()
+            except Exception:
+                pass
+
+    @classmethod
+    def close_all(cls) -> None:
+        """Closes all active EngineCacheService connections across all instances."""
+        with _lock:
+            instances = list(cls._instances)
+        for inst in instances:
+            try:
+                inst.close()
+            except Exception:
+                pass
 
     def _init_db(self):
         with _lock:
             try:
-                conn = self._get_connection()
+                conn = sqlite3.connect(self.db_path, timeout=15.0)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
                 with conn:
                     conn.execute("""
                         CREATE TABLE IF NOT EXISTS engine_evals (
@@ -107,7 +158,7 @@ class EngineCacheService:
                 (clean, min_depth)
             )
             row = cur.fetchone()
-            conn.close()
+            cur.close()
             if row:
                 best_uci, depth, eval_json = row[0], row[1], row[2]
                 eval_data = None
@@ -155,7 +206,7 @@ class EngineCacheService:
                 (clean, min_depth)
             )
             row = cur.fetchone()
-            conn.close()
+            cur.close()
             if row:
                 best_uci, depth, eval_json = row[0], row[1], row[2]
                 eval_data = None
@@ -190,7 +241,8 @@ class EngineCacheService:
         with _lock:
             for c in cleaned:
                 if c in self._local_cache:
-                    c_uci, c_depth = self._local_cache[c]
+                    entry = self._local_cache[c]
+                    c_uci, c_depth = entry[0], entry[1]
                     if c_depth >= min_depth:
                         result[c] = c_uci
                     else:
@@ -213,7 +265,7 @@ class EngineCacheService:
                     result[r_fen] = r_uci
                     with _lock:
                         self._local_cache[r_fen] = (r_uci, r_depth)
-            conn.close()
+            cur.close()
         except Exception:
             pass
         return result
@@ -256,7 +308,6 @@ class EngineCacheService:
                         updated_at = CURRENT_TIMESTAMP
                     WHERE excluded.depth >= engine_evals.depth;
                 """, (clean, depth, best_uci, eval_json_str))
-            conn.close()
         except Exception:
             pass
 
@@ -285,7 +336,7 @@ class EngineCacheService:
                 (clean, min_depth)
             )
             row = cur.fetchone()
-            conn.close()
+            cur.close()
             if row and row[0]:
                 alt_json, depth, is_exh, best_uci = row[0], row[1], bool(row[2]), row[3]
                 if require_exhaustive and not is_exh:
@@ -391,7 +442,7 @@ class EngineCacheService:
                     """, (clean, depth, eff_best, alt_json_str, depth, is_exh_int))
                     with _lock:
                         self._alt_cache[clean] = (cleaned_moves, depth, is_exhaustive, eff_best)
-            conn.close()
+                cur.close()
         except Exception:
             pass
 
@@ -411,7 +462,6 @@ class EngineCacheService:
                         alternates_depth = NULL,
                         alternates_exhaustive = 0
                 """)
-            conn.close()
         except Exception:
             pass
 

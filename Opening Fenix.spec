@@ -8,7 +8,10 @@ def get_safe_tree_datas(src_dir):
     datas = []
     if not os.path.exists(src_dir):
         return datas
+    public_only = os.environ.get('FENIX_PUBLIC_ONLY') == '1'
     for root, dirs, files in os.walk(src_dir):
+        if public_only and os.path.abspath(root) == os.path.abspath(src_dir):
+            dirs[:] = [d for d in dirs if 'example' in d.lower() or 'sample' in d.lower()]
         for f in files:
             ext = os.path.splitext(f)[1].lower()
             if ext in ['.pgi', '.tmp', '.lock']:

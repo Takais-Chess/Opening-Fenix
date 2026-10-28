@@ -2,6 +2,14 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.2.6] - 2026-10-29
+
+### Fixed & Improved
+- **Lichess Import 3-Move Lead-Up Skip Rule**: Replaced the previous 2-ply grandparent node skip heuristic with a rigorous 3-move lead-up sequence check ($m_3 \to m_2 \to m_1$). Positions are now only skipped if every incoming path has 0 games across all 3 preceding consecutive moves. Positions with depth < 3 or with any active games on incoming parent moves are never skipped, resolving issues where positions following played moves were erroneously marked as having 0 games.
+- **Lichess Database Self-Healing**: Added automated detection and purging of legacy falsely skipped positions where incoming parent moves have games (>0). On subsequent Lichess imports, stale empty records are automatically cleared and re-queried from the Lichess API.
+- **Background Task Center & Concurrent Jobs**: Introduced centralized background task management (`TaskManagerService`) with real-time status bar progress indicators, queue prioritization, error resilience, and graceful task cancellation.
+- **Settings Dialog & Live Board Customization**: Enhanced Unified Settings with sidebar search, responsive preference categories, and live board theme preview rendering.
+
 ## [1.2.5] - 2026-10-26
 
 ### Performance & Polish

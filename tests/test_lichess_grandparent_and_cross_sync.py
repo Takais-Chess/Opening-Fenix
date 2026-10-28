@@ -97,11 +97,12 @@ def test_compute_position_grandparents_simple_and_transposition(mock_user_dir, s
     db.close()
 
 
-def test_grandparent_skip_in_run_lichess_import(mock_user_dir, sample_repertoire):
+def test_parent_protection_and_three_move_skip_in_run_lichess_import(mock_user_dir, sample_repertoire):
     """
-    Tests that a position whose ALL grandparents have 0 games is skipped
-    without making network requests, and saved with moves_json = '{}'.
-    Also tests that if ONE grandparent has games (transposition), it is NOT skipped.
+    Tests that:
+    1. A position whose incoming move has games is NEVER skipped, even if earlier moves had 0 games.
+    2. A position whose lead-up has 3 consecutive evaluated 0-game moves IS skipped without network request.
+    3. Self-healing automatically purges stale empty records if their parent move has >0 games.
     """
     db_path = get_repertoire_db_path(sample_repertoire)
     db = DatabaseManager(db_path)
@@ -113,6 +114,8 @@ def test_grandparent_skip_in_run_lichess_import(mock_user_dir, sample_repertoire
     session.query(LichessData).delete()
     session.commit()
 
+    # Line 1: Normal line where p3 -> p4 has games (m4)
+    # p0 -> (e4) -> p1 -> (e5) -> p2 -> (Nf3) -> p3 -> (Nc6) -> p4
     start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
     p0 = Position(fen=start_fen)
     p1 = Position(fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1")
@@ -120,36 +123,57 @@ def test_grandparent_skip_in_run_lichess_import(mock_user_dir, sample_repertoire
     p3 = Position(fen="rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 1 2")
     p4 = Position(fen="r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3")
 
-    session.add_all([p0, p1, p2, p3, p4])
+    # Line 2: 3-move 0-game sideline branching off p1:
+    # p1 -> (a7a6, 0 games) -> p_rare1 -> (h2h4, 0 games) -> p_rare2 -> (b7b6, 0 games) -> p_rare3 (should be skipped!)
+    p_rare1 = Position(fen="rnbqkbnr/1ppppppp/p7/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2")
+    p_rare2 = Position(fen="rnbqkbnr/1ppppppp/p7/8/4P2P/8/PPPP1PP1/RNBQKBNR b KQkq - 0 2")
+    p_rare3 = Position(fen="rnbqkbnr/2pppppp/pp6/8/4P2P/8/PPPP1PP1/RNBQKBNR w KQkq - 0 3")
+
+    session.add_all([p0, p1, p2, p3, p4, p_rare1, p_rare2, p_rare3])
     session.commit()
 
     m1 = Move(from_position_id=p0.id, to_position_id=p1.id, uci="e2e4", san="e4")
     m2 = Move(from_position_id=p1.id, to_position_id=p2.id, uci="e7e5", san="e5")
     m3 = Move(from_position_id=p2.id, to_position_id=p3.id, uci="g1f3", san="Nf3")
     m4 = Move(from_position_id=p3.id, to_position_id=p4.id, uci="b8c6", san="Nc6")
-    session.add_all([m1, m2, m3, m4])
+
+    # Sideline moves
+    mr1 = Move(from_position_id=p1.id, to_position_id=p_rare1.id, uci="a7a6", san="a6")
+    mr2 = Move(from_position_id=p_rare1.id, to_position_id=p_rare2.id, uci="h2h4", san="h4")
+    mr3 = Move(from_position_id=p_rare2.id, to_position_id=p_rare3.id, uci="b7b6", san="b6")
+
+    session.add_all([m1, m2, m3, m4, mr1, mr2, mr3])
     session.commit()
 
     # Pre-populate Lichess data:
     # p0 has 1,000,000 games
-    # p1 has 500,000 games
-    # p2 has 0 games! (Grandparent of p4 is p2!)
+    # p1 has e7e5 (500,000 games) and a7a6 is NOT played (0 games)
     ld0 = LichessData(fen=p0.fen, elo_range="high", moves_json=json.dumps({"e2e4": {"total": 1000000}}))
     ld1 = LichessData(fen=p1.fen, elo_range="high", moves_json=json.dumps({"e7e5": {"total": 500000}}))
-    ld2 = LichessData(fen=p2.fen, elo_range="high", moves_json=json.dumps({})) # 0 games!
-    session.add_all([ld0, ld1, ld2])
+    # p_rare1 and p_rare2 both evaluated with 0 games
+    ld_r1 = LichessData(fen=p_rare1.fen, elo_range="high", moves_json=json.dumps({}))
+    ld_r2 = LichessData(fen=p_rare2.fen, elo_range="high", moves_json=json.dumps({}))
+    # p3 has 17 games for b8c6 (move m4 into p4)
+    ld3 = LichessData(fen=p3.fen, elo_range="high", moves_json=json.dumps({"b8c6": {"total": 17}}))
+
+    # Stale empty data for p4 to test self-healing!
+    # Even though p4 has an empty record, p3's move m4 has 17 games,
+    # so self-healing should purge this stale record and fetch real data for p4.
+    ld4_stale = LichessData(fen=p4.fen, elo_range="high", moves_json=json.dumps({}))
+
+    session.add_all([ld0, ld1, ld_r1, ld_r2, ld3, ld4_stale])
     session.commit()
 
     session.close()
     db.close()
 
-    # Track URLs requested
     network_requests = []
 
     def mock_get(url, headers):
         network_requests.append(url)
+        # Mock returns moves from p4 (e.g. f1c4)
         return json.dumps({
-            "moves": [{"uci": "b8c6", "white": 10, "draws": 5, "black": 2}]
+            "moves": [{"uci": "f1c4", "white": 10, "draws": 5, "black": 2}]
         }).encode("utf-8")
 
     with patch("time.sleep"), \
@@ -163,19 +187,20 @@ def test_grandparent_skip_in_run_lichess_import(mock_user_dir, sample_repertoire
     db = DatabaseManager(db_path)
     session = db.get_session()
 
-    ld3 = session.query(LichessData).filter_by(fen=p3.fen, elo_range="high").first()
     ld4 = session.query(LichessData).filter_by(fen=p4.fen, elo_range="high").first()
+    ld_r3 = session.query(LichessData).filter_by(fen=p_rare3.fen, elo_range="high").first()
 
-    # p3 was queried over network (its grandparent is p1 which has 500,000 games)
-    assert ld3 is not None
-    assert any(p3.fen in urllib.parse.unquote_plus(req) for req in network_requests)
-
-    # p4 has grandparent p2, which has 0 games!
-    # Therefore p4 MUST BE SKIPPED without network request!
+    # 1. Self-healing & Parent Protection: p4's incoming move m4 had 17 games!
+    # Self-healing purged ld4_stale, and p4 was queried over network.
     assert ld4 is not None
-    assert ld4.moves_json == "{}"
-    # Verify NO network request was made for p4!
-    assert not any(p4.fen in urllib.parse.unquote_plus(req) for req in network_requests)
+    assert "f1c4" in ld4.moves_json
+    assert any(p4.fen in urllib.parse.unquote_plus(req) for req in network_requests)
+
+    # 2. 3-Move Lead-Up Skip: p_rare3 has 3 consecutive 0-game moves (mr1, mr2, mr3).
+    # Therefore p_rare3 MUST BE SKIPPED without making any network request!
+    assert ld_r3 is not None
+    assert ld_r3.moves_json == "{}"
+    assert not any(p_rare3.fen in urllib.parse.unquote_plus(req) for req in network_requests)
 
     session.close()
     db.close()
@@ -252,3 +277,84 @@ def test_sync_lichess_data_from_other_repertoires_with_date_filter(mock_user_dir
 
     sA.close()
     dbA.close()
+
+
+def test_exact_bug_and_self_healing_scenario(mock_user_dir, sample_repertoire):
+    """
+    Directly reproduces the user's reported bug:
+    Grandparent (Pos 11846) has 0 games.
+    Parent (Pos 11847) has 9 games for move Qe7.
+    Child (Pos 11848) was previously marked as {} by the old bug.
+    Verifies that running run_lichess_import heals Pos 11848 and queries Lichess.
+    """
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.query(LichessData).delete()
+    session.commit()
+
+    # Grandparent -> Parent -> Child
+    gp_fen = "r1bqkb1r/pppp1ppp/2n5/4p3/2B2P2/2P5/PPP3PP/R1BQK1NR w KQkq -"
+    parent_fen = "r1bqkb1r/pppp1ppp/2n5/4p3/2B2P2/2P2N2/PPP3PP/R1BQK2R b KQkq -"
+    child_fen = "r1b1kb1r/ppppqppp/2n5/4p3/2B2P2/2P2N2/PPP3PP/R1BQK2R w KQkq -"
+
+    p_gp = Position(fen=gp_fen)
+    p_parent = Position(fen=parent_fen)
+    p_child = Position(fen=child_fen)
+
+    session.add_all([p_gp, p_parent, p_child])
+    session.commit()
+
+    m_gp = Move(from_position_id=p_gp.id, to_position_id=p_parent.id, uci="g1f3", san="Nf3")
+    m_parent = Move(from_position_id=p_parent.id, to_position_id=p_child.id, uci="d8e7", san="Qe7")
+    session.add_all([m_gp, m_parent])
+    session.commit()
+
+    # Grandparent had 0 games
+    ld_gp = LichessData(fen=p_gp.fen, elo_range="high", moves_json=json.dumps({}))
+    # Parent had 9 games for Qe7!
+    ld_parent = LichessData(fen=p_parent.fen, elo_range="high", moves_json=json.dumps({
+        "d8e7": {"white": 0, "draws": 1, "black": 8, "total": 9}
+    }))
+    # Child was falsely saved with {} by old bug
+    ld_child_stale = LichessData(fen=p_child.fen, elo_range="high", moves_json=json.dumps({}))
+
+    session.add_all([ld_gp, ld_parent, ld_child_stale])
+    session.commit()
+    session.close()
+    db.close()
+
+    network_requests = []
+
+    def mock_get(url, headers):
+        network_requests.append(url)
+        return json.dumps({
+            "moves": [
+                {"uci": "d1e2", "white": 0, "draws": 0, "black": 4},
+                {"uci": "f4e5", "white": 0, "draws": 0, "black": 2}
+            ]
+        }).encode("utf-8")
+
+    with patch("time.sleep"), \
+         patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"), \
+         patch("opening_fenix.core.services.lichess_service.LichessConnectionManager.get", side_effect=mock_get):
+
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+
+    # Verify that child_fen was queried and updated!
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    ld_child = session.query(LichessData).filter_by(fen=p_child.fen, elo_range="high").first()
+
+    assert ld_child is not None
+    assert ld_child.moves_json != "{}"
+    assert "d1e2" in ld_child.moves_json
+    assert any(p_child.fen in urllib.parse.unquote_plus(req) for req in network_requests)
+
+    session.close()
+    db.close()
+

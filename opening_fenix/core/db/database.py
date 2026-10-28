@@ -77,6 +77,8 @@ class DatabaseManager:
                     try:
                         dbapi_connection.execute("PRAGMA busy_timeout=60000")
                         dbapi_connection.execute("PRAGMA synchronous=NORMAL")
+                        dbapi_connection.execute("PRAGMA cache_size=-16000")
+                        dbapi_connection.execute("PRAGMA temp_store=MEMORY")
                     except Exception:
                         pass
 
@@ -154,6 +156,10 @@ class DatabaseManager:
                             conn.execute(text(f"ALTER TABLE positions ADD COLUMN {col} {type_str}"))
                             conn.commit()
 
+                    # Ensure index on Position.analysis_depth for existing databases
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_analysis_depth ON positions (analysis_depth)"))
+                    conn.commit()
+
                     # Check for new RepertoireLevel columns
                     result = conn.execute(text("PRAGMA table_info(repertoire_levels)"))
                     rl_columns = [row[1] for row in result.fetchall()]
@@ -192,6 +198,10 @@ class DatabaseManager:
                         if 'stats_updated_at' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN stats_updated_at DATETIME"))
                         conn.commit()
+
+                    # Ensure composite index on TrainingData(repertoire_name, next_due) for existing user databases
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_training_data_repo_due ON training_data (repertoire_name, next_due)"))
+                    conn.commit()
 
         except Exception as e:
             from opening_fenix.core.logger import logger

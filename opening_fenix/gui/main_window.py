@@ -525,7 +525,25 @@ class MainWindow(QMainWindow):
         
         main_layout.addWidget(content_wrapper, 1)
 
-        # Panels maintain crisp CSS border styling without software Gaussian blur overhead
+        # Floating Background Task Progress Indicator
+        from opening_fenix.gui.widgets.task_progress_indicator import TaskProgressIndicator
+        self.task_indicator = TaskProgressIndicator(self)
+        self.task_indicator.clicked.connect(self.open_task_center)
+
+    def open_task_center(self, initial_tab=None):
+        from opening_fenix.gui.dialogs.task_center_dialog import TaskCenterDialog
+        from PyQt6 import sip
+        active_repo = getattr(self.training_manager, 'active_repo_name', None) if getattr(self, 'training_manager', None) else None
+        if not hasattr(self, 'task_center_dialog') or not self.task_center_dialog or sip.isdeleted(self.task_center_dialog):
+            self.task_center_dialog = TaskCenterDialog(None, active_repo_name=active_repo)
+        else:
+            if active_repo and hasattr(self.task_center_dialog, 'set_active_repertoire'):
+                self.task_center_dialog.set_active_repertoire(active_repo)
+        if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
+            self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
+        self.task_center_dialog.show()
+        self.task_center_dialog.raise_()
+        self.task_center_dialog.activateWindow()
 
     def scroll_tabs_left(self):
         sb = self.repo_scroll.horizontalScrollBar()
@@ -1119,7 +1137,9 @@ class MainWindow(QMainWindow):
             if not self.board_widget.is_animating:
                 self._flush_pending_stats()
         else:
-            alt_type = self.repertoire_manager.get_alternative_move_type(self.current_move_obj, move.uci())
+            alt_type = self.repertoire_manager.get_alternative_move_type(
+                self.current_move_obj, move.uci(), training_manager=self.training_manager
+            )
             if alt_type:
                 alt_policy = self.training_manager.get_setting("alternate_move_policy") or "no_penalty"
                 if alt_policy == "mistake":

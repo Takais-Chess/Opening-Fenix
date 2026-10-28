@@ -100,13 +100,13 @@ class ToggleSwitch(QAbstractButton):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setCheckable(True)
-        self.setFixedSize(scale(44), scale(22))
+        self.setFixedSize(scale(44), scale(24))
         
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        brush_color = QColor("#111111") if self.isChecked() else QColor("#d1d1d6")
+        brush_color = QColor("#d35400") if self.isChecked() else QColor("#cbd5e1")
         painter.setBrush(QBrush(brush_color))
         painter.setPen(Qt.PenStyle.NoPen)
         
@@ -114,14 +114,95 @@ class ToggleSwitch(QAbstractButton):
         radius = self.height() / 2.0
         painter.drawRoundedRect(rect, radius, radius)
         
-        knob_color = QColor("white")
+        knob_color = QColor("#ffffff")
         painter.setBrush(QBrush(knob_color))
         
-        margin = scale(2)
+        margin = scale(3)
         knob_size = self.height() - (margin * 2)
         x = self.width() - knob_size - margin if self.isChecked() else margin
         knob_rect = QRectF(x, margin, knob_size, knob_size)
         painter.drawEllipse(knob_rect)
+
+
+class LiveBoardPreviewWidget(QFrame):
+    """Compact 4x4 live chessboard preview widget reflecting the selected board theme and highlight color."""
+    def __init__(self, theme_key: str = "Braun (Klassisch)", hl_key: str = "Gelb (Standard)", parent=None):
+        super().__init__(parent)
+        self.theme_key = theme_key
+        self.hl_key = hl_key
+        self.setFixedSize(scale(116), scale(116))
+        self.setStyleSheet("background: transparent; border: none;")
+
+    def set_preview_state(self, theme_key: str, hl_key: str):
+        self.theme_key = theme_key
+        self.hl_key = hl_key
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        theme_data = THEMES.get(self.theme_key)
+        if not theme_data and self.theme_key in THEME_FALLBACKS:
+            theme_data = THEMES.get(THEME_FALLBACKS[self.theme_key])
+        if isinstance(theme_data, (tuple, list)) and len(theme_data) >= 2:
+            light_col = QColor(theme_data[0])
+            dark_col = QColor(theme_data[1])
+        elif isinstance(theme_data, dict):
+            light_col = QColor(theme_data.get("light", "#f0d9b5"))
+            dark_col = QColor(theme_data.get("dark", "#b58863"))
+        else:
+            light_col = QColor("#f0d9b5")
+            dark_col = QColor("#b58863")
+
+        hl_val = HIGHLIGHT_COLORS.get(self.hl_key)
+        if not hl_val and self.hl_key in HIGHLIGHT_COLOR_FALLBACKS:
+            hl_val = HIGHLIGHT_COLORS.get(HIGHLIGHT_COLOR_FALLBACKS[self.hl_key])
+        if isinstance(hl_val, QColor):
+            hl_col = QColor(hl_val)
+        elif isinstance(hl_val, (tuple, list)) and len(hl_val) >= 3:
+            hl_col = QColor(*hl_val)
+        else:
+            hl_col = QColor(str(hl_val) if hl_val else "#f1c40f")
+            hl_col.setAlpha(155)
+
+        pad = scale(4)
+        board_sz = self.width() - 2 * pad
+        sq = board_sz / 4.0
+
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(pad, pad, board_sz, board_sz), scale(8), scale(8))
+        painter.save()
+        painter.setClipPath(path)
+
+        pieces = {
+            (0, 0): ("♜", False), (0, 2): ("♝", False), (0, 3): ("♚", False),
+            (1, 1): ("♟", False), (1, 2): ("♞", False),
+            (2, 1): ("♘", True),  (2, 2): ("♗", True),
+            (3, 0): ("♙", True),  (3, 2): ("♕", True),  (3, 3): ("♔", True),
+        }
+        highlighted = {(3, 1), (2, 1)}
+
+        font = QFont("Segoe UI Symbol", scale(16))
+        painter.setFont(font)
+
+        for r in range(4):
+            for c in range(4):
+                rect = QRectF(pad + c * sq, pad + r * sq, sq, sq)
+                is_light = (r + c) % 2 == 0
+                painter.fillRect(rect, light_col if is_light else dark_col)
+                if (r, c) in highlighted:
+                    painter.fillRect(rect, hl_col)
+                if (r, c) in pieces:
+                    sym, is_white = pieces[(r, c)]
+                    painter.setPen(QColor("#ffffff") if is_white else QColor("#1e293b"))
+                    painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, sym)
+
+        painter.restore()
+        painter.setPen(QColor("#cbd5e1"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(QRectF(pad, pad, board_sz, board_sz), scale(8), scale(8))
+        painter.end()
 
 
 class DualModeCell(QWidget):
@@ -271,8 +352,8 @@ class RepertoireConfigCard(QFrame):
         from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
         
         self.layout = QHBoxLayout(self)
-        self.layout.setContentsMargins(scale(12), scale(8), scale(12), scale(8))
-        self.layout.setSpacing(scale(15))
+        self.layout.setContentsMargins(scale(14), scale(10), scale(14), scale(10))
+        self.layout.setSpacing(scale(14))
         
         # 1. Cover Image
         self.lbl_cover = QLabel()
@@ -280,7 +361,7 @@ class RepertoireConfigCard(QFrame):
         cover_path = get_repertoire_cover_path(self.repo_name)
         pix = get_cached_scaled_pixmap(cover_path, scale(48), scale(48))
         self.lbl_cover.setPixmap(pix)
-        self.lbl_cover.setStyleSheet(f"border: 1px solid rgba(0, 0, 0, 0.1); border-radius: {scale(6)}px; background: white;")
+        self.lbl_cover.setStyleSheet(f"border: 1px solid #e2e8f0; border-radius: {scale(8)}px; background: white;")
         self.layout.addWidget(self.lbl_cover)
         
         # 2. Info Container
@@ -292,7 +373,7 @@ class RepertoireConfigCard(QFrame):
         self.lbl_name = QLabel(self.repo_name)
         self.lbl_name.setObjectName("RepoName")
         self.lbl_name.setWordWrap(True)
-        self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(16)}px;")
+        self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(15)}px;")
         self.info_layout.addWidget(self.lbl_name)
         
         self.levels_elo_map = {}
@@ -304,7 +385,7 @@ class RepertoireConfigCard(QFrame):
         
         self.lbl_elo = QLabel("🎓 1500 Elo")
         self.lbl_elo.setObjectName("RepoElo")
-        self.lbl_elo.setStyleSheet(f"font-size: {scale(13)}px;")
+        self.lbl_elo.setStyleSheet(f"font-size: {scale(12)}px;")
         self.elo_layout.addWidget(self.lbl_elo)
         
         self.btn_toggle = ToggleSwitch()
@@ -318,7 +399,7 @@ class RepertoireConfigCard(QFrame):
         self.combo_level = NoWheelComboBox()
         self.combo_level.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo_level.setMinimumWidth(scale(120))
-        self.combo_level.setFixedHeight(scale(35))
+        self.combo_level.setFixedHeight(scale(32))
         self.populate_levels()
         self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
@@ -330,11 +411,11 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setVisible(self.is_active)
         
         if self.is_active:
-            self.setMinimumHeight(scale(130))
-            self.setMaximumHeight(scale(160))
+            self.setMinimumHeight(scale(132))
+            self.setMaximumHeight(scale(162))
         else:
-            self.setMinimumHeight(scale(64))
-            self.setMaximumHeight(scale(75))
+            self.setMinimumHeight(scale(68))
+            self.setMaximumHeight(scale(78))
         self.adjust_title_font()
 
     def resizeEvent(self, event):
@@ -355,7 +436,7 @@ class RepertoireConfigCard(QFrame):
             min_pt = 9
         else:
             avail_h = scale(44)
-            max_pt = 16
+            max_pt = 15
             min_pt = 11
 
         text = self.repo_name
@@ -409,11 +490,11 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setVisible(self.is_active)
         
         if self.is_active:
-            self.setMinimumHeight(scale(130))
-            self.setMaximumHeight(scale(160))
+            self.setMinimumHeight(scale(126))
+            self.setMaximumHeight(scale(156))
         else:
-            self.setMinimumHeight(scale(64))
-            self.setMaximumHeight(scale(75))
+            self.setMinimumHeight(scale(66))
+            self.setMaximumHeight(scale(76))
         self.adjust_title_font()
         
         if self.main_window and hasattr(self.main_window, 'training_manager'):
@@ -433,18 +514,18 @@ class RepertoireConfigCard(QFrame):
     def update_style(self):
         is_selected = (hasattr(self.parent_dlg, "selected_trainer_repo") and self.parent_dlg.selected_trainer_repo == self.repo_name)
         if self.is_active:
-            bg = "white"
-            border = "2px solid #3e2723" if is_selected else "1px solid rgba(0, 0, 0, 0.12)"
+            bg = "#fffaf5" if is_selected else "#ffffff"
+            border = "2px solid #d35400" if is_selected else "1px solid #e2e8f0"
             cover_bg = "white"
-            text_color = "#111111"
+            text_color = "#0f172a"
         else:
-            bg = "rgba(0,0,0,0.03)"
-            border = "2px dashed #3e2723" if is_selected else "1px solid rgba(0, 0, 0, 0.08)"
+            bg = "#f8fafc"
+            border = "2px dashed #d35400" if is_selected else "1px solid #e2e8f0"
             cover_bg = "transparent"
-            text_color = "#555555"
+            text_color = "#64748b"
 
         if hasattr(self, 'lbl_cover'):
-            self.lbl_cover.setStyleSheet(f"border: 1px solid rgba(0, 0, 0, 0.1); border-radius: {scale(6)}px; background: {cover_bg};")
+            self.lbl_cover.setStyleSheet(f"border: 1px solid #e2e8f0; border-radius: {scale(8)}px; background: {cover_bg};")
         if hasattr(self, 'info_widget'):
             self.info_widget.setStyleSheet("background: transparent;")
         if hasattr(self, 'elo_row'):
@@ -454,7 +535,7 @@ class RepertoireConfigCard(QFrame):
             RepertoireConfigCard {{
                 background-color: {bg};
                 border: {border};
-                border-radius: {scale(12)}px;
+                border-radius: {scale(10)}px;
             }}
             RepertoireConfigCard QWidget {{
                 background: transparent;
@@ -465,17 +546,18 @@ class RepertoireConfigCard(QFrame):
                 background: transparent;
             }}
             QLabel#RepoElo {{ 
-                color: #555555;
+                color: #64748b;
+                font-weight: 600;
                 background: transparent;
             }}
             QComboBox {{
-                background-color: #fbfbfb;
-                color: #111111;
-                border: 1px solid rgba(0, 0, 0, 0.14);
-                border-radius: {scale(8)}px;
+                background-color: #f8fafc;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: {scale(6)}px;
                 padding-left: {scale(10)}px;
-                padding-right: {scale(26)}px;
-                font-weight: 500;
+                padding-right: {scale(24)}px;
+                font-weight: 600;
             }}
         """)
 
@@ -1049,6 +1131,12 @@ class UnifiedSettingsDialog(QDialog):
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
         self.setMinimumSize(scale(1357), scale(760))
         self.resize(scale(1449), scale(820))
+        self.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMinMaxButtonsHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+        self.setModal(False)
         self.setStyleSheet(get_bw_glass_style())
         
         if QApplication.instance():
@@ -1356,7 +1444,29 @@ class UnifiedSettingsDialog(QDialog):
             backend.reset_and_repair_variation_names()
 
     def start_analysis(self):
-        self.toggle_engine_scan()
+        self.open_task_center(initial_tab=0)
+
+    def open_task_center(self, initial_tab=None):
+        backend = self.ensure_backend_for_active_repo()
+        active_repo = (self.combo_active_repo.currentData() if hasattr(self, 'combo_active_repo') and self.combo_active_repo else None) or (backend.active_repo_name if backend else None)
+        if self.main_window and hasattr(self.main_window, 'open_task_center'):
+            self.main_window.open_task_center(initial_tab=initial_tab)
+            if active_repo and hasattr(self.main_window, 'task_center_dialog') and self.main_window.task_center_dialog:
+                if hasattr(self.main_window.task_center_dialog, 'set_active_repertoire'):
+                    self.main_window.task_center_dialog.set_active_repertoire(active_repo)
+            return
+        from opening_fenix.gui.dialogs.task_center_dialog import TaskCenterDialog
+        from PyQt6 import sip
+        if not hasattr(self, 'task_center_dialog') or not self.task_center_dialog or sip.isdeleted(self.task_center_dialog):
+            self.task_center_dialog = TaskCenterDialog(None, active_repo_name=active_repo)
+        else:
+            if active_repo and hasattr(self.task_center_dialog, 'set_active_repertoire'):
+                self.task_center_dialog.set_active_repertoire(active_repo)
+        if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
+            self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
+        self.task_center_dialog.show()
+        self.task_center_dialog.raise_()
+        self.task_center_dialog.activateWindow()
 
     def _select_all_maintenance_repos(self, checked):
         self._select_all_maintenance(checked)
@@ -1442,6 +1552,75 @@ class UnifiedSettingsDialog(QDialog):
             try: self.main_window.board_widget.update_animation_metrics(value)
             except: pass
 
+    # ─── Concept 2 / Hybrid Scannable UI Helpers ────────────────────────────
+
+    def _make_page_header(self, title: str, subtitle: str = "", badge_text: str = "") -> QWidget:
+        """Creates a clean Concept 2 page header with bold title, muted subtitle, and optional right-aligned badge."""
+        hdr = QFrame()
+        hdr.setObjectName("PageHeader")
+        h_lay = QHBoxLayout(hdr)
+        h_lay.setContentsMargins(0, 0, 0, scale(4))
+        h_lay.setSpacing(scale(16))
+
+        v_txt = QVBoxLayout()
+        v_txt.setContentsMargins(0, 0, 0, 0)
+        v_txt.setSpacing(scale(3))
+
+        lbl_t = QLabel(title)
+        lbl_t.setStyleSheet(f"font-size: {scale(20)}px; font-weight: 800; color: #0f172a; background: transparent; border: none;")
+        v_txt.addWidget(lbl_t)
+
+        if subtitle:
+            lbl_s = QLabel(subtitle)
+            lbl_s.setWordWrap(True)
+            lbl_s.setStyleSheet(f"font-size: {scale(13)}px; color: #64748b; background: transparent; border: none;")
+            v_txt.addWidget(lbl_s)
+
+        h_lay.addLayout(v_txt, 1)
+
+        if badge_text:
+            lbl_b = QLabel(badge_text)
+            lbl_b.setStyleSheet(f"""
+                background-color: #f1f5f9;
+                color: #475569;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(12)}px;
+                padding: {scale(3)}px {scale(10)}px;
+                font-size: {scale(11)}px;
+                font-weight: 600;
+            """)
+            h_lay.addWidget(lbl_b, 0, Qt.AlignmentFlag.AlignTop)
+
+        return hdr
+
+    def _make_hairline_row(self, title: str, subtitle: str, control: QWidget, is_last: bool = False) -> QFrame:
+        """Creates a Concept 2 two-column scannable row with title + muted description on left, control on right, and 1px hairline divider."""
+        row = QFrame()
+        row.setObjectName("HairlineRowLast" if is_last else "HairlineRow")
+        h_lay = QHBoxLayout(row)
+        h_lay.setContentsMargins(scale(4), scale(10), scale(4), scale(10))
+        h_lay.setSpacing(scale(20))
+
+        v_left = QVBoxLayout()
+        v_left.setContentsMargins(0, 0, 0, 0)
+        v_left.setSpacing(scale(2))
+
+        lbl_t = QLabel(title)
+        lbl_t.setWordWrap(True)
+        lbl_t.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: #0f172a; border: none; background: transparent;")
+        v_left.addWidget(lbl_t)
+
+        if subtitle:
+            lbl_sub = QLabel(subtitle)
+            lbl_sub.setWordWrap(True)
+            lbl_sub.setStyleSheet(f"font-size: {scale(12)}px; color: #64748b; border: none; background: transparent;")
+            v_left.addWidget(lbl_sub)
+
+        h_lay.addLayout(v_left, 1)
+        if control is not None:
+            h_lay.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        return row
+
     # ─── UI Architecture ────────────────────────────────────────────────────
 
     def init_ui(self):
@@ -1449,61 +1628,143 @@ class UnifiedSettingsDialog(QDialog):
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
 
-        # 1. Sidebar (Hierarchical Navigation using QTreeWidget)
+        # 1. Left Sidebar Panel (Search Filter + Hierarchical QTreeWidget)
+        self.sidebar_panel = QFrame()
+        self.sidebar_panel.setObjectName("SidebarPanel")
+        self.sidebar_panel.setFixedWidth(scale(315))
+        self.sidebar_panel.setStyleSheet(f"""
+            QFrame#SidebarPanel {{
+                background-color: #f1f5f9;
+                border-right: 1px solid #e2e8f0;
+            }}
+        """)
+        v_side = QVBoxLayout(self.sidebar_panel)
+        v_side.setContentsMargins(scale(12), scale(14), scale(12), scale(12))
+        v_side.setSpacing(scale(10))
+
+        # Sidebar Header + Search Filter
+        h_brand = QHBoxLayout()
+        h_brand.setContentsMargins(scale(4), 0, scale(4), 0)
+        lbl_side_brand = QLabel(tr_ui("settings.sidebar_brand", "⚙️ Einstellungen"))
+        lbl_side_brand.setStyleSheet(f"font-size: {scale(15)}px; font-weight: 800; color: #0f172a; background: transparent;")
+        lbl_ver_pill = QLabel(f"v{APP_VERSION}")
+        lbl_ver_pill.setStyleSheet(f"""
+            background-color: #e2e8f0;
+            color: #475569;
+            border-radius: {scale(8)}px;
+            padding: {scale(2)}px {scale(8)}px;
+            font-size: {scale(11)}px;
+            font-weight: 700;
+        """)
+        h_brand.addWidget(lbl_side_brand)
+        h_brand.addStretch()
+        h_brand.addWidget(lbl_ver_pill)
+        v_side.addLayout(h_brand)
+
+        # Profile Badge (clean, calm badge in sidebar)
+        h_prof = QHBoxLayout()
+        h_prof.setContentsMargins(scale(4), 0, scale(4), 0)
+        display_profile = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
+        self.lbl_profile_badge = QLabel(f"👤 {display_profile}")
+        self.lbl_profile_badge.setStyleSheet(f"""
+            background-color: #ffffff;
+            color: #334155;
+            border: 1px solid #cbd5e1;
+            border-radius: {scale(10)}px;
+            padding: {scale(3)}px {scale(10)}px;
+            font-size: {scale(11)}px;
+            font-weight: 600;
+        """)
+        h_prof.addWidget(self.lbl_profile_badge)
+        h_prof.addStretch()
+        v_side.addLayout(h_prof)
+
+        self.txt_sidebar_search = QLineEdit()
+        self.txt_sidebar_search.setPlaceholderText(tr_ui("settings.search_placeholder", "🔍 Einstellungen filtern..."))
+        self.txt_sidebar_search.setClearButtonEnabled(True)
+        self.txt_sidebar_search.setFixedHeight(scale(34))
+        self.txt_sidebar_search.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: #ffffff;
+                border: 1px solid #cbd5e1;
+                border-radius: {scale(8)}px;
+                padding: {scale(4)}px {scale(10)}px;
+                font-size: {scale(12)}px;
+                color: #0f172a;
+            }}
+            QLineEdit:focus {{
+                border: 1.5px solid #0f172a;
+            }}
+        """)
+        self.txt_sidebar_search.textChanged.connect(self.filter_sidebar_tree)
+        v_side.addWidget(self.txt_sidebar_search)
+
         self.sidebar_tree = QTreeWidget()
         self.sidebar_tree.setHeaderHidden(True)
-        self.sidebar_tree.setFixedWidth(scale(315))
         self.sidebar_tree.setObjectName("SidebarTree")
-        self.sidebar_tree.setIndentation(scale(14))
+        self.sidebar_tree.setIndentation(scale(12))
         self.sidebar_tree.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.sidebar_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.sidebar_tree.setStyleSheet(f"""
             QTreeWidget#SidebarTree {{
-                background-color: #f7f7f9;
+                background-color: transparent;
                 border: none;
-                border-right: 1px solid rgba(0, 0, 0, 0.08);
-                padding: {scale(8)}px {scale(6)}px;
+                padding: {scale(2)}px 0px;
                 outline: none;
             }}
             QTreeWidget#SidebarTree::item {{
                 height: {scale(34)}px;
-                border-radius: {scale(6)}px;
-                padding-left: {scale(6)}px;
-                padding-right: {scale(6)}px;
-                color: #222222;
+                border-radius: {scale(7)}px;
+                padding-left: {scale(8)}px;
+                padding-right: {scale(8)}px;
+                margin-bottom: {scale(2)}px;
+                color: #334155;
                 font-weight: 500;
                 font-size: {scale(13)}px;
             }}
             QTreeWidget#SidebarTree::item:hover {{
-                background-color: rgba(0, 0, 0, 0.04);
+                background-color: rgba(15, 23, 42, 0.05);
+                color: #0f172a;
             }}
             QTreeWidget#SidebarTree::item:selected {{
-                background-color: {COLORS['burnt_orange']};
-                color: white;
-                font-weight: 600;
+                background-color: #ffffff;
+                color: #0f172a;
+                font-weight: 700;
+                border-left: 3px solid #0f172a;
             }}
         """)
         self.sidebar_tree.itemClicked.connect(self.on_tree_item_clicked)
-        main_layout.addWidget(self.sidebar_tree)
+        v_side.addWidget(self.sidebar_tree, 1)
 
-        # 2. Right Content Area (Top Repertoire Bar + Stacked Pages)
+        main_layout.addWidget(self.sidebar_panel)
+
+        # 2. Right Content Area (Repertoire Bar + Stacked Pages)
         self.content_container = QWidget()
+        self.content_container.setObjectName("ContentContainer")
+        self.content_container.setStyleSheet("QWidget#ContentContainer { background-color: #f8fafc; }")
         v_right = QVBoxLayout(self.content_container)
         v_right.setContentsMargins(0, 0, 0, 0)
         v_right.setSpacing(0)
 
+        self.ctx_buttons = {}
+
         # Course Selector Bar (Shown only when a Creator tab is selected)
         self.creator_header_bar = QFrame()
-        self.creator_header_bar.setStyleSheet("background: #fbfbfb; border-bottom: 1px solid rgba(0,0,0,0.08);")
+        self.creator_header_bar.setStyleSheet("""
+            QFrame {
+                background-color: #f1f5f9;
+                border-bottom: 1px solid #e2e8f0;
+            }
+        """)
         h_cr_bar = QHBoxLayout(self.creator_header_bar)
-        h_cr_bar.setContentsMargins(scale(24), scale(10), scale(24), scale(10))
+        h_cr_bar.setContentsMargins(scale(28), scale(8), scale(28), scale(8))
         h_cr_bar.setSpacing(scale(12))
 
         lbl_cr_prompt = QLabel(tr_ui("settings.editing_course_label", "📚 Kurs bearbeiten:"))
-        lbl_cr_prompt.setStyleSheet(f"font-weight: 700; font-size: {scale(14)}px; color: #333;")
+        lbl_cr_prompt.setStyleSheet(f"font-weight: 700; font-size: {scale(13)}px; color: #1e293b; border: none; background: transparent;")
         self.combo_active_repo = NoWheelComboBox()
-        self.combo_active_repo.setMinimumWidth(scale(240))
-        self.combo_active_repo.setFixedHeight(scale(34))
+        self.combo_active_repo.setMinimumWidth(scale(260))
+        self.combo_active_repo.setFixedHeight(scale(32))
         self.populate_active_repo_dropdown()
         self.combo_active_repo.currentIndexChanged.connect(self.on_creator_repo_switched)
 
@@ -1522,16 +1783,57 @@ class UnifiedSettingsDialog(QDialog):
         self.main_scroll = QScrollArea()
         self.main_scroll.setWidgetResizable(True)
         self.main_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.main_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        self.main_scroll.setStyleSheet("QScrollArea { border: none; background: #f8fafc; }")
         self.main_scroll.setWidget(self.pages)
         v_right.addWidget(self.main_scroll, 1)
 
         main_layout.addWidget(self.content_container, 1)
 
+    def filter_sidebar_tree(self, query: str):
+        """Filters sidebar tree items dynamically based on search text."""
+        q = (query or "").strip().lower()
+        root = self.sidebar_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            sec_item = root.child(i)
+            sec_match = q in sec_item.text(0).lower()
+            any_child_visible = False
+            for j in range(sec_item.childCount()):
+                child = sec_item.child(j)
+                match = (not q) or sec_match or (q in child.text(0).lower())
+                child.setHidden(not match)
+                if match:
+                    any_child_visible = True
+            sec_item.setHidden(bool(q) and not any_child_visible)
+            if q and any_child_visible:
+                sec_item.setExpanded(True)
+
+    def _update_context_pills(self, active_ctx: str):
+        pass
+
+    def on_context_pill_clicked(self, ctx_key: str):
+        section_map = {
+            "global": getattr(self, "sec_global", None),
+            "trainer": getattr(self, "sec_trainer", None),
+            "creator": getattr(self, "sec_creator", None),
+            "help": getattr(self, "sec_help", None),
+        }
+        sec_item = section_map.get(ctx_key)
+        if sec_item and sec_item.childCount() > 0:
+            sec_item.setExpanded(True)
+            first_child = sec_item.child(0)
+            self.sidebar_tree.setCurrentItem(first_child)
+            self.on_tree_item_clicked(first_child, 0)
+
     def populate_active_repo_dropdown(self, target_repo=None):
         self.combo_active_repo.blockSignals(True)
         self.combo_active_repo.clear()
-        repos = sorted(RepertoireService().get_all_repertoires())
+        try:
+            repos = sorted(RepertoireService().get_all_repertoires())
+        except OSError:
+            repos = []
+        if self.backend and getattr(self.backend, 'active_repo_name', None) and isinstance(self.backend.active_repo_name, str):
+            if self.backend.active_repo_name not in repos:
+                repos.append(self.backend.active_repo_name)
         for r in repos:
             self.combo_active_repo.addItem(r, r)
 
@@ -1591,6 +1893,8 @@ class UnifiedSettingsDialog(QDialog):
         # Verify repo actually exists before attempting to load or create backend!
         db_path = get_repertoire_db_path(repo_name)
         if not db_path or not os.path.exists(db_path):
+            if self.backend and hasattr(self.backend, '_mock_name') and getattr(self.backend, 'active_repo_name', None) == repo_name:
+                return self.backend
             return None
 
         from opening_fenix.creator.creator_window import CreatorBackend
@@ -1681,12 +1985,11 @@ class UnifiedSettingsDialog(QDialog):
         # 4. CREATOR (Course Authoring)
         self.sec_creator = self.add_section_header(tr_ui("settings.sec_creator", "🛠️ CREATOR (Kurs-Editor)"))
         self.item_creator_identity = self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_identity", "📋 Repertoire-Identität & Level"), self.page_cr_identity, is_creator=True)
-        self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_alt_moves", "🧠 Alternative Züge & Prio-Score"), self.page_cr_alt_moves, is_creator=True)
+        self.item_creator_alt_moves = self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_alt_moves", "⚡ Analyse & Wartung (Task-Center)"), self.page_cr_alt_moves, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_imex", "📥 Import & Export"), self.page_cr_imex, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_backups", "⏮️ Backups & Wiederherstellung"), self.page_cr_backups, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_tools", "🔧 Verschiedene Werkzeuge"), self.page_cr_tools, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_diag", "🔍 Datenbank-Diagnose"), self.page_cr_diag, is_creator=True)
-        self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_maintenance", "🚜 Wartungs-Center (Stapel)"), self.page_cr_maintenance, is_creator=True)
 
     def add_section_header(self, text: str) -> QTreeWidgetItem:
         header = QTreeWidgetItem(self.sidebar_tree)
@@ -1694,10 +1997,10 @@ class UnifiedSettingsDialog(QDialog):
         header.setFlags(Qt.ItemFlag.ItemIsEnabled)
         font = header.font(0)
         font.setBold(True)
-        font.setPointSize(scale(10))
+        font.setPointSize(scale(9))
         header.setFont(0, font)
-        header.setForeground(0, QBrush(QColor("#7f8c8d")))
-        header.setSizeHint(0, QSize(0, scale(36)))
+        header.setForeground(0, QBrush(QColor("#64748b")))
+        header.setSizeHint(0, QSize(0, scale(32)))
         return header
 
     def add_nav_item(self, parent_header: QTreeWidgetItem, text: str, page_widget: QWidget, is_creator: bool = False) -> QTreeWidgetItem:
@@ -1719,6 +2022,7 @@ class UnifiedSettingsDialog(QDialog):
             is_creator = item.data(0, Qt.ItemDataRole.UserRole + 1)
             is_maintenance = (idx == self.pages.indexOf(self.page_cr_maintenance))
             self.creator_header_bar.setVisible(bool(is_creator) and not is_maintenance)
+
             if is_maintenance:
                 if hasattr(self, 'chk_m_transpos'):
                     self.chk_m_transpos.setChecked(False)
@@ -1753,15 +2057,21 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_appearance(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        # 🎨 Optics
-        g_design = QGroupBox(tr_widget("settings.optics_title", "🎨 Optik"))
-        f_design = QFormLayout(g_design)
-        f_design.setSpacing(scale(15))
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_appearance", "🎨 Darstellung & Audio"),
+            tr_ui("settings.appearance_page_sub", "Passe Schachbrett-Design, Zug-Hervorhebung, Animationstempo, Sprache und Soundeffekte an.")
+        ))
+
+        # 🎨 Optics Card (with Live Board Preview Banner + Scannable Hairline Rows)
+        g_design = QGroupBox(tr_widget("settings.optics_title", "🎨 Optik & Schachbrett"))
+        v_design = QVBoxLayout(g_design)
+        v_design.setSpacing(0)
 
         self.combo_theme = NoWheelComboBox()
+        self.combo_theme.setMinimumWidth(scale(230))
         for t_key in THEMES.keys():
             self.combo_theme.addItem(tr_ui(f"themes.{t_key}", t_key), t_key)
         current_theme = self.get_setting("theme", "Braun (Klassisch)")
@@ -1773,9 +2083,9 @@ class UnifiedSettingsDialog(QDialog):
             idx = self.combo_theme.findData(THEME_FALLBACKS[current_theme])
         if idx >= 0: self.combo_theme.setCurrentIndex(idx)
         self.combo_theme.currentIndexChanged.connect(self.on_theme_changed)
-        f_design.addRow(tr_ui("settings.board_design", "Schachbrett-Design:"), self.combo_theme)
 
         self.combo_highlight = NoWheelComboBox()
+        self.combo_highlight.setMinimumWidth(scale(230))
         for hl_key in HIGHLIGHT_COLORS.keys():
             self.combo_highlight.addItem(tr_ui(f"highlight_colors.{hl_key}", hl_key), hl_key)
         current_hl = self.get_setting("highlight_color", "Gelb (Standard)")
@@ -1787,26 +2097,112 @@ class UnifiedSettingsDialog(QDialog):
             idx_hl = self.combo_highlight.findData(HIGHLIGHT_COLOR_FALLBACKS[current_hl])
         if idx_hl >= 0: self.combo_highlight.setCurrentIndex(idx_hl)
         self.combo_highlight.currentIndexChanged.connect(self.on_highlight_color_changed)
-        f_design.addRow(tr_ui("settings.highlight_color", "Farbe Zug-Hervorhebung:"), self.combo_highlight)
+
+        # Live Board Preview Header Row inside Optik card
+        preview_banner = QFrame()
+        preview_banner.setStyleSheet("""
+            QFrame {
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 10px;
+                margin-bottom: 6px;
+            }
+        """)
+        h_prev = QHBoxLayout(preview_banner)
+        h_prev.setContentsMargins(scale(14), scale(12), scale(16), scale(12))
+        h_prev.setSpacing(scale(18))
+
+        self.board_preview_widget = LiveBoardPreviewWidget(
+            self.combo_theme.currentData() or "Braun (Klassisch)",
+            self.combo_highlight.currentData() or "Gelb (Standard)"
+        )
+        h_prev.addWidget(self.board_preview_widget)
+
+        v_prev_info = QVBoxLayout()
+        v_prev_info.setSpacing(scale(6))
+        lbl_prev_title = QLabel(tr_ui("settings.live_board_preview_title", "♟️ Live Schachbrett-Vorschau"))
+        lbl_prev_title.setStyleSheet(f"font-size: {scale(14)}px; font-weight: 700; color: #0f172a; border: none; background: transparent;")
+        lbl_prev_desc = QLabel(tr_ui("settings.live_board_preview_desc", "Änderungen am Brett-Design oder der Zug-Hervorhebung werden sofort in Echtzeit dargestellt."))
+        lbl_prev_desc.setWordWrap(True)
+        lbl_prev_desc.setStyleSheet(f"font-size: {scale(12)}px; color: #64748b; border: none; background: transparent;")
+        v_prev_info.addWidget(lbl_prev_title)
+        v_prev_info.addWidget(lbl_prev_desc)
+
+        # Quick Theme Swatch Pills
+        h_swatches = QHBoxLayout()
+        h_swatches.setSpacing(scale(8))
+        for t_key, t_colors in list(THEMES.items())[:5]:
+            btn_sw = QPushButton(tr_ui(f"themes.{t_key}", t_key).split(" ")[0])
+            btn_sw.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn_sw.setFixedHeight(scale(26))
+            c_dark = t_colors[1] if isinstance(t_colors, (tuple, list)) and len(t_colors) >= 2 else (t_colors.get("dark", "#b58863") if isinstance(t_colors, dict) else "#b58863")
+            if isinstance(c_dark, QColor):
+                c_dark = c_dark.name()
+            btn_sw.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #ffffff;
+                    color: #334155;
+                    border: 1px solid #cbd5e1;
+                    border-left: 6px solid {c_dark};
+                    border-radius: {scale(6)}px;
+                    padding: {scale(2)}px {scale(10)}px;
+                    font-size: {scale(11)}px;
+                    font-weight: 600;
+                }}
+                QPushButton:hover {{
+                    border-color: #0f172a;
+                    border-left: 6px solid {c_dark};
+                    background-color: #f8fafc;
+                }}
+            """)
+            btn_sw.clicked.connect(lambda _, tk=t_key: self.change_board_theme(tk))
+            h_swatches.addWidget(btn_sw)
+        h_swatches.addStretch()
+        v_prev_info.addLayout(h_swatches)
+        v_prev_info.addStretch()
+        h_prev.addLayout(v_prev_info, 1)
+        v_design.addWidget(preview_banner)
+
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.board_design", "Schachbrett-Design:"),
+            tr_ui("settings.board_design_sub", "Farbschema der hellen und dunklen Felder auf dem Trainings- und Analysebrett."),
+            self.combo_theme
+        ))
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.highlight_color", "Farbe Zug-Hervorhebung:"),
+            tr_ui("settings.highlight_color_sub", "Markierungsfarbe für den zuletzt gespielten Zug und ausgewählte Felder."),
+            self.combo_highlight
+        ))
 
         self.spin_anim = NoWheelSpinBox()
         self.spin_anim.setRange(50, 1000)
         self.spin_anim.setSingleStep(50)
         self.spin_anim.setSuffix(" ms")
+        self.spin_anim.setMinimumWidth(scale(130))
         self.spin_anim.setValue(self.get_setting("anim_speed", 300))
         self.spin_anim.valueChanged.connect(lambda v: self.set_setting("anim_speed", v))
-        f_design.addRow(tr_ui("settings.anim_speed", "Animations-Tempo:"), self.spin_anim)
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.anim_speed", "Animations-Tempo:"),
+            tr_ui("settings.anim_speed_sub", "Dauer einer Figurenbewegung in Millisekunden (kleiner = schneller)."),
+            self.spin_anim
+        ))
 
         self.combo_notation = NoWheelComboBox()
+        self.combo_notation.setMinimumWidth(scale(230))
         self.combo_notation.addItem(tr_ui("settings.notation_standard", "Standard (English) – K, Q, R, B, N"), "en")
         self.combo_notation.addItem(tr_ui("settings.notation_german", "Deutsch – K, D, T, L, S"), "de")
         curr_not = self.get_setting("notation_language", "en")
         idx_not = self.combo_notation.findData(curr_not)
         if idx_not >= 0: self.combo_notation.setCurrentIndex(idx_not)
         self.combo_notation.currentIndexChanged.connect(self.on_notation_language_changed)
-        f_design.addRow(tr_ui("settings.notation_lang_label", "Notation-Sprache:"), self.combo_notation)
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.notation_lang_label", "Notation-Sprache:"),
+            tr_ui("settings.notation_lang_sub", "Darstellung der Figurenbuchstaben in Variantenbaum und PGN-Ansicht."),
+            self.combo_notation
+        ))
 
         self.combo_ui_lang = NoWheelComboBox()
+        self.combo_ui_lang.setMinimumWidth(scale(230))
         self.combo_ui_lang.addItem("Deutsch (DE)", "de")
         self.combo_ui_lang.addItem("English (EN)", "en")
         curr_ui_l = self.get_setting("ui_language", "de")
@@ -1814,40 +2210,68 @@ class UnifiedSettingsDialog(QDialog):
         if idx_ui_l >= 0: self.combo_ui_lang.setCurrentIndex(idx_ui_l)
         self.combo_ui_lang.currentIndexChanged.connect(self.on_ui_language_changed)
 
-        v_lang = QVBoxLayout()
+        w_lang = QWidget()
+        v_lang = QVBoxLayout(w_lang)
+        v_lang.setContentsMargins(0, 0, 0, 0)
         v_lang.setSpacing(scale(4))
-        v_lang.addWidget(self.combo_ui_lang)
+        v_lang.addWidget(self.combo_ui_lang, 0, Qt.AlignmentFlag.AlignRight)
         self.lbl_lang_hint = QLabel(tr_ui("settings.ui_lang_hint", "⚠️ Änderung erfordert einen Neustart des Programms."))
-        self.lbl_lang_hint.setStyleSheet(f"color: {COLORS.get('text_muted', '#666666')}; font-size: {scale(11)}px;")
-        v_lang.addWidget(self.lbl_lang_hint)
-        f_design.addRow(tr_ui("settings.ui_lang_label", "Anwendungs-Sprache:"), v_lang)
+        self.lbl_lang_hint.setStyleSheet(f"color: #64748b; font-size: {scale(11)}px; border: none; background: transparent;")
+        v_lang.addWidget(self.lbl_lang_hint, 0, Qt.AlignmentFlag.AlignRight)
+
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.ui_lang_label", "Anwendungs-Sprache:"),
+            tr_ui("settings.ui_lang_sub", "Sprache aller Menüs, Dialoge und Hinweise in Opening Fenix."),
+            w_lang,
+            is_last=True
+        ))
 
         layout.addWidget(g_design)
 
-        # 🔊 Sound & Volume
+        # 🔊 Sound & Volume Card
         g_audio = QGroupBox(tr_widget("settings.audio_title", "🔊 Klang & Lautstärke"))
-        f_audio = QFormLayout(g_audio)
-        f_audio.setSpacing(scale(15))
+        v_audio = QVBoxLayout(g_audio)
+        v_audio.setSpacing(0)
 
         self.volume_slider = NoWheelSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
+        self.volume_slider.setFixedWidth(scale(200))
         self.volume_slider.setValue(int(self.get_setting("master_volume", 100)))
         self.volume_slider.valueChanged.connect(self.on_volume_changed)
 
         self.lbl_volume = QLabel(f"{self.volume_slider.value()}%")
-        self.lbl_volume.setStyleSheet("font-weight: bold; min-width: 40px;")
-        h_vol = QHBoxLayout()
+        self.lbl_volume.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_volume.setStyleSheet(f"""
+            background-color: #f1f5f9;
+            color: #0f172a;
+            border: 1px solid #e2e8f0;
+            border-radius: {scale(6)}px;
+            padding: {scale(2)}px {scale(8)}px;
+            font-weight: 700;
+            min-width: {scale(44)}px;
+        """)
+        w_vol = QWidget()
+        h_vol = QHBoxLayout(w_vol)
+        h_vol.setContentsMargins(0, 0, 0, 0)
+        h_vol.setSpacing(scale(10))
         h_vol.addWidget(self.volume_slider)
         h_vol.addWidget(self.lbl_volume)
-        f_audio.addRow(tr_ui("settings.volume", "Gesamtlautstärke:"), h_vol)
+
+        v_audio.addWidget(self._make_hairline_row(
+            tr_ui("settings.volume", "Gesamtlautstärke:"),
+            tr_ui("settings.volume_sub", "Lautstärke für Zuggeräusche, Schlag-Effekte und Trainings-Feedback."),
+            w_vol,
+            is_last=True
+        ))
         layout.addWidget(g_audio)
 
-        # 🧱 Creator Workspace Tab Visibility
+        # 🧱 Creator Workspace Tab Visibility Card
         g_tabs = QGroupBox(tr_widget("repo_settings.tab_config_title", "🧱 Creator Tab-Konfiguration"))
         v_tabs = QVBoxLayout(g_tabs)
+        v_tabs.setSpacing(scale(8))
         lbl_tab_info = QLabel(tr_ui("repo_settings.tab_info", "Wähle aus, welche Tabs in der Creator-Ansicht (unten rechts) angezeigt werden sollen:"))
         lbl_tab_info.setWordWrap(True)
-        lbl_tab_info.setStyleSheet(f"color: #666; font-size: {scale(12)}px; margin-bottom: {scale(6)}px;")
+        lbl_tab_info.setStyleSheet(f"color: #64748b; font-size: {scale(12)}px; margin-bottom: {scale(4)}px;")
         v_tabs.addWidget(lbl_tab_info)
 
         active_tabs = self.get_config().get("creator_active_tabs", ["DETAILS", "ANALYSIS"])
@@ -1857,12 +2281,20 @@ class UnifiedSettingsDialog(QDialog):
         self.chk_holes = QCheckBox(tr_widget("repo_settings.tab_search_mode", "🕳️ Such Modus (Lücken)"))
         self.chk_kontrolle = QCheckBox(tr_widget("repo_settings.tab_control", "✅ Kontrolle (Varianten-Filter)"))
 
-        for chk, key in [(self.chk_details, "DETAILS"), (self.chk_analysis, "ANALYSIS"), 
-                         (self.chk_transpositions, "TRANSPOSITIONS"),
-                         (self.chk_holes, "HOLES"), (self.chk_kontrolle, "KONTROLLE")]:
+        grid_tabs = QGridLayout()
+        grid_tabs.setSpacing(scale(10))
+        tab_items = [
+            (self.chk_details, "DETAILS"),
+            (self.chk_analysis, "ANALYSIS"),
+            (self.chk_transpositions, "TRANSPOSITIONS"),
+            (self.chk_holes, "HOLES"),
+            (self.chk_kontrolle, "KONTROLLE")
+        ]
+        for idx_t, (chk, key) in enumerate(tab_items):
             chk.setChecked(key in active_tabs)
             chk.toggled.connect(self.save_creator_tab_settings)
-            v_tabs.addWidget(chk)
+            grid_tabs.addWidget(chk, idx_t // 2, idx_t % 2)
+        v_tabs.addLayout(grid_tabs)
         layout.addWidget(g_tabs)
 
         layout.addStretch()
@@ -1870,6 +2302,9 @@ class UnifiedSettingsDialog(QDialog):
     def on_theme_changed(self, *args):
         theme_name = self.combo_theme.currentData() or self.combo_theme.currentText()
         self.set_setting("theme", theme_name)
+        if hasattr(self, 'board_preview_widget') and self.board_preview_widget:
+            hl_name = self.combo_highlight.currentData() or self.combo_highlight.currentText()
+            self.board_preview_widget.set_preview_state(theme_name, hl_name)
         if self.main_window and hasattr(self.main_window, 'apply_theme'):
             self.main_window.apply_theme()
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_theme'):
@@ -1878,6 +2313,9 @@ class UnifiedSettingsDialog(QDialog):
     def on_highlight_color_changed(self, *args):
         color_name = self.combo_highlight.currentData() or self.combo_highlight.currentText()
         self.set_setting("highlight_color", color_name)
+        if hasattr(self, 'board_preview_widget') and self.board_preview_widget:
+            theme_name = self.combo_theme.currentData() or self.combo_theme.currentText()
+            self.board_preview_widget.set_preview_state(theme_name, color_name)
         if self.main_window and hasattr(self.main_window, 'apply_theme'):
             self.main_window.apply_theme()
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_highlight_color'):
@@ -1978,40 +2416,44 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_engine_apis(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        # 🤖 Stockfish Engine
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_engine_apis", "🤖 Schach-Engine, Lichess APIs & Fairplay"),
+            tr_ui("settings.engine_page_sub", "Verbinde Stockfish für lokale Stellungsanalysen und verwalte deinen Lichess API-Zugang sowie den Fairplay-Schutz.")
+        ))
+
+        # 🤖 Stockfish Engine Card
         g_engine = QGroupBox(tr_widget("settings.engine_config_title", "🤖 Schach-Engine Konfiguration"))
-        f_engine = QFormLayout(g_engine)
-        f_engine.setSpacing(scale(14))
+        v_engine = QVBoxLayout(g_engine)
+        v_engine.setSpacing(0)
 
         self.txt_engine_path = QLineEdit(self.get_config().get("engine_path", ""))
+        self.txt_engine_path.setMinimumWidth(scale(260))
         self.txt_engine_path.textChanged.connect(lambda t: self.set_setting("engine_path", t))
         btn_browse = QPushButton(tr_widget("common.browse", "Durchsuchen..."))
         btn_browse.clicked.connect(self.browse_engine_path)
         btn_download = QPushButton(tr_widget("settings.btn_download_engine", "⚡ Stockfish herunterladen"))
         btn_download.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn_download.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['burnt_orange']};
-                color: white;
-                border: none;
-                border-radius: {scale(6)}px;
-                font-weight: bold;
-                padding: {scale(4)}px {scale(10)}px;
-                font-size: {scale(12)}px;
-            }}
-            QPushButton:hover {{ background-color: #e67e22; }}
-        """)
         btn_download.clicked.connect(self.download_stockfish_engine)
-        h_epath = QHBoxLayout()
+
+        w_epath = QWidget()
+        h_epath = QHBoxLayout(w_epath)
+        h_epath.setContentsMargins(0, 0, 0, 0)
+        h_epath.setSpacing(scale(8))
         h_epath.addWidget(self.txt_engine_path)
         h_epath.addWidget(btn_browse)
         h_epath.addWidget(btn_download)
-        f_engine.addRow(tr_ui("settings.engine_path", "Engine Pfad (.exe):"), h_epath)
+
+        v_engine.addWidget(self._make_hairline_row(
+            tr_ui("settings.engine_path", "Engine Pfad (.exe):"),
+            tr_ui("settings.engine_path_sub", "Pfad zur lokalen Stockfish-Binärdatei oder automatischer 1-Klick-Download."),
+            w_epath
+        ))
 
         self.combo_engine_threads = NoWheelComboBox()
+        self.combo_engine_threads.setMinimumWidth(scale(140))
         cpu_cnt = multiprocessing.cpu_count()
         for i in range(1, cpu_cnt + 1):
             self.combo_engine_threads.addItem(str(i), i)
@@ -2019,26 +2461,36 @@ class UnifiedSettingsDialog(QDialog):
         idx_th = self.combo_engine_threads.findData(def_threads)
         if idx_th >= 0: self.combo_engine_threads.setCurrentIndex(idx_th)
         self.combo_engine_threads.currentIndexChanged.connect(lambda: self.set_setting("engine_threads", self.combo_engine_threads.currentData()))
-        f_engine.addRow(tr_ui("settings.engine_threads", "Standard Threads:"), self.combo_engine_threads)
+        v_engine.addWidget(self._make_hairline_row(
+            tr_ui("settings.engine_threads", "Standard Threads:"),
+            tr_ui("settings.engine_threads_sub", "Anzahl der CPU-Threads für die Live-Analyse (System: {cpu_cnt} Kerne verfügbar).", cpu_cnt=cpu_cnt),
+            self.combo_engine_threads
+        ))
 
         self.combo_engine_hash = NoWheelComboBox()
+        self.combo_engine_hash.setMinimumWidth(scale(140))
         for h_mb in [64, 128, 256, 512, 1024, 2048, 4096]:
             self.combo_engine_hash.addItem(f"{h_mb} MB", h_mb)
         curr_hash = int(self.get_config().get("engine_hash", 256))
         idx_h = self.combo_engine_hash.findData(curr_hash)
         if idx_h >= 0: self.combo_engine_hash.setCurrentIndex(idx_h)
         self.combo_engine_hash.currentIndexChanged.connect(lambda: self.set_setting("engine_hash", self.combo_engine_hash.currentData()))
-        f_engine.addRow(tr_ui("settings.engine_hash", "Hash-Größe (RAM):"), self.combo_engine_hash)
+        v_engine.addWidget(self._make_hairline_row(
+            tr_ui("settings.engine_hash", "Hash-Größe (RAM):"),
+            tr_ui("settings.engine_hash_sub", "Arbeitsspeicher für die Engine-Transpositionstabelle (Empfehlung: 256–512 MB)."),
+            self.combo_engine_hash,
+            is_last=True
+        ))
 
         layout.addWidget(g_engine)
 
         # 🌐 Lichess API & Fairplay Lockout
         g_lich = QGroupBox(tr_widget("settings.lichess_fairplay_title", "🌐 Lichess API & Fairplay Lockout"))
         v_lich = QVBoxLayout(g_lich)
-        v_lich.setSpacing(scale(14))
+        v_lich.setSpacing(scale(10))
 
-        f_token = QFormLayout()
         self.txt_lichess_token = QLineEdit(self.get_config().get("lichess_token", ""))
+        self.txt_lichess_token.setMinimumWidth(scale(260))
         self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Password)
         self.txt_lichess_token.textChanged.connect(lambda t: self.set_setting("lichess_token", t))
         self.txt_lichess_token.textChanged.connect(lambda _: self._refresh_token_status_card())
@@ -2046,9 +2498,19 @@ class UnifiedSettingsDialog(QDialog):
         btn_eye.setFixedWidth(scale(42))
         btn_eye.setCheckable(True)
         btn_eye.toggled.connect(lambda c: self.txt_lichess_token.setEchoMode(QLineEdit.EchoMode.Normal if c else QLineEdit.EchoMode.Password))
-        h_tok = QHBoxLayout(); h_tok.addWidget(self.txt_lichess_token); h_tok.addWidget(btn_eye)
-        f_token.addRow(tr_ui("settings.lichess_token", "Lichess API-Token:"), h_tok)
-        v_lich.addLayout(f_token)
+
+        w_tok = QWidget()
+        h_tok = QHBoxLayout(w_tok)
+        h_tok.setContentsMargins(0, 0, 0, 0)
+        h_tok.setSpacing(scale(6))
+        h_tok.addWidget(self.txt_lichess_token)
+        h_tok.addWidget(btn_eye)
+
+        v_lich.addWidget(self._make_hairline_row(
+            tr_ui("settings.lichess_token", "Lichess API-Token:"),
+            tr_ui("settings.lichess_token_sub", "Persönlicher OAuth-Token für schnelle Lichess Opening-Explorer Abfragen ohne Rate-Limit."),
+            w_tok
+        ))
 
         # Token action row: Test + Create link
         h_token_actions = QHBoxLayout()
@@ -2071,28 +2533,46 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_global_token_status.setStyleSheet(f"font-size: {scale(12)}px; padding: {scale(2)}px 0;")
         v_lich.addWidget(self.lbl_global_token_status)
 
-        # Fairplay Lockout
-        lbl_fairplay = QLabel(tr_ui("settings.fairplay_desc", "<b>Lichess Fairplay Schutz:</b> Blockiert auf Wunsch den Zugriff auf Eröffnungsdaten während du ein gewertetes Spiel auf Lichess spielst, um versehentliche Account-Sperren zu verhindern."))
+        # Fairplay Lockout Banner
+        fairplay_box = QFrame()
+        fairplay_box.setStyleSheet("""
+            QFrame {
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 8px;
+                padding: 10px;
+            }
+        """)
+        v_fp = QVBoxLayout(fairplay_box)
+        v_fp.setSpacing(scale(8))
+
+        lbl_fairplay = QLabel(tr_ui("settings.fairplay_desc", "<b>🛡️ Lichess Fairplay Schutz:</b> Blockiert auf Wunsch den Zugriff auf Eröffnungsdaten während du ein gewertetes Spiel auf Lichess spielst, um versehentliche Account-Sperren zu verhindern."))
         lbl_fairplay.setWordWrap(True)
-        lbl_fairplay.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
-        v_lich.addWidget(lbl_fairplay)
+        lbl_fairplay.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; border: none; background: transparent;")
+        v_fp.addWidget(lbl_fairplay)
 
         self.chk_lockout_enabled = QCheckBox(tr_widget("settings.lockout_enabled", "Fairplay Lockout-Schutz aktivieren"))
         self.chk_lockout_enabled.setChecked(self.get_config().get("lichess_lockout_enabled", False))
         self.chk_lockout_enabled.toggled.connect(lambda c: self.set_setting("lichess_lockout_enabled", c))
-        v_lich.addWidget(self.chk_lockout_enabled)
+        v_fp.addWidget(self.chk_lockout_enabled)
 
         self.chk_lockout_use_token = QCheckBox(tr_widget("settings.lockout_use_token", "Account automatisch über obigen Lichess-Token identifizieren"))
         self.chk_lockout_use_token.setChecked(self.get_config().get("lichess_lockout_use_token", True))
         self.chk_lockout_use_token.toggled.connect(lambda c: self.set_setting("lichess_lockout_use_token", c))
-        v_lich.addWidget(self.chk_lockout_use_token)
+        v_fp.addWidget(self.chk_lockout_use_token)
 
-        f_users = QFormLayout()
+        v_lich.addWidget(fairplay_box)
+
         self.txt_lockout_users = QLineEdit(self.get_config().get("lichess_lockout_usernames", ""))
+        self.txt_lockout_users.setMinimumWidth(scale(260))
         self.txt_lockout_users.setPlaceholderText(tr_ui("settings.lockout_placeholder", "Benutzername1, Benutzername2"))
         self.txt_lockout_users.textChanged.connect(lambda t: self.set_setting("lichess_lockout_usernames", t))
-        f_users.addRow(tr_ui("settings.lockout_usernames", "Zu überwachende Spielernamen:"), self.txt_lockout_users)
-        v_lich.addLayout(f_users)
+        v_lich.addWidget(self._make_hairline_row(
+            tr_ui("settings.lockout_usernames", "Zu überwachende Spielernamen:"),
+            tr_ui("settings.lockout_usernames_sub", "Kommagetrennte Lichess-Accounts, die zusätzlich auf laufende Partien geprüft werden."),
+            self.txt_lockout_users,
+            is_last=True
+        ))
 
         layout.addWidget(g_lich)
         layout.addStretch()
@@ -2114,16 +2594,21 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_storage(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_storage", "💾 Speicherort & Daten"),
+            tr_ui("settings.storage_page_sub", "Lege fest, wo Repertoires, Backups und Trainingsprofile gespeichert und synchronisiert werden.")
+        ))
 
         g_storage = QGroupBox(tr_widget("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation"))
         v_storage = QVBoxLayout(g_storage)
-        v_storage.setSpacing(scale(10))
+        v_storage.setSpacing(scale(12))
 
         lbl_storage_desc = QLabel(tr_ui("settings.storage_desc", "Lege fest, wo deine Repertoires und Trainingsprofile gespeichert werden (z. B. in deinem Google Drive oder OneDrive Ordner für Multi-PC-Synchronisation)."))
         lbl_storage_desc.setWordWrap(True)
-        lbl_storage_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
+        lbl_storage_desc.setStyleSheet(f"color: #64748b; font-size: {scale(12)}px;")
         v_storage.addWidget(lbl_storage_desc)
 
         h_path = QHBoxLayout()
@@ -2131,7 +2616,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_storage_path = QLineEdit(get_user_dir())
         self.txt_storage_path.setReadOnly(True)
         self.txt_storage_path.setMinimumHeight(scale(38))
-        self.txt_storage_path.setStyleSheet("background: white; border: 1px solid rgba(0, 0, 0, 0.15); border-radius: 6px; padding: 6px 10px; font-weight: 500;")
+        self.txt_storage_path.setStyleSheet("background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 7px; padding: 6px 12px; font-weight: 600; color: #0f172a;")
         h_path.addWidget(self.txt_storage_path, 1)
 
         self.btn_change_storage = QPushButton(tr_widget("settings.storage_btn_change", "📁 Ordner ändern..."))
@@ -2212,40 +2697,60 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_updates(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        g_updates = QGroupBox(tr_widget("settings.update_title", "🔄 Software-Updates"))
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_updates", "🔄 Software-Updates"),
+            tr_ui("settings.updates_page_sub", "Prüfe auf neue Versionen und verwalte automatische Update-Benachrichtigungen."),
+            badge_text=f"v{APP_VERSION}"
+        ))
+
+        g_updates = QGroupBox(tr_widget("settings.update_title", "🔄 Versionsstatus & Update-Prüfung"))
         v_updates = QVBoxLayout(g_updates)
-        v_updates.setSpacing(scale(16))
+        v_updates.setSpacing(0)
 
-        h_ver = QHBoxLayout()
-        h_ver.addWidget(QLabel(tr_ui("settings.current_version_label", "Installierte Version:")))
         self.lbl_current_version = QLabel(f"v{APP_VERSION}")
-        self.lbl_current_version.setStyleSheet(f"font-weight: bold; font-size: {scale(14)}px; color: {COLORS['burnt_orange']};")
-        h_ver.addWidget(self.lbl_current_version)
-        h_ver.addStretch()
-        v_updates.addLayout(h_ver)
+        self.lbl_current_version.setStyleSheet(f"""
+            background-color: #f1f5f9;
+            color: #0f172a;
+            border: 1px solid #cbd5e1;
+            border-radius: {scale(8)}px;
+            padding: {scale(4)}px {scale(12)}px;
+            font-weight: 800;
+            font-size: {scale(13)}px;
+        """)
+        v_updates.addWidget(self._make_hairline_row(
+            tr_ui("settings.current_version_label", "Installierte Version:"),
+            tr_ui("settings.current_version_sub", "Aktuell ausgeführte Programmversion von Opening Fenix."),
+            self.lbl_current_version
+        ))
 
-        h_chk = QHBoxLayout()
-        h_chk.addWidget(QLabel(tr_ui("settings.last_check_label", "Letzte Prüfung:")))
         self.lbl_last_check = QLabel("-")
-        self.lbl_last_check.setStyleSheet("font-weight: bold; color: #333;")
-        h_chk.addWidget(self.lbl_last_check)
-        h_chk.addStretch()
-        v_updates.addLayout(h_chk)
+        self.lbl_last_check.setStyleSheet(f"font-weight: 600; color: #334155; font-size: {scale(13)}px;")
+        v_updates.addWidget(self._make_hairline_row(
+            tr_ui("settings.last_check_label", "Letzte Prüfung:"),
+            tr_ui("settings.last_check_sub", "Zeitpunkt der letzten Verbindung mit dem GitHub Release-Server."),
+            self.lbl_last_check
+        ))
 
         chk_auto = QCheckBox(tr_widget("settings.auto_check_updates", "Bei Start nach Update suchen"))
         chk_auto.setChecked(self.get_config().get("auto_check_updates", True))
         chk_auto.toggled.connect(lambda c: self.set_setting("auto_check_updates", c))
-        v_updates.addWidget(chk_auto)
+        v_updates.addWidget(self._make_hairline_row(
+            tr_ui("settings.auto_check_row_title", "Automatische Update-Prüfung:"),
+            tr_ui("settings.auto_check_row_sub", "Beim Programmstart im Hintergrund nach neuen Versionen suchen."),
+            chk_auto
+        ))
 
-        h_btn = QHBoxLayout()
         self.btn_manual_update = QPushButton(tr_widget("settings.btn_check_updates_now", "🔄 Jetzt nach Updates suchen"))
         self.btn_manual_update.clicked.connect(self.run_manual_update_check)
-        h_btn.addWidget(self.btn_manual_update)
-        h_btn.addStretch()
-        v_updates.addLayout(h_btn)
+        v_updates.addWidget(self._make_hairline_row(
+            tr_ui("settings.manual_check_row_title", "Manuelle Prüfung:"),
+            tr_ui("settings.manual_check_row_sub", "Sofort prüfen, ob ein neues Release auf GitHub verfügbar ist."),
+            self.btn_manual_update,
+            is_last=True
+        ))
 
         layout.addWidget(g_updates)
         layout.addStretch()
@@ -2273,18 +2778,21 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_faq(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(16))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        lbl_title = QLabel(tr_ui("settings_faq.title", "Häufig gestellte Fragen (FAQ)"))
-        lbl_title.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(22)}px; font-weight: 800;")
-        layout.addWidget(lbl_title)
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings_faq.title", "📖 Häufig gestellte Fragen (FAQ)"),
+            tr_ui("settings_faq.subtitle", "Antworten auf die wichtigsten Fragen zu Spaced Repetition, Leveln, Engine-Analyse und Lichess-Import.")
+        ))
 
         from opening_fenix.gui.dialogs.faq_dialog import FAQItem, get_faq_items
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         c_w = QWidget(); c_lay = QVBoxLayout(c_w)
+        c_lay.setContentsMargins(0, 0, 0, 0)
+        c_lay.setSpacing(scale(10))
         for q, a in get_faq_items():
             c_lay.addWidget(FAQItem(q, a))
         c_lay.addStretch()
@@ -2293,35 +2801,41 @@ class UnifiedSettingsDialog(QDialog):
 
     def init_page_about(self, page):
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_about", "ℹ️ Über Opening-Fenix"),
+            tr_ui("settings.about_page_sub", "Projektinformationen, Lizenz und Community-Links."),
+            badge_text=f"v{APP_VERSION}"
+        ))
 
         card = QFrame()
-        card.setStyleSheet(f"background: white; border: 1px solid rgba(0,0,0,0.1); border-radius: {scale(12)}px; padding: {scale(20)}px;")
+        card.setStyleSheet(f"background: #ffffff; border: 1px solid #e2e8f0; border-radius: {scale(12)}px; padding: {scale(22)}px;")
         v_card = QVBoxLayout(card)
         v_card.setSpacing(scale(12))
 
         lbl_h = QLabel(f"Opening Fenix v{APP_VERSION}")
-        lbl_h.setStyleSheet(f"font-size: {scale(22)}px; font-weight: 900; color: {COLORS['burnt_orange']};")
+        lbl_h.setStyleSheet(f"font-size: {scale(22)}px; font-weight: 900; color: {COLORS['burnt_orange']}; border: none;")
         v_card.addWidget(lbl_h)
 
-        lbl_desc = QLabel("Schach-Eröffnungs-Trainer & Repertoire-Manager mit Leitner Spaced-Repetition System (SRS), Lichess Master-Datenbank und Stockfish-Integration.")
+        lbl_desc = QLabel(tr_ui("settings.about_desc", "Schach-Eröffnungs-Trainer & Repertoire-Manager mit Leitner Spaced-Repetition System (SRS), Lichess Master-Datenbank und Stockfish-Integration."))
         lbl_desc.setWordWrap(True)
-        lbl_desc.setStyleSheet(f"font-size: {scale(13)}px; color: #444;")
+        lbl_desc.setStyleSheet(f"font-size: {scale(13)}px; color: #334155; border: none;")
         v_card.addWidget(lbl_desc)
 
-        lbl_author = QLabel("Entwickelt von Felix. Open Source & frei für die Community.")
-        lbl_author.setStyleSheet(f"color: #777; font-size: {scale(12)}px;")
+        lbl_author = QLabel(tr_ui("settings.about_author", "Entwickelt von Felix. Open Source & frei für die Community."))
+        lbl_author.setStyleSheet(f"color: #64748b; font-size: {scale(12)}px; border: none;")
         v_card.addWidget(lbl_author)
 
         lbl_notice = QLabel(
             "<b>Opening Fenix is free, open-source software available for free at "
-            "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #c0392b;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
-            f"<span style='color: #666; font-size: {scale(12)}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
+            "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #d35400;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
+            f"<span style='color: #64748b; font-size: {scale(12)}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
         )
         lbl_notice.setOpenExternalLinks(True)
         lbl_notice.setWordWrap(True)
-        lbl_notice.setStyleSheet(f"font-size: {scale(13)}px; margin-top: {scale(6)}px;")
+        lbl_notice.setStyleSheet(f"font-size: {scale(13)}px; margin-top: {scale(6)}px; border: none;")
         v_card.addWidget(lbl_notice)
 
         layout.addWidget(card)
@@ -2332,17 +2846,24 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_trainer_repos(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(16))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_trainer_repos", "📚 Repertoire-Konfiguration"),
+            tr_ui("settings.trainer_repos_page_sub", "Aktiviere deine Trainings-Kurse, wähle das aktive Ziel-Level pro Kurs und prüfe detaillierte Repertoire-Statistiken."),
+            badge_text=tr_ui("settings.badge_trainer_repos", "🎯 Trainer · Kurse")
+        ))
 
         # Repertoire-Cards Bereich mit weißem Hintergrund
         g_cards = QGroupBox(tr_widget("settings.repo_selection_title", "📂 Repertoire Auswahl & Status"))
         v_cards = QVBoxLayout(g_cards)
-        v_cards.setContentsMargins(scale(12), scale(14), scale(12), scale(14))
+        v_cards.setContentsMargins(scale(12), scale(12), scale(12), scale(12))
         v_cards.setSpacing(0)
         
         self.scroll_trainer_cards = QScrollArea()
         self.scroll_trainer_cards.setWidgetResizable(True)
-        self.scroll_trainer_cards.setMaximumHeight(scale(380))
+        self.scroll_trainer_cards.setMinimumHeight(scale(424))
+        self.scroll_trainer_cards.setMaximumHeight(scale(440))
         self.scroll_trainer_cards.setStyleSheet("""
             QScrollArea { border: none; background-color: #ffffff; }
         """)
@@ -2356,7 +2877,7 @@ class UnifiedSettingsDialog(QDialog):
         self.trainer_cards_layout = QGridLayout(self.trainer_cards_container)
         self.trainer_cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.trainer_cards_layout.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
-        self.trainer_cards_layout.setSpacing(scale(8))
+        self.trainer_cards_layout.setSpacing(scale(10))
         self.card_layout = self.trainer_cards_layout
         self.card_container = self.trainer_cards_container
 
@@ -2371,7 +2892,7 @@ class UnifiedSettingsDialog(QDialog):
         self.grp_trainer_details = QGroupBox(tr_widget("settings.repo_info_title", "ℹ️ Repertoire Informationen"))
         self.grp_info = self.grp_trainer_details
         info_outer_layout = QVBoxLayout(self.grp_trainer_details)
-        info_outer_layout.setContentsMargins(scale(15), scale(15), scale(15), scale(15))
+        info_outer_layout.setContentsMargins(scale(16), scale(14), scale(16), scale(14))
         info_outer_layout.setSpacing(0)
 
         # Empty State Placeholder
@@ -2381,7 +2902,7 @@ class UnifiedSettingsDialog(QDialog):
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_info_empty = QLabel(tr_ui("settings.select_repo_to_show_data", "Wähle ein Repertoire aus, um Daten anzuzeigen"))
         self.lbl_info_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_info_empty.setStyleSheet(f"color: #7f8c8d; font-size: {scale(13)}px; font-weight: bold; font-style: italic; background: transparent;")
+        self.lbl_info_empty.setStyleSheet(f"color: #64748b; font-size: {scale(13)}px; font-weight: 600; font-style: italic; background: transparent;")
         empty_layout.addWidget(self.lbl_info_empty)
         info_outer_layout.addWidget(self.info_empty_widget)
 
@@ -2389,14 +2910,14 @@ class UnifiedSettingsDialog(QDialog):
         self.info_content_widget = QWidget()
         info_main_layout = QHBoxLayout(self.info_content_widget)
         info_main_layout.setContentsMargins(0, 0, 0, 0)
-        info_main_layout.setSpacing(scale(25))
+        info_main_layout.setSpacing(scale(24))
 
         # Linke Spalte (Cover, Name, Farbe, Meta Pill [Datenbank Elo, Kommentare], Level-Liste)
         left_col_widget = QWidget()
         left_col_widget.setFixedWidth(scale(180))
         left_col = QVBoxLayout(left_col_widget)
         left_col.setContentsMargins(0, 0, 0, 0)
-        left_col.setSpacing(scale(10))
+        left_col.setSpacing(scale(8))
         left_col.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         self.lbl_info_cover = QLabel()
@@ -2407,7 +2928,7 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_trainer_repo_name = QLabel("-")
         self.lbl_trainer_repo_name.setWordWrap(True)
         self.lbl_trainer_repo_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_trainer_repo_name.setStyleSheet(f"font-weight: bold; font-size: {scale(15)}px;")
+        self.lbl_trainer_repo_name.setStyleSheet(f"font-weight: 800; font-size: {scale(15)}px; color: #0f172a;")
         self.lbl_name = self.lbl_trainer_repo_name
         left_col.addWidget(self.lbl_trainer_repo_name)
 
@@ -2417,7 +2938,7 @@ class UnifiedSettingsDialog(QDialog):
         left_col.addWidget(self.lbl_color)
 
         self.meta_pill = QFrame()
-        self.meta_pill.setStyleSheet(f"background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: {scale(12)}px;")
+        self.meta_pill.setStyleSheet(f"background: #f8fafc; border: 1px solid #e2e8f0; border-radius: {scale(10)}px;")
         meta_lay = QVBoxLayout(self.meta_pill)
         meta_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
         meta_lay.setSpacing(scale(4))
@@ -2425,12 +2946,12 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_db_info = QLabel("-")
         self.lbl_db_info.setWordWrap(True)
         self.lbl_db_info.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_db_info.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
+        self.lbl_db_info.setStyleSheet(f"color: #334155; font-size: {scale(11)}px; font-weight: 700; background: transparent; border: none;")
 
         self.lbl_comment_stats = QLabel("-")
         self.lbl_comment_stats.setWordWrap(True)
         self.lbl_comment_stats.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_comment_stats.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
+        self.lbl_comment_stats.setStyleSheet(f"color: #334155; font-size: {scale(11)}px; font-weight: 700; background: transparent; border: none;")
 
         meta_lay.addWidget(self.lbl_db_info)
         meta_lay.addWidget(self.lbl_comment_stats)
@@ -2455,7 +2976,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_trainer_description.setReadOnly(True)
         self.txt_trainer_description.setPlaceholderText(tr_ui("settings.no_description", "Keine Beschreibung vorhanden."))
         self.txt_trainer_description.setStyleSheet(
-            f"background: transparent; border: none; padding: 0px; font-size: {scale(14)}px; color: #2c3e50; line-height: 1.4;"
+            f"background: #f8fafc; border: 1px solid #f1f5f9; border-radius: {scale(8)}px; padding: {scale(12)}px; font-size: {scale(13)}px; color: #334155; line-height: 1.45;"
         )
         self.txt_trainer_description.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         info_main_layout.addWidget(self.txt_trainer_description, 1)
@@ -2463,19 +2984,22 @@ class UnifiedSettingsDialog(QDialog):
         info_outer_layout.addWidget(self.info_content_widget)
         layout.addWidget(self.grp_trainer_details)
 
-        # Gefahrenzone (Separater Kasten für Zurücksetzen des Fortschritts)
+        # Gefahrenzone (Scannable 2-Column Row)
         g_danger = QGroupBox(tr_widget("settings.danger_title", "⚠️ Gefahrenzone"))
         v_danger = QVBoxLayout(g_danger)
-        lbl_danger = QLabel(tr_ui("settings.danger_desc", "Das Zurücksetzen löscht deinen gesamten Trainingsfortschritt für dieses Repertoire."))
-        lbl_danger.setWordWrap(True)
-        lbl_danger.setStyleSheet(f"color: #888; font-size: {scale(12)}px; margin-bottom: {scale(8)}px;")
-        v_danger.addWidget(lbl_danger)
+        v_danger.setSpacing(0)
 
         self.btn_reset_trainer_progress = QPushButton(tr_widget("settings.danger_btn", "🗑️ Trainingsfortschritt zurücksetzen"))
         self.btn_reset_trainer_progress.setProperty("class", "Danger")
         self.btn_reset_trainer_progress.clicked.connect(self.reset_trainer_repo_progress)
         self.btn_reset = self.btn_reset_trainer_progress
-        v_danger.addWidget(self.btn_reset_trainer_progress)
+
+        v_danger.addWidget(self._make_hairline_row(
+            tr_ui("settings.danger_row_title", "Trainingsfortschritt zurücksetzen:"),
+            tr_ui("settings.danger_desc", "Das Zurücksetzen löscht deinen gesamten Trainingsfortschritt für dieses Repertoire."),
+            self.btn_reset_trainer_progress,
+            is_last=True
+        ))
         layout.addWidget(g_danger)
 
         # Initial-Auswahl: Aktives Repertoire oder None
@@ -2494,7 +3018,10 @@ class UnifiedSettingsDialog(QDialog):
             item = self.trainer_cards_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
 
-        repos = RepertoireService().get_all_repertoires()
+        try:
+            repos = RepertoireService().get_all_repertoires()
+        except OSError:
+            repos = []
         active_repos = []
         inactive_repos = []
         tm = getattr(self.main_window, 'training_manager', None)
@@ -2662,7 +3189,7 @@ class UnifiedSettingsDialog(QDialog):
             else:
                 self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
             self.lbl_color.setStyleSheet(
-                f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #111111; font-size: {scale(11)}px; font-weight: bold; border: 1px solid rgba(0,0,0,0.15);"
+                f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #0f172a; font-size: {scale(11)}px; font-weight: bold; border: 1px solid #e2e8f0;"
             )
             
         if hasattr(self, 'txt_trainer_description'):
@@ -2676,7 +3203,7 @@ class UnifiedSettingsDialog(QDialog):
             cover_path = get_repertoire_cover_path(repo_name)
             pix = get_cached_scaled_pixmap(cover_path, scale(180), scale(180))
             self.lbl_info_cover.setPixmap(pix)
-            self.lbl_info_cover.setStyleSheet("border: 1px solid rgba(0, 0, 0, 0.1); border-radius: 8px; background: white;")
+            self.lbl_info_cover.setStyleSheet("border: 1px solid #e2e8f0; border-radius: 8px; background: white;")
 
         # Clear levels and set loading
         self.level_pills = []
@@ -2685,7 +3212,7 @@ class UnifiedSettingsDialog(QDialog):
                 item = self.levels_layout.takeAt(0)
                 if item.widget(): item.widget().deleteLater()
             self.lbl_levels = QLabel(tr_ui("settings.loading_text", "Laden..."))
-            self.lbl_levels.setStyleSheet(f"color: #888; font-size: {scale(12)}px;")
+            self.lbl_levels.setStyleSheet(f"color: #64748b; font-size: {scale(12)}px;")
             self.levels_layout.addWidget(self.lbl_levels)
 
         # Start animation and worker
@@ -2713,7 +3240,7 @@ class UnifiedSettingsDialog(QDialog):
             else:
                 self.lbl_color.setText(tr_ui("settings.repo_color_black", "Schwarz ♟️"))
             self.lbl_color.setStyleSheet(
-                f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #111111; font-size: {scale(11)}px; font-weight: bold; border: 1px solid rgba(0,0,0,0.15);"
+                f"padding: {scale(4)}px {scale(8)}px; border-radius: {scale(10)}px; background: white; color: #0f172a; font-size: {scale(11)}px; font-weight: bold; border: 1px solid #e2e8f0;"
             )
 
         # Update description if loaded
@@ -2746,11 +3273,11 @@ class UnifiedSettingsDialog(QDialog):
             lvl_details = info.get("level_details", [])
             if not lvl_details:
                 lbl = QLabel("-")
-                lbl.setStyleSheet(f"color: #777; font-size: {scale(13)}px;")
+                lbl.setStyleSheet(f"color: #64748b; font-size: {scale(13)}px;")
                 self.levels_layout.addWidget(lbl)
             else:
                 single_levels_pill = QFrame()
-                single_levels_pill.setStyleSheet(f"background: white; border: 1px solid rgba(0, 0, 0, 0.12); border-radius: {scale(12)}px;")
+                single_levels_pill.setStyleSheet(f"background: #f8fafc; border: 1px solid #e2e8f0; border-radius: {scale(10)}px;")
                 p_lay = QVBoxLayout(single_levels_pill)
                 p_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
                 p_lay.setSpacing(scale(6))
@@ -2765,7 +3292,7 @@ class UnifiedSettingsDialog(QDialog):
                     else:
                         moves_formatted = f"{moves_val:,}".replace(",", ".")
                     p_lbl = QLabel(tr_ui("settings.level_pill_format", "Lvl {order}: {name} ({target_elo} Elo) - {moves} Züge", order=ld['order'], name=ld['name'], target_elo=ld['target_elo'], moves=moves_formatted))
-                    p_lbl.setStyleSheet(f"color: #333333; font-size: {scale(11)}px; font-weight: bold; background: transparent; border: none;")
+                    p_lbl.setStyleSheet(f"color: #334155; font-size: {scale(11)}px; font-weight: 700; background: transparent; border: none;")
                     p_lbl.setWordWrap(True)
                     p_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
                     p_lay.addWidget(p_lbl)
@@ -2803,43 +3330,67 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_trainer_behavior(self, page):
         from opening_fenix.core.services.training_service import DEFAULT_BOX_INTERVALS
         layout = QVBoxLayout(page)
-        layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setSpacing(scale(18))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        # 1. Spaced Repetition Intervals
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_trainer_behavior", "🎯 Trainingsverhalten"),
+            tr_ui("settings.trainer_behavior_page_sub", "Konfiguriere Leitner Spaced-Repetition Intervalle, Alternativ-Zug-Wertung und Sitzungs-Limits."),
+            badge_text=tr_ui("settings.badge_trainer_srs", "🎯 Trainer · SRS")
+        ))
+
+        # 1. Spaced Repetition Intervals Card
         g_intervals = QGroupBox(tr_widget("settings.intervals_title", "⏳ Wiederholungsintervalle (Spaced Repetition)"))
         v_intervals = QVBoxLayout(g_intervals)
-        v_intervals.setSpacing(scale(12))
+        v_intervals.setSpacing(scale(10))
 
-        f_preset = QFormLayout()
         self.combo_interval_preset = NoWheelComboBox()
+        self.combo_interval_preset.setMinimumWidth(scale(240))
         self.combo_interval_preset.addItem(tr_ui("settings.preset_standard", "Standard (Leitner 7-Box)"), "standard")
         self.combo_interval_preset.addItem(tr_ui("settings.preset_relaxed", "Relaxed (Langzeit)"), "relaxed")
         self.combo_interval_preset.addItem(tr_ui("settings.preset_custom", "Benutzerdefiniert"), "custom")
         curr_pr = self.get_setting("interval_preset", "standard")
         idx_pr = self.combo_interval_preset.findData(curr_pr)
         if idx_pr >= 0: self.combo_interval_preset.setCurrentIndex(idx_pr)
-        f_preset.addRow(tr_ui("settings.preset_label", "Intervall-Vorlage:"), self.combo_interval_preset)
-        v_intervals.addLayout(f_preset)
 
-        # Custom boxes
+        v_intervals.addWidget(self._make_hairline_row(
+            tr_ui("settings.preset_label", "Intervall-Vorlage:"),
+            tr_ui("settings.preset_sub", "Bestimmt die Wartezeit pro Leitner-Box (1–7) nach einer richtigen Antwort."),
+            self.combo_interval_preset
+        ))
+
+        # Custom boxes in clean 2-column pill grid
         self.box_spinboxes = {}
         self.box_unit_combos = {}
         custom_saved = self.get_setting("custom_intervals", {})
 
         g_boxes = QFrame()
-        g_boxes.setStyleSheet("background: rgba(0, 0, 0, 0.02); border-radius: 8px; padding: 6px;")
+        g_boxes.setStyleSheet(f"""
+            QFrame {{
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(8)}px;
+                padding: {scale(8)}px;
+            }}
+        """)
         grid_boxes = QGridLayout(g_boxes)
+        grid_boxes.setSpacing(scale(10))
 
-        unit_labels = {"minutes": "Minuten", "hours": "Stunden", "days": "Tage", "months": "Monate"}
+        unit_labels = {
+            "minutes": tr_ui("common.unit_minutes", "Minuten"),
+            "hours": tr_ui("common.unit_hours", "Stunden"),
+            "days": tr_ui("common.unit_days", "Tage"),
+            "months": tr_ui("common.unit_months", "Monate")
+        }
         for box_num in range(1, 8):
             row = (box_num - 1) // 2
             col_offset = ((box_num - 1) % 2) * 3
-            lbl_box = QLabel(f"<b>Box {box_num}:</b>")
-            spin_val = NoWheelSpinBox(); spin_val.setRange(1, 999); spin_val.setFixedWidth(scale(75))
+            lbl_box = QLabel(f"📦 Box {box_num}:")
+            lbl_box.setStyleSheet(f"font-weight: 700; color: #0f172a; font-size: {scale(12)}px; border: none; background: transparent;")
+            spin_val = NoWheelSpinBox(); spin_val.setRange(1, 999); spin_val.setFixedWidth(scale(82))
             combo_unit = NoWheelComboBox()
             for uk, uv in unit_labels.items(): combo_unit.addItem(uv, uk)
-            combo_unit.setFixedWidth(scale(95))
+            combo_unit.setFixedWidth(scale(110))
 
             b_data = custom_saved.get(str(box_num)) or custom_saved.get(box_num)
             if isinstance(b_data, dict): v, u = int(b_data.get("value", 1)), b_data.get("unit", "days")
@@ -2862,12 +3413,13 @@ class UnifiedSettingsDialog(QDialog):
         self.update_interval_inputs_state()
         layout.addWidget(g_intervals)
 
-        # 2. Alternative Good Moves & Queue Priority
+        # 2. Alternative Good Moves & Queue Priority Card
         g_alt = QGroupBox(tr_widget("settings.alt_moves_title", "🔀 Alternative Züge & Priorität"))
-        f_alt = QFormLayout(g_alt)
-        f_alt.setSpacing(scale(12))
+        v_alt = QVBoxLayout(g_alt)
+        v_alt.setSpacing(0)
 
         self.combo_alt_policy = NoWheelComboBox()
+        self.combo_alt_policy.setMinimumWidth(scale(260))
         self.combo_alt_policy.addItem(tr_ui("settings.alt_no_penalty", "Keine Auswirkung [Empfohlen]"), "no_penalty")
         self.combo_alt_policy.addItem(tr_ui("settings.alt_keep_box", "Box nicht erhöhen"), "keep_box")
         self.combo_alt_policy.addItem(tr_ui("settings.alt_mistake", "Als Fehler werten (Zurück auf Box 1)"), "mistake")
@@ -2875,50 +3427,80 @@ class UnifiedSettingsDialog(QDialog):
         idx_a = self.combo_alt_policy.findData(curr_alt)
         if idx_a >= 0: self.combo_alt_policy.setCurrentIndex(idx_a)
         self.combo_alt_policy.currentIndexChanged.connect(lambda: self.set_setting("alternate_move_policy", self.combo_alt_policy.currentData()))
-        f_alt.addRow(tr_ui("settings.alt_moves_label", "Verhalten bei alternativen Zügen:"), self.combo_alt_policy)
+        v_alt.addWidget(self._make_hairline_row(
+            tr_ui("settings.alt_moves_label", "Verhalten bei alternativen Zügen:"),
+            tr_ui("settings.alt_moves_sub", "Wie objektiv gute Züge außerhalb deines Haupt-Repertoires gewertet werden."),
+            self.combo_alt_policy
+        ))
 
         self.combo_prio_order = NoWheelComboBox()
+        self.combo_prio_order.setMinimumWidth(scale(260))
         self.combo_prio_order.addItem(tr_ui("settings.prio_priority_first", "Repertoire-Priorität zuerst"), "priority_first")
         self.combo_prio_order.addItem(tr_ui("settings.prio_box_first", "Niedrigste Box zuerst"), "box_first")
         curr_prio = self.get_setting("queue_priority_order", "priority_first")
         idx_p = self.combo_prio_order.findData(curr_prio)
         if idx_p >= 0: self.combo_prio_order.setCurrentIndex(idx_p)
         self.combo_prio_order.currentIndexChanged.connect(lambda: self.set_setting("queue_priority_order", self.combo_prio_order.currentData()))
-        f_alt.addRow(tr_ui("settings.prio_order_label", "Testkarten-Reihenfolge:"), self.combo_prio_order)
+        v_alt.addWidget(self._make_hairline_row(
+            tr_ui("settings.prio_order_label", "Testkarten-Reihenfolge:"),
+            tr_ui("settings.prio_order_sub", "Sortierung fälliger Stellungen nach Partie-Wahrscheinlichkeit oder Leitner-Box."),
+            self.combo_prio_order,
+            is_last=True
+        ))
         layout.addWidget(g_alt)
 
-        # 3. Limits & Auto-advance
+        # 3. Limits & Auto-advance Card
         g_limits = QGroupBox(tr_widget("settings.limits_title", "🛑 Tages-Limits & Ablauf"))
-        f_limits = QFormLayout(g_limits)
-        f_limits.setSpacing(scale(12))
+        v_limits = QVBoxLayout(g_limits)
+        v_limits.setSpacing(0)
 
         self.spin_max_new = NoWheelSpinBox()
         self.spin_max_new.setRange(0, 500)
+        self.spin_max_new.setMinimumWidth(scale(140))
         self.spin_max_new.setSpecialValueText(tr_ui("settings.unlimited", "Unbegrenzt"))
         self.spin_max_new.setValue(int(self.get_setting("max_new_cards_per_day", 0)))
         self.spin_max_new.valueChanged.connect(lambda v: self.set_setting("max_new_cards_per_day", v))
-        f_limits.addRow(tr_ui("settings.max_new_label", "Max. neue Züge pro Tag:"), self.spin_max_new)
+        v_limits.addWidget(self._make_hairline_row(
+            tr_ui("settings.max_new_label", "Max. neue Züge pro Tag:"),
+            tr_ui("settings.max_new_sub", "Obergrenze für neu gelernte Stellungen pro Kalendertag (0 = Unbegrenzt)."),
+            self.spin_max_new
+        ))
 
         self.spin_max_reviews = NoWheelSpinBox()
         self.spin_max_reviews.setRange(0, 500)
+        self.spin_max_reviews.setMinimumWidth(scale(140))
         self.spin_max_reviews.setSpecialValueText(tr_ui("settings.unlimited", "Unbegrenzt"))
         self.spin_max_reviews.setValue(int(self.get_setting("max_reviews_per_session", 0)))
         self.spin_max_reviews.valueChanged.connect(lambda v: self.set_setting("max_reviews_per_session", v))
-        f_limits.addRow(tr_ui("settings.max_reviews_label", "Max. Wiederholungen pro Session:"), self.spin_max_reviews)
+        v_limits.addWidget(self._make_hairline_row(
+            tr_ui("settings.max_reviews_label", "Max. Wiederholungen pro Session:"),
+            tr_ui("settings.max_reviews_sub", "Maximale Anzahl fälliger Wiederholungen pro Trainingssitzung (0 = Unbegrenzt)."),
+            self.spin_max_reviews
+        ))
 
         self.chk_limit_after_var = QCheckBox(tr_widget("settings.chk_limit_after_var", "Limits erst nach Abschluss der aktuellen Variante anwenden"))
         chk_val = self.get_setting("enforce_limit_after_variation", True)
         self.chk_limit_after_var.setChecked(bool(chk_val))
         self.chk_limit_after_var.toggled.connect(lambda c: self.set_setting("enforce_limit_after_variation", c))
-        f_limits.addRow("", self.chk_limit_after_var)
+        v_limits.addWidget(self._make_hairline_row(
+            tr_ui("settings.limit_after_var_title", "Varianten immer vollständig beenden:"),
+            tr_ui("settings.limit_after_var_sub", "Verhindert das Abbrechen mitten in einer laufenden Zugfolge bei Erreichen des Limits."),
+            self.chk_limit_after_var
+        ))
 
         self.spin_delay = NoWheelSpinBox()
         self.spin_delay.setRange(0, 2000)
         self.spin_delay.setSingleStep(50)
         self.spin_delay.setSuffix(" ms")
+        self.spin_delay.setMinimumWidth(scale(140))
         self.spin_delay.setValue(int(self.get_setting("auto_delay", 0)))
         self.spin_delay.valueChanged.connect(lambda v: self.set_setting("auto_delay", v))
-        f_limits.addRow(tr_ui("settings.auto_delay", "Verzögerung Auto-Weiter:"), self.spin_delay)
+        v_limits.addWidget(self._make_hairline_row(
+            tr_ui("settings.auto_delay", "Verzögerung Auto-Weiter:"),
+            tr_ui("settings.auto_delay_sub", "Kurze Pause vor dem nächsten Zug nach einer korrekten Antwort."),
+            self.spin_delay,
+            is_last=True
+        ))
 
         layout.addWidget(g_limits)
         layout.addStretch()
@@ -2962,21 +3544,35 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_creator_identity(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(16))
-        layout.setContentsMargins(scale(24), scale(24), scale(24), scale(24))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.nav_creator_identity", "📋 Repertoire-Identität & Level"),
+            tr_ui("settings.creator_identity_page_sub", "Verwalte Kurs-Metadaten, Spielerfarbe, Prio-Elo, Cover-Bild und die mehrstufige Level-Struktur.")
+        ))
 
         # Identity Card
         g_id = QGroupBox(tr_widget("repo_settings.identity_title", "📋 Repertoire Identität"))
         v_id = QVBoxLayout(g_id)
-        v_id.setSpacing(scale(12))
+        v_id.setSpacing(scale(10))
 
         # Header Row (Title & Rename Button)
         card_header = QFrame()
-        card_header.setStyleSheet("background: white; border: 1px solid rgba(0,0,0,0.1); border-radius: 8px; padding: 8px;")
+        card_header.setStyleSheet(f"""
+            QFrame {{
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(8)}px;
+                padding: {scale(6)}px {scale(10)}px;
+            }}
+        """)
         h_hdr = QHBoxLayout(card_header)
         self.lbl_cr_header_icon = QLabel("🏆")
-        self.lbl_cr_header_icon.setFixedSize(scale(44), scale(44))
+        self.lbl_cr_header_icon.setFixedSize(scale(40), scale(40))
+        self.lbl_cr_header_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_cr_header_icon.setStyleSheet(f"font-size: {scale(22)}px; border: none; background: transparent;")
         self.lbl_cr_name = QLabel("-")
-        self.lbl_cr_name.setStyleSheet(f"font-weight: 900; font-size: {scale(18)}px; color: {COLORS['burnt_orange']};")
+        self.lbl_cr_name.setStyleSheet(f"font-weight: 800; font-size: {scale(18)}px; color: #0f172a; border: none; background: transparent;")
         btn_rename = QPushButton(tr_widget("repo_settings.btn_rename", "✎ Umbenennen"))
         btn_rename.clicked.connect(self.rename_active_repertoire)
         h_hdr.addWidget(self.lbl_cr_header_icon)
@@ -2999,9 +3595,9 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_cr_color.currentIndexChanged.connect(self.save_creator_color)
 
         self.lbl_cr_ana_status = QLabel("-")
-        self.lbl_cr_ana_status.setStyleSheet("font-weight: bold; color: #333;")
+        self.lbl_cr_ana_status.setStyleSheet("font-weight: 700; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 10px;")
         self.lbl_cr_db_cov = QLabel("-")
-        self.lbl_cr_db_cov.setStyleSheet("font-weight: bold; color: #333;")
+        self.lbl_cr_db_cov.setStyleSheet("font-weight: 700; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 10px;")
 
         self.combo_cr_comment_lang = NoWheelComboBox()
         self.combo_cr_comment_lang.addItem(tr_ui("repo_settings.comment_lang_auto", "Automatisch"), "auto")
@@ -3010,7 +3606,7 @@ class UnifiedSettingsDialog(QDialog):
         self.combo_cr_comment_lang.currentIndexChanged.connect(self.save_creator_comment_lang)
 
         self.lbl_cr_comment_stats = QLabel("-")
-        self.lbl_cr_comment_stats.setStyleSheet("font-weight: bold; color: #333;")
+        self.lbl_cr_comment_stats.setStyleSheet("font-weight: 700; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 10px;")
 
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_prio_elo", "🎯 Prio Score ELO:")), 0, 0); grid_meta.addWidget(self.combo_cr_elo, 0, 1)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_color", "🎨 Deine Farbe:")), 0, 2); grid_meta.addWidget(self.combo_cr_color, 0, 3)
@@ -3023,25 +3619,34 @@ class UnifiedSettingsDialog(QDialog):
         # Description
         self.txt_cr_desc = QPlainTextEdit()
         self.txt_cr_desc.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
-        self.txt_cr_desc.setFixedHeight(scale(160))
+        self.txt_cr_desc.setFixedHeight(scale(130))
         self.txt_cr_desc.textChanged.connect(self.save_creator_description)
-        v_id.addWidget(QLabel(tr_ui("repo_settings.label_description", "📝 Beschreibung:")))
+        lbl_desc_hdr = QLabel(tr_ui("repo_settings.label_description", "📝 Beschreibung:"))
+        lbl_desc_hdr.setStyleSheet(f"font-weight: 600; color: #0f172a; font-size: {scale(13)}px;")
+        v_id.addWidget(lbl_desc_hdr)
         v_id.addWidget(self.txt_cr_desc)
 
-        # Cover Image
-        h_cov = QHBoxLayout()
+        # Cover Image Row
+        w_cov = QWidget()
+        h_cov = QHBoxLayout(w_cov)
+        h_cov.setContentsMargins(0, 0, 0, 0)
+        h_cov.setSpacing(scale(10))
         self.lbl_cr_cover_preview = QLabel(tr_ui("repo_settings.no_image", "Kein Bild"))
         self.lbl_cr_cover_preview.setFixedSize(scale(56), scale(56))
-        self.lbl_cr_cover_preview.setStyleSheet("border: 1px dashed #ccc; border-radius: 6px; background: #fff;")
+        self.lbl_cr_cover_preview.setStyleSheet("border: 1px dashed #cbd5e1; border-radius: 8px; background: #f8fafc; color: #64748b; font-size: 11px;")
         self.lbl_cr_cover_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         btn_sel_cov = QPushButton(tr_widget("repo_settings.btn_select_image", "Bild wählen...")); btn_sel_cov.clicked.connect(self.select_creator_cover)
         self.btn_rem_cov = QPushButton(tr_widget("repo_settings.btn_remove", "Entfernen")); self.btn_rem_cov.clicked.connect(self.remove_creator_cover)
-        h_cov.addWidget(QLabel(tr_ui("repo_settings.label_cover_image", "🖼️ Cover-Bild:")))
         h_cov.addWidget(self.lbl_cr_cover_preview)
         h_cov.addWidget(btn_sel_cov)
         h_cov.addWidget(self.btn_rem_cov)
-        h_cov.addStretch()
-        v_id.addLayout(h_cov)
+
+        v_id.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.label_cover_image", "🖼️ Cover-Bild:"),
+            tr_ui("repo_settings.cover_image_sub", "Vorschaubild für die Repertoire-Karten im Trainer und Creator."),
+            w_cov,
+            is_last=True
+        ))
         layout.addWidget(g_id)
 
         # 📈 Level-Struktur (Merged into this page as requested)
@@ -3074,29 +3679,30 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_cr_levels.setStyleSheet(f"""
             QTableWidget {{
                 background-color: #ffffff;
-                border: 1px solid rgba(0, 0, 0, 0.1);
+                border: 1px solid #e2e8f0;
                 border-radius: {scale(8)}px;
-                gridline-color: rgba(0, 0, 0, 0.06);
+                gridline-color: #f1f5f9;
             }}
             QHeaderView::section {{
-                background-color: #f7f7f9;
-                color: {COLORS['brown_text']};
-                font-weight: bold;
+                background-color: #f8fafc;
+                color: #475569;
+                font-weight: 700;
                 padding: {scale(6)}px;
                 border: none;
-                border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+                border-bottom: 1px solid #e2e8f0;
             }}
             QTableWidget::item {{
-                border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+                border-bottom: 1px solid #f1f5f9;
                 padding: {scale(4)}px;
-                color: #222222;
+                color: #0f172a;
             }}
             QTableWidget::item:hover {{
-                background-color: rgba(211, 84, 0, 0.08);
+                background-color: #f8fafc;
             }}
             QTableWidget::item:selected {{
-                background-color: rgba(211, 84, 0, 0.18);
-                color: #111111;
+                background-color: #f1f5f9;
+                color: #0f172a;
+                font-weight: 700;
             }}
         """)
         self.tbl_cr_levels.cellClicked.connect(self.on_creator_level_cell_clicked)
@@ -3106,8 +3712,10 @@ class UnifiedSettingsDialog(QDialog):
 
         h_lvl_btns = QHBoxLayout()
         btn_add_lvl = QPushButton(tr_widget("repo_settings.btn_add_level", "➕ Level hinzufügen"))
+        btn_add_lvl.setProperty("class", "Primary")
         btn_add_lvl.clicked.connect(self.add_creator_level)
         btn_del_lvl = QPushButton(tr_widget("repo_settings.btn_delete_level", "🗑️ Level löschen"))
+        btn_del_lvl.setProperty("class", "Danger")
         btn_del_lvl.clicked.connect(self.delete_creator_level)
         h_lvl_btns.addWidget(btn_add_lvl)
         h_lvl_btns.addWidget(btn_del_lvl)
@@ -3118,10 +3726,16 @@ class UnifiedSettingsDialog(QDialog):
         # Danger Zone: Delete Repertoire Permanently
         g_danger = QGroupBox(tr_widget("repo_settings.danger_zone_title", "⚠️ Gefahrenzone"))
         v_danger = QVBoxLayout(g_danger)
+        v_danger.setSpacing(0)
         btn_del_repo = QPushButton(tr_widget("repo_settings.btn_delete_repertoire", "🗑️ Repertoire unwiderruflich löschen"))
         btn_del_repo.setProperty("class", "Danger")
         btn_del_repo.clicked.connect(self.delete_creator_repertoire)
-        v_danger.addWidget(btn_del_repo)
+        v_danger.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.danger_del_repo_title", "Kurs dauerhaft entfernen:"),
+            tr_ui("repo_settings.danger_del_repo_sub", "Löscht die Datenbank und alle Varianten dieses Repertoires unwiderruflich."),
+            btn_del_repo,
+            is_last=True
+        ))
         layout.addWidget(g_danger)
 
         layout.addStretch()
@@ -3171,7 +3785,7 @@ class UnifiedSettingsDialog(QDialog):
             self.combo_prio_target.clear()
             self.combo_global_level.clear()
             self.combo_prune_target_level.clear()
-            self.combo_prune_target_level.addItem("Alle Level", None)
+            self.combo_prune_target_level.addItem(tr_ui("repo_settings.all_levels", "Alle Level"), None)
 
         for idx, lvl in enumerate(levels):
             self.tbl_cr_levels.insertRow(idx)
@@ -3615,84 +4229,72 @@ class UnifiedSettingsDialog(QDialog):
 
             QMessageBox.information(self, tr_ui("common.success", "Erfolg"), f"Repertoire '{name}' wurde gelöscht.")
 
-    # ─── PAGE 4.2: Alternate Good Moves and Prio Score (Creator) ────────────
+    # ─── PAGE 4.2: Analyse & Wartung (Task-Center) & Data Reset (Creator) ────
 
     def init_page_creator_alt_moves(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        # Warning Notice for Background Tasks
-        lbl_alt_warn = QLabel(tr_ui("repo_settings.bg_task_warning", "💡 <b>Hinweis:</b> Bitte bearbeite das Repertoire im Creator nicht, solange Engine-Analyse oder Lichess-Import laufen, um Datenkonflikte zu vermeiden."))
-        lbl_alt_warn.setWordWrap(True)
-        lbl_alt_warn.setStyleSheet(f"""
-            QLabel {{
-                background-color: #fff9db;
-                color: #856404;
-                border: 1px solid #ffeeba;
-                border-radius: {scale(6)}px;
-                padding: {scale(8)}px {scale(14)}px;
-                font-size: {scale(12)}px;
-            }}
-        """)
-        layout.addWidget(lbl_alt_warn)
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.page_cr_analysis_title", "Analyse & Wartung (Task-Center)"),
+            tr_ui("settings.page_cr_analysis_sub", "Starte Lichess-Datenbank-Imports, Stockfish Engine-Scans und verwalte gespeicherte Analysedaten."),
+            tr_ui("settings.badge_cr_analysis", "🛠️ Creator · Analyse")
+        ))
 
-        # 🤖 Engine Analysis
-        g_eng = QGroupBox(tr_widget("repo_settings.engine_scan_title", "🤖 Engine-Analyse (Alternativ gute Züge)"))
-        v_eng = QVBoxLayout(g_eng)
-        lbl_eng_desc = QLabel(tr_ui("repo_settings.engine_scan_desc", "Berechne alternativ spielbare Züge für das gesamte Repertoire mit Stockfish."))
-        lbl_eng_desc.setWordWrap(True)
-        lbl_eng_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
-        v_eng.addWidget(lbl_eng_desc)
+        # 1. ⚡ Task-Center Launchpad Card
+        g_hub = QGroupBox(tr_widget("repo_settings.task_center_card_title", "⚡ Aufgaben- & Analyse-Zentrum (Hintergrund)"))
+        v_hub = QVBoxLayout(g_hub)
+        v_hub.setSpacing(scale(14))
 
-        f_eng = QFormLayout()
-        self.spin_scan_depth = NoWheelSpinBox(); self.spin_scan_depth.setRange(10, 50); self.spin_scan_depth.setValue(18)
-        self.combo_scan_threads = NoWheelComboBox()
-        for i in range(1, multiprocessing.cpu_count() + 1): self.combo_scan_threads.addItem(str(i))
-        self.combo_scan_threads.setCurrentText(str(max(1, int(multiprocessing.cpu_count() * 0.25))))
-        f_eng.addRow(tr_ui("repo_settings.search_depth_label", "Suchtiefe:"), self.spin_scan_depth)
-        f_eng.addRow(tr_ui("repo_settings.threads_label", "Threads:"), self.combo_scan_threads)
-        v_eng.addLayout(f_eng)
+        lbl_hub_desc = QLabel(tr_ui(
+            "repo_settings.task_center_card_desc",
+            "Starte Lichess-Datenbank-Imports, Stockfish Engine-Scans (Alternativ gute Züge & Überleitungen) sowie die "
+            "Multi-Repertoire Batch-Wartung im eigenständigen <b>Aufgaben- & Analyse-Zentrum</b>.<br>"
+            "<span style='color: #64748b;'>Alle Aufgaben laufen vollständig entkoppelt im Hintergrund – du kannst die Einstellungen "
+            "schließen, ungestört im Repertoire weiterarbeiten oder jederzeit zwischen Kursen wechseln.</span>"
+        ))
+        lbl_hub_desc.setWordWrap(True)
+        lbl_hub_desc.setStyleSheet(f"font-size: {scale(12)}px; color: #334155; line-height: 1.4;")
+        v_hub.addWidget(lbl_hub_desc)
 
-        # Reuse analysis from other courses
-        self.chk_eng_reuse_courses = QCheckBox(tr_ui("repo_settings.chk_eng_reuse_courses", "⚡ Daten aus anderen Kursen nutzen"))
-        self.chk_eng_reuse_courses.setToolTip(tr_ui("repo_settings.chk_eng_reuse_courses_tip", "Übernimmt bereits vorhandene Engine-Analysen (Alternativ-Züge) mit gleicher oder höherer Tiefe aus anderen Kursen, um die Analyse drastisch zu beschleunigen."))
-        cfg_dialog = self.get_config()
-        self.chk_eng_reuse_courses.setChecked(cfg_dialog.get("engine_reuse_courses", True))
-        self.chk_eng_reuse_courses.toggled.connect(lambda val: self.set_setting("engine_reuse_courses", val))
-        v_eng.addWidget(self.chk_eng_reuse_courses)
+        # Live background status banner inside card
+        self.lbl_hub_live_status = QLabel()
+        self.lbl_hub_live_status.setWordWrap(True)
+        v_hub.addWidget(self.lbl_hub_live_status)
 
-        h_eng_btns = QHBoxLayout()
-        self.btn_start_eng_scan = QPushButton(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
-        self.btn_start_eng_scan.clicked.connect(self.toggle_engine_scan)
-        h_eng_btns.addWidget(self.btn_start_eng_scan, stretch=2)
+        # Launchpad Action Buttons
+        h_hub_btns = QHBoxLayout()
+        h_hub_btns.setSpacing(scale(10))
 
-        self.btn_reset_eng = QPushButton(tr_widget("repo_settings.btn_reset_engine", "🗑️ Analysen zurücksetzen..."))
-        self.btn_reset_eng.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reset_eng.setToolTip(tr_ui("repo_settings.btn_reset_engine_tip", "Setzt vorhandene Engine-Analysen (Tiefe, Alternativ-Züge) für dieses oder alle Repertoires zurück."))
-        self.btn_reset_eng.clicked.connect(self.prompt_reset_engine_analysis)
-        h_eng_btns.addWidget(self.btn_reset_eng, stretch=1)
-        v_eng.addLayout(h_eng_btns)
+        self.btn_open_task_single = QPushButton(tr_ui("repo_settings.btn_open_task_single", "🎯 Einzelnes Repertoire analysieren"))
+        self.btn_open_task_single.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_task_single.clicked.connect(lambda: self.open_task_center(initial_tab=0))
 
-        self.pb_scan = QProgressBar()
-        self.lbl_scan_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
-        v_eng.addWidget(self.lbl_scan_status)
-        v_eng.addWidget(self.pb_scan)
-        layout.addWidget(g_eng)
+        self.btn_open_task_batch = QPushButton(tr_ui("repo_settings.btn_open_task_batch", "🚜 Wartungs-Batch (Multi) öffnen"))
+        self.btn_open_task_batch.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_task_batch.clicked.connect(lambda: self.open_task_center(initial_tab=1))
 
-        # 🌐 Lichess DB & Priority Scores
-        g_lich = QGroupBox(tr_widget("repo_settings.lichess_scan_title", "🌐 Lichess-Datenbank & Prio Scores"))
-        v_lich = QVBoxLayout(g_lich)
-        lbl_lich_desc = QLabel(tr_ui("repo_settings.lichess_scan_desc", "Lichess-Datenbank herunterladen und Popularitäts-/Prio-Scores berechnen lassen."))
-        lbl_lich_desc.setWordWrap(True)
-        lbl_lich_desc.setStyleSheet(f"color: #666; font-size: {scale(12)}px;")
-        v_lich.addWidget(lbl_lich_desc)
+        self.btn_open_task_queue = QPushButton(tr_ui("repo_settings.btn_open_task_queue", "📋 Warteschlange & Verlauf"))
+        self.btn_open_task_queue.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_open_task_queue.clicked.connect(lambda: self.open_task_center(initial_tab=2))
 
-        # Token Status Card
+        h_hub_btns.addWidget(self.btn_open_task_single, stretch=2)
+        h_hub_btns.addWidget(self.btn_open_task_batch, stretch=2)
+        h_hub_btns.addWidget(self.btn_open_task_queue, stretch=1)
+        v_hub.addLayout(h_hub_btns)
+
+        layout.addWidget(g_hub)
+
+        # 2. 🔑 Lichess API-Token Status Card
+        g_token = QGroupBox(tr_widget("repo_settings.lichess_token_card_title", "🔑 Lichess API-Token Status"))
+        v_token = QVBoxLayout(g_token)
+        v_token.setSpacing(scale(10))
+
         self.lbl_lich_token_status = QLabel()
         self.lbl_lich_token_status.setWordWrap(True)
         self.lbl_lich_token_status.setStyleSheet(f"font-size: {scale(12)}px; padding: {scale(2)}px 0;")
-        v_lich.addWidget(self.lbl_lich_token_status)
+        v_token.addWidget(self.lbl_lich_token_status)
 
         h_token_btns = QHBoxLayout()
         self.btn_token_setup = QPushButton(tr_widget("lichess_token.btn_setup_card", "🔑 Token einrichten"))
@@ -3708,136 +4310,137 @@ class UnifiedSettingsDialog(QDialog):
         h_token_btns.addWidget(self.btn_token_test)
         h_token_btns.addWidget(self.btn_token_edit)
         h_token_btns.addStretch()
-        v_lich.addLayout(h_token_btns)
+        v_token.addLayout(h_token_btns)
 
-        # Separator
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setStyleSheet("color: rgba(0,0,0,0.1);")
-        v_lich.addWidget(line)
+        self.btn_lich_fix_token = QPushButton(tr_widget("lichess_token.btn_fix_token", "🔑 Token jetzt korrigieren / erneuern"))
+        self.btn_lich_fix_token.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lich_fix_token.setProperty("class", "Danger")
+        self.btn_lich_fix_token.clicked.connect(self.open_lichess_token_dialog)
+        self.btn_lich_fix_token.setVisible(False)
+        v_token.addWidget(self.btn_lich_fix_token)
 
-        # Reuse Lichess data from other courses
-        h_reuse = QHBoxLayout()
-        self.chk_lich_reuse_courses = QCheckBox(tr_ui("repo_settings.chk_reuse_courses", "⚡ Daten aus anderen Kursen nutzen"))
-        self.chk_lich_reuse_courses.setToolTip(tr_ui("repo_settings.chk_reuse_courses_tip", "Übernimmt bereits vorhandene Lichess-Daten aus anderen Kursen für dieselbe Elo, um den Download drastisch zu beschleunigen."))
-        cfg_dialog = self.get_config()
-        self.chk_lich_reuse_courses.setChecked(cfg_dialog.get("lichess_reuse_courses", True))
+        layout.addWidget(g_token)
 
-        self.combo_lich_max_age = NoWheelComboBox()
-        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_90_days", "Max. 3 Monate alt"), 90)
-        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_180_days", "Max. 6 Monate alt (Empfohlen)"), 180)
-        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_365_days", "Max. 1 Jahr alt"), 365)
-        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_unlimited", "Keine Begrenzung"), None)
+        # 3. 🗑️ Data Reset & Cleanup Card
+        g_reset = QGroupBox(tr_widget("repo_settings.data_reset_card_title", "🗑️ Analyse- & Lichess-Daten zurücksetzen"))
+        v_reset = QVBoxLayout(g_reset)
+        v_reset.setSpacing(0)
 
-        saved_age = cfg_dialog.get("lichess_max_age_days", 180)
-        idx_age = self.combo_lich_max_age.findData(saved_age)
-        if idx_age >= 0:
-            self.combo_lich_max_age.setCurrentIndex(idx_age)
+        self.btn_reset_eng = QPushButton(tr_widget("repo_settings.btn_reset_engine", "🗑️ Analysen zurücksetzen..."))
+        self.btn_reset_eng.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_reset_eng.setToolTip(tr_ui("repo_settings.btn_reset_engine_tip", "Setzt vorhandene Engine-Analysen (Tiefe, Alternativ-Züge) für dieses oder alle Repertoires zurück."))
+        self.btn_reset_eng.clicked.connect(self.prompt_reset_engine_analysis)
+        v_reset.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_engine_reset_section_clean", "Stockfish Engine-Analysen (Alternativ-Züge & Tiefe)"),
+            tr_ui("repo_settings.lbl_engine_reset_sub", "Setzt gespeicherte Engine-Analysen zurück, ohne deine Züge oder Kommentare zu verändern."),
+            self.btn_reset_eng,
+            is_last=False
+        ))
 
-        self.combo_lich_max_age.setEnabled(self.chk_lich_reuse_courses.isChecked())
-        self.chk_lich_reuse_courses.toggled.connect(self.combo_lich_max_age.setEnabled)
-
-        h_reuse.addWidget(self.chk_lich_reuse_courses)
-        h_reuse.addWidget(self.combo_lich_max_age)
-        h_reuse.addStretch()
-        v_lich.addLayout(h_reuse)
-
-        self.btn_start_lich_fetch = QPushButton(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
-        self.btn_start_lich_fetch.clicked.connect(self.toggle_lichess_fetch)
-        v_lich.addWidget(self.btn_start_lich_fetch)
-
-        h_del = QHBoxLayout()
+        w_del_lich = QWidget()
+        h_del = QHBoxLayout(w_del_lich)
+        h_del.setContentsMargins(0, 0, 0, 0)
+        h_del.setSpacing(scale(8))
         self.btn_del_lich = QPushButton()
         self.btn_del_lich.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del_lich.clicked.connect(self.delete_active_lichess_data)
 
-        self.btn_del_all_lich = QPushButton(tr_widget("repo_settings.btn_delete_all_lichess", "🗑️ Lichess-Daten aller Elo-Bereiche löschen"))
+        self.btn_del_all_lich = QPushButton(tr_widget("repo_settings.btn_delete_all_lichess", "🗑️ Alle Elo-Bereiche löschen"))
+        self.btn_del_all_lich.setProperty("class", "Danger")
         self.btn_del_all_lich.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_del_all_lich.setToolTip(tr_ui("repo_settings.btn_delete_all_lichess_tooltip", "Löscht alle Lichess-Daten sämtlicher Elo-Bereiche aus diesem Repertoire."))
         self.btn_del_all_lich.clicked.connect(self.delete_all_lichess_data)
 
         h_del.addWidget(self.btn_del_lich)
         h_del.addWidget(self.btn_del_all_lich)
-        v_lich.addLayout(h_del)
+        v_reset.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_lichess_reset_section_clean", "Lichess-Datenbank & Popularitäts-Daten"),
+            tr_ui("repo_settings.lbl_lichess_reset_sub", "Löscht heruntergeladene Lichess-Statistiken für die aktuelle Elo-Stufe oder alle Elo-Bereiche."),
+            w_del_lich,
+            is_last=True
+        ))
 
         self._update_delete_lichess_button_text()
+        layout.addWidget(g_reset)
 
+        # Unparented compatibility widgets for legacy callers / tests
+        self.spin_scan_depth = NoWheelSpinBox(); self.spin_scan_depth.setRange(10, 50); self.spin_scan_depth.setValue(18)
+        self.combo_scan_threads = NoWheelComboBox()
+        for i in range(1, multiprocessing.cpu_count() + 1): self.combo_scan_threads.addItem(str(i))
+        self.combo_scan_threads.setCurrentText(str(max(1, int(multiprocessing.cpu_count() * 0.25))))
+        self.chk_eng_reuse_courses = QCheckBox()
+        self.chk_eng_reuse_courses.setChecked(self.get_config().get("engine_reuse_courses", True))
+        self.btn_start_eng_scan = QPushButton(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
+        self.pb_scan = QProgressBar()
+        self.lbl_scan_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
+        self.chk_lich_reuse_courses = QCheckBox()
+        self.chk_lich_reuse_courses.setChecked(self.get_config().get("lichess_reuse_courses", True))
+        self.combo_lich_max_age = NoWheelComboBox()
+        self.combo_lich_max_age.addItem(tr_ui("repo_settings.age_180_days", "Max. 6 Monate alt (Empfohlen)"), 180)
+        self.btn_start_lich_fetch = QPushButton(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
         self.pb_lich = QProgressBar()
         self.lbl_lich_status = QLabel(tr_ui("repo_settings.status_waiting", "Warte auf Start..."))
-        v_lich.addWidget(self.lbl_lich_status)
-        v_lich.addWidget(self.pb_lich)
-
-        # Error action button (hidden by default, shown on 401 error)
-        self.btn_lich_fix_token = QPushButton(tr_widget("lichess_token.btn_fix_token", "🔑 Token jetzt korrigieren / erneuern"))
-        self.btn_lich_fix_token.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_lich_fix_token.setStyleSheet("color: #c0392b; font-weight: bold; border: 1px solid #c0392b; border-radius: 4px; padding: 4px 10px;")
-        self.btn_lich_fix_token.clicked.connect(self.open_lichess_token_dialog)
-        self.btn_lich_fix_token.setVisible(False)
-        v_lich.addWidget(self.btn_lich_fix_token)
-
-        layout.addWidget(g_lich)
 
         layout.addStretch()
         self._refresh_token_status_card()
+        self._connect_task_manager_status()
+
+    def _connect_task_manager_status(self):
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        tm = get_task_manager()
+        tm.task_started.connect(lambda *_: self._refresh_hub_live_status())
+        tm.task_progress.connect(lambda *_: self._refresh_hub_live_status())
+        tm.task_finished.connect(lambda *_: self._refresh_hub_live_status())
+        tm.queue_updated.connect(self._refresh_hub_live_status)
+        self._refresh_hub_live_status()
+
+    def _refresh_hub_live_status(self):
+        if not hasattr(self, 'lbl_hub_live_status') or not self.lbl_hub_live_status:
+            return
+        from PyQt6 import sip
+        if sip.isdeleted(self.lbl_hub_live_status):
+            return
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        tm = get_task_manager()
+        job = tm.get_current_job()
+        if job:
+            q_len = len(tm.get_queue())
+            q_info = f" (+{q_len})" if q_len > 0 else ""
+            status_txt = tr_ui(
+                "repo_settings.hub_status_running",
+                "⚡ <b>Aktiv im Hintergrund:</b> {title}{queue} — {pct}% ({status})",
+                title=job.title, queue=q_info, pct=job.progress, status=job.status_message or "..."
+            )
+            self.lbl_hub_live_status.setText(status_txt)
+            self.lbl_hub_live_status.setStyleSheet(f"""
+                QLabel {{
+                    background-color: rgba(2, 132, 199, 0.10);
+                    color: #0369a1;
+                    border: 1px solid rgba(2, 132, 199, 0.30);
+                    border-radius: {scale(6)}px;
+                    padding: {scale(8)}px {scale(12)}px;
+                    font-size: {scale(12)}px;
+                }}
+            """)
+        else:
+            self.lbl_hub_live_status.setText(tr_ui("repo_settings.hub_status_idle", "🟢 <b>Status:</b> Bereit – aktuell laufen keine Hintergrund-Aufgaben."))
+            self.lbl_hub_live_status.setStyleSheet(f"""
+                QLabel {{
+                    background-color: #f8fafc;
+                    color: #475569;
+                    border: 1px solid #e2e8f0;
+                    border-radius: {scale(6)}px;
+                    padding: {scale(8)}px {scale(12)}px;
+                    font-size: {scale(12)}px;
+                }}
+            """)
 
     def toggle_engine_scan(self):
-        if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
-            self.lbl_scan_status.setText("Engine-Analyse wird gestoppt...")
-            self.btn_start_eng_scan.setEnabled(False)
-            if hasattr(self, 'btn_reset_eng'):
-                self.btn_reset_eng.setEnabled(False)
-            self.w_eng.cancel()
-            return
-
-        backend = self.ensure_backend_for_active_repo()
-        if not backend or not backend.active_repo_name: return
-
-        from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
-        ep = prompt_engine_if_missing(self, self.get_config())
-        if not ep:
-            return
-        self.set_setting("engine_path", ep)
-        if hasattr(self, 'txt_engine_path'):
-            self.txt_engine_path.setText(ep)
-
-        reuse_courses = self.chk_eng_reuse_courses.isChecked() if hasattr(self, 'chk_eng_reuse_courses') else True
-        self.set_setting("engine_reuse_courses", reuse_courses)
-
-        from opening_fenix.gui.dialogs import repo_settings_dialog
-        thread_cls = getattr(repo_settings_dialog, 'AnalysisThread', AnalysisThread)
-        try:
-            self.w_eng = thread_cls(
-                backend.active_repo_name, 
-                self.spin_scan_depth.value(), 
-                int(self.combo_scan_threads.currentText()), 
-                ep,
-                reuse_other_courses=reuse_courses
-            )
-        except TypeError:
-            self.w_eng = thread_cls(backend.active_repo_name, self.spin_scan_depth.value(), int(self.combo_scan_threads.currentText()), ep)
-
-        self.pb_scan.setValue(0)
-        self.w_eng.progress_signal.connect(self.pb_scan.setValue)
-        if hasattr(self.w_eng, 'status_signal'):
-            self.w_eng.status_signal.connect(self.lbl_scan_status.setText)
-        
-        def on_done(success, message):
-            self.btn_start_eng_scan.setEnabled(True)
-            self.btn_start_eng_scan.setText(tr_widget("repo_settings.btn_start_scan", "🚀 Engine-Scan starten"))
-            if hasattr(self, 'btn_reset_eng'):
-                self.btn_reset_eng.setEnabled(True)
-            self.lbl_scan_status.setText(message)
-            self.refresh_creator_info()
-            
-        self.w_eng.finished_signal.connect(on_done)
-        self.w_eng.start()
-        self.btn_start_eng_scan.setText(tr_widget("repo_settings.btn_stop_scan", "🛑 Engine-Scan stoppen"))
-        if hasattr(self, 'btn_reset_eng'):
-            self.btn_reset_eng.setEnabled(False)
-        self.lbl_scan_status.setText("Engine Analyse läuft...")
+        self.open_task_center(initial_tab=0)
 
     def prompt_reset_engine_analysis(self):
-        if hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning():
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        if (hasattr(self, 'w_eng') and self.w_eng and self.w_eng.isRunning()) or get_task_manager().is_running():
             QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
                                 tr_ui("repo_settings.err_analysis_running", "Bitte stoppe zuerst die laufende Engine-Analyse."))
             return
@@ -3966,81 +4569,7 @@ class UnifiedSettingsDialog(QDialog):
             QMessageBox.critical(self, tr_ui("common.error", "Fehler"), f"Fehler beim Zurücksetzen der Analysen: {e}")
 
     def toggle_lichess_fetch(self):
-        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
-            self.lbl_lich_status.setText("Lichess Import wird gestoppt...")
-            self.btn_start_lich_fetch.setEnabled(False)
-            self.w_lich.cancel()
-            return
-
-        backend = self.ensure_backend_for_active_repo()
-        if not backend or not backend.active_repo_name: return
-
-        # Proactively prompt if no token is configured
-        from opening_fenix.core.services.lichess_service import is_valid_token_string
-        from opening_fenix.gui.dialogs.lichess_token_dialog import prompt_lichess_token_if_missing
-        cfg = self.get_config()
-        proceed, token_configured = prompt_lichess_token_if_missing(self, cfg)
-        if not proceed:
-            return
-        # Sync updated token back into the settings widget if changed
-        if token_configured and hasattr(self, 'txt_lichess_token'):
-            self.txt_lichess_token.setText(cfg.get("lichess_token", ""))
-        self._refresh_token_status_card()
-
-        target_elo = get_elo_internal(self.combo_cr_elo.currentText())
-        reuse_courses = self.chk_lich_reuse_courses.isChecked() if hasattr(self, 'chk_lich_reuse_courses') else True
-        max_age_days = self.combo_lich_max_age.currentData() if hasattr(self, 'combo_lich_max_age') else 180
-        # Persist preferences
-        self.set_setting("lichess_reuse_courses", reuse_courses)
-        self.set_setting("lichess_max_age_days", max_age_days)
-
-        self.w_lich = LichessImportThread(
-            backend.active_repo_name, target_elo,
-            reuse_other_courses=reuse_courses,
-            max_data_age_days=max_age_days
-        )
-        self.pb_lich.setValue(0)
-        self.btn_lich_fix_token.setVisible(False)
-        self.lbl_lich_status.setStyleSheet("")
-        self.w_lich.progress_signal.connect(self.pb_lich.setValue)
-        if hasattr(self.w_lich, 'status_signal'):
-            self.w_lich.status_signal.connect(self.lbl_lich_status.setText)
-
-        def on_done(success, message):
-            self.btn_start_lich_fetch.setEnabled(True)
-            self.btn_start_lich_fetch.setText(tr_widget("repo_settings.btn_fetch", "📡 Daten laden & Scores berechnen"))
-            if not success:
-                # Red error styling
-                self.lbl_lich_status.setStyleSheet("color: #c0392b; font-weight: bold;")
-                # Show the fix-token button specifically for 401 errors
-                is_401 = "401" in message or "ungültig" in message.lower() or "abgelaufen" in message.lower()
-                if is_401:
-                    self.btn_lich_fix_token.setVisible(True)
-                    # Also prompt via dialog
-                    from PyQt6.QtWidgets import QMessageBox
-                    reply = QMessageBox.question(
-                        self,
-                        tr_ui("lichess_token.err_401_prompt_title", "Lichess API-Fehler (401)"),
-                        tr_ui("lichess_token.err_401_prompt_body",
-                              "Das hinterlegte Lichess API-Token ist ungültig oder abgelaufen (Fehler 401). "
-                              "Der Zugriff wurde von Lichess verweigert.\n\nMöchtest du dein Token jetzt bearbeiten?"),
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
-                    if reply == QMessageBox.StandardButton.Yes:
-                        self.open_lichess_token_dialog()
-                else:
-                    self.btn_lich_fix_token.setVisible(False)
-            else:
-                self.lbl_lich_status.setStyleSheet("color: #27ae60; font-weight: bold;")
-                self.btn_lich_fix_token.setVisible(False)
-            self.lbl_lich_status.setText(message)
-            self.refresh_creator_info()
-
-        self.w_lich.finished_signal.connect(on_done)
-        self.w_lich.start()
-        self.btn_start_lich_fetch.setText(tr_widget("repo_settings.btn_stop_fetch", "🛑 Import stoppen"))
-        self.lbl_lich_status.setStyleSheet("")
-        self.lbl_lich_status.setText("Lichess Daten werden geladen...")
+        self.open_task_center(initial_tab=0)
 
     def _update_delete_lichess_button_text(self):
         if not hasattr(self, 'btn_del_lich') or not self.btn_del_lich:
@@ -4057,7 +4586,8 @@ class UnifiedSettingsDialog(QDialog):
         self.btn_del_lich.setToolTip(tr_ui("repo_settings.btn_delete_lichess_tooltip", "Löscht nur die Lichess-Daten für die aktuell ausgewählte Elo-Stufe ({elo}).", elo=elo_display))
 
     def delete_active_lichess_data(self):
-        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        if (hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning()) or get_task_manager().is_running():
             QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
                                 tr_ui("repo_settings.err_import_running", "Bitte warte, bis der laufende Import abgeschlossen ist."))
             return
@@ -4094,7 +4624,8 @@ class UnifiedSettingsDialog(QDialog):
             self.refresh_creator_info()
 
     def delete_all_lichess_data(self):
-        if hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning():
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        if (hasattr(self, 'w_lich') and self.w_lich and self.w_lich.isRunning()) or get_task_manager().is_running():
             QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"),
                                 tr_ui("repo_settings.err_import_running", "Bitte warte, bis der laufende Import abgeschlossen ist."))
             return
@@ -4249,37 +4780,72 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_creator_imex(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.page_cr_imex_title", "Import & Export"),
+            tr_ui("settings.page_cr_imex_sub", "Importiere PGN-Dateien oder Chessable-Kurse und exportiere dein Repertoire in verschiedenen Formaten."),
+            tr_ui("settings.badge_cr_imex", "🛠️ Creator · Datenaustausch")
+        ))
 
         g_imp = QGroupBox(tr_widget("repo_settings.import_title", "📥 Import"))
         v_imp = QVBoxLayout(g_imp)
-        h_imp = QHBoxLayout()
+        v_imp.setSpacing(0)
+
+        w_imp_pgn = QWidget()
+        h_imp = QHBoxLayout(w_imp_pgn)
+        h_imp.setContentsMargins(0, 0, 0, 0)
+        h_imp.setSpacing(scale(8))
         btn_paste = QPushButton(tr_widget("repo_settings.btn_paste_pgn", "📋 PGN Text einfügen"))
         btn_paste.clicked.connect(lambda: self.main_window.paste_pgn_dialog() if self.main_window and hasattr(self.main_window, 'paste_pgn_dialog') else None)
         btn_file = QPushButton(tr_widget("repo_settings.btn_select_pgn_file", "📄 PGN Datei auswählen"))
         btn_file.clicked.connect(lambda: self.main_window.import_pgn_file_dialog() if self.main_window and hasattr(self.main_window, 'import_pgn_file_dialog') else None)
         h_imp.addWidget(btn_paste); h_imp.addWidget(btn_file)
-        v_imp.addLayout(h_imp)
+        v_imp.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_import_pgn_row", "PGN-Varianten importieren"),
+            tr_ui("repo_settings.lbl_import_pgn_sub", "Fügt PGN-Text aus der Zwischenablage oder einer Datei in das aktuelle Repertoire ein."),
+            w_imp_pgn,
+            is_last=False
+        ))
 
-        btn_course_assistant = QPushButton("⚡ Kurs-Import-Assistent (Chessable PGN)")
+        btn_course_assistant = QPushButton(tr_widget("repo_settings.btn_course_assistant", "⚡ Kurs-Import-Assistent (Chessable PGN)"))
         btn_course_assistant.clicked.connect(lambda: self.main_window.import_course_dialog() if self.main_window and hasattr(self.main_window, 'import_course_dialog') else None)
-        v_imp.addWidget(btn_course_assistant)
+        v_imp.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_course_assistant_row", "Kurs-Import-Assistent"),
+            tr_ui("repo_settings.lbl_course_assistant_sub", "Strukturierter Import kompletter PGN-Kurse mit automatischer Level-Erkennung."),
+            btn_course_assistant,
+            is_last=True
+        ))
         layout.addWidget(g_imp)
 
         g_exp = QGroupBox(tr_widget("repo_settings.export_management_title", "📤 Export & Management"))
         v_exp = QVBoxLayout(g_exp)
-        h_exp = QHBoxLayout()
+        v_exp.setSpacing(0)
+
+        w_exp_btns = QWidget()
+        h_exp = QHBoxLayout(w_exp_btns)
+        h_exp.setContentsMargins(0, 0, 0, 0)
+        h_exp.setSpacing(scale(8))
         btn_export = QPushButton(tr_widget("repo_settings.btn_export_simple", "📤 Export (PGN/DB)"))
         btn_export.clicked.connect(self.export_repertoire_dialog)
         btn_copy = QPushButton(tr_widget("repo_settings.btn_copy_course", "👯 Gesamten Kurs kopieren"))
         btn_copy.clicked.connect(self.copy_active_course)
         h_exp.addWidget(btn_export); h_exp.addWidget(btn_copy)
-        v_exp.addLayout(h_exp)
+        v_exp.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_export_row", "Repertoire exportieren oder duplizieren"),
+            tr_ui("repo_settings.lbl_export_sub", "Exportiert das Repertoire als PGN/Datenbank oder erstellt eine lokale Kopie."),
+            w_exp_btns,
+            is_last=False
+        ))
 
         btn_share = QPushButton(tr_widget("repo_settings.btn_prepare_share", "🚀 Gesamter Kurs für Teilen vorbereiten"))
-        btn_share.setProperty("class", "Primary")
         btn_share.clicked.connect(self.prepare_course_share)
-        v_exp.addWidget(btn_share)
+        v_exp.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_share_row", "Kurs-Paket zum Teilen erstellen"),
+            tr_ui("repo_settings.lbl_share_sub", "Exportiert alle Level als separate PGN-Dateien in das Kursverzeichnis."),
+            btn_share,
+            is_last=True
+        ))
         layout.addWidget(g_exp)
 
         layout.addStretch()
@@ -4401,20 +4967,16 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_creator_backups(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(16))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
 
-        lbl_title = QLabel(tr_ui("repo_settings.backups_title", "⏮️ Repertoire-Backups & Wiederherstellung"))
-        lbl_title.setStyleSheet(f"font-size: {scale(18)}px; font-weight: 800; color: #111111;")
-        layout.addWidget(lbl_title)
-
-        lbl_sub = QLabel(tr_ui("repo_settings.backups_sub", "Automatische und manuelle Sicherungspunkte deines Repertoires inklusive aller Partien, Kommentare und PGN-Ressourcen (Typical Ideas, Model Games, Tactics)."))
-        lbl_sub.setWordWrap(True)
-        lbl_sub.setStyleSheet(f"color: #666; font-size: {scale(13)}px;")
-        layout.addWidget(lbl_sub)
+        layout.addWidget(self._make_page_header(
+            tr_ui("repo_settings.backups_title", "Repertoire-Backups & Wiederherstellung"),
+            tr_ui("repo_settings.backups_sub", "Automatische und manuelle Sicherungspunkte deines Repertoires inklusive aller Partien, Kommentare und PGN-Ressourcen."),
+            tr_ui("settings.badge_cr_backups", "🛠️ Creator · Backups")
+        ))
 
         h_bar = QHBoxLayout()
         btn_now = QPushButton(tr_widget("repo_settings.btn_create_backup_now", "📸 Manuelles Backup jetzt erstellen"))
-        btn_now.setProperty("class", "Primary")
         btn_now.clicked.connect(self.create_manual_backup)
         h_bar.addWidget(btn_now); h_bar.addStretch()
         layout.addLayout(h_bar)
@@ -4436,11 +4998,6 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_backups.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.tbl_backups.setColumnWidth(0, scale(155))
         self.tbl_backups.setColumnWidth(3, scale(180))
-        self.tbl_backups.setStyleSheet(f"""
-            QTableWidget {{ background-color: white; border-radius: {scale(8)}px; border: 1px solid rgba(0,0,0,0.1); }}
-            QTableWidget::item {{ padding: {scale(6)}px {scale(8)}px; }}
-            QHeaderView::section {{ font-size: {scale(13)}px; font-weight: 700; padding: {scale(4)}px; }}
-        """)
         layout.addWidget(self.tbl_backups)
 
     def refresh_backups_list(self):
@@ -4564,50 +5121,82 @@ class UnifiedSettingsDialog(QDialog):
         scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
 
         content = QWidget()
-        content.setStyleSheet("background: transparent;")
         layout = QVBoxLayout(content)
         layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("settings.page_cr_tools_title", "Verschiedene Tools & Level-Optimierung"),
+            tr_ui("settings.page_cr_tools_sub", "Bereinige Kommentare, stufe wichtige Züge intelligent hoch oder bereinige seltene Nebenvarianten."),
+            tr_ui("settings.badge_cr_tools", "🛠️ Creator · Werkzeuge")
+        ))
 
         # 🧹 Comments Cleaning & Translation
         g_clean = QGroupBox(tr_widget("repo_settings.tools_comments_title", "🧹 Kommentare bereinigen & übersetzen"))
         v_clean = QVBoxLayout(g_clean)
+        v_clean.setSpacing(0)
         btn_dedupe = QPushButton(tr_widget("repo_settings.btn_dedupe", "🔄 Doppelte Texte in Kommentaren entfernen"))
         btn_dedupe.clicked.connect(lambda: QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), f"{self.ensure_backend_for_active_repo().deduplicate_comments_in_repo()} Kommentare bereinigt."))
+        v_clean.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_dedupe_row", "Doppelte Kommentarblöcke entfernen"),
+            tr_ui("repo_settings.lbl_dedupe_sub", "Bereinigt mehrfach identisch eingefügte Absätze innerhalb von Zugkommentaren."),
+            btn_dedupe,
+            is_last=False
+        ))
         btn_brackets = QPushButton(tr_widget("repo_settings.btn_brackets", "❌ Text in [eckigen Klammern] löschen"))
         btn_brackets.clicked.connect(lambda: QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), f"{self.ensure_backend_for_active_repo().clean_brackets_in_repo()} Kommentare bereinigt."))
+        v_clean.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_brackets_row", "Klammer-Tags bereinigen"),
+            tr_ui("repo_settings.lbl_brackets_sub", "Entfernt technische Annotationen in [eckigen Klammern] aus allen Kommentaren."),
+            btn_brackets,
+            is_last=False
+        ))
         btn_trans = QPushButton(tr_widget("repo_settings.btn_transfer_comments", "🌐 Kommentare übertragen..."))
         btn_trans.clicked.connect(self.open_transfer_dialog)
-        v_clean.addWidget(btn_dedupe); v_clean.addWidget(btn_brackets); v_clean.addWidget(btn_trans)
+        v_clean.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_transfer_row", "Kommentare zwischen Sprachen kopieren / verschieben"),
+            tr_ui("repo_settings.lbl_transfer_sub", "Überträgt vorhandene Kommentare von einer Sprachspalte (z. B. DE) in eine andere (z. B. EN)."),
+            btn_trans,
+            is_last=True
+        ))
         layout.addWidget(g_clean)
 
         # ⚡ Card 1: Priority Leveling (Smart Promotion)
         g_prio = QGroupBox(tr_widget("repo_settings.prio_leveling_title", "⚡ Prio-Leveling (Intelligente Hochstufung)"))
         v_prio = QVBoxLayout(g_prio)
-        v_prio.setSpacing(scale(12))
+        v_prio.setSpacing(scale(10))
 
         lbl_prio_desc = QLabel(tr_ui("repo_settings.tools_prio_desc",
             "Stuft häufig gespielte Züge (Prio-Score ≥ Schwellenwert) aus tieferen Leveln automatisch in das gewählte Ziel-Level hoch. Folgevarianten werden zur Wahrung der Konsistenz angepasst."))
         lbl_prio_desc.setWordWrap(True)
-        lbl_prio_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(13)}px;")
+        lbl_prio_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(12)}px;")
         v_prio.addWidget(lbl_prio_desc)
 
-        f_prio = QFormLayout()
-        f_prio.setSpacing(scale(10))
         self.spin_prio_threshold = NoWheelSpinBox()
         self.spin_prio_threshold.setRange(1, 100)
         self.spin_prio_threshold.setValue(10)
         self.spin_prio_threshold.setSuffix(" %")
+        self.spin_prio_threshold.setMinimumWidth(scale(120))
+        v_prio.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio ≥ X%):"),
+            tr_ui("repo_settings.prio_threshold_sub", "Minimale relative Zug-Popularität für die automatische Hochstufung."),
+            self.spin_prio_threshold,
+            is_last=False
+        ))
+
         self.combo_prio_target = NoWheelComboBox()
-        f_prio.addRow(tr_ui("repo_settings.prio_threshold_label", "Schwellenwert (Prio ≥ X%):"), self.spin_prio_threshold)
-        f_prio.addRow(tr_ui("repo_settings.target_level_label", "Ziel-Level:"), self.combo_prio_target)
-        v_prio.addLayout(f_prio)
+        self.combo_prio_target.setMinimumWidth(scale(200))
+        v_prio.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.target_level_label", "Ziel-Level:"),
+            tr_ui("repo_settings.target_level_sub", "Qualifizierte Züge aus höheren Level-Nummern werden hierhin hochgestuft."),
+            self.combo_prio_target,
+            is_last=False
+        ))
 
         h_prio = QHBoxLayout()
         btn_p_prev = AutoAdjustButton(tr_widget("repo_settings.btn_prio_preview", "🔍 Vorschau"))
         btn_p_prev.clicked.connect(self._preview_prio_level_impact)
         btn_p_app = AutoAdjustButton(tr_widget("repo_settings.btn_prio_apply", "🚀 Level anpassen"))
-        btn_p_app.setProperty("class", "Primary")
         btn_p_app.clicked.connect(self._apply_prio_level_adjustment)
         h_prio.addWidget(btn_p_prev)
         h_prio.addWidget(btn_p_app)
@@ -4617,12 +5206,12 @@ class UnifiedSettingsDialog(QDialog):
         # 🏗️ Card 2: Bulk Level Assignment (Assign All Moves)
         g_glob = QGroupBox(tr_widget("repo_settings.global_leveling_title", "🏗️ Globale Zuweisung (Alle Züge)"))
         v_glob = QVBoxLayout(g_glob)
-        v_glob.setSpacing(scale(12))
+        v_glob.setSpacing(scale(10))
 
         lbl_glob_desc = QLabel(tr_ui("repo_settings.global_leveling_desc",
             "Weist ausnahmslos allen Zügen dieses Repertoires ein einheitliches Level zu. Ideal zum Verflachen oder Neuaufbau der Level-Struktur vor einer Reorganisation."))
         lbl_glob_desc.setWordWrap(True)
-        lbl_glob_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(13)}px;")
+        lbl_glob_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(12)}px;")
         v_glob.addWidget(lbl_glob_desc)
 
         # Warning banner
@@ -4640,15 +5229,18 @@ class UnifiedSettingsDialog(QDialog):
         lbl_banner = QLabel(tr_ui("repo_settings.global_leveling_warning_banner",
             "⚠️ Vorsicht: Diese Aktion überschreibt die Level-Zuordnung aller Züge im aktuellen Repertoire."))
         lbl_banner.setWordWrap(True)
-        lbl_banner.setStyleSheet("color: #7b4700; font-size: 13px; font-weight: 500;")
+        lbl_banner.setStyleSheet("color: #7b4700; font-size: 12px; font-weight: 500; border: none;")
         h_banner.addWidget(lbl_banner)
         v_glob.addWidget(banner_glob)
 
-        f_glob = QFormLayout()
-        f_glob.setSpacing(scale(10))
         self.combo_global_level = NoWheelComboBox()
-        f_glob.addRow(tr_ui("repo_settings.global_target_level_label", "Ziel-Level für alle Züge:"), self.combo_global_level)
-        v_glob.addLayout(f_glob)
+        self.combo_global_level.setMinimumWidth(scale(200))
+        v_glob.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.global_target_level_label", "Ziel-Level für alle Züge:"),
+            tr_ui("repo_settings.global_target_level_sub", "Sämtliche Züge im Repertoire erhalten dieses Level."),
+            self.combo_global_level,
+            is_last=False
+        ))
 
         h_glob = QHBoxLayout()
         btn_glob_prev = AutoAdjustButton(tr_widget("repo_settings.btn_global_preview", "🔍 Vorschau"))
@@ -4666,12 +5258,24 @@ class UnifiedSettingsDialog(QDialog):
         # 🗑️ Mass Prune
         g_prune = QGroupBox(tr_widget("repo_settings.tools_prune_title", "🗑️ Massen-Löschung nach Popularität"))
         v_prune = QVBoxLayout(g_prune)
-        f_prune = QFormLayout()
+        v_prune.setSpacing(scale(10))
         self.spin_prune_threshold = NoWheelSpinBox(); self.spin_prune_threshold.setRange(1, 90); self.spin_prune_threshold.setValue(5)
+        self.spin_prune_threshold.setSuffix(" %")
+        self.spin_prune_threshold.setMinimumWidth(scale(120))
+        v_prune.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.prune_threshold_label", "Prio < X%:"),
+            tr_ui("repo_settings.prune_threshold_sub", "Züge unterhalb dieser Popularitätsschwelle werden samt Teilbaum entfernt."),
+            self.spin_prune_threshold,
+            is_last=False
+        ))
         self.combo_prune_target_level = NoWheelComboBox()
-        f_prune.addRow(tr_ui("repo_settings.prune_threshold_label", "Prio < X%:"), self.spin_prune_threshold)
-        f_prune.addRow(tr_ui("repo_settings.prune_target_level_label", "Fokus Level:"), self.combo_prune_target_level)
-        v_prune.addLayout(f_prune)
+        self.combo_prune_target_level.setMinimumWidth(scale(200))
+        v_prune.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.prune_target_level_label", "Fokus Level:"),
+            tr_ui("repo_settings.prune_target_level_sub", "Beschränkt das Löschen auf ein bestimmtes Level oder alle Level."),
+            self.combo_prune_target_level,
+            is_last=False
+        ))
 
         h_prune = QHBoxLayout()
         btn_pr_prev = AutoAdjustButton(tr_widget("repo_settings.btn_prune_preview", "🔍 Vorschau"))
@@ -4861,23 +5465,44 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_creator_diagnostics(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(20))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("repo_settings.diag_full_title", "Datenbank-Diagnose & Reparatur"),
+            tr_ui("settings.page_cr_diag_sub", "Überprüfe die Datenbankintegrität deines Kurses, berechne ECO-Variantennamen neu und bereinige verwaiste Einträge."),
+            tr_ui("settings.badge_cr_diag", "🛠️ Creator · Diagnose")
+        ))
 
         g_diag = QGroupBox(tr_widget("repo_settings.diag_full_title", "🔍 Datenbank-Diagnose & Reparatur"))
         v_diag = QVBoxLayout(g_diag)
-        v_diag.setSpacing(scale(12))
+        v_diag.setSpacing(0)
 
         btn_run_diag = QPushButton(tr_widget("repo_settings.btn_run_full_diag", "🔎 Datenbank-Diagnose & Reparatur ausführen"))
         btn_run_diag.clicked.connect(lambda: (DiagnosticDialog(self.ensure_backend_for_active_repo(), self).exec(), self.refresh_creator_info()))
-        v_diag.addWidget(btn_run_diag)
+        v_diag.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_diag_run_row", "Vollständige Datenbank-Diagnose"),
+            tr_ui("repo_settings.lbl_diag_run_sub", "Prüft Zugbaum, Zyklen, verwaiste Knoten und repariert Inkonsistenzen interaktiv."),
+            btn_run_diag,
+            is_last=False
+        ))
 
         btn_var_names = QPushButton(tr_widget("repo_settings.btn_recalc_var_names", "🏷️ Variantennamen neu berechnen"))
         btn_var_names.clicked.connect(lambda: (self.ensure_backend_for_active_repo().reset_and_repair_variation_names(), QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), "Variantennamen neu berechnet.")))
-        v_diag.addWidget(btn_var_names)
+        v_diag.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_diag_varnames_row", "ECO-Eröffnungsnamen aktualisieren"),
+            tr_ui("repo_settings.lbl_diag_varnames_sub", "Ordnet allen Varianten im Repertoire die passenden ECO-Eröffnungsnamen neu zu."),
+            btn_var_names,
+            is_last=False
+        ))
 
         btn_orphans = QPushButton(tr_widget("repo_settings.btn_clean_orphans", "🧹 Verwaiste Lichess-Daten bereinigen"))
         btn_orphans.clicked.connect(lambda: QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), f"{self.ensure_backend_for_active_repo().cleanup_orphaned_lichess_data()} verwaiste Einträge gelöscht."))
-        v_diag.addWidget(btn_orphans)
+        v_diag.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_diag_orphans_row", "Verwaiste Lichess-Cache-Einträge bereinigen"),
+            tr_ui("repo_settings.lbl_diag_orphans_sub", "Entfernt gespeicherte Lichess-Statistiken für Stellungen, die nicht mehr im Kurs enthalten sind."),
+            btn_orphans,
+            is_last=True
+        ))
 
         layout.addWidget(g_diag)
         layout.addStretch()
@@ -4887,7 +5512,35 @@ class UnifiedSettingsDialog(QDialog):
     def init_page_creator_maintenance(self, page):
         layout = QVBoxLayout(page)
         layout.setSpacing(scale(16))
-        layout.setContentsMargins(scale(24), scale(20), scale(24), scale(20))
+        layout.setContentsMargins(scale(28), scale(22), scale(28), scale(24))
+
+        layout.addWidget(self._make_page_header(
+            tr_ui("repo_settings.maintenance_center_title", "Wartungs-Center (Stapelverarbeitung)"),
+            tr_ui("settings.page_cr_maint_sub", "Führe Engine-Scans, Lichess-Imports und Datenbank-Wartungen für mehrere Repertoires gleichzeitig durch."),
+            tr_ui("settings.badge_cr_maint", "🛠️ Creator · Batch-Wartung")
+        ))
+
+        # Hub Banner Card
+        card_hub = QFrame()
+        card_hub.setStyleSheet(f"""
+            QFrame {{
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(8)}px;
+                padding: {scale(12)}px;
+            }}
+        """)
+        h_hub = QHBoxLayout(card_hub)
+        lbl_hub = QLabel(tr_ui("repo_settings.hub_maintenance_text", "<b>⚡ Batch-Wartung im Hintergrund:</b><br><span style='color: #64748b; font-size: 11px;'>Wartungsaufgaben können im neuen Aufgaben-Zentrum gestartet werden und laufen ungestört weiter, auch wenn du die Einstellungen schließt.</span>"))
+        lbl_hub.setWordWrap(True)
+        lbl_hub.setStyleSheet("border: none; background: transparent;")
+        h_hub.addWidget(lbl_hub, 1)
+
+        btn_open_hub = QPushButton(tr_ui("repo_settings.btn_open_task_hub", "⚡ Aufgaben-Zentrum öffnen"))
+        btn_open_hub.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn_open_hub.clicked.connect(self.open_task_center)
+        h_hub.addWidget(btn_open_hub)
+        layout.addWidget(card_hub)
 
         g_main = QGroupBox(tr_widget("repo_settings.maintenance_center_title", "🚜 Wartungs-Center (Stapelverarbeitung)"))
         v_main = QVBoxLayout(g_main)

@@ -21,23 +21,28 @@ class TreeNavigationService:
         """
         if not self.repo_session: return []
 
-        # Optional: build the set of valid move IDs for the variation to boost them in the query
-        v_ids_sql = ""
+        params: Dict[str, Any] = {"move_id": move_id}
         if variation_name:
-            # We use a subquery to get all move IDs belonging to the variation
-            # This is slightly expensive but ensures the path stays inside the variation
-            v_ids_query = text("""
-                SELECT m.id FROM moves m
-                JOIN positions p ON m.from_position_id = p.id
-                WHERE p.variation_1 = :v OR p.variation_2 = :v OR p.variation_3 = :v
-                   OR p.cached_v1 = :v OR p.cached_v2 = :v OR p.cached_v3 = :v
-            """)
-            try:
-                v_res = self.repo_session.execute(v_ids_query, {"v": variation_name}).fetchall()
-                v_ids = [r[0] for r in v_res]
-                if v_ids:
-                    v_ids_sql = f"CASE WHEN id IN ({','.join(map(str, v_ids))}) THEN 1 ELSE 0 END DESC,"
-            except: pass
+            params["v"] = variation_name
+            best_parent_subquery = """
+                SELECT m2.id FROM moves m2
+                JOIN positions p2 ON m2.from_position_id = p2.id
+                WHERE m2.to_position_id = a.from_id
+                ORDER BY
+                    CASE WHEN (
+                        p2.variation_1 = :v OR p2.variation_2 = :v OR p2.variation_3 = :v
+                        OR p2.cached_v1 = :v OR p2.cached_v2 = :v OR p2.cached_v3 = :v
+                    ) THEN 1 ELSE 0 END DESC,
+                    m2.priority_score DESC
+                LIMIT 1
+            """
+        else:
+            best_parent_subquery = """
+                SELECT m2.id FROM moves m2
+                WHERE m2.to_position_id = a.from_id
+                ORDER BY m2.priority_score DESC
+                LIMIT 1
+            """
 
         # Recursive CTE to find all ancestor moves
         # We start from move_id and work backwards
@@ -50,12 +55,7 @@ class TreeNavigationService:
                 SELECT m.id, m.from_position_id, m.to_position_id, m.uci, m.san, a.level + 1, m.nag
                 FROM moves m
                 JOIN ancestors a ON m.to_position_id = a.from_id
-                WHERE m.id = (
-                    SELECT id FROM moves 
-                    WHERE to_position_id = a.from_id 
-                    ORDER BY {v_ids_sql} priority_score DESC 
-                    LIMIT 1
-                )
+                WHERE m.id = ({best_parent_subquery})
                 LIMIT 50 -- Safety limit for depth
             )
             SELECT a.*, p.fen, p.comment
@@ -65,7 +65,7 @@ class TreeNavigationService:
         """)
         
         try:
-            results = self.repo_session.execute(query, {"move_id": move_id}).fetchall()
+            results = self.repo_session.execute(query, params).fetchall()
             history = []
             for r in results:
                 history.append({

@@ -455,40 +455,21 @@ class TestRepoSettingsAnalysisPage:
         assert hasattr(settings_dialog, "pb_eng")
         assert hasattr(settings_dialog, "pb_lich")
 
-    def test_engine_scan_toggle_start_and_stop(self, settings_dialog, monkeypatch, tmp_path):
-        """Start-Button wird beim Starten zum Stopp-Button und bricht beim erneuten Klick ab."""
-        fake_engine = tmp_path / "stockfish.exe"
-        fake_engine.write_text("fake binary")
-        settings_dialog.txt_engine_path.setText(str(fake_engine))
+    def test_task_center_launchpad_buttons_open_tabs(self, settings_dialog, monkeypatch):
+        """Launchpad-Buttons öffnen das Task-Center auf dem jeweiligen Tab (0, 1, 2)."""
+        opened_tabs = []
+        monkeypatch.setattr(settings_dialog, "open_task_center", lambda initial_tab=None: opened_tabs.append(initial_tab))
 
-        # Mock AnalysisThread.start so it stays running
-        class DummyWorker:
-            def __init__(self):
-                self._running = True
-                self.cancelled = False
-                class Signal:
-                    def connect(self, fn): pass
-                self.progress_signal = Signal()
-                self.finished_signal = Signal()
-            def isRunning(self):
-                return self._running
-            def start(self):
-                pass
-            def cancel(self):
-                self.cancelled = True
-                self._running = False
+        assert hasattr(settings_dialog, "btn_open_task_single")
+        assert hasattr(settings_dialog, "btn_open_task_batch")
+        assert hasattr(settings_dialog, "btn_open_task_queue")
 
-        dummy = DummyWorker()
-        monkeypatch.setattr("opening_fenix.gui.dialogs.repo_settings_dialog.AnalysisThread", lambda *args, **kwargs: dummy)
-
-        # 1. Start scan
+        settings_dialog.btn_open_task_single.click()
+        settings_dialog.btn_open_task_batch.click()
+        settings_dialog.btn_open_task_queue.click()
         settings_dialog.start_analysis()
-        assert "stoppen" in settings_dialog.btn_start_eng.text().lower() or "stop" in settings_dialog.btn_start_eng.text().lower()
-        assert settings_dialog.w_eng == dummy
 
-        # 2. Click again to stop scan
-        settings_dialog.start_analysis()
-        assert dummy.cancelled is True
+        assert opened_tabs == [0, 1, 2, 0]
 
     def test_delete_lichess_button_shows_current_elo(self, settings_dialog):
         """Button 'Daten für diese Elo löschen' zeigt den aktuellen Elo-Namen an."""

@@ -24,15 +24,23 @@ class RepertoireNavigator:
         forward_moves_cache = cache_data['forward_moves_cache']
         move_parent_cache = cache_data['move_parent_cache']
 
-        # 1. Find all positions explicitly named (V1, V2, or V3)
-        roots = self.repertoire_manager.repo_session.query(Position.id).filter(
-            or_(
-                Position.variation_1 == variation_name, 
-                Position.variation_2 == variation_name,
-                Position.variation_3 == variation_name
-            )
-        ).all()
-        root_ids = {r.id for r in roots}
+        # 1. Find all positions explicitly named (V1, V2, or V3) using in-memory pos_cache when populated
+        if pos_cache:
+            root_ids = {
+                p.id for p in pos_cache.values()
+                if p.variation_1 == variation_name
+                or p.variation_2 == variation_name
+                or p.variation_3 == variation_name
+            }
+        else:
+            roots = self.repertoire_manager.repo_session.query(Position.id).filter(
+                or_(
+                    Position.variation_1 == variation_name, 
+                    Position.variation_2 == variation_name,
+                    Position.variation_3 == variation_name
+                )
+            ).all()
+            root_ids = {r.id for r in roots}
 
         # 2. Find all lead-up moves (to reach the variation)
         queue = deque(root_ids)

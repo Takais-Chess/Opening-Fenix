@@ -449,6 +449,17 @@ def detect_islands(repo_name: str) -> Tuple[bool, str]:
         user_turn_char = get_meta(session, "color", "w")
         dead_end_user_turns = []
 
+        # Pre-fetch move graph and repertoire move IDs in bulk to avoid N+1 queries during BFS
+        all_moves_rows = session.query(Move.id, Move.from_position_id, Move.to_position_id).all()
+        rep_move_ids = {rm_mid for (rm_mid,) in session.query(RepertoireMove.move_id).all()}
+
+        outgoing_by_pos = {}
+        user_rep_by_pos = {}
+        for m_id, from_id, to_id in all_moves_rows:
+            outgoing_by_pos.setdefault(from_id, []).append(to_id)
+            if m_id in rep_move_ids:
+                user_rep_by_pos.setdefault(from_id, []).append(to_id)
+
         while queue:
             pos_id = queue.popleft()
             reachable_pos_ids.add(pos_id)
@@ -457,23 +468,19 @@ def detect_islands(repo_name: str) -> Tuple[bool, str]:
             is_user_turn = fen.split(" ")[1] == user_turn_char
 
             if is_user_turn:
-                user_repertoire_moves = session.query(Move).join(RepertoireMove).filter(
-                    Move.from_position_id == pos_id
-                ).all()
-
-                if user_repertoire_moves:
-                    for user_move in user_repertoire_moves:
-                        if user_move.to_position_id and user_move.to_position_id not in visited_bfs:
-                            visited_bfs.add(user_move.to_position_id)
-                            queue.append(user_move.to_position_id)
+                user_to_ids = user_rep_by_pos.get(pos_id)
+                if user_to_ids:
+                    for to_pos_id in user_to_ids:
+                        if to_pos_id and to_pos_id not in visited_bfs:
+                            visited_bfs.add(to_pos_id)
+                            queue.append(to_pos_id)
                 else:
                     dead_end_user_turns.append(pos_id)
             else:
-                outgoing_moves = session.query(Move).filter_by(from_position_id=pos_id).all()
-                for move in outgoing_moves:
-                    if move.to_position_id and move.to_position_id not in visited_bfs:
-                        visited_bfs.add(move.to_position_id)
-                        queue.append(move.to_position_id)
+                for to_pos_id in outgoing_by_pos.get(pos_id, ()):
+                    if to_pos_id and to_pos_id not in visited_bfs:
+                        visited_bfs.add(to_pos_id)
+                        queue.append(to_pos_id)
 
         unreachable_ids = all_pos_ids - reachable_pos_ids
 

@@ -12,7 +12,8 @@ def calculate_repertoire_statistics(
     repo_name: str, 
     is_test: Optional[bool] = None, 
     elo_range: Optional[str] = None,
-    profile_name: Optional[str] = None
+    profile_name: Optional[str] = None,
+    selected_level: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     Computes comprehensive statistics for a repertoire:
@@ -24,7 +25,7 @@ def calculate_repertoire_statistics(
     - 1-step opponent coverage curve (Move 1, Move 2, Move 3...)
     """
     db_path = get_repertoire_db_path(repo_name, is_test)
-    prof_data = get_profile_box_statistics(repo_name, profile_name, is_test) if profile_name else None
+    prof_data = get_profile_box_statistics(repo_name, profile_name, is_test, selected_level=selected_level) if profile_name else None
     if not os.path.exists(db_path):
         return _empty_stats_result(repo_name, profile_stats=prof_data)
 

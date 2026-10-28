@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint, Float, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, UniqueConstraint, Float, Boolean, Index
 from sqlalchemy.orm import declarative_base, relationship
 import datetime
 
@@ -28,7 +28,7 @@ class Position(Base):
     cached_v3 = Column(String, nullable=True, index=True)
     
     # Analysis
-    analysis_depth = Column(Integer, nullable=True)
+    analysis_depth = Column(Integer, nullable=True, index=True)
     good_moves = Column(String, nullable=True) 
     
     # Metrics
@@ -107,7 +107,10 @@ class TrainingData(UserBase):
     streak = Column(Integer, default=0)
     last_review = Column(DateTime, nullable=True)
     
-    __table_args__ = (UniqueConstraint('repertoire_name', 'fen', 'move_uci', name='_user_rep_move_uc'),)
+    __table_args__ = (
+        UniqueConstraint('repertoire_name', 'fen', 'move_uci', name='_user_rep_move_uc'),
+        Index('ix_training_data_repo_due', 'repertoire_name', 'next_due'),
+    )
 
 class UserRepertoireSettings(UserBase):
     """

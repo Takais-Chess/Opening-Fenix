@@ -352,21 +352,21 @@ def test_statistics_dialog_ui_profile_switching(qtbot, mock_user_dir, sample_rep
     dlg = RepertoireStatisticsDialog(repo_name=sample_repertoire, profile_name="UserA")
     qtbot.addWidget(dlg)
 
-    # Initially UserA is selected: Box 2 should have 1, Box 7 should have 0
+    # Initially UserA is selected: wait for async worker to populate Box 2 = 1, Box 7 = 0
     _, lbl_cnt_2, _, _ = dlg.box_tile_widgets[2]
     _, lbl_cnt_7, _, _ = dlg.box_tile_widgets[7]
-    assert lbl_cnt_2.text() == "1"
-    assert lbl_cnt_7.text() == "0"
+    qtbot.waitUntil(lambda: lbl_cnt_2.text() == "1" and lbl_cnt_7.text() == "0", timeout=3000)
 
     # Switch profile to UserB in dropdown
     dlg.combo_profile.setCurrentText("UserB")
     assert dlg.selected_profile == "UserB"
 
-    # After switching, Box 2 should have 0, Box 7 should have 1
-    assert lbl_cnt_2.text() == "0"
-    assert lbl_cnt_7.text() == "1"
+    # After switching, wait for async worker to update Box 2 = 0, Box 7 = 1
+    qtbot.waitUntil(lambda: lbl_cnt_2.text() == "0" and lbl_cnt_7.text() == "1", timeout=3000)
 
     if dlg.worker:
         dlg.worker.wait(2000)
+    if dlg.profile_worker:
+        dlg.profile_worker.wait(2000)
     dlg.close()
 

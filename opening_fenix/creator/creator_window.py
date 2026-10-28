@@ -508,33 +508,63 @@ class CreatorBackend:
 
     def is_branch_fully_reviewed(self, pos_id, session_start):
         """
-        Uses a Recursive CTE to check if a position and all its reachable
-        repertoire descendants have been reviewed in the current session.
-        Performance optimization: Returns True/False efficiently.
+        Checks if a position and all its reachable repertoire descendants have been
+        reviewed in the current session using a cached graph and memoized lookup.
+        Automatically invalidated via clear_cache() when positions or moves change.
         """
-        if not self.session or not session_start: return False
-        
-        # SQLite Recursive CTE to find all descendant positions in the active repertoire
-        # and check if any of them have last_overhaul_review < session_start OR NULL.
-        sql = text("""
-            WITH RECURSIVE descendants(id) AS (
-                SELECT :pos_id
-                UNION
-                SELECT m.to_position_id
-                FROM moves m
-                INNER JOIN descendants d ON m.from_position_id = d.id
-                INNER JOIN repertoire_moves rm ON m.id = rm.move_id
-                WHERE rm.is_active = 1
-            )
-            SELECT COUNT(*)
-            FROM descendants d
-            LEFT JOIN positions p ON d.id = p.id
-            WHERE p.last_overhaul_review IS NULL OR p.last_overhaul_review < :session_start
-        """)
-        
+        if not self.session or not session_start or not pos_id:
+            return False
+
+        session_iso = session_start.isoformat() if hasattr(session_start, "isoformat") else str(session_start)
+        cache_key = ("branch_reviewed", pos_id, session_iso)
+        if cache_key in self._ui_cache:
+            return self._ui_cache[cache_key]
+
         try:
-            result = self.session.execute(sql, {"pos_id": pos_id, "session_start": session_start.isoformat()}).scalar()
-            return result == 0
+            graph_key = ("overhaul_review_graph", session_iso)
+            if graph_key not in self._ui_cache:
+                unreviewed_rows = self.session.execute(
+                    text("SELECT id FROM positions WHERE last_overhaul_review IS NULL OR last_overhaul_review < :session_start"),
+                    {"session_start": session_iso}
+                ).fetchall()
+                unreviewed_ids = {r[0] for r in unreviewed_rows}
+
+                edge_rows = self.session.execute(
+                    text("""
+                        SELECT m.from_position_id, m.to_position_id
+                        FROM moves m
+                        INNER JOIN repertoire_moves rm ON m.id = rm.move_id
+                        WHERE rm.is_active = 1
+                    """)
+                ).fetchall()
+                adj = {}
+                for from_id, to_id in edge_rows:
+                    if to_id:
+                        adj.setdefault(from_id, []).append(to_id)
+
+                self._ui_cache[graph_key] = (unreviewed_ids, adj)
+            else:
+                unreviewed_ids, adj = self._ui_cache[graph_key]
+
+            if pos_id in unreviewed_ids:
+                self._ui_cache[cache_key] = False
+                return False
+
+            queue = collections.deque([pos_id])
+            visited = {pos_id}
+            is_reviewed = True
+            while queue:
+                curr = queue.popleft()
+                if curr in unreviewed_ids:
+                    is_reviewed = False
+                    break
+                for nxt in adj.get(curr, ()):
+                    if nxt not in visited:
+                        visited.add(nxt)
+                        queue.append(nxt)
+
+            self._ui_cache[cache_key] = is_reviewed
+            return is_reviewed
         except Exception as e:
             from opening_fenix.core.logger import logger
             logger.error(f"Error in is_branch_fully_reviewed: {e}")
@@ -4177,6 +4207,37 @@ class CreatorWindow(QMainWindow):
 
         l.addWidget(self.main_splitter)
 
+        # Floating Background Task Progress Indicator
+        from opening_fenix.gui.widgets.task_progress_indicator import TaskProgressIndicator
+        from opening_fenix.core.services.task_manager_service import get_task_manager
+        self.task_indicator = TaskProgressIndicator(self)
+        self.task_indicator.clicked.connect(self.open_task_center)
+        get_task_manager().task_finished.connect(self._on_background_task_finished)
+
+    def open_task_center(self, initial_tab=None):
+        from opening_fenix.gui.dialogs.task_center_dialog import TaskCenterDialog
+        from PyQt6 import sip
+        active_repo = getattr(self, 'active_repo_name', None) or (self.backend.active_repo_name if getattr(self, 'backend', None) else None)
+        if not hasattr(self, 'task_center_dialog') or not self.task_center_dialog or sip.isdeleted(self.task_center_dialog):
+            self.task_center_dialog = TaskCenterDialog(None, active_repo_name=active_repo)
+        else:
+            if active_repo and hasattr(self.task_center_dialog, 'set_active_repertoire'):
+                self.task_center_dialog.set_active_repertoire(active_repo)
+        if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
+            self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
+        self.task_center_dialog.show()
+        self.task_center_dialog.raise_()
+        self.task_center_dialog.activateWindow()
+
+    def _on_background_task_finished(self, job, success, message):
+        if success and getattr(self, 'active_repo_name', None) == job.repo_name:
+            if hasattr(self, 'update_ui_from_fen'):
+                self.update_ui_from_fen()
+            if hasattr(self, 'update_structure_tree'):
+                self.update_structure_tree()
+            if hasattr(self, 'refresh_creator_info'):
+                self.refresh_creator_info()
+
     def _on_splitter_moved(self, pos=None, index=None):
         self._auto_size_board = False
         if hasattr(self, 'main_splitter') and self.main_splitter:
@@ -6012,6 +6073,12 @@ class CreatorWindow(QMainWindow):
         """Switches the active repertoire and refreshes all UI components."""
         if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog:
             self.repo_settings_dialog.close()
+        
+        # Keep background TaskCenterDialog alive and in sync if open
+        from PyQt6 import sip
+        if hasattr(self, 'task_center_dialog') and self.task_center_dialog and not sip.isdeleted(self.task_center_dialog):
+            if repo_name and hasattr(self.task_center_dialog, 'set_active_repertoire'):
+                self.task_center_dialog.set_active_repertoire(repo_name)
         
         if training_manager:
             self.training_manager = training_manager
