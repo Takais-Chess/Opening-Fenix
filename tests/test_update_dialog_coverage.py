@@ -25,7 +25,8 @@ def test_update_dialog_init(qtbot, sample_release_info):
     dialog.show()
     
     assert "1.2.0" in dialog.windowTitle() or "Update" in dialog.windowTitle()
-    assert dialog.txt_notes.toPlainText() == sample_release_info["body"]
+    assert "What's New" in dialog.txt_notes.toPlainText()
+    assert "Faster Priority Calculation" in dialog.txt_notes.toPlainText()
     assert not dialog.btn_download.isHidden()
     assert not dialog.btn_snooze.isHidden()
     assert dialog.progress_container.isHidden()

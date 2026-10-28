@@ -3,7 +3,7 @@ import sys
 import subprocess
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-    QTextEdit, QProgressBar, QMenu, QWidget, QFrame, QApplication
+    QTextBrowser, QProgressBar, QMenu, QWidget, QFrame, QApplication
 )
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices, QAction, QColor
@@ -12,6 +12,7 @@ from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon
 from opening_fenix.core.translation import tr_ui, tr_widget
 from opening_fenix.core.version import APP_VERSION
+from opening_fenix.core.markdown_renderer import markdown_to_github_html
 from opening_fenix.core.services.update_service import (
     DownloaderWorker, set_snooze_period
 )
@@ -31,6 +32,7 @@ class UpdateDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle(tr_ui("update.window_title", "Opening Fenix - Update verfügbar"))
         self.setMinimumSize(scale(640), scale(520))
+        self.resize(scale(700), scale(560))
         set_consistent_icon(self)
 
         self.init_ui()
@@ -61,19 +63,20 @@ class UpdateDialog(QDialog):
         lbl_notes_hdr.setStyleSheet(f"color: {COLORS['brown_text']}; font-weight: bold; font-size: {scale(14)}px;")
         layout.addWidget(lbl_notes_hdr)
 
-        self.txt_notes = QTextEdit()
-        self.txt_notes.setReadOnly(True)
+        self.txt_notes = QTextBrowser()
+        self.txt_notes.setOpenExternalLinks(True)
         body_text = self.release_info.get("body", "").strip() or tr_ui("update.no_notes", "Keine Versionshinweise angegeben.")
-        self.txt_notes.setPlainText(body_text)
+        rendered_html = markdown_to_github_html(body_text)
+        self.txt_notes.setHtml(rendered_html)
         self.txt_notes.setStyleSheet(f"""
-            QTextEdit {{
-                background-color: {COLORS['glass_bg']};
-                border: 1px solid {COLORS['glass_border']};
+            QTextBrowser {{
+                background-color: #ffffff;
+                border: 1px solid rgba(0, 0, 0, 0.15);
                 border-radius: {scale(10)}px;
-                padding: {scale(12)}px;
-                color: {COLORS['brown_text']};
-                font-size: {scale(13)}px;
-                line-height: 1.4;
+                padding: {scale(10)}px;
+                color: #1f2328;
+                selection-background-color: #b4d5fe;
+                selection-color: #1f2328;
             }}
         """)
         layout.addWidget(self.txt_notes, 1)
