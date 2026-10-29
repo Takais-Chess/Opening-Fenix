@@ -1390,3 +1390,59 @@ def release_repertoire_locks(repo_name: str, checkpoint_wal: bool = False) -> No
         pass
     gc.collect()
     time.sleep(0.15)
+
+
+def get_ssl_context(verify: bool = True):
+    """
+    Creates a robust SSLContext for HTTPS requests.
+    - If verify=False, returns an unverified context.
+    - If verify=True, loads certifi CA bundle and merges all Windows Root and CA store certificates.
+    """
+    import ssl
+    if not verify and hasattr(ssl, "_create_unverified_context"):
+        return ssl._create_unverified_context()
+
+    try:
+        try:
+            import certifi
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        except Exception:
+            ctx = ssl.create_default_context()
+
+        if sys.platform == "win32" and hasattr(ssl, "enum_certificates"):
+            for store_name in ("ROOT", "CA"):
+                try:
+                    for cert, encoding, trust in ssl.enum_certificates(store_name):
+                        if encoding == "x509_asn":
+                            ctx.load_verify_locations(cadata=cert)
+                except Exception:
+                    pass
+        return ctx
+    except Exception:
+        if hasattr(ssl, "_create_unverified_context"):
+            return ssl._create_unverified_context()
+        return ssl.create_default_context()
+
+
+def safe_urlopen(req, timeout: int = 15):
+    """
+    Executes urllib.request.urlopen with robust SSL handling:
+    1. Tries first using an enhanced SSLContext (certifi + Windows certificate store).
+    2. If an SSL Certificate Verify Failed error occurs (e.g. strict corporate proxy,
+       antivirus SSL inspection, or outdated root certificates), falls back to an
+       unverified context so network operations (updates, downloads) continue working seamlessly.
+    """
+    import ssl
+    import urllib.request
+    import urllib.error
+
+    ctx = get_ssl_context(verify=True)
+    try:
+        return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+    except (urllib.error.URLError, ssl.SSLError, Exception) as e:
+        err_str = str(e)
+        if "CERTIFICATE_VERIFY_FAILED" in err_str or "certificate verify failed" in err_str or "SSLCertVerificationError" in err_str:
+            unverified_ctx = get_ssl_context(verify=False)
+            return urllib.request.urlopen(req, context=unverified_ctx, timeout=timeout)
+        raise
+

@@ -9,7 +9,7 @@ import urllib.error
 from typing import Optional, Tuple
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
-from opening_fenix.core.utils import get_default_user_dir
+from opening_fenix.core.utils import get_default_user_dir, safe_urlopen
 from opening_fenix.core.services.update_service import get_config_dict, save_config_dict
 from opening_fenix.core.logger import logger
 
@@ -60,7 +60,7 @@ def get_latest_stockfish_asset_url(timeout: int = 6) -> Tuple[str, str]:
             STOCKFISH_API_LATEST,
             headers={"User-Agent": "OpeningFenix-App"}
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with safe_urlopen(req, timeout=timeout) as resp:
             if resp.status == 200:
                 data = json.loads(resp.read().decode("utf-8"))
                 assets = data.get("assets", [])
@@ -124,7 +124,7 @@ class StockfishDownloaderWorker(QThread):
             temp_dir = tempfile.gettempdir()
             temp_zip_path = os.path.join(temp_dir, f"sf_download_{os.getpid()}.zip")
 
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with safe_urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
                 chunk_size = 1024 * 64

@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
 from opening_fenix.core.version import APP_VERSION
-from opening_fenix.core.utils import get_user_dir
+from opening_fenix.core.utils import get_user_dir, safe_urlopen
 from opening_fenix.core.logger import logger
 
 GITHUB_REPO = "Takais-Chess/Opening-Fenix"
@@ -200,7 +200,7 @@ class UpdateCheckWorker(QThread):
                 GITHUB_RELEASES_API,
                 headers={"User-Agent": "OpeningFenix-App"}
             )
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            with safe_urlopen(req, timeout=10) as resp:
                 if resp.status != 200:
                     self.check_error.emit(f"HTTP {resp.status}")
                     return
@@ -280,7 +280,7 @@ class DownloaderWorker(QThread):
                 self.download_url,
                 headers={"User-Agent": "OpeningFenix-App"}
             )
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with safe_urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get('Content-Length', 0))
                 downloaded = 0
                 chunk_size = 1024 * 64

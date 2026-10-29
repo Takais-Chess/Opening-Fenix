@@ -127,3 +127,41 @@ def test_localize_san():
     assert localize_san("e8=Q", "de") == "e8=D"
     assert localize_san("Kf2", "de") == "Kf2" # King stays K
     assert localize_san("Nf3", "unknown") == "Nf3"
+
+
+def test_get_ssl_context_and_safe_urlopen():
+    from opening_fenix.core.utils import get_ssl_context, safe_urlopen
+    import urllib.request
+    import urllib.error
+    from unittest.mock import MagicMock, patch
+
+    ctx_verified = get_ssl_context(verify=True)
+    assert ctx_verified is not None
+
+    ctx_unverified = get_ssl_context(verify=False)
+    assert ctx_unverified is not None
+
+    req = urllib.request.Request("https://example.com")
+
+    # 1. Normal success
+    mock_resp = MagicMock()
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_open:
+        resp = safe_urlopen(req)
+        assert resp == mock_resp
+        assert mock_open.call_count == 1
+
+    # 2. SSL error fallback to unverified
+    ssl_err = urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
+    call_count = 0
+    def side_effect(r, context=None, timeout=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise ssl_err
+        return mock_resp
+
+    with patch("urllib.request.urlopen", side_effect=side_effect):
+        resp = safe_urlopen(req)
+        assert resp == mock_resp
+        assert call_count == 2
+
