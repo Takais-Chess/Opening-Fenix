@@ -626,75 +626,11 @@ def run_lichess_import(
             if reused_count > 0:
                 logger.info(f"[Lichess Import] Reused {reused_count} positions from other courses (max age: {max_data_age_days} days).")
 
-        # Self-healing: identify positions previously saved as empty ({})
-        # where an incoming move in this repertoire actually has > 0 games in this Elo category.
-        # These were falsely skipped by earlier versions.
-        # Purge their stale empty LichessData records so they are included in positions_to_query.
-        existing_ld_rows = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
-        existing_ld_map: Dict[str, dict] = {}
-        for f_val, mjson in existing_ld_rows:
-            clean_f = " ".join(f_val.split(" ")[:4])
-            try:
-                existing_ld_map[clean_f] = json.loads(mjson)
-            except Exception:
-                existing_ld_map[clean_f] = {}
-
-        all_moves_for_heal = session.query(
-            Move.uci, Move.san, Position.fen, Move.to_position_id
-        ).join(Position, Move.from_position_id == Position.id).all()
-
-        id_to_fen_dict = dict(session.query(Position.id, Position.fen).all())
-        stale_fens_to_purge = set()
-        for uci, san, from_fen, to_pid in all_moves_for_heal:
-            to_fen = id_to_fen_dict.get(to_pid)
-            if not to_fen:
-                continue
-            to_clean = " ".join(to_fen.split(" ")[:4])
-            to_dict = existing_ld_map.get(to_clean)
-            if to_dict is not None:
-                to_games = sum(v.get('total', 0) for v in to_dict.values() if isinstance(v, dict))
-                if to_games == 0:
-                    from_clean = " ".join(from_fen.split(" ")[:4])
-                    g_count = get_move_game_count(from_clean, uci, san, existing_ld_map)
-                    if g_count is not None and g_count > 0:
-                        stale_fens_to_purge.add(to_fen)
-                        stale_fens_to_purge.add(to_clean)
-
-        if stale_fens_to_purge:
-            num_purged = session.query(LichessData).filter(
-                LichessData.elo_range == elo_category,
-                LichessData.fen.in_(stale_fens_to_purge)
-            ).delete(synchronize_session=False)
-            commit_with_retry(session)
-            logger.info(f"[Lichess Import] Self-healing: Purged {num_purged} stale empty records with valid parent games for ELO '{elo_category}'.")
-
-        existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
-        
-        # Query positions that don't have Lichess data yet
-        positions_to_query = session.query(Position).filter(
-            ~Position.fen.in_(existing_fens_query)
-        ).distinct().all()
-
-        total_pos = len(positions_to_query)
-
-        logger.info(
-            f"[Lichess Import] Started for repo '{repo_name}' (ELO: {elo_category}). "
-            f"Positions to query: {total_pos}. Starting Target RPM: {limiter.target_rpm:.0f} "
-            f"(Token present: {bool(lichess_token)})"
-        )
-
-        if not positions_to_query:
-            set_meta(session, "lichess_elo", elo_category)
-            # Invalidate coverage cache to force recalculation with new Elo if changed
-            set_meta(session, "cov_cache_count", "-1")
-            commit_with_retry(session)
-            return True, f"Alle Positionen haben bereits Lichess-Daten für ELO '{elo_category}'."
-
-        # Compute structural graph metadata for priority and BFS ordering
+        # Compute structural graph metadata for priority, self-healing and BFS ordering
         pos_depths = compute_position_bfs_depths(session)
         pos_grandparents, id_to_fen = compute_position_grandparents(session)
 
-        # Preload moves and repertoire info for fast in-memory priority estimation
+        # Preload moves and repertoire info for fast in-memory priority estimation and graph traversal
         all_moves_db = session.query(Move.id, Move.from_position_id, Move.to_position_id, Move.uci, Move.san).all()
         outgoing_moves: Dict[int, List[Move]] = {}
         incoming_moves: Dict[int, List[Move]] = {}
@@ -730,6 +666,63 @@ def run_lichess_import(
         for pid, d in pos_depths.items():
             if d <= max_d:
                 positions_by_depth[d].append(pid)
+
+        # Comprehensive Initial Self-Healing:
+        # Check all positions that currently have empty ({}) LichessData.
+        # If any of them CANNOT be skipped under the 3-ply rule (check_can_skip_position_3ply == False),
+        # it was falsely skipped by earlier versions.
+        # Purge its stale empty LichessData record so it is included in positions_to_query.
+        existing_ld_rows = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
+        existing_ld_map: Dict[str, dict] = {}
+        for f_val, mjson in existing_ld_rows:
+            clean_f = " ".join(f_val.split(" ")[:4])
+            try:
+                existing_ld_map[clean_f] = json.loads(mjson)
+            except Exception:
+                existing_ld_map[clean_f] = {}
+
+        stale_fens_to_purge = set()
+        for pid, fen in id_to_fen.items():
+            clean_f = " ".join(fen.split(" ")[:4])
+            mdict = existing_ld_map.get(clean_f)
+            if mdict is not None:
+                total_games = sum(v.get('total', 0) for v in mdict.values() if isinstance(v, dict))
+                if total_games == 0:
+                    if not check_can_skip_position_3ply(pid, incoming_moves, id_to_fen, existing_ld_map):
+                        stale_fens_to_purge.add(fen)
+                        stale_fens_to_purge.add(clean_f)
+
+        if stale_fens_to_purge:
+            num_purged = session.query(LichessData).filter(
+                LichessData.elo_range == elo_category,
+                LichessData.fen.in_(stale_fens_to_purge)
+            ).delete(synchronize_session=False)
+            commit_with_retry(session)
+            for sf in stale_fens_to_purge:
+                existing_ld_map.pop(sf, None)
+            logger.info(f"[Lichess Import] Self-healing: Purged {num_purged} stale empty records that cannot be skipped under 3-ply rule for ELO '{elo_category}'.")
+
+        existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
+        
+        # Query positions that don't have Lichess data yet
+        positions_to_query = session.query(Position).filter(
+            ~Position.fen.in_(existing_fens_query)
+        ).distinct().all()
+
+        total_pos = len(positions_to_query)
+
+        logger.info(
+            f"[Lichess Import] Started for repo '{repo_name}' (ELO: {elo_category}). "
+            f"Positions to query: {total_pos}. Starting Target RPM: {limiter.target_rpm:.0f} "
+            f"(Token present: {bool(lichess_token)})"
+        )
+
+        if not positions_to_query:
+            set_meta(session, "lichess_elo", elo_category)
+            # Invalidate coverage cache to force recalculation with new Elo if changed
+            set_meta(session, "cov_cache_count", "-1")
+            commit_with_retry(session)
+            return True, f"Alle Positionen haben bereits Lichess-Daten für ELO '{elo_category}'."
 
         fen_lichess_data: Dict[str, dict] = {}
         fen_games_count: Dict[str, int] = {}
@@ -910,26 +903,66 @@ def run_lichess_import(
                     moves_data = data.get('moves', [])
                     # Double check to prevent race condition during long network request
                     existing = session.query(LichessData).filter_by(fen=pos.fen, elo_range=elo_category).first()
-                    if not existing:
-                        if moves_data:
-                            moves_dict = {
-                                move['uci']: {
-                                    'white': move.get('white', 0),
-                                    'draws': move.get('draws', 0),
-                                    'black': move.get('black', 0),
-                                    'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
-                                } for move in moves_data if 'uci' in move
-                            }
+                    if moves_data:
+                        moves_dict = {
+                            move['uci']: {
+                                'white': move.get('white', 0),
+                                'draws': move.get('draws', 0),
+                                'black': move.get('black', 0),
+                                'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
+                            } for move in moves_data if 'uci' in move
+                        }
+                        if existing:
+                            existing.moves_json = json.dumps(moves_dict)
+                            existing.fetched_at = datetime.datetime.now()
+                        else:
                             new_data = LichessData(
                                 fen=pos.fen,
                                 elo_range=elo_category,
                                 moves_json=json.dumps(moves_dict),
                                 fetched_at=datetime.datetime.now()
                             )
-                            g_total = sum(m.get('total', 0) for m in moves_dict.values())
-                            fen_games_count[pos.fen] = g_total
-                            fen_games_count[clean_pos_fen] = g_total
-                            fen_lichess_data[clean_pos_fen] = moves_dict
+                            session.add(new_data)
+                        g_total = sum(m.get('total', 0) for m in moves_dict.values())
+                        fen_games_count[pos.fen] = g_total
+                        fen_games_count[clean_pos_fen] = g_total
+                        fen_lichess_data[clean_pos_fen] = moves_dict
+
+                        # Dynamic cascading unblocking:
+                        # If this position returned moves with games > 0, check all outgoing moves.
+                        # If any child position in the repertoire was previously marked empty ({}),
+                        # unblock it dynamically so it is queried in this same run!
+                        for out_m in outgoing_moves.get(pos.id, []):
+                            child_pid = out_m.to_position_id
+                            if not child_pid or child_pid in remaining_pos_ids:
+                                continue
+                            m_games = moves_dict.get(out_m.uci, {}).get('total', 0)
+                            if m_games > 0:
+                                child_fen = id_to_fen.get(child_pid)
+                                if child_fen:
+                                    child_clean = " ".join(child_fen.split(" ")[:4])
+                                    c_dict = fen_lichess_data.get(child_clean)
+                                    c_games = sum(v.get('total', 0) for v in c_dict.values() if isinstance(v, dict)) if c_dict is not None else -1
+                                    if c_games == 0:
+                                        session.query(LichessData).filter(
+                                            LichessData.elo_range == elo_category,
+                                            LichessData.fen.in_([child_fen, child_clean])
+                                        ).delete(synchronize_session=False)
+                                        fen_lichess_data.pop(child_clean, None)
+                                        fen_games_count.pop(child_clean, None)
+                                        fen_games_count.pop(child_fen, None)
+                                        remaining_pos_ids.add(child_pid)
+                                        total_pos += 1
+                                        c_depth = pos_depths.get(child_pid, 0)
+                                        while len(positions_by_depth) <= c_depth:
+                                            positions_by_depth.append([])
+                                        if child_pid not in positions_by_depth[c_depth]:
+                                            positions_by_depth[c_depth].append(child_pid)
+                                        max_d = max(max_d, c_depth)
+                    else:
+                        if existing:
+                            existing.moves_json = json.dumps({})
+                            existing.fetched_at = datetime.datetime.now()
                         else:
                             new_data = LichessData(
                                 fen=pos.fen,
@@ -937,18 +970,18 @@ def run_lichess_import(
                                 moves_json=json.dumps({}),
                                 fetched_at=datetime.datetime.now()
                             )
-                            fen_games_count[pos.fen] = 0
-                            fen_games_count[clean_pos_fen] = 0
-                            fen_lichess_data[clean_pos_fen] = {}
-                        session.add(new_data)
-                        try:
-                            with session.begin_nested():
-                                session.flush()
-                            new_data_points_added += 1
-                            uncommitted_items += 1
-                        except Exception:
-                            # Ignored collision (already inserted by another thread)
-                            pass
+                            session.add(new_data)
+                        fen_games_count[pos.fen] = 0
+                        fen_games_count[clean_pos_fen] = 0
+                        fen_lichess_data[clean_pos_fen] = {}
+                    try:
+                        with session.begin_nested():
+                            session.flush()
+                        new_data_points_added += 1
+                        uncommitted_items += 1
+                    except Exception:
+                        # Ignored collision (already inserted by another thread)
+                        pass
 
                 except urllib.error.HTTPError as e:
                     successful_requests_in_a_row = 0

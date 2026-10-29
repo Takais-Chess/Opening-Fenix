@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.2.7] - 2026-10-29
+
+### Fixed & Improved
+- **Lichess Dynamic Cascading Unblocking**: Fixed an issue where Lichess imports previously only unlocked falsely skipped positions 1 ply at a time due to static batch evaluation. When an import discovers a move with active games (>0), downstream repertoire positions previously marked empty (`{}`) are now dynamically purged from the database, invalidated in-memory, and immediately added into the active depth queues (`remaining_pos_ids` and `positions_by_depth`), allowing entire multi-ply variations to be queried and populated in a single import run.
+- **Deep 3-Ply Database Self-Healing**: Comprehensive pre-import sweep now identifies and cleans all legacy empty positions throughout the repertoire tree where any incoming 3-move lead-up path possesses active games, preventing stale cached results from blocking queries.
+- **Safe Lichess Data Upsert**: Fixed an issue where existing database records were not updated upon receiving valid moves from the Lichess API, ensuring moves and timestamps are reliably persisted.
+
 ## [1.2.6] - 2026-10-29
 
 ### Fixed & Improved

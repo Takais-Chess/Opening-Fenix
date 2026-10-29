@@ -358,3 +358,99 @@ def test_exact_bug_and_self_healing_scenario(mock_user_dir, sample_repertoire):
     session.close()
     db.close()
 
+
+def test_cascading_multi_ply_self_healing(mock_user_dir, sample_repertoire):
+    """
+    Verifies that when an entire variation (p1 -> p2 -> p3) was falsely saved as {}
+    by the old bug, a SINGLE run_lichess_import run dynamically unblocks and queries
+    all chained positions as moves with >0 games are discovered.
+    """
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.query(LichessData).delete()
+    session.commit()
+
+    # Chain: p0 (root) -> p1 -> p2 -> p3
+    f0 = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3" # 1.e4
+    f1 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq e6" # 1...e5
+    f2 = "rnbqkbnr/pppp1ppp/8/4p3/4PP2/8/PPPP2PP/RNBQKBNR b KQkq f3" # 2.f4
+    f3 = "rnbqkbnr/pppp1ppp/8/8/4Pp2/8/PPPP2PP/RNBQKBNR w KQkq -" # 2...exf4
+
+    p0 = Position(fen=f0)
+    p1 = Position(fen=f1)
+    p2 = Position(fen=f2)
+    p3 = Position(fen=f3)
+    session.add_all([p0, p1, p2, p3])
+    session.commit()
+
+    m1 = Move(from_position_id=p0.id, to_position_id=p1.id, uci="e7e5", san="e5")
+    m2 = Move(from_position_id=p1.id, to_position_id=p2.id, uci="f2f4", san="f4")
+    m3 = Move(from_position_id=p2.id, to_position_id=p3.id, uci="e5f4", san="exf4")
+    session.add_all([m1, m2, m3])
+    session.commit()
+
+    # Root p0 has games for e7e5 (50 games)
+    ld0 = LichessData(fen=p0.fen, elo_range="high", moves_json=json.dumps({
+        "e7e5": {"white": 20, "draws": 10, "black": 20, "total": 50}
+    }))
+    # All downstream positions p1, p2, p3 were falsely saved with {} by earlier bug
+    ld1_stale = LichessData(fen=p1.fen, elo_range="high", moves_json=json.dumps({}))
+    ld2_stale = LichessData(fen=p2.fen, elo_range="high", moves_json=json.dumps({}))
+    ld3_stale = LichessData(fen=p3.fen, elo_range="high", moves_json=json.dumps({}))
+
+    session.add_all([ld0, ld1_stale, ld2_stale, ld3_stale])
+    session.commit()
+    session.close()
+    db.close()
+
+    network_requests = []
+
+    def mock_get(url, headers):
+        unquoted = urllib.parse.unquote_plus(url)
+        network_requests.append(unquoted)
+        if f1 in unquoted:
+            return json.dumps({
+                "moves": [{"uci": "f2f4", "white": 10, "draws": 5, "black": 5}]
+            }).encode("utf-8")
+        elif f2 in unquoted:
+            return json.dumps({
+                "moves": [{"uci": "e5f4", "white": 8, "draws": 2, "black": 10}]
+            }).encode("utf-8")
+        elif f3 in unquoted:
+            return json.dumps({
+                "moves": [{"uci": "g1f3", "white": 12, "draws": 4, "black": 4}]
+            }).encode("utf-8")
+        return json.dumps({"moves": []}).encode("utf-8")
+
+    with patch("time.sleep"), \
+         patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"), \
+         patch("opening_fenix.core.services.lichess_service.LichessConnectionManager.get", side_effect=mock_get):
+
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+
+    # Verify that in a SINGLE run, ALL THREE positions p1, p2, p3 were queried and populated!
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    res1 = session.query(LichessData).filter_by(fen=p1.fen, elo_range="high").first()
+    res2 = session.query(LichessData).filter_by(fen=p2.fen, elo_range="high").first()
+    res3 = session.query(LichessData).filter_by(fen=p3.fen, elo_range="high").first()
+
+    assert res1 is not None and "f2f4" in res1.moves_json
+    assert res2 is not None and "e5f4" in res2.moves_json
+    assert res3 is not None and "g1f3" in res3.moves_json
+
+    # All three must have been requested over network
+    assert any(f1 in r for r in network_requests)
+    assert any(f2 in r for r in network_requests)
+    assert any(f3 in r for r in network_requests)
+
+    session.close()
+    db.close()
+
+
