@@ -71,7 +71,7 @@ def test_migrate_same_dir(temp_dir):
     summary = migrate_user_data(source_dir, source_dir)
     assert summary == {'repertoires': 0, 'profiles': 0, 'backups': 0}
 
-def test_ensure_user_data_seeded_respects_custom_dir(temp_dir, monkeypatch):
+def test_ensure_user_data_seeded_seeds_missing_into_custom_dir(temp_dir, monkeypatch):
     custom_dir = os.path.join(temp_dir, 'custom_dir')
     os.makedirs(os.path.join(custom_dir, 'repertoires', 'MyRepertoire'), exist_ok=True)
     with open(os.path.join(custom_dir, 'repertoires', 'MyRepertoire', 'MyRepertoire.db'), 'w') as f:
@@ -82,7 +82,11 @@ def test_ensure_user_data_seeded_respects_custom_dir(temp_dir, monkeypatch):
 
     ensure_user_data_seeded()
 
-    # Verify no other default repertoires were injected into custom_dir
+    # Verify existing repertoire was not overwritten
+    with open(os.path.join(custom_dir, 'repertoires', 'MyRepertoire', 'MyRepertoire.db'), 'r') as f:
+        assert f.read() == 'data'
+
+    # Verify bundled repertoires are also seeded even when custom_dir has repertoires
     rep_list = os.listdir(os.path.join(custom_dir, 'repertoires'))
-    assert rep_list == ['MyRepertoire']
+    assert 'MyRepertoire' in rep_list
 

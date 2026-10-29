@@ -477,42 +477,35 @@ def ensure_user_data_seeded():
             except Exception:
                 pass
 
-    has_custom_dir = bool(get_custom_data_dir())
-    custom_has_repertoires = False
-    if has_custom_dir:
-        cust_repo_dir = os.path.join(user_dir, "repertoires")
-        if os.path.exists(cust_repo_dir) and any(os.path.isdir(os.path.join(cust_repo_dir, d)) for d in os.listdir(cust_repo_dir)):
-            custom_has_repertoires = True
+    # Repertoire seeding: Any missing bundled repertoire in user_dir will be copied,
+    # but existing repertoires are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
+    # This also applies when a custom data directory is active, ensuring that deleted or new
+    # bundled repertoires can be re-installed/seeded without affecting existing user repertoires.
+    dest_folder = os.path.join(user_dir, "repertoires")
+    if not os.path.exists(dest_folder):
+        os.makedirs(dest_folder, exist_ok=True)
+        
+    for src in sources:
+        src_folder = os.path.join(src, "repertoires")
+        if os.path.exists(src_folder) and os.path.isdir(src_folder):
+            for item in os.listdir(src_folder):
+                s_path = os.path.join(src_folder, item)
+                d_path = os.path.join(dest_folder, item)
+                
+                is_ex = is_example_repertoire(item)
+                if is_pub and not is_ex:
+                    continue
+                if not is_pub and is_ex:
+                    continue
 
-    if not custom_has_repertoires:
-        # For repertoires without a custom dir: We do NOT skip based on repertoires_seeded flag.
-        # Any missing repertoire in user_dir will be copied, but existing repertoires
-        # are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
-        dest_folder = os.path.join(user_dir, "repertoires")
-        if not os.path.exists(dest_folder):
-            os.makedirs(dest_folder, exist_ok=True)
-            
-        for src in sources:
-            src_folder = os.path.join(src, "repertoires")
-            if os.path.exists(src_folder) and os.path.isdir(src_folder):
-                for item in os.listdir(src_folder):
-                    s_path = os.path.join(src_folder, item)
-                    d_path = os.path.join(dest_folder, item)
-                    
-                    is_ex = is_example_repertoire(item)
-                    if is_pub and not is_ex:
-                        continue
-                    if not is_pub and is_ex:
-                        continue
-
-                    if not os.path.exists(d_path):
-                        try:
-                            if os.path.isdir(s_path):
-                                shutil.copytree(s_path, d_path)
-                            else:
-                                shutil.copy(s_path, d_path)
-                        except Exception as e:
-                            print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
+                if not os.path.exists(d_path):
+                    try:
+                        if os.path.isdir(s_path):
+                            shutil.copytree(s_path, d_path)
+                        else:
+                            shutil.copy(s_path, d_path)
+                    except Exception as e:
+                        print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
 
     # Mark repertoires as seeded in config.json after seeding
     if not repertoires_seeded and os.path.exists(user_config):
