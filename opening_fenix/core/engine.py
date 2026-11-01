@@ -3,6 +3,7 @@ import chess.engine
 import subprocess
 import sys
 import time
+import threading
 from PyQt6.QtCore import QThread, pyqtSignal, QElapsedTimer
 from opening_fenix.core.logger import logger
 
@@ -24,6 +25,16 @@ class EngineThread(QThread):
         self.running = False
         self.is_active = False
         self.lines_cache = {} # Stores latest info for each multipv index
+        
+        # MultiPV Iteration synchronization state
+        self.current_iter_depth = 0
+        self.current_iter_lines = {}
+        self.completed_lines = {}
+        self._last_emit_time = QElapsedTimer()
+        self._last_emit_time.start()
+        
+        # Thread synchronization
+        self._lock = threading.Lock()
         
         # Performance state
         self._target_fen = None
@@ -72,32 +83,35 @@ class EngineThread(QThread):
                 pass
             self.engine = None
 
-    def set_position(self, fen):
-        if self._target_fen == fen:
-            return
-            
-        self._target_fen = fen
-        self.board = chess.Board(fen)
+    def set_position(self, fen, force_restart=False):
+        with self._lock:
+            if self._target_fen == fen and not force_restart:
+                return
+                
+            self._target_fen = fen
+            self.board = chess.Board(fen)
 
     def toggle_analysis(self, active):
-        if self.is_active == active:
-            return
-            
-        self.is_active = active
-        if active and self._target_fen:
-            self.board = chess.Board(self._target_fen)
+        with self._lock:
+            if self.is_active == active:
+                return
+                
+            self.is_active = active
+            if active and self._target_fen:
+                self.board = chess.Board(self._target_fen)
 
     def update_config(self, threads, depth, use_depth_limit, multipv, hash_size=None):
         changed = False
-        if self.threads != threads or self.multipv != multipv or (hash_size is not None and self.hash_size != hash_size):
-            changed = True
-            
-        self.threads = threads
-        self.target_depth = depth
-        self.use_depth_limit = use_depth_limit
-        self.multipv = multipv
-        if hash_size is not None:
-            self.hash_size = hash_size
+        with self._lock:
+            if self.threads != threads or self.multipv != multipv or (hash_size is not None and self.hash_size != hash_size):
+                changed = True
+                
+            self.threads = threads
+            self.target_depth = depth
+            self.use_depth_limit = use_depth_limit
+            self.multipv = multipv
+            if hash_size is not None:
+                self.hash_size = hash_size
         
         if changed and self.engine:
             try:
@@ -132,20 +146,33 @@ class EngineThread(QThread):
                     continue
 
                 # Check if we need to start a new analysis
-                settings_changed = (self.multipv != current_multipv) or (self.target_depth != current_depth)
-                position_changed = (self._target_fen != current_board_fen)
+                with self._lock:
+                    settings_changed = (self.multipv != current_multipv) or (self.target_depth != current_depth)
+                    position_changed = (self._target_fen != current_board_fen)
+                    target_fen = self._target_fen
+                    target_multipv = self.multipv
+                    target_depth = self.target_depth
+                    board_snapshot = self.board.copy() if self.board else None
                 
                 if position_changed or settings_changed:
-                    current_board_fen = self._target_fen
-                    current_multipv = self.multipv
-                    current_depth = self.target_depth
-                    self.lines_cache = {} 
+                    current_board_fen = target_fen
+                    current_multipv = target_multipv
+                    current_depth = target_depth
+                    self.lines_cache = {}
+                    self.current_iter_depth = 0
+                    self.current_iter_lines = {}
+                    self.completed_lines = {}
+                    self._last_emit_time.restart()
                     
                     limit = None
                     if self.use_depth_limit:
                         limit = chess.engine.Limit(depth=self.target_depth)
                     
-                    legal_moves_count = self.board.legal_moves.count()
+                    if not board_snapshot:
+                        self.msleep(50)
+                        continue
+
+                    legal_moves_count = board_snapshot.legal_moves.count()
                     if legal_moves_count == 0:
                         self.info_signal.emit(["Partieende / Keine legalen Züge"])
                         self.msleep(100)
@@ -155,7 +182,7 @@ class EngineThread(QThread):
                     
                     try:
                         self._is_analyzing = True
-                        with self.engine.analysis(self.board, limit, multipv=actual_multipv) as analysis:
+                        with self.engine.analysis(board_snapshot, limit, multipv=actual_multipv) as analysis:
                             for info in analysis:
                                 # FAST ABORT CHECKS
                                 if not self.running or not self.is_active:
@@ -166,22 +193,24 @@ class EngineThread(QThread):
                                     break
                                 
                                 # Process the info packet directly
-                                self.process_info(info, self.board)
+                                self.process_info(info, board_snapshot, actual_multipv=actual_multipv)
                                 
-                        # One final flush to ensure the UI gets the very last evaluation 
-                        # even if it happened faster than our 100ms throttle timer
+                        # One final flush to ensure the UI gets the very last evaluation
                         if self._target_fen == current_board_fen:
-                            self._emit_current_cache(self.board)
+                            if self.completed_lines:
+                                self.lines_cache.update(self.completed_lines)
+                            self._emit_current_cache(board_snapshot)
 
                         # If analysis reached target_depth without being aborted by moves or settings changes:
                         if (self._target_fen == current_board_fen and 
                             self.running and self.is_active and 
                             self.multipv == current_multipv and 
                             self.target_depth == current_depth):
+                            src_lines = self.completed_lines if self.completed_lines else self.lines_cache
                             final_lines = [
-                                self.lines_cache[k].copy() 
-                                for k in sorted(self.lines_cache.keys()) 
-                                if k <= actual_multipv and self.lines_cache[k].get("pv")
+                                src_lines[k].copy() 
+                                for k in sorted(src_lines.keys()) 
+                                if k <= actual_multipv and src_lines[k].get("pv")
                             ]
                             if final_lines:
                                 self.analysis_finished_signal.emit(current_board_fen, current_depth, final_lines)
@@ -211,23 +240,54 @@ class EngineThread(QThread):
                 
         self.stop_engine()
 
-    def process_info(self, info, board):
+    def process_info(self, info, board, actual_multipv=None):
+        if actual_multipv is None:
+            actual_multipv = self.multipv
+
         # Only cache the raw data quickly
+        idx = None
         if "multipv" in info:
             idx = info["multipv"]
             self.lines_cache[idx] = info.copy()
         elif "pv" in info:
+            idx = 1
             self.lines_cache[1] = info.copy()
-            
-        # THROTTLING: Only do the heavy string building and UI emitting every 100ms
-        # THROTTLING: Only do the heavy string building and UI emitting every 100ms
+
+        if idx is not None:
+            depth = info.get("depth", 0)
+            if depth > self.current_iter_depth:
+                self.current_iter_depth = depth
+                self.current_iter_lines = {idx: info.copy()}
+            elif depth == self.current_iter_depth:
+                self.current_iter_lines[idx] = info.copy()
+
+            # When all active MultiPV lines have reached the current depth iteration:
+            if len(self.current_iter_lines) >= actual_multipv:
+                self.completed_lines = {k: v.copy() for k, v in self.current_iter_lines.items()}
+                if self._throttle_timer.hasExpired(self._emit_interval):
+                    self.lines_cache.update(self.completed_lines)
+                    self._emit_current_cache(board)
+                    self._throttle_timer.restart()
+                    self._last_emit_time.restart()
+                    return
+
+        # Fallback / single line: emit when throttle timer has expired
         if self._throttle_timer.hasExpired(self._emit_interval):
-            self._emit_current_cache(board)
-            self._throttle_timer.restart()
+            if actual_multipv == 1 or self._last_emit_time.hasExpired(1000) or not self.completed_lines:
+                if self.completed_lines:
+                    self.lines_cache.update(self.completed_lines)
+                self._emit_current_cache(board)
+                self._throttle_timer.restart()
+                self._last_emit_time.restart()
 
     def _emit_current_cache(self, board):
         """Builds strings and emits to UI. Separated from process_info to allow throttling."""
-        if not self.lines_cache: return
+        if not self.lines_cache:
+            return
+        
+        # Calculate synchronized depth to prevent lines showing mismatched depths (e.g. 19 vs 20)
+        valid_depths = [self.lines_cache[k].get("depth", 0) for k in sorted(self.lines_cache.keys()) if k <= self.multipv and self.lines_cache[k].get("depth", 0) > 0]
+        sync_depth = min(valid_depths) if valid_depths else 0
         
         structured_lines = []
         best_eval_cp = None
@@ -235,11 +295,14 @@ class EngineThread(QThread):
 
         # Process the cached lines
         for idx in sorted(self.lines_cache.keys()):
-            if idx > self.multipv: continue
+            if idx > self.multipv:
+                continue
                 
             line_data = self.lines_cache[idx]
             extracted = self._extract_line_data(line_data, board)
             if extracted:
+                if sync_depth > 0:
+                    extracted['depth'] = sync_depth
                 structured_lines.append(extracted)
                 if idx == 1:
                     best_eval_cp = extracted['cp_val']
@@ -268,6 +331,7 @@ class EngineThread(QThread):
                     cp_val = cp
         
         pv = line_info.get("pv", [])
+        first_uci = pv[0].uci() if (pv and len(pv) > 0) else None
         
         # Optimization: Only push moves we actually intend to show (max 6)
         temp_board = board.copy()
@@ -286,5 +350,6 @@ class EngineThread(QThread):
             "score": score_str,
             "depth": depth,
             "pv": pv_str,
-            "cp_val": cp_val
+            "cp_val": cp_val,
+            "first_uci": first_uci
         }

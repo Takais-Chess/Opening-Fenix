@@ -227,3 +227,52 @@ def test_diagnostic_repairs_mocked(creator_backend, monkeypatch):
     repaired = creator_backend.repair_diagnostic_issues()
     # It should at least run without crashing and return a count
     assert isinstance(repaired, int)
+
+
+def test_analysis_tab_engine_table_improvements(qapp, mock_user_dir, sample_repertoire):
+    """Test the improved engine analysis table, responsive columns, in-place updates, and status messages."""
+    from opening_fenix.creator.creator_window import CreatorWindow
+    from PyQt6.QtCore import Qt
+    
+    win = CreatorWindow(repertoire_name=sample_repertoire)
+    try:
+        # Check initial configuration
+        assert hasattr(win, 'table_engine')
+        assert hasattr(win, 'combo_lines')
+        assert win.table_engine.wordWrap() is False
+        
+        # Test in-place line update
+        sample_output = [
+            {'score': '+0.25', 'depth': 20, 'pv': 'e4 c5 Nf3 d6', 'first_uci': 'e2e4'},
+            {'score': '+0.10', 'depth': 20, 'pv': 'd4 Nf6 c4', 'first_uci': 'd2d4'}
+        ]
+        win.update_engine_output(sample_output)
+        
+        assert win.table_engine.rowCount() == 2
+        assert win.table_engine.item(0, 0).text() == "+0.25"
+        assert win.table_engine.item(0, 1).text() == "20"
+        assert win.table_engine.item(0, 2).text() == "e4 c5 Nf3 d6"
+        assert win.table_engine.item(0, 2).data(Qt.ItemDataRole.UserRole) == "e2e4"
+        
+        # Test in-place update without item recreation
+        item_ref = win.table_engine.item(0, 0)
+        sample_output[0]['score'] = '+0.30'
+        win.update_engine_output(sample_output)
+        assert win.table_engine.item(0, 0) is item_ref
+        assert win.table_engine.item(0, 0).text() == "+0.30"
+        
+        # Test status message handling (e.g. checkmate / no legal moves)
+        win.update_engine_output(["Partieende / Keine legalen Züge"])
+        assert win.table_engine.rowCount() == 1
+        assert "Partieende" in win.table_engine.item(0, 2).text()
+        
+        # Test column adjustment
+        win.adjust_engine_columns()
+        assert win.table_engine.columnWidth(0) > 0
+        assert win.table_engine.columnWidth(1) > 0
+        
+        # Test combo_lines setting propagation
+        win.combo_lines.setCurrentText("1")
+        assert win.config.get("engine_multipv") == "1"
+    finally:
+        win.close()

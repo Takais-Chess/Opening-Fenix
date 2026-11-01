@@ -195,3 +195,36 @@ def test_run_loop_basic(mock_engine_thread):
         
         mock_engine.analysis.assert_called()
         mock_engine_thread.info_signal.emit.assert_any_call(["Engine-Thread gestartet."])
+
+
+def test_emit_synchronized_depth(mock_engine_thread):
+    board = chess.Board()
+    mock_engine_thread.multipv = 3
+    # Simulating line 1 reached depth 20 while line 2 and 3 are still at 19
+    mock_engine_thread.lines_cache = {
+        1: {"score": chess.engine.PovScore(chess.engine.Cp(30), chess.WHITE), "depth": 20, "pv": [chess.Move.from_uci("e2e4")]},
+        2: {"score": chess.engine.PovScore(chess.engine.Cp(20), chess.WHITE), "depth": 19, "pv": [chess.Move.from_uci("d2d4")]},
+        3: {"score": chess.engine.PovScore(chess.engine.Cp(10), chess.WHITE), "depth": 19, "pv": [chess.Move.from_uci("c2c4")]}
+    }
+    
+    mock_engine_thread._emit_current_cache(board)
+    
+    assert mock_engine_thread.info_signal.emit.called
+    emitted = mock_engine_thread.info_signal.emit.call_args[0][0]
+    assert len(emitted) == 3
+    # All lines must display the same synchronized depth (min depth = 19)
+    assert emitted[0]['depth'] == 19
+    assert emitted[1]['depth'] == 19
+    assert emitted[2]['depth'] == 19
+    assert emitted[0]['first_uci'] == "e2e4"
+
+def test_extract_line_data_first_uci(mock_engine_thread):
+    board = chess.Board()
+    info = {
+        "score": chess.engine.PovScore(chess.engine.Cp(15), chess.WHITE),
+        "pv": [chess.Move.from_uci("e2e4"), chess.Move.from_uci("c7c5")],
+        "depth": 15
+    }
+    extracted = mock_engine_thread._extract_line_data(info, board)
+    assert extracted["first_uci"] == "e2e4"
+    assert extracted["depth"] == 15

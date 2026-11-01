@@ -3949,6 +3949,7 @@ class CreatorWindow(QMainWindow):
         # Left Column: Engine (GlassPill)
         engine_container = QFrame()
         engine_container.setObjectName("EngineAnalysisPill")
+        engine_container.setMinimumWidth(scale(190))
         self.repolish(engine_container)
         evl = QVBoxLayout(engine_container)
         evl.setContentsMargins(scale(4), scale(12), scale(4), scale(12))
@@ -4011,12 +4012,21 @@ class CreatorWindow(QMainWindow):
         self.combo_lines.lineEdit().setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.combo_lines.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_lines.addItems([str(i) for i in range(1, 11)])
-        self.combo_lines.setCurrentText("3")
+        saved_lines = str(self.config.get("engine_multipv", "3"))
+        if self.combo_lines.findText(saved_lines) != -1:
+            self.combo_lines.setCurrentText(saved_lines)
+        else:
+            self.combo_lines.setCurrentText("3")
         self.combo_lines.setFixedWidth(scale(34))
         self.combo_lines.view().setMinimumWidth(scale(75))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
+        
+        self.combo_depth.currentTextChanged.connect(self._on_engine_setting_changed)
+        self.combo_threads.currentTextChanged.connect(self._on_engine_setting_changed)
+        self.combo_lines.currentTextChanged.connect(self._on_engine_setting_changed)
+        self.combo_hash.currentTextChanged.connect(self._on_engine_setting_changed)
         
         lbl_depth = QLabel(tr_ui("creator.engine_depth_label", "Tiefe:"))
         lbl_depth.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']};")
@@ -4042,7 +4052,7 @@ class CreatorWindow(QMainWindow):
         evl.addWidget(self.btn_engine_toggle)
         
         self.table_engine = QTableWidget(0, 3)
-        self.table_engine.setWordWrap(True)
+        self.table_engine.setWordWrap(False)
         self.table_engine.setHorizontalHeaderLabels([
             tr_ui("creator.engine_col_score", "Bewertung"),
             tr_ui("creator.engine_col_depth", "Tiefe"),
@@ -4052,14 +4062,54 @@ class CreatorWindow(QMainWindow):
         self.table_engine.setAlternatingRowColors(True)
         self.table_engine.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table_engine.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_engine.cellDoubleClicked.connect(self.on_engine_move_double_click)
         header_e = self.table_engine.horizontalHeader()
         header_e.setDefaultAlignment(Qt.AlignmentFlag.AlignCenter)
-        header_e.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header_e.setMinimumSectionSize(scale(25))
+        header_e.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_engine.setColumnWidth(0, scale(60))
+        self.table_engine.setColumnWidth(1, scale(45))
         self.table_engine.setShowGrid(False)
         self.table_engine.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.table_engine.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table_engine.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        
+        # Apply premium glassmorphic styling to match common moves
+        self.table_engine.setStyleSheet(f"""
+            QTableWidget {{
+                background-color: transparent;
+                alternate-background-color: rgba(62, 39, 35, 0.03);
+                border: none;
+            }}
+            QHeaderView::section {{
+                background-color: transparent;
+                color: {COLORS['brown_text']};
+                padding-left: 2px;
+                padding-right: 2px;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+                font-weight: bold;
+                border: none;
+                border-bottom: {scale(2)}px solid {COLORS['glass_border']};
+            }}
+            QTableWidget::item {{
+                padding-left: 2px;
+                padding-right: 2px;
+                padding-top: {scale(4)}px;
+                padding-bottom: {scale(4)}px;
+                border-bottom: 1px solid rgba(62, 39, 35, 0.08);
+            }}
+            QTableWidget::item:hover {{
+                background-color: rgba(211, 84, 0, 0.08);
+            }}
+            QTableWidget::item:selected {{
+                background-color: rgba(211, 84, 0, 0.15);
+                color: {COLORS['brown_text']};
+            }}
+        """)
+        self.table_engine.installEventFilter(self)
         evl.addWidget(self.table_engine)
         self.analysis_splitter.addWidget(engine_container)
         
@@ -4284,7 +4334,9 @@ class CreatorWindow(QMainWindow):
                     self.board_widget.update()
         if widget == self.tab_analysis:
             self.resize_common_moves_columns()
+            self.adjust_engine_columns()
             QTimer.singleShot(0, self.resize_common_moves_columns)
+            QTimer.singleShot(0, self.adjust_engine_columns)
         if widget == self.tab_holes:
             self.update_hole_level_combo()
             self.on_hole_mode_change()
@@ -4656,6 +4708,83 @@ class CreatorWindow(QMainWindow):
         elif re.search(r'\blow\b', desc_lower):
             self.set_repertoire_elo("low")
 
+
+    def on_engine_move_double_click(self, row, column):
+        it = self.table_engine.item(row, 2)
+        if it:
+            uci = it.data(Qt.ItemDataRole.UserRole)
+            if uci:
+                self.save_current_details_now()
+                try:
+                    move = chess.Move.from_uci(uci)
+                    if move in self.board_widget.board.legal_moves:
+                        san = self.board_widget.board.san(move)
+                        fen = self.board_widget.board.fen()
+                        is_cap = self.board_widget.board.is_capture(move)
+                        self.board_widget.board.push(move)
+                        self.board_widget.update()
+                        self.play_sound("capture" if is_cap else "move")
+                        self.backend.add_move(fen, move.uci(), san)
+                        self.update_ui_from_fen()
+                        self.trigger_background_enrichment(self.board_widget.board.fen())
+                except:
+                    pass
+
+    def adjust_engine_columns(self):
+        if not hasattr(self, 'table_engine'):
+            return
+        total_width = self.table_engine.viewport().width()
+        if total_width <= 0:
+            return
+            
+        # Determine dynamic font size based on width
+        if total_width < scale(200):
+            fs = 8.5
+        elif total_width < scale(240):
+            fs = 9.5
+        elif total_width < scale(280):
+            fs = 10.5
+        else:
+            fs = 11.5
+            
+        font = self.table_engine.font()
+        font.setPointSizeF(float(fs))
+        self.table_engine.setFont(font)
+        
+        header = self.table_engine.horizontalHeader()
+        header_font = header.font()
+        header_font.setPointSizeF(float(fs))
+        header.setFont(header_font)
+        
+        # Dynamic labels: if narrow, shorten headers
+        if total_width < scale(220):
+            labels = [
+                tr_ui("creator.engine_col_score_short", "Eval"),
+                tr_ui("creator.engine_col_depth_short", "T"),
+                tr_ui("creator.engine_col_move_short", "Zug")
+            ]
+            w_eval = scale(48)
+            w_depth = scale(34)
+        else:
+            labels = [
+                tr_ui("creator.engine_col_score", "Bewertung"),
+                tr_ui("creator.engine_col_depth", "Tiefe"),
+                tr_ui("creator.engine_col_move", "Zug")
+            ]
+            w_eval = scale(62)
+            w_depth = scale(44)
+            
+        current_labels = [self.table_engine.horizontalHeaderItem(i).text() for i in range(3) if self.table_engine.horizontalHeaderItem(i)]
+        if current_labels != labels:
+            self.table_engine.setHorizontalHeaderLabels(labels)
+            
+        header.blockSignals(True)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_engine.setColumnWidth(0, w_eval)
+        self.table_engine.setColumnWidth(1, w_depth)
+        header.blockSignals(False)
 
     def on_common_move_double_click(self, row, column):
         uci = self.table_common_moves.item(row, 0).data(Qt.ItemDataRole.UserRole)
@@ -5560,6 +5689,32 @@ class CreatorWindow(QMainWindow):
             self.btn_engine_toggle.setStyleSheet(f"background-color: {COLORS['success_green']}; color: white; border-radius: 18px;")
         self.toggle_engine(checked)
 
+    def _on_engine_setting_changed(self):
+        if not hasattr(self, 'combo_lines') or not hasattr(self, 'combo_depth') or not hasattr(self, 'combo_threads') or not hasattr(self, 'combo_hash'):
+            return
+        try:
+            lines = int(self.combo_lines.currentText())
+            depth = int(self.combo_depth.currentText())
+            threads = int(self.combo_threads.currentText())
+            hash_val = self.combo_hash.currentText()
+        except (ValueError, TypeError):
+            return
+
+        self.config["engine_multipv"] = str(lines)
+        self.config["engine_depth"] = str(depth)
+        self.config["engine_threads"] = str(threads)
+        self.config["engine_hash"] = str(hash_val)
+        self.save_config()
+
+        if self.engine_thread and self.engine_thread.isRunning():
+            self.engine_thread.update_config(
+                threads=threads,
+                depth=depth,
+                use_depth_limit=True,
+                multipv=lines,
+                hash_size=int(hash_val)
+            )
+
     def toggle_engine(self, active):
         if self.engine_thread and not self.engine_thread.isRunning():
             self.init_engine()
@@ -5583,7 +5738,7 @@ class CreatorWindow(QMainWindow):
             self.engine_thread.toggle_analysis(active)
             if active: 
                 self.table_engine.setRowCount(0)
-                self.engine_thread.set_position(self.board_widget.board.fen())
+                self.engine_thread.set_position(self.board_widget.board.fen(), force_restart=True)
         elif active:
             from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
             ep = prompt_engine_if_missing(self, self.config)
@@ -5601,22 +5756,55 @@ class CreatorWindow(QMainWindow):
             self.btn_engine_toggle.blockSignals(False)
 
     def update_engine_output(self, d):
-        if not d or isinstance(d[0], str): return
+        if not d:
+            return
+        if isinstance(d[0], str):
+            self.table_engine.setUpdatesEnabled(False)
+            try:
+                self.table_engine.setRowCount(1)
+                status_item = QTableWidgetItem(d[0])
+                status_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table_engine.setItem(0, 0, QTableWidgetItem(""))
+                self.table_engine.setItem(0, 1, QTableWidgetItem(""))
+                self.table_engine.setItem(0, 2, status_item)
+            finally:
+                self.table_engine.setUpdatesEnabled(True)
+            return
+
         self.table_engine.setUpdatesEnabled(False)
         try:
-            self.table_engine.setRowCount(len(d))
+            target_count = len(d)
+            if self.table_engine.rowCount() != target_count:
+                self.table_engine.setRowCount(target_count)
+
             for r, l in enumerate(d):
-                it_score = QTableWidgetItem(l['score'])
-                it_score.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_engine.setItem(r, 0, it_score)
-                
-                it_depth = QTableWidgetItem(str(l['depth']))
-                it_depth.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_engine.setItem(r, 1, it_depth)
-                
-                it_pv = QTableWidgetItem(l['pv'])
-                it_pv.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.table_engine.setItem(r, 2, it_pv)
+                # Column 0: Score
+                it0 = self.table_engine.item(r, 0)
+                if not it0:
+                    it0 = QTableWidgetItem()
+                    it0.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table_engine.setItem(r, 0, it0)
+                it0.setText(l.get('score', '...'))
+
+                # Column 1: Depth
+                it1 = self.table_engine.item(r, 1)
+                if not it1:
+                    it1 = QTableWidgetItem()
+                    it1.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table_engine.setItem(r, 1, it1)
+                it1.setText(str(l.get('depth', '')))
+
+                # Column 2: Move / PV
+                it2 = self.table_engine.item(r, 2)
+                if not it2:
+                    it2 = QTableWidgetItem()
+                    it2.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    self.table_engine.setItem(r, 2, it2)
+                pv_text = l.get('pv', '')
+                it2.setText(pv_text)
+                it2.setToolTip(pv_text)
+                if 'first_uci' in l and l['first_uci']:
+                    it2.setData(Qt.ItemDataRole.UserRole, l['first_uci'])
         finally:
             self.table_engine.setUpdatesEnabled(True)
 
@@ -6259,6 +6447,8 @@ class CreatorWindow(QMainWindow):
 
         if obj == getattr(self, 'table_common_moves', None) and event.type() == QEvent.Type.Resize:
             self.resize_common_moves_columns()
+        if obj == getattr(self, 'table_engine', None) and event.type() == QEvent.Type.Resize:
+            self.adjust_engine_columns()
 
         from PyQt6.QtWidgets import QLineEdit
         if hasattr(self, '_processing_event') and self._processing_event:
