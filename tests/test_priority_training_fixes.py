@@ -68,18 +68,18 @@ def test_transposition_priority_accumulation(mock_user_dir):
     assert success, msg
 
     session.expire_all()
-    # At start position, user has 2 moves (e4, c4) -> 0.5 split each
-    assert session.get(Move, m_e4.id).priority_score == pytest.approx(0.5)
-    assert session.get(Move, m_c4.id).priority_score == pytest.approx(0.5)
+    # At start position, user has 2 moves (e4, c4) -> 1.0 each (as if playing line always)
+    assert session.get(Move, m_e4.id).priority_score == pytest.approx(1.0)
+    assert session.get(Move, m_c4.id).priority_score == pytest.approx(1.0)
 
-    # Opponent turn e5 (100% of branch) -> 0.5. User Nf3 short -> 0.5
-    assert session.get(Move, m_nf3_short.id).priority_score == pytest.approx(0.5)
-    # Opponent turn c5 (100% of branch) -> 0.5. User Nf3 long -> 0.5
-    assert session.get(Move, m_nf3_long.id).priority_score == pytest.approx(0.5)
+    # Opponent turn e5 (100% of branch) -> 1.0. User Nf3 short -> 1.0
+    assert session.get(Move, m_nf3_short.id).priority_score == pytest.approx(1.0)
+    # Opponent turn c5 (100% of branch) -> 1.0. User Nf3 long -> 1.0
+    assert session.get(Move, m_nf3_long.id).priority_score == pytest.approx(1.0)
 
     # Move out of p_target (Nc6) is opponent turn.
-    # Total probability reaching p_target = 0.5 + 0.5 = 1.0!
-    # Nc6 should have priority_score = 1.0 (accumulated from BOTH transpositions)!
+    # Reaching p_target via overlap peak = max(1.0, 1.0) = 1.0 (no doubling to 2.0!).
+    # Nc6 should have priority_score = 1.0!
     assert session.get(Move, m_nc6.id).priority_score == pytest.approx(1.0)
 
     session.close()

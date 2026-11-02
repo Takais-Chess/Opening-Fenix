@@ -336,15 +336,13 @@ class HoleFinderThread(QThread):
 
 class FenIndexBuilderThread(QThread):
     """
-    Builds the in-memory FEN set AND the repertoire adjacency dict from the
-    repertoire DB using its own sqlite3 connection — completely non-blocking.
+    Builds the in-memory FEN set, repertoire adjacency dict, and pre-computed
+    min_reachable_level cache from the repertoire DB using its own sqlite3 connection
+    — completely non-blocking.
 
-    Emits (fen_set: set[str], repo_adjacency: dict[str, list[str]])
-      fen_set        — 4-part normalised FENs of every position in the DB
-      repo_adjacency — mapping from_fen_norm → [uci1, uci2, ...] for each
-                       existing repertoire move
+    Emits (fen_set: set[str], repo_adjacency: dict[str, list[str]], min_reach_cache: dict[str, int])
     """
-    ready = pyqtSignal(object, object)   # set[str], dict[str, list[str]]
+    ready = pyqtSignal(object, object, object)   # set[str], dict[str, list[str]], dict[str, int]
 
     def __init__(self, db_path, parent=None):
         super().__init__(parent)
@@ -360,6 +358,9 @@ class FenIndexBuilderThread(QThread):
 
     def run(self):
         import sqlite3
+        import collections
+        import heapq
+        import chess
         con = None
         try:
             if self._is_cancelled():
@@ -370,28 +371,37 @@ class FenIndexBuilderThread(QThread):
             # ── 1. All position FENs ──────────────────────────────────────────────
             if self._is_cancelled():
                 return
-            cur.execute("SELECT fen FROM positions")
+            cur.execute("SELECT id, fen FROM positions")
             fen_set = set()
+            id_to_fen = {}
+            root_id = None
+            clean_root = " ".join(chess.STARTING_FEN.split()[:4])
             while True:
                 if self._is_cancelled():
                     return
                 rows = cur.fetchmany(1000)
                 if not rows:
                     break
-                for row in rows:
-                    if row[0]:
-                        fen_set.add(" ".join(row[0].strip().split()[:4]))
+                for pid, pfen in rows:
+                    if pfen:
+                        fn = " ".join(pfen.strip().split()[:4])
+                        fen_set.add(fn)
+                        id_to_fen[pid] = fn
+                        if fn == clean_root:
+                            root_id = pid
 
-            # ── 2. Repertoire move adjacency (one JOIN, one query) ────────────────
+            # ── 2. Repertoire move adjacency & Dijkstra graph ─────────────────────
             repo_adj: dict = {}
+            adj_for_dijkstra = collections.defaultdict(list)
             try:
                 if self._is_cancelled():
                     return
                 cur.execute("""
-                    SELECT p.fen, m.uci
+                    SELECT p.fen, m.uci, m.from_position_id, m.to_position_id, COALESCE(rm.level, 1)
                     FROM moves m
                     JOIN positions p ON m.from_position_id = p.id
                     INNER JOIN repertoire_moves rm ON rm.move_id = m.id
+                    WHERE rm.is_active = 1
                 """)
                 while True:
                     if self._is_cancelled():
@@ -399,20 +409,44 @@ class FenIndexBuilderThread(QThread):
                     rows = cur.fetchmany(1000)
                     if not rows:
                         break
-                    for fen, uci in rows:
+                    for fen, uci, from_pid, to_pid, lvl in rows:
                         fn = " ".join(fen.strip().split()[:4])
                         repo_adj.setdefault(fn, []).append(uci)
+                        adj_for_dijkstra[from_pid].append((to_pid, lvl))
             except Exception:
                 pass   # schema mismatch — fall back to no exclusions
 
+            # ── 3. Dijkstra Reachable Level Pre-computation ───────────────────────
+            min_reach_cache = {clean_root: 1}
+            try:
+                if not self._is_cancelled() and root_id is not None:
+                    dist = {root_id: 1}
+                    pq = [(1, root_id)]
+                    while pq:
+                        curr_lvl, u = heapq.heappop(pq)
+                        if curr_lvl > dist.get(u, float('inf')):
+                            continue
+                        for v, edge_lvl in adj_for_dijkstra.get(u, []):
+                            path_lvl = max(curr_lvl, edge_lvl)
+                            if path_lvl < dist.get(v, float('inf')):
+                                dist[v] = path_lvl
+                                heapq.heappush(pq, (path_lvl, v))
+
+                    for pid, lvl in dist.items():
+                        fn = id_to_fen.get(pid)
+                        if fn:
+                            min_reach_cache[fn] = lvl
+            except Exception:
+                pass
+
             if self._is_cancelled():
                 return
-            self.ready.emit(fen_set, repo_adj)
+            self.ready.emit(fen_set, repo_adj, min_reach_cache)
         except Exception as e:
             import logging
             logging.error(f"FenIndexBuilderThread error: {e}")
             if not self._is_cancelled():
-                self.ready.emit(set(), {})
+                self.ready.emit(set(), {}, {})
         finally:
             if con:
                 try:

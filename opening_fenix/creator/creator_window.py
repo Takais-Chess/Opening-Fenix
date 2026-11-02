@@ -148,17 +148,20 @@ class CreatorBackend:
             self.db_manager = None
         self.active_repo_name = None
 
-    def clear_cache(self):
-        """Clears the LRU cache and expires session objects to ensure fresh data."""
+    def clear_cache(self, graph_changed=True):
+        """Clears the LRU cache and expires session objects to ensure fresh data.
+        If graph_changed is False (e.g. engine eval or comment edit), preserves
+        expensive graph structures like _min_reachable_level_cache."""
         self._ui_cache = {}
-        self._outgoing_transpositions_cache = {}
-        self._min_reachable_level_cache = None
-        if hasattr(self, "window") and self.window:
-            if hasattr(self.window, "clear_transposition_caches"):
-                try:
-                    self.window.clear_transposition_caches()
-                except Exception:
-                    pass
+        if graph_changed:
+            self._outgoing_transpositions_cache = {}
+            self._min_reachable_level_cache = None
+            if hasattr(self, "window") and self.window:
+                if hasattr(self.window, "clear_transposition_caches"):
+                    try:
+                        self.window.clear_transposition_caches()
+                    except Exception:
+                        pass
         if self.session:
             try:
                 self.session.rollback()
@@ -218,25 +221,21 @@ class CreatorBackend:
     def get_parent_moves_for_fen(self, fen):
         if not self.session: return []
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if not pos: return []
-        moves = self.session.query(Move).filter_by(to_position_id=pos.id).all()
-        result = []
-        for m in moves:
-            from_pos = self.session.get(Position, m.from_position_id)
-            if from_pos:
-                result.append({
-                    "move_san": m.san,
-                    "move_uci": m.uci,
-                    "parent_fen": from_pos.fen
-                })
-        return result
+        results = (
+            self.session.query(Move.san, Move.uci, Position.fen)
+            .join(Position, Move.from_position_id == Position.id)
+            .filter(Move.to_position_id == pos.id)
+            .all()
+        )
+        return [{"move_san": san, "move_uci": uci, "parent_fen": p_fen} for san, uci, p_fen in results]
 
     def get_path_to_fen(self, fen):
         if not self.session: return None, []
         # Robust FEN Cleaning (normalize spaces and trim)
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if not pos: return None, []
         path = []
         curr_id = pos.id
@@ -266,7 +265,7 @@ class CreatorBackend:
             return self._ui_cache[cache_key]
             
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         data = {"id": None, "comment": "", "variation_1": "", "variation_2": "", "variation_3": "",
                 "v1_inherited": False, "v2_inherited": False, "v3_inherited": False}
         if not pos: 
@@ -299,7 +298,7 @@ class CreatorBackend:
         if not self.session: return
         # Robust FEN Cleaning for query consistency
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if not pos: 
             pos = Position(fen=clean_fen)
             self.session.add(pos)
@@ -328,17 +327,16 @@ class CreatorBackend:
             self._update_cached_names_recursive(pos)
 
         self.session.commit()
-        self.clear_cache()
+        self.clear_cache(graph_changed=False)
 
     def mark_position_reviewed(self, fen):
         if not self.session: return
-        clean_fen = " ".join(fen.split(" ")[:4])
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if pos:
             pos.last_overhaul_review = datetime.datetime.now()
             self.session.commit()
-            self.clear_cache()
+            self.clear_cache(graph_changed=False)
 
     def reset_overhaul_progress(self):
         """Clears overhaul review timestamps for all positions in the repertoire."""
@@ -356,7 +354,7 @@ class CreatorBackend:
         
         # Use clean FEN (4 fields) to match DB
         start_fen = " ".join(chess.STARTING_FEN.split(" ")[:4])
-        start_pos = self.session.query(Position).filter(Position.fen.like(start_fen + "%")).first()
+        start_pos = self.session.query(Position).filter(Position.fen.op('GLOB')(start_fen + "*")).first()
         if not start_pos: return set()
         
         reachable = {start_pos.id}
@@ -647,13 +645,12 @@ class CreatorBackend:
 
     def set_position_hole_exempt(self, fen, exempt):
         if not self.session: return
-        clean_fen = " ".join(fen.split(" ")[:4])
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.like(clean_fen + "%")).first()
+        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
         if pos:
             pos.is_hole_exempt = exempt
             self.session.commit()
-            self.clear_cache()
+            self.clear_cache(graph_changed=False)
 
 
     def _update_cached_names_recursive(self, pos, visited=None):
@@ -711,7 +708,7 @@ class CreatorBackend:
         if pos and pos.engine_eval != eval_val:
             pos.engine_eval = eval_val
             self.session.commit()
-            self.clear_cache()
+            self.clear_cache(graph_changed=False)
 
     def handle_engine_analysis_finished(self, fen, depth, lines) -> bool:
         """
@@ -759,7 +756,7 @@ class CreatorBackend:
                 if best_score_white_cp is not None:
                     pos.engine_eval = best_score_white_cp
                 self.session.commit()
-                self.clear_cache()
+                self.clear_cache(graph_changed=False)
 
             cache_service.set_alternate_moves(fen, depth, good_moves, is_exhaustive=True, best_uci=best_uci)
             if best_uci:
@@ -771,7 +768,7 @@ class CreatorBackend:
             if pos and best_score_white_cp is not None and pos.engine_eval != best_score_white_cp:
                 pos.engine_eval = best_score_white_cp
                 self.session.commit()
-                self.clear_cache()
+                self.clear_cache(graph_changed=False)
 
             if best_uci:
                 cache_service.set_best_move(fen, depth, best_uci)
@@ -4058,6 +4055,13 @@ class CreatorWindow(QMainWindow):
             tr_ui("creator.engine_col_depth", "Tiefe"),
             tr_ui("creator.engine_col_move", "Zug")
         ])
+        for _c in range(3):
+            _hi = self.table_engine.horizontalHeaderItem(_c)
+            if _hi:
+                if _c == 2:
+                    _hi.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    _hi.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         self.table_engine.verticalHeader().setVisible(False)
         self.table_engine.setAlternatingRowColors(True)
         self.table_engine.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -4777,6 +4781,13 @@ class CreatorWindow(QMainWindow):
         current_labels = [self.table_engine.horizontalHeaderItem(i).text() for i in range(3) if self.table_engine.horizontalHeaderItem(i)]
         if current_labels != labels:
             self.table_engine.setHorizontalHeaderLabels(labels)
+            for _c in range(3):
+                _hi = self.table_engine.horizontalHeaderItem(_c)
+                if _hi:
+                    if _c == 2:
+                        _hi.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                    else:
+                        _hi.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             
         header.blockSignals(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
@@ -5119,9 +5130,6 @@ class CreatorWindow(QMainWindow):
         if self.overhaul_active and not self.overhaul_paused:
             self.backend.mark_position_reviewed(f)
             self.update_overhaul_progress()
-        elif not self.overhaul_active:
-            # Still update progress bar to show general completion for current filter
-            self.update_overhaul_progress()
 
         d = self.backend.get_position_data(f)
         
@@ -5442,7 +5450,8 @@ class CreatorWindow(QMainWindow):
                 target_lang=self.active_comment_lang
             )
             self.update_structure_tree()
-            self.update_overhaul_progress()
+            if self.overhaul_active:
+                self.update_overhaul_progress()
             # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too
             if hasattr(self, 'tabs') and hasattr(self, 'tab_kontrolle') and self.tabs.currentWidget() == self.tab_kontrolle:
                 self.init_management_slots()
@@ -5798,8 +5807,8 @@ class CreatorWindow(QMainWindow):
                 it2 = self.table_engine.item(r, 2)
                 if not it2:
                     it2 = QTableWidgetItem()
-                    it2.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                     self.table_engine.setItem(r, 2, it2)
+                it2.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                 pv_text = l.get('pv', '')
                 it2.setText(pv_text)
                 it2.setToolTip(pv_text)
@@ -5817,6 +5826,17 @@ class CreatorWindow(QMainWindow):
         is_exhaustive = self.backend.handle_engine_analysis_finished(fen, depth, lines)
         if is_exhaustive and hasattr(self, 'update_ui_from_fen'):
             self.update_ui_from_fen()
+
+    def _prewarm_repo_settings_dialog(self):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
+        if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
+            try:
+                self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
+                self.repo_settings_dialog.finished.connect(self._on_settings_closed)
+            except Exception as e:
+                logger.debug(f"Repo settings prewarm deferred: {e}")
 
     def open_repo_settings(self):
         from PyQt6 import sip
@@ -6384,6 +6404,8 @@ class CreatorWindow(QMainWindow):
                 self.windowHandle().screenChanged.connect(self._on_screen_changed)
             except Exception:
                 pass
+        # Pre-warm creator settings dialog during idle time for instant opening
+        QTimer.singleShot(1500, self._prewarm_repo_settings_dialog)
 
     def _on_screen_changed(self, screen):
         self._auto_size_board = True
@@ -8023,9 +8045,7 @@ class CreatorWindow(QMainWindow):
             return pos_share, pos_prio_str
         return None, "—"
 
-    def _insert_direct_transpos_row(self, r: int, it: dict):
-        """Inserts a single 1-move outgoing transposition row into the table."""
-        self.table_transpositions.insertRow(r)
+    def _get_transposition_current_context(self) -> tuple:
         curr_fen = self.board_widget.board.fen() if (hasattr(self, "board_widget") and self.board_widget) else ""
         cat = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
         common_moves = self.backend.get_lichess_common_moves(curr_fen, cat) if (curr_fen and self.backend) else []
@@ -8043,6 +8063,31 @@ class CreatorWindow(QMainWindow):
                     p_reach = self.backend._get_pos_prio(db_p.id)
                 else:
                     p_reach = 0.0
+        return common_moves, total_games, p_reach
+
+    def _insert_direct_transpos_row(self, r: int, it: dict, curr_context: tuple = None):
+        """Inserts a single 1-move outgoing transposition row into the table."""
+        self.table_transpositions.insertRow(r)
+        if curr_context is not None:
+            common_moves, total_games, p_reach = curr_context
+        else:
+            curr_fen = self.board_widget.board.fen() if (hasattr(self, "board_widget") and self.board_widget) else ""
+            cat = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
+            common_moves = self.backend.get_lichess_common_moves(curr_fen, cat) if (curr_fen and self.backend) else []
+            total_games = sum(m.get('total', 0) for m in common_moves)
+            p_reach = 1.0
+            if curr_fen and self.backend and self.backend.session:
+                clean_fen = " ".join(curr_fen.strip().split()[:4])
+                clean_root = " ".join(chess.STARTING_FEN.split()[:4])
+                if clean_fen == clean_root:
+                    p_reach = 1.0
+                else:
+                    from opening_fenix.core.db.models import Position as DbPos
+                    db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_fen + "*")).first()
+                    if db_p:
+                        p_reach = self.backend._get_pos_prio(db_p.id)
+                    else:
+                        p_reach = 0.0
 
         disp_move = format_move_notation(self.board_widget.board, it['move_san'])
         move_item = QTableWidgetItem(disp_move)
@@ -8185,10 +8230,11 @@ class CreatorWindow(QMainWindow):
                 for _ in range(sep_row):
                     self.table_transpositions.removeRow(0)
 
+                curr_context = self._get_transposition_current_context() if outgoing_items else None
                 # Now row 0 is the separator. Insert new current-position rows before the separator
                 insert_row = 0
                 for it in outgoing_items:
-                    self._insert_direct_transpos_row(insert_row, it)
+                    self._insert_direct_transpos_row(insert_row, it, curr_context=curr_context)
                     insert_row += 1
 
                 for p in bfs_items:
@@ -8231,10 +8277,11 @@ class CreatorWindow(QMainWindow):
                 self._adjust_transposition_table_columns()
                 return
 
+            curr_context = self._get_transposition_current_context() if outgoing_items else None
             # Insert direct outgoing items
             insert_row = 0
             for it in outgoing_items:
-                self._insert_direct_transpos_row(insert_row, it)
+                self._insert_direct_transpos_row(insert_row, it, curr_context=curr_context)
                 insert_row += 1
 
             # Insert BFS items
@@ -8421,10 +8468,12 @@ class CreatorWindow(QMainWindow):
         t.start()
         self._fen_index_thread = t
 
-    def _on_fen_index_ready(self, fen_set, repo_adj):
+    def _on_fen_index_ready(self, fen_set, repo_adj, min_reach_cache=None):
         """Receive completed FEN index + repo adjacency from background thread."""
         self.backend._fen_index = fen_set
         self.backend._repo_adjacency = repo_adj
+        if min_reach_cache:
+            self.backend._min_reachable_level_cache = min_reach_cache
         if hasattr(self, "btn_deep_transpos"):
             self._update_deep_button_state()
 
@@ -8790,7 +8839,7 @@ class CreatorWindow(QMainWindow):
             self.backend._min_reachable_level_cache = None
             self.backend._outgoing_transpositions_cache = {}
 
-    def suggest_transposition_level(self, data: dict):
+    def suggest_transposition_level(self, data: dict, min_reach_level: int = None):
         """
         Suggests an optimal repertoire level for a transposition based on:
         1. Reachable Level Hierarchy: filters out levels lower than the minimum level required to reach origin.
@@ -8827,7 +8876,8 @@ class CreatorWindow(QMainWindow):
             return self._transpos_suggestion_cache[cache_key]
 
         # Determine minimum level required to reach the origin position
-        min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if origin_fen else 1
+        if min_reach_level is None:
+            min_reach_level = self.backend.get_position_min_reachable_level(origin_fen) if origin_fen else 1
 
         available_levels = [lvl for lvl in levels if lvl.get("order", 1) >= min_reach_level]
         if not available_levels:
@@ -8848,7 +8898,7 @@ class CreatorWindow(QMainWindow):
             if clean_target in self._target_level_cache:
                 l_target = self._target_level_cache[clean_target]
             else:
-                target_pos = self.backend.session.query(Position).filter_by(fen=clean_target).first()
+                target_pos = self.backend.session.query(Position).filter(Position.fen.op('GLOB')(clean_target + "*")).first()
                 if target_pos:
                     # First check outgoing moves from target position
                     target_levels = [
@@ -9341,7 +9391,7 @@ class CreatorWindow(QMainWindow):
         if not available_levels:
             available_levels = levels
 
-        suggested_order, suggested_reason = self.suggest_transposition_level(data)
+        suggested_order, suggested_reason = self.suggest_transposition_level(data, min_reach_level=min_reach_level)
 
         for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
             order = lvl.get("order", 1)
@@ -9460,7 +9510,7 @@ class CreatorWindow(QMainWindow):
             available_levels = levels
 
         self.lbl_transpos_add.setVisible(True)
-        suggested_order, suggested_reason = self.suggest_transposition_level(data)
+        suggested_order, suggested_reason = self.suggest_transposition_level(data, min_reach_level=min_reach_level)
 
         for lvl in sorted(available_levels, key=lambda x: x.get("order", 1)):
             order = lvl.get("order", 1)
@@ -10230,7 +10280,7 @@ class CreatorWindow(QMainWindow):
         try:
             if hasattr(self, "combo_hole_mode") and self.combo_hole_mode:
                 current_mode = self.combo_hole_mode.currentData()
-                if current_mode != mode:
+                if current_mode != mode and mode != "transpositions":
                     return
 
             streamed = getattr(self, "_hole_scan_streamed", False)

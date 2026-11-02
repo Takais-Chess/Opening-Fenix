@@ -224,10 +224,10 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                                         "ply_depth": d,
                                     })
                 else:
-                    p_next = p_reach / len(rep_moves)
+                    p_next = p_reach
                     for m in rep_moves:
                         if m.to_position_id:
-                            reach_probs[m.to_position_id] = reach_probs.get(m.to_position_id, 0.0) + p_next
+                            reach_probs[m.to_position_id] = max(reach_probs.get(m.to_position_id, 0.0), p_next)
             else:
                 lichess_moves = lichess_cache.get(clean_fen, {})
                 total_games = sum(v.get('total', 0) for v in lichess_moves.values())
@@ -237,7 +237,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                         p_next = p_reach / len(out_moves)
                         for m in out_moves:
                             if m.to_position_id:
-                                reach_probs[m.to_position_id] = reach_probs.get(m.to_position_id, 0.0) + p_next
+                                reach_probs[m.to_position_id] = max(reach_probs.get(m.to_position_id, 0.0), p_next)
                     continue
 
                 covered = covered_ucis_for(pid)
@@ -253,7 +253,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                             m_uci = m.uci.strip().lower()
                             if m_uci == norm_uci or CASTLING_ALT.get(m_uci, '') == norm_uci:
                                 if m.to_position_id:
-                                    reach_probs[m.to_position_id] = reach_probs.get(m.to_position_id, 0.0) + p_total
+                                    reach_probs[m.to_position_id] = max(reach_probs.get(m.to_position_id, 0.0), p_total)
                                 break
                     else:
                         if p_total >= threshold_val and not is_exempt:
@@ -505,10 +505,16 @@ def find_unanswered_moves(session: Session, threshold: float = 0.0,
             p_reach = reach_probs.get(pid, 0.0)
             nexts = rep_moves_from.get(pid, [])
             if nexts:
-                p_next = p_reach / len(nexts)
+                fen = id_to_fen.get(pid, "")
+                parts = fen.split(" ")
+                is_user = len(parts) > 1 and parts[1].lower() == user_turn_char
+                p_next = p_reach if is_user else (p_reach / len(nexts))
                 for m_obj in nexts:
                     if m_obj.to_position_id:
-                        reach_probs[m_obj.to_position_id] = reach_probs.get(m_obj.to_position_id, 0.0) + p_next
+                        reach_probs[m_obj.to_position_id] = max(
+                            reach_probs.get(m_obj.to_position_id, 0.0),
+                            p_next
+                        )
 
     results = []
     for d, depth_list in enumerate(pos_by_depth):
@@ -979,11 +985,10 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
 
         if curr_is_user:
             if rep_moves:
-                p_split = p_curr / len(rep_moves)
                 for move in rep_moves:
                     tid = move.to_position_id
                     if tid:
-                        reach_probs[tid] = reach_probs.get(tid, 0.0) + p_split
+                        reach_probs[tid] = max(reach_probs.get(tid, 0.0), p_curr)
                         t_norm = id_to_clean_fen.get(tid)
                         if t_norm:
                             reach_probs_fen[t_norm] = reach_probs[tid]
@@ -1006,7 +1011,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                         p_move = p_curr * (move_total / total_games)
                     else:
                         p_move = p_curr / len(rep_moves) if rep_moves else 0.0
-                    reach_probs[tid] = reach_probs.get(tid, 0.0) + p_move
+                    reach_probs[tid] = max(reach_probs.get(tid, 0.0), p_move)
                     t_norm = id_to_clean_fen.get(tid)
                     if t_norm:
                         reach_probs_fen[t_norm] = reach_probs[tid]

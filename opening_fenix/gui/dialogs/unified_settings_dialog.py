@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QInputDialog, QAbstractItemView
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread, QEvent
-from PyQt6.QtGui import QIcon, QFont, QFontMetrics, QPixmap, QPainter, QPainterPath, QColor, QBrush
+from PyQt6.QtGui import QIcon, QFont, QFontMetrics, QPixmap, QPainter, QPainterPath, QColor, QBrush, QImageReader
 from PyQt6.QtCore import QRectF
 
 from opening_fenix.core.version import APP_VERSION
@@ -91,6 +91,18 @@ class CenteredSpinBoxCell(QWidget):
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
     def wheelEvent(self, event):
         event.ignore()
+
+    def valueFromText(self, text: str) -> float:
+        clean = text.replace('%', '').strip().replace(',', '.')
+        try:
+            return float(clean)
+        except ValueError:
+            return self.minimum()
+
+    def textFromValue(self, value: float) -> str:
+        if value == int(value):
+            return str(int(value))
+        return f"{value:.2f}".rstrip('0').rstrip('.')
 
 class NoWheelSlider(QSlider):
     def wheelEvent(self, event):
@@ -273,20 +285,42 @@ def get_cached_scaled_pixmap(path_or_default: Optional[str], width: int, height:
     if cached is not None and not cached.isNull():
         return cached
 
+    target_size = QSize(width, height)
     if path_or_default and path_or_default != "__default_logo__" and os.path.exists(path_or_default):
-        pix = QPixmap(path_or_default).scaled(
-            width, height,
-            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-            Qt.TransformationMode.SmoothTransformation
-        )
-    else:
-        logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
-        if os.path.exists(logo_path):
-            pix = QPixmap(logo_path).scaled(
+        reader = QImageReader(path_or_default)
+        reader.setAutoTransform(True)
+        orig_size = reader.size()
+        if orig_size.isValid() and not orig_size.isEmpty():
+            scaled_size = orig_size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+            reader.setScaledSize(scaled_size)
+            img = reader.read()
+            if not img.isNull():
+                pix = QPixmap.fromImage(img)
+            else:
+                pix = QPixmap(path_or_default).scaled(
+                    width, height,
+                    Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+        else:
+            pix = QPixmap(path_or_default).scaled(
                 width, height,
                 Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                 Qt.TransformationMode.SmoothTransformation
             )
+    else:
+        logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
+        if os.path.exists(logo_path):
+            reader = QImageReader(logo_path)
+            reader.setAutoTransform(True)
+            orig_size = reader.size()
+            if orig_size.isValid() and not orig_size.isEmpty():
+                scaled_size = orig_size.scaled(target_size, Qt.AspectRatioMode.KeepAspectRatioByExpanding)
+                reader.setScaledSize(scaled_size)
+                img = reader.read()
+                pix = QPixmap.fromImage(img) if not img.isNull() else QPixmap(logo_path)
+            else:
+                pix = QPixmap(logo_path)
         else:
             pix = QPixmap()
 
@@ -513,6 +547,11 @@ class RepertoireConfigCard(QFrame):
 
     def update_style(self):
         is_selected = (hasattr(self.parent_dlg, "selected_trainer_repo") and self.parent_dlg.selected_trainer_repo == self.repo_name)
+        state = (is_selected, self.is_active)
+        if getattr(self, '_current_style_state', None) == state:
+            return
+        self._current_style_state = state
+
         if self.is_active:
             bg = "#fffaf5" if is_selected else "#ffffff"
             border = "2px solid #d35400" if is_selected else "1px solid #e2e8f0"
@@ -526,10 +565,6 @@ class RepertoireConfigCard(QFrame):
 
         if hasattr(self, 'lbl_cover'):
             self.lbl_cover.setStyleSheet(f"border: 1px solid #e2e8f0; border-radius: {scale(8)}px; background: {cover_bg};")
-        if hasattr(self, 'info_widget'):
-            self.info_widget.setStyleSheet("background: transparent;")
-        if hasattr(self, 'elo_row'):
-            self.elo_row.setStyleSheet("background: transparent;")
 
         self.setStyleSheet(f"""
             RepertoireConfigCard {{
@@ -1230,27 +1265,22 @@ class UnifiedSettingsDialog(QDialog):
             self.refresh_backups_list()
         else:
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
+            # Reload / sync trainer repertoire cards and active selection
+            if hasattr(self, 'refresh_trainer_repertoire_cards'):
+                self.refresh_trainer_repertoire_cards()
 
-        # 2. Invalidate levels cache so fresh database values are read
-        invalidate_repertoire_levels_cache()
+            active_repo = None
+            if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+                active_repo = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
+            target_repo = active_repo or getattr(self, 'selected_trainer_repo', None)
+            if target_repo:
+                self.on_trainer_repo_selected(target_repo)
+                self.update_trainer_card_selection_highlights()
 
-        # 3. Reload all repertoire cards from scratch (detecting new, deleted, or renamed repos)
-        if hasattr(self, 'refresh_trainer_repertoire_cards'):
-            self.refresh_trainer_repertoire_cards()
-
-        # 4. Reload active repertoire details fresh from scratch
-        active_repo = None
-        if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
-            active_repo = getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None)
-        target_repo = active_repo or getattr(self, 'selected_trainer_repo', None)
-        if target_repo:
-            self.on_trainer_repo_selected(target_repo)
-            self.update_trainer_card_selection_highlights()
-
-        # 5. Reset maintenance loaded flag so maintenance center queries latest data when viewed
+        # Reset maintenance loaded flag so maintenance center queries latest data when viewed
         self.maintenance_loaded = False
 
-        # 6. Re-synchronize live tab configuration and appearance controls without firing change signals
+        # Re-synchronize live tab configuration and appearance controls without firing change signals
         self.sync_creator_tab_checkboxes()
         self.sync_appearance_controls()
 
@@ -3014,10 +3044,6 @@ class UnifiedSettingsDialog(QDialog):
         layout.addStretch()
 
     def refresh_trainer_repertoire_cards(self):
-        while self.trainer_cards_layout.count():
-            item = self.trainer_cards_layout.takeAt(0)
-            if item.widget(): item.widget().deleteLater()
-
         try:
             repos = RepertoireService().get_all_repertoires()
         except OSError:
@@ -3036,14 +3062,59 @@ class UnifiedSettingsDialog(QDialog):
                 
         sorted_repos = sorted(active_repos) + sorted(inactive_repos)
 
-        for r_name in sorted_repos:
+        # Check if existing cards can be reused in-place
+        existing_cards = []
+        for i in range(self.trainer_cards_layout.count()):
+            it = self.trainer_cards_layout.itemAt(i)
+            if it and it.widget() and isinstance(it.widget(), RepertoireConfigCard):
+                existing_cards.append(it.widget())
+
+        existing_names = [c.repo_name for c in existing_cards]
+        if existing_names == sorted_repos:
+            # All cards match 1:1! Update state in-place without destroying and recreating widgets
+            for card in existing_cards:
+                is_active = visibility_map.get(card.repo_name, True)
+                if card.is_active != is_active:
+                    card.is_active = is_active
+                    card.btn_toggle.blockSignals(True)
+                    card.btn_toggle.setChecked(is_active)
+                    card.btn_toggle.blockSignals(False)
+                    card.lbl_elo.setVisible(is_active)
+                    card.combo_level.setVisible(is_active)
+                    if is_active:
+                        card.setMinimumHeight(scale(132))
+                        card.setMaximumHeight(scale(162))
+                        card.populate_levels()
+                    else:
+                        card.setMinimumHeight(scale(68))
+                        card.setMaximumHeight(scale(78))
+                    card.adjust_title_font()
+                card.update_style()
+            return
+
+        while self.trainer_cards_layout.count():
+            item = self.trainer_cards_layout.takeAt(0)
+            if item.widget(): item.widget().deleteLater()
+
+        # Compute column count upfront based on viewport width
+        width = self.scroll_trainer_cards.viewport().width() if hasattr(self, "scroll_trainer_cards") else 0
+        card_min_width = scale(250)
+        spacing = scale(8)
+        margins = self.trainer_cards_layout.contentsMargins()
+        avail_width = width - (margins.left() + margins.right()) - scale(8)
+        cols = max(1, avail_width // (card_min_width + spacing)) if width > 10 else 3
+        self._current_cols = cols
+
+        for c in range(max(cols, 10)):
+            self.trainer_cards_layout.setColumnStretch(c, 1 if c < cols else 0)
+
+        for idx, r_name in enumerate(sorted_repos):
             is_active = visibility_map.get(r_name, True)
             card = RepertoireConfigCard(r_name, is_active, self)
             card.clicked.connect(lambda n=r_name: self.on_trainer_repo_selected(n))
-            self.trainer_cards_layout.addWidget(card)
-
-        self._current_cols = -1
-        self.rearrange_trainer_cards_grid()
+            r = idx // cols
+            c = idx % cols
+            self.trainer_cards_layout.addWidget(card, r, c)
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.Resize:
@@ -5172,9 +5243,11 @@ class UnifiedSettingsDialog(QDialog):
         lbl_prio_desc.setStyleSheet(f"color: {COLORS['bw_sub_text']}; font-size: {scale(12)}px;")
         v_prio.addWidget(lbl_prio_desc)
 
-        self.spin_prio_threshold = NoWheelSpinBox()
-        self.spin_prio_threshold.setRange(1, 100)
-        self.spin_prio_threshold.setValue(10)
+        self.spin_prio_threshold = NoWheelDoubleSpinBox()
+        self.spin_prio_threshold.setRange(0.1, 100.0)
+        self.spin_prio_threshold.setDecimals(2)
+        self.spin_prio_threshold.setSingleStep(0.5)
+        self.spin_prio_threshold.setValue(10.0)
         self.spin_prio_threshold.setSuffix(" %")
         self.spin_prio_threshold.setMinimumWidth(scale(120))
         v_prio.addWidget(self._make_hairline_row(
@@ -5259,7 +5332,11 @@ class UnifiedSettingsDialog(QDialog):
         g_prune = QGroupBox(tr_widget("repo_settings.tools_prune_title", "🗑️ Massen-Löschung nach Popularität"))
         v_prune = QVBoxLayout(g_prune)
         v_prune.setSpacing(scale(10))
-        self.spin_prune_threshold = NoWheelSpinBox(); self.spin_prune_threshold.setRange(1, 90); self.spin_prune_threshold.setValue(5)
+        self.spin_prune_threshold = NoWheelDoubleSpinBox()
+        self.spin_prune_threshold.setRange(0.1, 90.0)
+        self.spin_prune_threshold.setDecimals(2)
+        self.spin_prune_threshold.setSingleStep(0.5)
+        self.spin_prune_threshold.setValue(5.0)
         self.spin_prune_threshold.setSuffix(" %")
         self.spin_prune_threshold.setMinimumWidth(scale(120))
         v_prune.addWidget(self._make_hairline_row(
@@ -5299,18 +5376,19 @@ class UnifiedSettingsDialog(QDialog):
         if not backend or not backend.active_repo_name:
             QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
             return
-        threshold = self.spin_prio_threshold.value()
+        threshold_val = self.spin_prio_threshold.value()
+        threshold_str = str(int(threshold_val)) if threshold_val == int(threshold_val) else f"{threshold_val:g}"
         target_data = self.combo_prio_target.currentData()
         target_text = self.combo_prio_target.currentText()
         if target_data is None:
             return
 
-        count = backend.get_priority_level_impact(threshold, target_data)
+        count = backend.get_priority_level_impact(threshold_val, target_data)
         if count == 0:
             msg = tr_ui(
                 "repo_settings.dlg_prio_preview_zero",
                 "Keine Züge mit Priorität ≥ {threshold}% in tieferen Leveln gefunden.\nAlle qualifizierten Züge sind bereits auf oder über '{target}'.",
-                threshold=threshold,
+                threshold=threshold_str,
                 target=target_text
             )
         else:
@@ -5318,7 +5396,7 @@ class UnifiedSettingsDialog(QDialog):
                 "repo_settings.dlg_prio_preview_msg",
                 "{count} Züge mit Priorität ≥ {threshold}% in tieferen Leveln gefunden.\n\nDurch das Anwenden werden diese Züge (sowie deren Folgevarianten) auf das Level '{target}' hochgestuft.",
                 count=count,
-                threshold=threshold,
+                threshold=threshold_str,
                 target=target_text
             )
         QMessageBox.information(self, tr_ui("repo_settings.dlg_prio_preview_title", "Prio-Leveling Vorschau"), msg)
@@ -5328,13 +5406,13 @@ class UnifiedSettingsDialog(QDialog):
         if not backend or not backend.active_repo_name:
             QMessageBox.warning(self, tr_ui("common.warning", "Hinweis"), tr_ui("repo_settings.msg_select_one", "Bitte mindestens ein Repertoire wählen."))
             return
-        threshold = self.spin_prio_threshold.value()
+        threshold_val = self.spin_prio_threshold.value()
         target_data = self.combo_prio_target.currentData()
         target_text = self.combo_prio_target.currentText()
         if target_data is None:
             return
 
-        modified = backend.apply_priority_level_update(threshold, target_data)
+        modified = backend.apply_priority_level_update(threshold_val, target_data)
         self.refresh_creator_info()
         if modified > 0:
             msg = tr_ui("repo_settings.dlg_prio_applied", "{count} Züge erfolgreich auf '{target}' angepasst.", count=modified, target=target_text)

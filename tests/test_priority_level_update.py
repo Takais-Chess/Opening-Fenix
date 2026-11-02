@@ -74,3 +74,35 @@ class TestPriorityLevelUpdate:
         
         new_rm_c = backend.session.get(RepertoireMove, rm_c.id)
         assert new_rm_c.level == 1
+
+    def test_priority_upgrade_fractional_threshold(self, backend):
+        # Setup positions and moves
+        from_pos = Position(fen="frac_test start")
+        to_1 = Position(fen="frac_test to_1")
+        to_2 = Position(fen="frac_test to_2")
+        backend.session.add_all([from_pos, to_1, to_2])
+        backend.session.commit()
+
+        # Move 1: 0.5% prio (0.005), level 3 -> should qualify for threshold 0.5%
+        m1 = Move(from_position_id=from_pos.id, to_position_id=to_1.id, uci="e2e4", san="e4", priority_score=0.005)
+        # Move 2: 0.2% prio (0.002), level 3 -> below 0.5%
+        m2 = Move(from_position_id=from_pos.id, to_position_id=to_2.id, uci="d2d4", san="d4", priority_score=0.002)
+        backend.session.add_all([m1, m2])
+        backend.session.commit()
+
+        rm1 = RepertoireMove(move_id=m1.id, level=3)
+        rm2 = RepertoireMove(move_id=m2.id, level=3)
+        backend.session.add_all([rm1, rm2])
+        backend.session.commit()
+
+        # Impact preview with 0.5% threshold
+        impact = backend.get_priority_level_impact(0.5, 1)
+        assert impact == 1
+
+        # Apply update
+        modified = backend.apply_priority_level_update(0.5, 1)
+        assert modified == 1
+
+        backend.session.expire_all()
+        assert backend.session.get(RepertoireMove, rm1.id).level == 1
+        assert backend.session.get(RepertoireMove, rm2.id).level == 3

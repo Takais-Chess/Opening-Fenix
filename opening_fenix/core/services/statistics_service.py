@@ -350,8 +350,8 @@ def calculate_repertoire_statistics(
                                 weighted_win_score += user_score * p_reach
                                 total_weight_eff += p_reach
 
-                        p_next = p_reach / len(rep_moves)
-                        reach_probs[rm['to_id']] = reach_probs.get(rm['to_id'], 0.0) + p_next
+                        p_next = p_reach
+                        reach_probs[rm['to_id']] = max(reach_probs.get(rm['to_id'], 0.0), p_next)
                         if ply < 32:
                             bfs_queue.append((rm['to_id'], ply + 1))
                 else:
@@ -373,7 +373,7 @@ def calculate_repertoire_statistics(
                                 p_next = p_reach * p_move
                                 for rm in rep_moves:
                                     if rm['uci'].strip().lower() == u_norm:
-                                        reach_probs[rm['to_id']] = reach_probs.get(rm['to_id'], 0.0) + p_next
+                                        reach_probs[rm['to_id']] = max(reach_probs.get(rm['to_id'], 0.0), p_next)
                                         if ply < 32:
                                             bfs_queue.append((rm['to_id'], ply + 1))
                                         break
@@ -381,7 +381,7 @@ def calculate_repertoire_statistics(
                         if rep_moves:
                             p_next = p_reach / len(rep_moves)
                             for rm in rep_moves:
-                                reach_probs[rm['to_id']] = reach_probs.get(rm['to_id'], 0.0) + p_next
+                                reach_probs[rm['to_id']] = max(reach_probs.get(rm['to_id'], 0.0), p_next)
                                 if ply < 32:
                                     bfs_queue.append((rm['to_id'], ply + 1))
 

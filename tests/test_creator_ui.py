@@ -1222,7 +1222,8 @@ def test_transposition_header_responsive_layout(creator_window, qapp):
 
     # Column 4 width should be compact (less than 200px for typical repertoire levels)
     col4_w = creator_window.table_transpositions.columnWidth(4)
-    assert col4_w < 200, f"Column 4 width ({col4_w}px) is too wide"
+    from opening_fenix.gui.scaling import scale
+    assert col4_w < scale(200), f"Column 4 width ({col4_w}px) is too wide"
 
 
 def test_transposition_buttons_auto_shrink_and_tooltip_style(creator_window, qapp):
@@ -2311,32 +2312,22 @@ def test_background_enrichment_queue_sequential(creator_window, qtbot, monkeypat
 
     # Finish thread 1
     created_threads[0].finish()
-    qtbot.wait(100)
-
-    # Thread 2 should now be running
-    assert len(created_threads) == 2
+    qtbot.waitUntil(lambda: len(created_threads) == 2, timeout=2000)
     assert len(creator_window.enrichment_queue) == 2
 
     # Finish thread 2
     created_threads[1].finish()
-    qtbot.wait(100)
-
-    # Thread 3 should now be running
-    assert len(created_threads) == 3
+    qtbot.waitUntil(lambda: len(created_threads) == 3, timeout=2000)
     assert len(creator_window.enrichment_queue) == 1
 
     # Finish thread 3
     created_threads[2].finish()
-    qtbot.wait(100)
-
-    # Thread 4 should now be running, queue empty
-    assert len(created_threads) == 4
+    qtbot.waitUntil(lambda: len(created_threads) == 4, timeout=2000)
     assert len(creator_window.enrichment_queue) == 0
 
     # Finish thread 4
     created_threads[3].finish()
-    qtbot.wait(100)
-    assert len(creator_window.enrichment_threads) == 0
+    qtbot.waitUntil(lambda: len(creator_window.enrichment_threads) == 0, timeout=2000)
 
 
 

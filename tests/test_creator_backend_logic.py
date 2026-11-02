@@ -126,6 +126,7 @@ def test_is_branch_fully_reviewed(backend):
         p.last_overhaul_review = future_date
         backend.session.add(p)
     backend.session.commit()
+    backend.clear_cache()
     # verify it worked
     p_check = backend.session.get(Position, pos.id)
     assert p_check.last_overhaul_review == future_date

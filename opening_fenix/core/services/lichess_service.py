@@ -280,15 +280,20 @@ def compute_estimated_position_priorities(
             if is_user_turn:
                 user_moves = [m for m in out_moves if m.id in rep_move_ids]
                 if user_moves:
-                    split = curr_prob / len(user_moves)
                     for m in user_moves:
                         if m.to_position_id:
-                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+                            id_probabilities[m.to_position_id] = max(
+                                id_probabilities.get(m.to_position_id, 0.0),
+                                curr_prob
+                            )
                 else:
                     split = curr_prob / len(out_moves)
                     for m in out_moves:
                         if m.to_position_id:
-                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+                            id_probabilities[m.to_position_id] = max(
+                                id_probabilities.get(m.to_position_id, 0.0),
+                                split
+                            )
             else:
                 ld_moves = fen_lichess_data.get(clean_fen)
                 if ld_moves is not None:
@@ -307,12 +312,18 @@ def compute_estimated_position_priorities(
                             m_total = stat.get('total', 0) if stat else 0
                             if m_total > 0 and m.to_position_id:
                                 share = m_total / total_games
-                                id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + (curr_prob * share)
+                                id_probabilities[m.to_position_id] = max(
+                                    id_probabilities.get(m.to_position_id, 0.0),
+                                    curr_prob * share
+                                )
                 else:
                     split = curr_prob / len(out_moves)
                     for m in out_moves:
                         if m.to_position_id:
-                            id_probabilities[m.to_position_id] = id_probabilities.get(m.to_position_id, 0.0) + split
+                            id_probabilities[m.to_position_id] = max(
+                                id_probabilities.get(m.to_position_id, 0.0),
+                                split
+                            )
 
     return id_probabilities
 
@@ -668,10 +679,12 @@ def run_lichess_import(
                 positions_by_depth[d].append(pid)
 
         # Comprehensive Initial Self-Healing:
-        # Check all positions that currently have empty ({}) LichessData.
-        # If any of them CANNOT be skipped under the 3-ply rule (check_can_skip_position_3ply == False),
-        # it was falsely skipped by earlier versions.
-        # Purge its stale empty LichessData record so it is included in positions_to_query.
+        # Check positions that currently have empty ({}) LichessData.
+        # An empty record was falsely skipped by legacy versions (v1.2.5 and older)
+        # ONLY IF an incoming parent move directly leading into it in this repertoire
+        # has active games (>0) in LichessData.
+        # If all incoming parent moves have 0 games, this position genuinely has 0 games
+        # on Lichess and must NEVER be purged, ensuring that restarts do not re-query them.
         existing_ld_rows = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
         existing_ld_map: Dict[str, dict] = {}
         for f_val, mjson in existing_ld_rows:
@@ -688,7 +701,17 @@ def run_lichess_import(
             if mdict is not None:
                 total_games = sum(v.get('total', 0) for v in mdict.values() if isinstance(v, dict))
                 if total_games == 0:
-                    if not check_can_skip_position_3ply(pid, incoming_moves, id_to_fen, existing_ld_map):
+                    inc_moves = incoming_moves.get(pid, [])
+                    has_active_incoming_move = False
+                    for m in inc_moves:
+                        p_from_fen = id_to_fen.get(m.from_position_id)
+                        if p_from_fen:
+                            g_cnt = get_move_game_count(p_from_fen, m.uci, m.san, existing_ld_map)
+                            if g_cnt is not None and g_cnt > 0:
+                                has_active_incoming_move = True
+                                break
+
+                    if has_active_incoming_move:
                         stale_fens_to_purge.add(fen)
                         stale_fens_to_purge.add(clean_f)
 
@@ -700,7 +723,7 @@ def run_lichess_import(
             commit_with_retry(session)
             for sf in stale_fens_to_purge:
                 existing_ld_map.pop(sf, None)
-            logger.info(f"[Lichess Import] Self-healing: Purged {num_purged} stale empty records that cannot be skipped under 3-ply rule for ELO '{elo_category}'.")
+            logger.info(f"[Lichess Import] Self-healing: Purged {num_purged} stale empty legacy records for ELO '{elo_category}'.")
 
         existing_fens_query = session.query(LichessData.fen).filter_by(elo_range=elo_category)
         
@@ -867,7 +890,16 @@ def run_lichess_import(
                     commit_with_retry(session)
                     return False, "Import abgebrochen."
 
-                if elo_category == 'masters':
+                # Check if position is beyond Lichess player DB 25-move (50-ply) cap:
+                is_deep_position = (pos_depths.get(pos.id, 0) >= 50)
+                if not is_deep_position and pos.fen:
+                    fen_parts = pos.fen.split()
+                    if len(fen_parts) >= 6 and fen_parts[5].isdigit():
+                        if int(fen_parts[5]) >= 26:
+                            is_deep_position = True
+
+                use_masters = (elo_category == 'masters') or is_deep_position
+                if use_masters:
                     params = {
                         'variant': 'standard',
                         'fen': pos.fen,
@@ -875,6 +907,11 @@ def run_lichess_import(
                     }
                     query_string = urllib.parse.urlencode(params)
                     url = f"https://explorer.lichess.org/masters?{query_string}"
+                    if is_deep_position and elo_category != 'masters':
+                        logger.debug(
+                            f"[Lichess Import] Position {pos.id} is at depth {pos_depths.get(pos.id, '?')} "
+                            f"(>= 50 plies / move 26+). Using Masters database fallback."
+                        )
                 else:
                     params = {
                         'variant': 'standard',
@@ -901,6 +938,27 @@ def run_lichess_import(
                     successful_requests_in_a_row += 1
 
                     moves_data = data.get('moves', [])
+
+                    # Fallback for positions near the 25-move boundary (ply >= 48 or fullmove >= 25):
+                    # If player database returned 0 moves, check the Masters database before treating as empty
+                    if not moves_data and not use_masters:
+                        near_boundary = (pos_depths.get(pos.id, 0) >= 48)
+                        if not near_boundary and pos.fen:
+                            parts = pos.fen.split()
+                            if len(parts) >= 6 and parts[5].isdigit() and int(parts[5]) >= 25:
+                                near_boundary = True
+                        if near_boundary:
+                            m_params = {'variant': 'standard', 'fen': pos.fen, 'moves': 25}
+                            m_url = f"https://explorer.lichess.org/masters?{urllib.parse.urlencode(m_params)}"
+                            m_resp = client.get(m_url, headers=headers)
+                            m_data = json.loads(m_resp.decode('utf-8'))
+                            m_moves = m_data.get('moves', [])
+                            if m_moves:
+                                moves_data = m_moves
+                                logger.debug(
+                                    f"[Lichess Import] Position {pos.id} returned 0 player games, "
+                                    f"found {len(m_moves)} moves in Masters database fallback."
+                                )
                     # Double check to prevent race condition during long network request
                     existing = session.query(LichessData).filter_by(fen=pos.fen, elo_range=elo_category).first()
                     if moves_data:

@@ -121,14 +121,14 @@ def test_priority_total_games_logic(mock_user_dir):
     db_m_e4 = session.get(Move, m_e4.id)
     assert db_m_e4.priority_score == pytest.approx(0.9)
     
-    # e4 (User): e5=0.45 (User turn, equal split among e5 and c5)
+    # e4 (User): e5=0.9 (User turn, full reachability for each option without 50/50 split)
     db_m_e5 = session.get(Move, m_e5.id)
-    assert db_m_e5.priority_score == pytest.approx(0.45)
+    assert db_m_e5.priority_score == pytest.approx(0.9)
     
-    # e5 (Opponent): f4=1.0 share relative to e5's probability (=0.45).
+    # e5 (Opponent): f4=1.0 share relative to e5's probability (=0.9).
     # Effective total = 0 + 1(rare) = 1.
     db_m_f4 = session.get(Move, m_f4.id)
-    assert db_m_f4.priority_score == pytest.approx(0.45)
+    assert db_m_f4.priority_score == pytest.approx(0.9)
 
     # 6. Test local calculation
     # Change e4 stats and recalculate locally from start.

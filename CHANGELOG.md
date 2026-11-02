@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.0] - 2026-11-03
+
+### Added & Improved
+- **Full Repertoire Line Priority Propagation**: Removed the 50/50 probability division when multiple active repertoire choices exist on player turns. Each player move now inherits 100% of the parent reach probability, evaluating every line as a full weapon without artificial dilution of downstream opponent moves.
+- **Peak Overlap Reconciliation for Transpositions**: Repertoire paths that transpose into the same board position now take the peak/dominant probability of the converging lines, ensuring lead-up moves maintain accurate line priority while completely preventing probability doubling or artificial inflation.
+- **Hole Finder & Background Sync**: Synchronized probability calculations across Hole Finder, Lichess download prioritization, and Repertoire Statistics to ensure consistent, accurate metrics throughout the entire application.
+
 ## [1.2.7] - 2026-10-29
 
 ### Fixed & Improved

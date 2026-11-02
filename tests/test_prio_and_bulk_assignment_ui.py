@@ -125,10 +125,26 @@ def test_dialog_creator_tools_widgets(qtbot):
     assert hasattr(dlg, 'combo_prio_target')
     assert hasattr(dlg, 'combo_global_level')
 
-    # Test prio preview
+    # Test fractional threshold (e.g. 0.5%)
+    dlg.spin_prio_threshold.setValue(0.5)
+    assert dlg.spin_prio_threshold.value() == 0.5
+    assert "0.5 %" in dlg.spin_prio_threshold.text()
+
+    dlg.spin_prune_threshold.setValue(0.5)
+    assert dlg.spin_prune_threshold.value() == 0.5
+    assert "0.5 %" in dlg.spin_prune_threshold.text()
+
+    # Test prio preview with 0.5% threshold
     with patch.object(QMessageBox, 'information') as mock_info:
         dlg._preview_prio_level_impact()
         assert mock_info.called
+        mock_backend.get_priority_level_impact.assert_called_with(0.5, 1)
+
+    # Test prio apply with 0.5% threshold
+    with patch.object(QMessageBox, 'information') as mock_info:
+        dlg._apply_prio_level_adjustment()
+        assert mock_info.called
+        mock_backend.apply_priority_level_update.assert_called_with(0.5, 1)
 
     # Test global preview
     with patch.object(QMessageBox, 'information') as mock_info:

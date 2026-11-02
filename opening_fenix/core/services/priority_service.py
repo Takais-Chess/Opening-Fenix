@@ -118,11 +118,13 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                     user_repertoire_moves = [m for m in all_outgoing_moves if m.id in rep_move_ids]
 
                     if user_repertoire_moves:
-                        split_prob = current_prob / len(user_repertoire_moves)
                         for user_move in user_repertoire_moves:
-                            user_move.priority_score = split_prob
+                            user_move.priority_score = current_prob
                             if user_move.to_position_id:
-                                id_probabilities[user_move.to_position_id] = id_probabilities.get(user_move.to_position_id, 0.0) + split_prob
+                                id_probabilities[user_move.to_position_id] = max(
+                                    id_probabilities.get(user_move.to_position_id, 0.0),
+                                    current_prob
+                                )
 
                 else:
                     if not all_outgoing_moves:
@@ -175,21 +177,30 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                             next_prob = current_prob * share
                             move.priority_score = next_prob
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + next_prob
+                                id_probabilities[move.to_position_id] = max(
+                                    id_probabilities.get(move.to_position_id, 0.0),
+                                    next_prob
+                                )
                         
                         for move, weight in rare_moves_with_weights:
                             share = weight / effective_total
                             next_prob = current_prob * share
                             move.priority_score = next_prob
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] = id_probabilities.get(move.to_position_id, 0.0) + next_prob
+                                id_probabilities[move.to_position_id] = max(
+                                    id_probabilities.get(move.to_position_id, 0.0),
+                                    next_prob
+                                )
                     else:
                         # Fallback for no data
                         split_prob = current_prob / len(all_outgoing_moves)
                         for move in all_outgoing_moves:
                             move.priority_score = split_prob
                             if move.to_position_id:
-                                id_probabilities[move.to_position_id] += split_prob
+                                id_probabilities[move.to_position_id] = max(
+                                    id_probabilities.get(move.to_position_id, 0.0),
+                                    split_prob
+                                )
 
             if progress_callback:
                 progress_callback(int((depth + 1) * 100 / total_depths))
@@ -219,7 +230,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         if clean_start_fen == start_fen_normalized or not incoming_moves:
             start_prob = 1.0
         else:
-            start_prob = sum((m.priority_score or 0.0) for m in incoming_moves)
+            start_prob = max(((m.priority_score or 0.0) for m in incoming_moves), default=0.0)
             
         if start_prob <= 0 and clean_start_fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
             return True, "No probability to propagate."
@@ -297,7 +308,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         for pid in reachable_ids:
             if pid == start_pos_id: continue
             incoming = incoming_moves_cache.get(pid, [])
-            ext_prob = sum((m.priority_score or 0.0) for m in incoming if m.from_position_id not in reachable_ids)
+            ext_prob = max(((m.priority_score or 0.0) for m in incoming if m.from_position_id not in reachable_ids), default=0.0)
             id_probabilities[pid] = ext_prob
 
         rep_moves_db = session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
@@ -340,11 +351,13 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                         m.priority_score = 0.0
                     
                     if user_rep_moves:
-                        split_prob = current_prob / len(user_rep_moves)
                         for m in user_rep_moves:
-                            m.priority_score = split_prob
+                            m.priority_score = current_prob
                             if m.to_position_id in id_probabilities:
-                                id_probabilities[m.to_position_id] += split_prob
+                                id_probabilities[m.to_position_id] = max(
+                                    id_probabilities[m.to_position_id],
+                                    current_prob
+                                )
                     # No else needed as all were reset to 0.0 above
                 else:
                     # LICESS DATA & TOTAL GAMES LOGIC
@@ -393,14 +406,20 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                             next_p = current_prob * share
                             m.priority_score = next_p
                             if m.to_position_id in id_probabilities:
-                                id_probabilities[m.to_position_id] += next_p
+                                id_probabilities[m.to_position_id] = max(
+                                    id_probabilities[m.to_position_id],
+                                    next_p
+                                )
                         
                         for m, weight in rare_moves_with_weights:
                             share = weight / effective_total
                             next_p = current_prob * share
                             m.priority_score = next_p
                             if m.to_position_id in id_probabilities:
-                                id_probabilities[m.to_position_id] += next_p
+                                id_probabilities[m.to_position_id] = max(
+                                    id_probabilities[m.to_position_id],
+                                    next_p
+                                )
                         continue
 
                     # Fallback for no data
@@ -409,7 +428,10 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                         for m in out_moves:
                             m.priority_score = split_prob
                             if m.to_position_id in id_probabilities:
-                                id_probabilities[m.to_position_id] += split_prob
+                                id_probabilities[m.to_position_id] = max(
+                                    id_probabilities[m.to_position_id],
+                                    split_prob
+                                )
 
         session.flush()
         return True, "Local priority scores updated."

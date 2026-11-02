@@ -454,3 +454,170 @@ def test_cascading_multi_ply_self_healing(mock_user_dir, sample_repertoire):
     db.close()
 
 
+def test_lichess_import_idempotent_restart_no_false_purges(mock_user_dir, sample_repertoire):
+    """
+    Regression test for the issue where restarting a completed Lichess import
+    falsely purged valid 0-game positions on every restart.
+    Verifies that restarting an import after completion makes 0 network requests
+    and immediately reports that all positions are up to date.
+    """
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.query(LichessData).delete()
+    session.commit()
+
+    # 1.e4 c5 2.a3 b6 3.h4 4.c5
+    # p0: 1000 games
+    # p1: 500 games
+    # p2: 10 games for 2.a3
+    # p3: 10 games on Lichess (moves: b8c6, e7e6), but b7b6 was never played (0 games)
+    # p4: 0 games on Lichess
+    # p5: 0 games on Lichess
+    # p6: 3 consecutive 0-game moves lead-up -> skipped under 3-ply rule!
+    fens = [
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -",
+        "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -",
+        "rnbqkbnr/pp1ppppp/8/2p5/4P3/P7/1PPP1PPP/RNBQKBNR b KQkq -",
+        "rnbqkbnr/p2ppppp/1p6/2p5/4P3/P7/1PPP1PPP/RNBQKBNR w KQkq -",
+        "rnbqkbnr/p2ppppp/1p6/2p5/4P2P/P7/1PPP1PP1/RNBQKBNR b KQkq -",
+        "rnbqkbnr/3ppppp/1pp5/2p5/4P2P/P7/1PPP1PP1/RNBQKBNR w KQkq -"
+    ]
+    positions = [Position(fen=f) for f in fens]
+    session.add_all(positions)
+    session.commit()
+
+    moves = [
+        Move(from_position_id=positions[0].id, to_position_id=positions[1].id, uci="e2e4", san="e4"),
+        Move(from_position_id=positions[1].id, to_position_id=positions[2].id, uci="c7c5", san="c5"),
+        Move(from_position_id=positions[2].id, to_position_id=positions[3].id, uci="a2a3", san="a3"),
+        Move(from_position_id=positions[3].id, to_position_id=positions[4].id, uci="b7b6", san="b6"),
+        Move(from_position_id=positions[4].id, to_position_id=positions[5].id, uci="h2h4", san="h4"),
+        Move(from_position_id=positions[5].id, to_position_id=positions[6].id, uci="c6c5", san="c6")
+    ]
+    session.add_all(moves)
+    session.commit()
+    session.close()
+    db.close()
+
+    network_requests = []
+
+    def mock_get(url, headers):
+        unquoted = urllib.parse.unquote_plus(url)
+        network_requests.append(unquoted)
+        if fens[0] in unquoted:
+            return json.dumps({"moves": [{"uci": "e2e4", "white": 500, "draws": 200, "black": 300, "total": 1000}]}).encode()
+        if fens[1] in unquoted:
+            return json.dumps({"moves": [{"uci": "c7c5", "white": 250, "draws": 100, "black": 150, "total": 500}]}).encode()
+        if fens[2] in unquoted:
+            return json.dumps({"moves": [{"uci": "a2a3", "white": 5, "draws": 2, "black": 3, "total": 10}]}).encode()
+        if fens[3] in unquoted:
+            return json.dumps({"moves": [
+                {"uci": "b8c6", "white": 3, "draws": 1, "black": 2, "total": 6},
+                {"uci": "e7e6", "white": 2, "draws": 1, "black": 1, "total": 4}
+            ]}).encode()
+        return json.dumps({"moves": []}).encode()
+
+    with patch("time.sleep"), \
+         patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"), \
+         patch("opening_fenix.core.services.lichess_service.LichessConnectionManager.get", side_effect=mock_get):
+
+        # RUN 1: Full initial import
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+        assert len(network_requests) == 6  # 0 to 5 queried, 6 skipped
+
+        # RUN 2: Immediate restart must be idempotent!
+        network_requests.clear()
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+        assert "bereits Lichess-Daten" in msg
+        assert len(network_requests) == 0, f"Expected 0 requests on restart, got {len(network_requests)}"
+
+        # RUN 3: Another restart must also do 0 queries
+        network_requests.clear()
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+        assert "bereits Lichess-Daten" in msg
+        assert len(network_requests) == 0
+
+
+def test_lichess_import_masters_fallback_for_deep_positions(mock_user_dir, sample_repertoire):
+    """
+    Verifies that for positions at depth >= 50 (move 26+), run_lichess_import with elo_category='high'
+    automatically routes requests to explorer.lichess.org/masters to bypass the 25-move cap.
+    Also verifies that existing empty records for move 26 with active incoming moves are purged and fetched.
+    """
+    db_path = get_repertoire_db_path(sample_repertoire)
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.query(LichessData).delete()
+    session.commit()
+
+    # Create a 3-position chain at move 25 Black (depth 49) -> move 26 White (depth 50) -> move 26 Black (depth 51)
+    fen_p49 = "5k2/p1r5/2pR2pb/4pp2/2B5/5P2/PPP3P1/1K6 b - - 0 25"
+    fen_p50 = "8/p1r3k1/2pR2pb/4pp2/2B5/5P2/PPP3P1/1K6 w - - 0 26"
+    fen_p51 = "8/p1r3k1/2pR2pb/4pp2/1PB5/5P2/P1P3P1/1K6 b - - 0 26"
+
+    pos49 = Position(fen=fen_p49)
+    pos50 = Position(fen=fen_p50)
+    pos51 = Position(fen=fen_p51)
+    session.add_all([pos49, pos50, pos51])
+    session.commit()
+
+    m49 = Move(from_position_id=pos49.id, to_position_id=pos50.id, uci="f8g7", san="Kg7")
+    m50 = Move(from_position_id=pos50.id, to_position_id=pos51.id, uci="b2b4", san="b4")
+    session.add_all([m49, m50])
+    session.commit()
+
+    # Pre-populate pos49 with 10 games for f8g7, and pos50/pos51 with stale empty {}
+    session.add_all([
+        LichessData(fen=fen_p49, elo_range="high", moves_json=json.dumps({"f8g7": {"white": 4, "draws": 2, "black": 4, "total": 10}})),
+        LichessData(fen=fen_p50, elo_range="high", moves_json=json.dumps({})),
+        LichessData(fen=fen_p51, elo_range="high", moves_json=json.dumps({}))
+    ])
+    session.commit()
+
+    network_requests = []
+    def mock_get(url, headers):
+        unquoted = urllib.parse.unquote_plus(url)
+        network_requests.append(unquoted)
+        if fen_p50 in unquoted:
+            assert "explorer.lichess.org/masters" in unquoted
+            return json.dumps({"moves": [{"uci": "b2b4", "white": 10, "draws": 5, "black": 4, "total": 19}]}).encode()
+        if fen_p51 in unquoted:
+            assert "explorer.lichess.org/masters" in unquoted
+            return json.dumps({"moves": [{"uci": "h6f4", "white": 8, "draws": 4, "black": 3, "total": 15}]}).encode()
+        return json.dumps({"moves": []}).encode()
+
+    with patch("time.sleep"), \
+         patch("opening_fenix.core.services.lichess_service._update_lichess_delay_config"), \
+         patch("opening_fenix.core.services.lichess_service.LichessConnectionManager.get", side_effect=mock_get):
+
+        success, msg = run_lichess_import(sample_repertoire, "high")
+        assert success is True
+
+    # Check that pos50 and pos51 were both queried using masters and updated
+    ld50 = session.query(LichessData).filter_by(fen=fen_p50, elo_range="high").first()
+    assert ld50 is not None
+    data50 = json.loads(ld50.moves_json)
+    assert "b2b4" in data50
+    assert data50["b2b4"]["total"] == 19
+
+    ld51 = session.query(LichessData).filter_by(fen=fen_p51, elo_range="high").first()
+    assert ld51 is not None
+    data51 = json.loads(ld51.moves_json)
+    assert "h6f4" in data51
+    assert data51["h6f4"]["total"] == 15
+
+    # Check network requests used masters
+    assert len(network_requests) == 2
+    for req in network_requests:
+        assert "explorer.lichess.org/masters" in req

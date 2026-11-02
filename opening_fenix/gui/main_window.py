@@ -166,6 +166,8 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self.trigger_board_adjust)
         # Start the onboarding tour if not shown yet
         QTimer.singleShot(500, self.check_for_onboarding)
+        # Pre-warm settings dialog during idle time for instant opening
+        QTimer.singleShot(1500, self._prewarm_settings_dialog)
         if is_free_training_profile(self.profile_name) and not getattr(self, '_free_training_setup_shown', False):
             self._free_training_setup_shown = True
             QTimer.singleShot(200, self.open_free_training_setup)
@@ -1247,6 +1249,17 @@ class MainWindow(QMainWindow):
         # Use a singleShot timer to ensure the layout is complete before scrolling.
         # moveCursor(End) is more robust than manually setting scrollbar values.
         QTimer.singleShot(50, lambda: self.txt_notation.moveCursor(QTextCursor.MoveOperation.End))
+
+    def _prewarm_settings_dialog(self):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
+        if not hasattr(self, 'settings_dialog') or not self.settings_dialog or sip.isdeleted(self.settings_dialog):
+            try:
+                self.settings_dialog = SettingsDialog(self)
+                self.settings_dialog.finished.connect(self._on_settings_closed)
+            except Exception as e:
+                logger.debug(f"Settings prewarm deferred: {e}")
 
     def open_settings(self):
         from PyQt6 import sip

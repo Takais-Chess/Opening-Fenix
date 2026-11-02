@@ -22,6 +22,14 @@ def fetch_repertoire_levels(session: Session) -> List[Dict[str, Any]]:
     return [{"id": l.id, "name": l.name, "order": l.order, "target_elo": l.target_elo} for l in lvls]
 
 _levels_cache: Dict[str, List[Dict[str, Any]]] = {}
+_cached_all_repos: Optional[List[str]] = None
+_cached_all_repos_mtime: Optional[float] = None
+
+def invalidate_all_repertoires_cache() -> None:
+    """Invalidates the in-memory cache of all valid repertoire names."""
+    global _cached_all_repos, _cached_all_repos_mtime
+    _cached_all_repos = None
+    _cached_all_repos_mtime = None
 
 def invalidate_repertoire_levels_cache(repo_name: Optional[str] = None) -> None:
     """Clears cached levels for a specific repertoire or all repertoires."""
@@ -202,24 +210,41 @@ class RepertoireService:
         self.repo_session = None
 
     def get_all_repertoires(self) -> List[str]:
+        global _cached_all_repos, _cached_all_repos_mtime
         repo_base = os.path.join(get_user_dir(), "repertoires")
         if not os.path.exists(repo_base):
             return []
-        
+
+        try:
+            current_mtime = os.path.getmtime(repo_base)
+        except OSError:
+            current_mtime = 0
+
+        if _cached_all_repos is not None and _cached_all_repos_mtime == current_mtime:
+            return list(_cached_all_repos)
+
         files = []
-        
-        # Scan normally
-        for f in os.listdir(repo_base):
-            if f != "test" and os.path.isdir(os.path.join(repo_base, f)):
-                files.append(f)
-                
+
+        # Scan normally with fast scandir
+        try:
+            with os.scandir(repo_base) as it:
+                for entry in it:
+                    if entry.name != "test" and entry.is_dir():
+                        files.append(entry.name)
+        except OSError:
+            pass
+
         # Scan test layer
         test_base = os.path.join(repo_base, "test")
         if os.path.exists(test_base):
-            for f in os.listdir(test_base):
-                if os.path.isdir(os.path.join(test_base, f)):
-                    files.append(f)
-                    
+            try:
+                with os.scandir(test_base) as it:
+                    for entry in it:
+                        if entry.is_dir():
+                            files.append(entry.name)
+            except OSError:
+                pass
+
         # Filter only those that actually have a database and deduplicate
         valid_repos = []
         seen = set()
@@ -227,19 +252,20 @@ class RepertoireService:
             if repo_name in seen:
                 continue
             db_path = get_repertoire_db_path(repo_name)
-            if os.path.exists(db_path):
-                # Verify SQLite header just in case
+            if os.path.exists(db_path) and os.path.getsize(db_path) >= 100:
                 try:
-                    conn = sqlite3.connect(db_path)
-                    conn.execute("SELECT 1 FROM sqlite_master WHERE type='table'")
-                    conn.close()
-                    valid_repos.append(repo_name)
-                    seen.add(repo_name)
-                except sqlite3.DatabaseError as e:
-                    logger.debug(f"Skipping {repo_name} due to database error: {e}")
-                    
+                    with open(db_path, "rb") as f:
+                        if f.read(16).startswith(b"SQLite format 3\x00"):
+                            valid_repos.append(repo_name)
+                            seen.add(repo_name)
+                except Exception as e:
+                    logger.debug(f"Skipping {repo_name} due to read error: {e}")
+
         from opening_fenix.core.utils import filter_repertoires_by_build_type
-        return filter_repertoires_by_build_type(valid_repos)
+        filtered = filter_repertoires_by_build_type(valid_repos)
+        _cached_all_repos = filtered
+        _cached_all_repos_mtime = current_mtime
+        return list(filtered)
 
     def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = False, create_if_missing: bool = True) -> None:
         self.close()
