@@ -1050,11 +1050,293 @@ def update_comment_with_annotations(comment_data, arrows=None, highlights=None) 
         return clean
 
 
+# --- POSITION EVALUATION SYMBOLS & CONTENT DETECTION ---
+
+EVAL_SYMBOLS = ["+−", "±", "⩲", "=", "∞", "⇆", "⩱", "∓", "−+"]
+ALL_EVAL_SYMBOLS = ["+−", "+-", "±", "⩲", "=", "∞", "⇆", "⩱", "∓", "−+", "-+"]
+
+
+def extract_eval_symbol(text: str):
+    """
+    Extracts a chess position evaluation symbol from a comment string if present.
+    Recognizes symbols alone, on the last line, or trailing after whitespace.
+    Normalizes '+-' -> '+−' and '-+' -> '−+'.
+    """
+    if not text or not isinstance(text, str):
+        return None
+    cleaned = clean_chessbase_annotations(text).strip()
+    if not cleaned:
+        return None
+
+    def _normalize(sym: str) -> str:
+        if sym == "+-": return "+−"
+        if sym == "-+": return "−+"
+        return sym
+
+    if cleaned in ALL_EVAL_SYMBOLS:
+        return _normalize(cleaned)
+
+    lines = cleaned.split('\n')
+    last_line = lines[-1].strip()
+    if last_line in ALL_EVAL_SYMBOLS:
+        return _normalize(last_line)
+
+    tokens = last_line.split()
+    if tokens and tokens[-1] in ALL_EVAL_SYMBOLS:
+        return _normalize(tokens[-1])
+
+    return None
+
+
+def strip_eval_symbol(text: str) -> str:
+    """
+    Removes any trailing evaluation symbol from the comment text.
+    Preserves all preceding text and line breaks.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    s = text.rstrip()
+    if not s:
+        return ""
+    if s.strip() in ALL_EVAL_SYMBOLS:
+        return ""
+
+    lines = s.split('\n')
+    if lines:
+        last_line = lines[-1].strip()
+        if last_line in ALL_EVAL_SYMBOLS:
+            lines.pop()
+            return '\n'.join(lines).rstrip()
+
+        tokens = lines[-1].split()
+        if tokens and tokens[-1] in ALL_EVAL_SYMBOLS:
+            tokens.pop()
+            lines[-1] = " ".join(tokens)
+            return '\n'.join(lines).rstrip()
+
+    return s
+
+
+def has_meaningful_comment(text: str) -> bool:
+    """
+    Checks if a comment string contains actual verbal commentary,
+    ignoring ChessBase drawing tags ([%csl ...], [%cal ...]) and evaluation symbols (+−, =, etc.).
+    Returns True ONLY if there is actual written text.
+    """
+    if not text or not isinstance(text, str):
+        return False
+    clean = clean_chessbase_annotations(text)
+    without_eval = strip_eval_symbol(clean)
+    return bool(without_eval.strip())
+
+
+def get_lang_display_label(code: str) -> str:
+    """Returns a friendly display label with flag for common chess language codes."""
+    if not code:
+        return ""
+    c = code.lower().strip()
+    flags = {
+        "en": "🇬🇧 EN (English)",
+        "de": "🇩🇪 DE (Deutsch)",
+        "es": "🇪🇸 ES (Español)",
+        "fr": "🇫🇷 FR (Français)",
+        "it": "🇮🇹 IT (Italiano)",
+        "ru": "🇷🇺 RU (Русский)",
+        "pl": "🇵🇱 PL (Polski)",
+        "zh": "🇨🇳 ZH (Chinese)",
+        "pt": "🇵🇹 PT (Português)",
+        "nl": "🇳🇱 NL (Nederlands)",
+        "uk": "🇺🇦 UK (Українська)",
+        "cs": "🇨🇿 CS (Čeština)",
+        "tr": "🇹🇷 TR (Türkçe)",
+    }
+    return flags.get(c, f"🌐 {c.upper()}")
+
+
+def translate_chess_comment(comment_text: str, src_lang: str = "en", tgt_lang: str = "de", timeout: float = 6.0) -> str:
+    """
+    Translates a chess position comment using Google Translate while safely preserving
+    ChessBase diagram tags ([%csl ...], [%cal ...]) and evaluation symbols (+−, =, etc.).
+    Returns translated text string. If offline or error occurs, returns cleaned original text.
+    """
+    if not comment_text or not isinstance(comment_text, str) or not comment_text.strip():
+        return ""
+
+    import re
+    import urllib.request
+    import urllib.parse
+    import json
+    from opening_fenix.core.logger import logger
+
+    # 1. Extract ChessBase tags
+    tags = re.findall(r'(\[%c[s|a]l [^\]]+\])', comment_text)
+    tags_part = " ".join(tags) if tags else ""
+
+    # 2. Extract evaluation symbol
+    eval_sym = extract_eval_symbol(comment_text)
+
+    # 3. Get purely verbal text
+    clean_text = clean_chessbase_annotations(comment_text)
+    verbal_text = strip_eval_symbol(clean_text).strip()
+
+    if not verbal_text:
+        res_parts = []
+        if tags_part: res_parts.append(tags_part)
+        if eval_sym: res_parts.append(eval_sym)
+        return "\n".join(res_parts) if eval_sym else tags_part
+
+    # 4. Call Google Translate
+    translated_verbal = verbal_text
+    try:
+        q = urllib.parse.quote(verbal_text)
+        src = src_lang.lower().strip() if src_lang else "auto"
+        tgt = tgt_lang.lower().strip() if tgt_lang else "de"
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={tgt}&dt=t&q={q}"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            if data and data[0]:
+                chunks = [chunk[0] for chunk in data[0] if chunk and chunk[0]]
+                if chunks:
+                    translated_verbal = ''.join(chunks).strip()
+    except Exception as e:
+        logger.warning(f"Google translate request failed: {e}")
+        return comment_text
+
+    # 5. Reassemble: [tags] [translated verbal] [eval_sym]
+    parts = []
+    if tags_part:
+        parts.append(tags_part)
+    if translated_verbal:
+        parts.append(translated_verbal)
+
+    res = " ".join(parts) if tags_part else translated_verbal
+    if eval_sym:
+        res = f"{res}\n{eval_sym}" if res else eval_sym
+
+    return res
+
+
+def strip_outer_parentheses_single(s: str) -> str:
+    """
+    Strips redundant balanced outer parentheses wrapping an entire comment or segment,
+    while safely preserving leading/trailing ChessBase annotation tags ([%cal...], [%csl...]).
+    Internal parentheses like '(better was 5.Nf3)' or '(Kasparov 1985)' remain untouched.
+    """
+    if not s or not isinstance(s, str):
+        return s
+    orig = s
+    trimmed = s.strip()
+
+    # Extract leading [%...] tags
+    m_lead = re.match(r'^((?:\[%\w+\s+[^\]]+\]\s*)+)', trimmed)
+    tag_prefix = ''
+    body = trimmed
+    if m_lead:
+        tag_prefix = m_lead.group(0)
+        body = trimmed[m_lead.end():].strip()
+
+    # Extract trailing [%...] tags
+    m_trail = re.search(r'((?:\s*\[%\w+\s+[^\]]+\])+)$', body)
+    tag_suffix = ''
+    if m_trail:
+        tag_suffix = m_trail.group(0)
+        body = body[:m_trail.start()].strip()
+
+    # Check if body is fully enclosed by matching outer parentheses
+    changed_body = False
+    while body.startswith('(') and body.endswith(')'):
+        depth = 0
+        is_fully_enclosed = True
+        for i, ch in enumerate(body):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+                # If depth drops to 0 before the final character, outer parens do not enclose the entire string
+                if depth == 0 and i < len(body) - 1:
+                    is_fully_enclosed = False
+                    break
+        if is_fully_enclosed and depth == 0:
+            body = body[1:-1].strip()
+            changed_body = True
+        else:
+            break
+
+    if not changed_body:
+        return orig
+
+    # Reconstruct text preserving tags and inner whitespace
+    res = body
+    if tag_prefix:
+        res = f"{tag_prefix.strip()} {res}".strip()
+    if tag_suffix:
+        res = f"{res} {tag_suffix.strip()}".strip()
+    return res
+
+
+def clean_outer_parentheses_from_text(text: str) -> str:
+    """
+    Removes outer parentheses from text, handling multi-part comments separated by ' | '
+    and multi-paragraph comments.
+    """
+    if not text or not isinstance(text, str):
+        return ""
+    # Split by ' | ' for combined comments across lines/chapters
+    parts = text.split(" | ")
+    cleaned_parts = []
+    for part in parts:
+        p_clean = strip_outer_parentheses_single(part)
+        if p_clean != part:
+            cleaned_parts.append(p_clean)
+        else:
+            # Check paragraph by paragraph if the entire part was not wrapped
+            paras = re.split(r"(\n\s*\n+)", part)
+            cleaned_paras = [strip_outer_parentheses_single(p) if not re.match(r"^\n\s*\n+$", p) else p for p in paras]
+            cleaned_parts.append(''.join(cleaned_paras))
+    return " | ".join(cleaned_parts)
+
+
+def clean_comment_parentheses(comment: str) -> tuple[str, bool]:
+    """
+    Cleans enclosing outer parentheses from a comment string, supporting
+    both multilingual JSON comments and plain text comments.
+    Returns (cleaned_comment_str, was_changed_bool).
+    """
+    if not comment or not isinstance(comment, str):
+        return comment, False
+
+    raw = comment.strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                changed = False
+                new_data = {}
+                for lang, val in data.items():
+                    if isinstance(val, str):
+                        new_val = clean_outer_parentheses_from_text(val)
+                        if new_val != val:
+                            changed = True
+                        new_data[lang] = new_val
+                    else:
+                        new_data[lang] = val
+                if changed:
+                    return json.dumps(new_data, ensure_ascii=False), True
+                return comment, False
+        except Exception:
+            pass
+
+    new_val = clean_outer_parentheses_from_text(comment)
+    return new_val, new_val != comment
+
+
 def clean_comment_text(text: str) -> str:
     """
     Cleans hard-wrapped line breaks and isolated move/punctuation tokens
     typically generated by web PGN exporters (like Chessable).
     Preserves genuine paragraph breaks (double newlines) and intentional multi-line comments.
+    Also strips redundant outer parentheses wrapping whole comments or segments.
     """
     if not text:
         return ""
@@ -1102,7 +1384,8 @@ def clean_comment_text(text: str) -> str:
         else:
             cleaned_paras.append("\n".join(lines))
             
-    return "\n\n".join(cleaned_paras)
+    res = "\n\n".join(cleaned_paras)
+    return clean_outer_parentheses_from_text(res)
 
 
 def combine_comments(existing_comment: str, new_comment: str, default_lang: str = "de") -> str:
@@ -1129,6 +1412,7 @@ def combine_comments(existing_comment: str, new_comment: str, default_lang: str 
         return format_multilingual_comment(inc_dict)
         
     ext_dict = get_multilingual_comment_dict(existing_comment, default_lang=target)
+    ext_dict = {k: clean_comment_text(v) for k, v in ext_dict.items()}
     
     # Merge dictionaries key by key
     merged = dict(ext_dict)
@@ -1196,8 +1480,8 @@ def get_repertoire_comment_stats(session) -> str:
     counts = {}
     for (raw_c,) in comments:
         c_dict = get_multilingual_comment_dict(raw_c)
-        for lang in c_dict.keys():
-            if lang:
+        for lang, val in c_dict.items():
+            if lang and has_meaningful_comment(val):
                 lang_upper = lang.upper()
                 counts[lang_upper] = counts.get(lang_upper, 0) + 1
                 

@@ -16,7 +16,8 @@ from opening_fenix.core.utils import (
     initialize_repertoire_assets,
     combine_comments,
     normalize_castling_uci,
-    natural_sort_key
+    natural_sort_key,
+    clean_outer_parentheses_from_text
 )
 from opening_fenix.core.services.repair_service import repair_repertoire_health
 from opening_fenix.core.logger import logger
@@ -216,7 +217,8 @@ def sanitize_comment_variations(text: str) -> str:
                 if convert_to_comment:
                     clean = chunk.replace('{', ' ').replace('}', ' ')
                     clean = re.sub(r'\s+', ' ', clean).strip()
-                    result.append(f" {{ ({clean}) }} ")
+                    clean = clean_outer_parentheses_from_text(clean)
+                    result.append(f" {{ {clean} }} ")
                     i = k
                     continue
 

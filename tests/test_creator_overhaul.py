@@ -97,3 +97,110 @@ def test_overhaul_filters(creator_window, qapp):
     
     # Verify UI reflects change
     assert creator_window.combo_overhaul_level.currentIndex() == 1
+
+
+def test_overhaul_session_level_persistence(creator_window):
+    """Test saving and loading overhaul session level in backend."""
+    backend = creator_window.backend
+    assert backend.get_overhaul_session_level() is None
+    
+    backend.save_overhaul_session_level(2)
+    assert backend.get_overhaul_session_level() == 2
+    
+    backend.save_overhaul_session_level(None)
+    assert backend.get_overhaul_session_level() is None
+
+
+def test_repertoire_switch_isolates_sessions_and_levels(qapp, mock_user_dir):
+    """Test that switching repertoires unloads session and preserves level settings per repertoire."""
+    from opening_fenix.core.utils import get_repertoire_db_path
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.models import Base, RepertoireLevel, Position, Move, RepertoireMove
+    import chess
+
+    # 1. Setup RepoA and RepoB
+    for r_name in ["RepoA", "RepoB"]:
+        db_path = get_repertoire_db_path(r_name)
+        db = DatabaseManager(db_path, base=Base)
+        s = db.get_session()
+        lvl1 = RepertoireLevel(name="Basics", order=1)
+        lvl2 = RepertoireLevel(name="Deep Theory", order=2)
+        s.add_all([lvl1, lvl2])
+        p1 = Position(fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR")
+        p2 = Position(fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR")
+        s.add_all([p1, p2])
+        s.flush()
+        m = Move(from_position_id=p1.id, to_position_id=p2.id, uci="e2e4", san="e4")
+        s.add(m)
+        s.flush()
+        rm = RepertoireMove(move_id=m.id, level=1, is_active=True)
+        s.add(rm)
+        s.commit()
+        db.close()
+
+    # 2. Open Creator with RepoA
+    win = CreatorWindow("RepoA")
+    win.show()
+    qapp.processEvents()
+
+    # Ensure tab is active
+    if not any("KONTROLLE" in win.tabs.tabText(i).upper() for i in range(win.tabs.count())):
+        widget, title = win._all_tabs["KONTROLLE"]
+        win.tabs.addTab(widget, title)
+    for i in range(win.tabs.count()):
+        if "KONTROLLE" in win.tabs.tabText(i).upper():
+            win.tabs.setCurrentIndex(i)
+            break
+    qapp.processEvents()
+
+    # In RepoA, select Level 1 (order 1)
+    idx_lvl1 = -1
+    for i in range(win.combo_overhaul_level.count()):
+        if win.combo_overhaul_level.itemData(i) == 1:
+            idx_lvl1 = i
+            break
+    assert idx_lvl1 != -1
+    win.combo_overhaul_level.setCurrentIndex(idx_lvl1)
+    qapp.processEvents()
+
+    # Start session in RepoA with Level 1
+    win.toggle_overhaul_session()
+    qapp.processEvents()
+    assert win.overhaul_active is True
+    assert win.backend.get_overhaul_session_level() == 1
+    assert win.combo_overhaul_level.isEnabled() is False
+
+    # 3. Switch to RepoB (RepoB has NO active session)
+    win.load_repertoire("RepoB")
+    qapp.processEvents()
+
+    # Verify session is NOT leaked into RepoB
+    assert win.overhaul_active is False
+    assert win.overhaul_start is None
+    assert win.combo_overhaul_level.isEnabled() is True
+    assert "Starten" in win.btn_overhaul_start.text()
+
+    # In RepoB, user sets filter to Level 2 (Deep Theory)
+    idx_lvl2 = -1
+    for i in range(win.combo_overhaul_level.count()):
+        if win.combo_overhaul_level.itemData(i) == 2:
+            idx_lvl2 = i
+            break
+    assert idx_lvl2 != -1
+    win.combo_overhaul_level.setCurrentIndex(idx_lvl2)
+    qapp.processEvents()
+    assert win.backend.get_meta("overhaul_selected_level") == "2"
+
+    # 4. Switch back to RepoA
+    win.load_repertoire("RepoA")
+    qapp.processEvents()
+
+    # Verify RepoA's session is restored and locked to Level 1
+    assert win.overhaul_active is True
+    assert win.overhaul_start is not None
+    assert win.combo_overhaul_level.currentData() == 1
+    assert win.combo_overhaul_level.isEnabled() is False
+    assert "Fortsetzen" in win.btn_overhaul_start.text()
+
+    win.close()
+

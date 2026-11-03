@@ -7,7 +7,7 @@ import zipfile
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from opening_fenix.core.utils import get_user_dir, get_base_path, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict
+from opening_fenix.core.utils import get_user_dir, get_base_path, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict, has_meaningful_comment
 from opening_fenix.core.logger import logger
 
 
@@ -177,9 +177,9 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
                     c.execute("SELECT comment FROM positions WHERE comment IS NOT NULL AND comment != ''")
                     for (raw_c,) in c.fetchall():
                         c_dict = get_multilingual_comment_dict(raw_c)
-                        if "en" in c_dict and c_dict["en"]:
+                        if "en" in c_dict and has_meaningful_comment(c_dict["en"]):
                             en_cnt += 1
-                        if "de" in c_dict and c_dict["de"]:
+                        if "de" in c_dict and has_meaningful_comment(c_dict["de"]):
                             de_cnt += 1
 
                 # 2. Levels and moves per level

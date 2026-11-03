@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.1] - 2026-11-03
+
+### Performance & Improvements
+- **Zero-Lag Creator Move Execution**: Eliminated SQLite write-lock contention during background enrichment (enrich_position) by decoupling network Lichess fetches, cross-course lookups, and Stockfish evaluations from database transactions, reducing GUI move execution under active enrichment from ~549 ms to ~2.8 ms (~196x speedup).
+- **Subtree Pruning in Local Priority Propagation**: Optimized calculate_local_priority_scores to evaluate immediate outgoing moves first and prune unchanged sibling subtrees, speeding up root/early-move priority propagation on 14,000+ position repertoires from ~676 ms down to ~2.5 ms (~276x speedup).
+- **Fast-Path Move Navigation & Indexed FEN Lookups**: Replaced unindexed GLOB table scans with O(1) indexed exact and range FEN queries (_get_pos_by_fen), added no-op fast paths in dd_move for existing repertoire moves, and batched outgoing transposition queries (ind_outgoing_transpositions).
+- **Cached Overhaul Reachability & Targeted UI Refresh**: Cached reachable position sets and replaced chunked SQL count loops with set intersection in get_overhaul_stats (~27x faster), while restricting background enrichment callbacks to non-intrusive table updates.
+- **Comment Cleanup & Multilingual Enhancements**: Added automatic and manual removal of redundant outer parentheses around comments (clean_outer_parentheses_from_text), improved meaningful comment detection across language stats, and refined dual-language comment auto-translation triggers during Overhaul sessions.
+
 ## [1.3.0] - 2026-11-03
 
 ### Added & Improved

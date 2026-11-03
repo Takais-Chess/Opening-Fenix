@@ -5222,6 +5222,14 @@ class UnifiedSettingsDialog(QDialog):
             btn_brackets,
             is_last=False
         ))
+        btn_parens = QPushButton(tr_widget("repo_settings.btn_parens", "🧹 Äußere Klammern ( ) um Kommentare entfernen"))
+        btn_parens.clicked.connect(self._clean_repo_parentheses)
+        v_clean.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_parens_row", "Umschließende runde Klammern entfernen"),
+            tr_ui("repo_settings.lbl_parens_sub", "Entfernt überflüssige ( ) um ganze Kommentare oder Abschnitte. Klammern innerhalb von Sätzen bleiben erhalten."),
+            btn_parens,
+            is_last=False
+        ))
         btn_trans = QPushButton(tr_widget("repo_settings.btn_transfer_comments", "🌐 Kommentare übertragen..."))
         btn_trans.clicked.connect(self.open_transfer_dialog)
         v_clean.addWidget(self._make_hairline_row(
@@ -5521,6 +5529,14 @@ class UnifiedSettingsDialog(QDialog):
                 tr_ui("repo_settings.dlg_done", "Fertig"),
                 tr_ui("repo_settings.dlg_global_done", "Alle {count} Züge wurden erfolgreich auf '{target}' gesetzt.", count=updated, target=target_text)
             )
+
+    def _clean_repo_parentheses(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend:
+            QMessageBox.warning(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), tr_ui("repo_settings.msg_db_not_found", "Repertoire-Datenbank nicht gefunden."))
+            return
+        count = backend.clean_parentheses_in_repo()
+        QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), tr_ui("repo_settings.msg_parens_cleaned", "{count} Kommentare bereinigt.", count=count))
 
     def open_transfer_dialog(self):
         backend = self.ensure_backend_for_active_repo()

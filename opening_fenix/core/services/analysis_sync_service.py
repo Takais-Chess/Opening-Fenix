@@ -179,3 +179,80 @@ def sync_analysis_data_from_other_repertoires(
             return 0
 
     return copied_count
+
+
+def find_position_analysis_in_other_repertoires(
+    clean_fen: str,
+    current_repo_name: str,
+    target_depth: int
+) -> Optional[Tuple[int, List[str], Optional[int]]]:
+    """
+    Fast O(1) indexed lookup for a single position across other course databases
+    without holding a target database session open.
+
+    Returns (best_depth, good_moves_list, engine_eval) or None.
+    """
+    norm = normalize_fen(clean_fen)
+    if not norm:
+        return None
+
+    try:
+        all_repos = RepertoireService().get_all_repertoires()
+    except Exception as e:
+        logger.debug(f"[Analysis Cross-Sync] Failed to list repertoires: {e}")
+        return None
+
+    other_repos = [r for r in all_repos if r != current_repo_name]
+    if not other_repos:
+        return None
+
+    best_match: Optional[Tuple[int, List[str], Optional[int]]] = None
+
+    for other_repo in other_repos:
+        other_db_path = get_repertoire_db_path(other_repo)
+        if not os.path.exists(other_db_path):
+            continue
+
+        conn = None
+        try:
+            conn = sqlite3.connect(other_db_path, timeout=2.0)
+            cursor = conn.cursor()
+
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
+            if not cursor.fetchone():
+                continue
+
+            cursor.execute("PRAGMA table_info(positions)")
+            cols = {row[1] for row in cursor.fetchall()}
+            if not {'analysis_depth', 'good_moves', 'fen'}.issubset(cols):
+                continue
+
+            select_eval = ", engine_eval" if 'engine_eval' in cols else ", NULL"
+            query = (
+                f"SELECT analysis_depth, good_moves{select_eval} "
+                f"FROM positions WHERE (fen = ? OR (fen BETWEEN ? AND ?)) "
+                f"AND analysis_depth IS NOT NULL AND analysis_depth >= ? "
+                f"AND good_moves IS NOT NULL LIMIT 1"
+            )
+            cursor.execute(query, (norm, f"{norm} ", f"{norm} ~", target_depth))
+            row = cursor.fetchone()
+            if row:
+                r_depth, r_gm, r_eval = row
+                try:
+                    parsed = json.loads(r_gm)
+                    if isinstance(parsed, list):
+                        if best_match is None or r_depth > best_match[0]:
+                            best_match = (r_depth, parsed, r_eval)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"[Analysis Cross-Sync] Error reading repo '{other_repo}': {e}")
+        finally:
+            if conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    return best_match
+

@@ -38,7 +38,7 @@ from sqlalchemy.orm import joinedload
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
 from opening_fenix.core.db.database import commit_with_retry
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
-from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations
+from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations, clean_comment_parentheses, extract_eval_symbol, strip_eval_symbol, has_meaningful_comment, get_lang_display_label, EVAL_SYMBOLS, translate_chess_comment
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
 
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
@@ -156,6 +156,7 @@ class CreatorBackend:
         if graph_changed:
             self._outgoing_transpositions_cache = {}
             self._min_reachable_level_cache = None
+            self._reachable_ids_cache = {}
             if hasattr(self, "window") and self.window:
                 if hasattr(self.window, "clear_transposition_caches"):
                     try:
@@ -168,6 +169,18 @@ class CreatorBackend:
             except Exception:
                 pass
             self.session.expire_all()
+
+    def _get_pos_by_fen(self, fen: str):
+        """Fast O(1) indexed lookup on Position.fen (exact match + indexed range fallback for 6-part FENs)."""
+        if not self.session or not fen:
+            return None
+        clean_fen = " ".join(fen.strip().split()[:4])
+        pos = self.session.query(Position).filter_by(fen=clean_fen).first()
+        if not pos:
+            pos = self.session.query(Position).filter(
+                Position.fen.between(clean_fen + " ", clean_fen + " ~")
+            ).first()
+        return pos
 
     def get_repertoire_start_move(self, force_refresh=False):
         if not force_refresh: return self._cached_start_move
@@ -220,8 +233,7 @@ class CreatorBackend:
 
     def get_parent_moves_for_fen(self, fen):
         if not self.session: return []
-        clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         if not pos: return []
         results = (
             self.session.query(Move.san, Move.uci, Position.fen)
@@ -233,9 +245,7 @@ class CreatorBackend:
 
     def get_path_to_fen(self, fen):
         if not self.session: return None, []
-        # Robust FEN Cleaning (normalize spaces and trim)
-        clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         if not pos: return None, []
         path = []
         curr_id = pos.id
@@ -264,8 +274,7 @@ class CreatorBackend:
         if cache_key in self._ui_cache:
             return self._ui_cache[cache_key]
             
-        clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         data = {"id": None, "comment": "", "variation_1": "", "variation_2": "", "variation_3": "",
                 "v1_inherited": False, "v2_inherited": False, "v3_inherited": False}
         if not pos: 
@@ -298,7 +307,7 @@ class CreatorBackend:
         if not self.session: return
         # Robust FEN Cleaning for query consistency
         clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(clean_fen)
         if not pos: 
             pos = Position(fen=clean_fen)
             self.session.add(pos)
@@ -325,14 +334,14 @@ class CreatorBackend:
 
         if names_changed:
             self._update_cached_names_recursive(pos)
+            self._reachable_ids_cache = {}
 
         self.session.commit()
         self.clear_cache(graph_changed=False)
 
     def mark_position_reviewed(self, fen):
         if not self.session: return
-        clean_fen = " ".join(fen.strip().split(" ")[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         if pos:
             pos.last_overhaul_review = datetime.datetime.now()
             self.session.commit()
@@ -351,10 +360,17 @@ class CreatorBackend:
         """
         if not self.session: return set()
         if level is None: level = 99 # Default to all levels
+
+        if not hasattr(self, "_reachable_ids_cache") or self._reachable_ids_cache is None:
+            self._reachable_ids_cache = {}
+        var_key = tuple(variation_filter) if isinstance(variation_filter, (list, tuple)) else variation_filter
+        cache_key = (level, var_key)
+        if cache_key in self._reachable_ids_cache:
+            return self._reachable_ids_cache[cache_key]
         
         # Use clean FEN (4 fields) to match DB
         start_fen = " ".join(chess.STARTING_FEN.split(" ")[:4])
-        start_pos = self.session.query(Position).filter(Position.fen.op('GLOB')(start_fen + "*")).first()
+        start_pos = self._get_pos_by_fen(start_fen)
         if not start_pos: return set()
         
         reachable = {start_pos.id}
@@ -405,8 +421,10 @@ class CreatorBackend:
                 
                 filtered_ids.add(pid)
                 
+            self._reachable_ids_cache[cache_key] = filtered_ids
             return filtered_ids
             
+        self._reachable_ids_cache[cache_key] = reachable
         return reachable
 
     def get_variation_structure(self):
@@ -461,17 +479,13 @@ class CreatorBackend:
         
         if total_count == 0: return 0, 0
         
-        checked_count = 0
-        total_ids_list = list(total_ids)
-        chunk_size = 900
-        for i in range(0, len(total_ids_list), chunk_size):
-            chunk = total_ids_list[i:i + chunk_size]
-            query = self.session.query(Position).filter(Position.id.in_(chunk))
-            if session_start:
-                query = query.filter(Position.last_overhaul_review >= session_start)
-            else:
-                query = query.filter(Position.last_overhaul_review != None)
-            checked_count += query.count()
+        query = self.session.query(Position.id)
+        if session_start:
+            query = query.filter(Position.last_overhaul_review >= session_start)
+        else:
+            query = query.filter(Position.last_overhaul_review != None)
+        reviewed_ids = {r[0] for r in query.all()}
+        checked_count = len(total_ids & reviewed_ids)
             
         return checked_count, total_count
 
@@ -491,6 +505,24 @@ class CreatorBackend:
             self.set_meta("overhaul_session_start", dt.isoformat())
         else:
             self.set_meta("overhaul_session_start", None)
+        self.session.commit()
+
+    def get_overhaul_session_level(self):
+        """Loads the overhaul session target level from metadata."""
+        val = self.get_meta("overhaul_session_level")
+        if val is not None:
+            try:
+                return int(val)
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def save_overhaul_session_level(self, lvl):
+        """Saves the overhaul session target level to metadata."""
+        if lvl is not None:
+            self.set_meta("overhaul_session_level", str(lvl))
+        else:
+            self.set_meta("overhaul_session_level", None)
         self.session.commit()
 
     def set_meta(self, key, value):
@@ -702,9 +734,7 @@ class CreatorBackend:
 
     def update_position_analysis(self, fen, depth, eval_val):
         if not self.session: return
-        clean_fen = " ".join(fen.strip().split()[:4])
-        # Use GLOB for case-sensitive prefix matching in SQLite
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         if pos and pos.engine_eval != eval_val:
             pos.engine_eval = eval_val
             self.session.commit()
@@ -729,8 +759,7 @@ class CreatorBackend:
         from opening_fenix.core.services.analysis_service import evaluate_multipv_exhaustiveness
         from opening_fenix.core.services.engine_cache_service import EngineCacheService
 
-        clean_fen = " ".join(fen.strip().split()[:4])
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
 
         rep_uci = None
         if pos:
@@ -782,9 +811,7 @@ class CreatorBackend:
         if cache_key in self._ui_cache:
             return self._ui_cache[cache_key]
             
-        clean_fen = " ".join(fen.strip().split()[:4])
-        # Use GLOB for case-sensitive prefix matching in SQLite
-        pos = self.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+        pos = self._get_pos_by_fen(fen)
         if not pos: 
             self._ui_cache[cache_key] = []
             return []
@@ -1254,12 +1281,16 @@ class CreatorBackend:
 
     def add_move(self, from_fen, move_uci, move_san, level_order=None, nag=0):
         if not self.session: return
+        changed = False
         clean_from = " ".join(from_fen.split(" ")[:4])
-        from_pos = self.session.query(Position).filter_by(fen=clean_from).first()
+        from_pos = self._get_pos_by_fen(clean_from)
         if not from_pos:
             from_pos = Position(fen=clean_from)
             self.session.add(from_pos)
             self.session.flush()
+            changed = True
+            if getattr(self, "_fen_index", None) is not None:
+                self._fen_index.add(clean_from)
 
         board = chess.Board(from_fen)
         try:
@@ -1275,11 +1306,14 @@ class CreatorBackend:
         from opening_fenix.core.utils import normalize_castling_uci, CASTLING_ALT, CASTLING_SANS
         move_uci = normalize_castling_uci(move_uci, move_san)
 
-        to_pos = self.session.query(Position).filter_by(fen=clean_to).first()
+        to_pos = self._get_pos_by_fen(clean_to)
         if not to_pos:
             to_pos = Position(fen=clean_to)
             self.session.add(to_pos)
             self.session.flush()
+            changed = True
+            if getattr(self, "_fen_index", None) is not None:
+                self._fen_index.add(clean_to)
             # Initialize cached names for new position from parent
             if from_pos.cached_v1: to_pos.cached_v1 = from_pos.cached_v1
             if from_pos.cached_v2: to_pos.cached_v2 = from_pos.cached_v2
@@ -1292,12 +1326,15 @@ class CreatorBackend:
                 db_move = self.session.query(Move).filter_by(from_position_id=from_pos.id, uci=alt_uci).first()
                 if db_move:
                     db_move.uci = move_uci
+                    changed = True
         if not db_move:
             db_move = Move(from_position_id=from_pos.id, to_position_id=to_pos.id, uci=move_uci, san=move_san, nag=nag)
             self.session.add(db_move)
             self.session.flush()
-        elif nag != 0:
+            changed = True
+        elif nag != 0 and db_move.nag != nag:
             db_move.nag = nag
+            changed = True
 
         rep_move = self.session.query(RepertoireMove).filter_by(move_id=db_move.id).first()
         if not rep_move:
@@ -1328,10 +1365,14 @@ class CreatorBackend:
             else:
                 final_level = level_order
             self.session.add(RepertoireMove(move_id=db_move.id, level=final_level))
+            changed = True
         elif level_order is not None and level_order < rep_move.level:
             rep_move.level = level_order
-        commit_with_retry(self.session)
-        self.clear_cache()
+            changed = True
+
+        if changed:
+            commit_with_retry(self.session)
+            self.clear_cache()
 
     def get_delete_impact(self, from_pos_id, uci):
         """Iteratively built set of move_ids and pos_ids that will be orphaned."""
@@ -1571,6 +1612,24 @@ class CreatorBackend:
             self.clear_cache()
         return changed
 
+    def clean_parentheses_in_repo(self) -> int:
+        """Removes enclosing outer parentheses ( ) around entire comments or segments."""
+        if not self.session: return 0
+        changed = 0
+        positions = self.session.query(Position).filter(
+            (Position.comment != None) & (Position.comment != "")
+        ).all()
+        for p in positions:
+            orig = p.comment or ""
+            new_text, was_changed = clean_comment_parentheses(orig)
+            if was_changed:
+                p.comment = new_text
+                changed += 1
+        if changed:
+            self.session.commit()
+            self.clear_cache()
+        return changed
+
     def _delete_move_recursive(self, move):
         # REMOVED: Replaced by the much faster bulk iterative approach inside `delete_move` directly.
         pass
@@ -1679,9 +1738,14 @@ class CreatorBackend:
 
     def _get_pos_prio(self, pid):
         if not self.session or not pid: return 0.0
+        cache_key = f"pos_prio_{pid}"
+        if hasattr(self, "_ui_cache") and cache_key in self._ui_cache:
+            return self._ui_cache[cache_key]
         moves = self.session.query(Move.priority_score).filter_by(to_position_id=pid).all()
-        if not moves: return 0.0
-        return min(1.0, sum(m[0] or 0.0 for m in moves))
+        val = min(1.0, sum(m[0] or 0.0 for m in moves)) if moves else 0.0
+        if hasattr(self, "_ui_cache"):
+            self._ui_cache[cache_key] = val
+        return val
 
     def get_repertoire_info(self, fast_only=False):
         if not self.session: return {"name": self.active_repo_name, "levels": [], "depth": "N/A", "elo": "N/A", "moves": "N/A", "description": "", "coverage_pct": 0}
@@ -2000,9 +2064,7 @@ class CreatorBackend:
         board = chess.Board(current_fen)
 
         # Find moves already in the repertoire FROM this position (skip those)
-        current_pos_db = self.session.query(Position).filter(
-            Position.fen.op('GLOB')(clean_current + "*")
-        ).first()
+        current_pos_db = self._get_pos_by_fen(clean_current)
         ignored_ucis = set()
         if current_pos_db:
             from opening_fenix.core.utils import CASTLING_ALT, CASTLING_SANS
@@ -2018,7 +2080,7 @@ class CreatorBackend:
                         ignored_ucis.add(alt)
 
         fen_index = getattr(self, "_fen_index", None)
-        results = []
+        candidates = []
         for move in board.legal_moves:
             uci = move.uci()
             if uci in ignored_ucis:
@@ -2032,27 +2094,57 @@ class CreatorBackend:
             if fen_index is not None and next_fen not in fen_index:
                 continue
 
-            san = board.san(move)
-            pos = self.session.query(Position).filter(
-                Position.fen.op('GLOB')(next_fen + "*")
-            ).first()
-            if pos:
-                has_variation = any([pos.variation_1, pos.variation_2, pos.variation_3,
-                                     pos.cached_v1, pos.cached_v2])
-                incoming_repo = self.session.query(RepertoireMove).join(Move).filter(
-                    Move.to_position_id == pos.id).count() > 0
-                outgoing_repo = self.session.query(RepertoireMove).join(Move).filter(
-                    Move.from_position_id == pos.id).count() > 0
+            candidates.append((uci, move, next_fen))
 
-                if has_variation or incoming_repo or outgoing_repo:
-                    v_name = (pos.variation_1 or pos.cached_v1 or
-                              pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
-                    results.append({
-                        "move_uci": uci,
-                        "move_san": san,
-                        "target_fen": next_fen,
-                        "variation_name": v_name,
-                    })
+        results = []
+        if candidates:
+            target_fens = list({nf for _, _, nf in candidates})
+            matched_positions = self.session.query(Position).filter(
+                Position.fen.in_(target_fens)
+            ).all()
+            pos_by_fen = {self._normalize_fen(p.fen): p for p in matched_positions if p and p.fen}
+
+            # Fallback for legacy 6-part FENs if any candidate was in fen_index but not exact-matched
+            if len(pos_by_fen) < len(target_fens):
+                for nf in target_fens:
+                    if nf not in pos_by_fen:
+                        p_fallback = self.session.query(Position).filter(
+                            Position.fen.between(nf + " ", nf + " ~")
+                        ).first()
+                        if p_fallback:
+                            pos_by_fen[nf] = p_fallback
+
+            if pos_by_fen:
+                pos_ids = [p.id for p in pos_by_fen.values()]
+                incoming_ids = {
+                    r[0] for r in self.session.query(Move.to_position_id)
+                    .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                    .filter(Move.to_position_id.in_(pos_ids))
+                    .distinct().all()
+                }
+                outgoing_ids = {
+                    r[0] for r in self.session.query(Move.from_position_id)
+                    .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                    .filter(Move.from_position_id.in_(pos_ids))
+                    .distinct().all()
+                }
+
+                for uci, move, next_fen in candidates:
+                    pos = pos_by_fen.get(next_fen)
+                    if not pos:
+                        continue
+                    has_variation = any([pos.variation_1, pos.variation_2, pos.variation_3,
+                                         pos.cached_v1, pos.cached_v2])
+                    if has_variation or (pos.id in incoming_ids) or (pos.id in outgoing_ids):
+                        san = board.san(move)
+                        v_name = (pos.variation_1 or pos.cached_v1 or
+                                  pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
+                        results.append({
+                            "move_uci": uci,
+                            "move_san": san,
+                            "target_fen": next_fen,
+                            "variation_name": v_name,
+                        })
 
         if hasattr(self, "_outgoing_transpositions_cache"):
             self._outgoing_transpositions_cache[clean_current] = results
@@ -3433,6 +3525,26 @@ class AutoShrinkPillButton(QPushButton):
 
 
 
+class CommentTranslationThread(QThread):
+    finished_signal = pyqtSignal(str, bool)
+
+    def __init__(self, text: str, src_lang: str = "en", tgt_lang: str = "de", parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.src_lang = src_lang
+        self.tgt_lang = tgt_lang
+
+    def run(self):
+        from opening_fenix.core.utils import translate_chess_comment
+        from opening_fenix.core.logger import logger
+        try:
+            res = translate_chess_comment(self.text, src_lang=self.src_lang, tgt_lang=self.tgt_lang)
+            self.finished_signal.emit(res, True)
+        except Exception as e:
+            logger.warning(f"CommentTranslationThread error: {e}")
+            self.finished_signal.emit(self.text, False)
+
+
 class CreatorWindow(QMainWindow):
     closed = pyqtSignal()
 
@@ -3535,6 +3647,10 @@ class CreatorWindow(QMainWindow):
         # Multilingual Comment Editor State
         self.active_comment_lang = self.get_notation_lang() or "de"
         self.current_position_comments = {}
+        self.dual_comment_mode = False
+        self.dual_source_lang = "en"
+        self.dual_target_lang = "de"
+        self.symbol_buttons = {}
 
         # Tab visibility defaults with persistent one-time migration
         if "creator_active_tabs" not in self.config:
@@ -3865,13 +3981,111 @@ class CreatorWindow(QMainWindow):
         dv.setSpacing(scale(10))
 
 
-        # Kommentar Section
+        # Kommentar Section (Supports Single & Space-Optimal Dual Translation Split View)
+        self.comment_container = QWidget()
+        cc_layout = QVBoxLayout(self.comment_container)
+        cc_layout.setContentsMargins(0, 0, 0, 0)
+        cc_layout.setSpacing(scale(2))
+
+        # Primary / Source Text Edit
         self.txt_c = QPlainTextEdit()
         self.txt_c.setPlaceholderText(tr_ui("creator.comment_placeholder", "Stellungs-Kommentar hier eingeben..."))
         self.txt_c.setMinimumHeight(scale(150))
         self.txt_c.textChanged.connect(self.on_details_changed)
+        cc_layout.addWidget(self.txt_c, 1)
 
-        dv.addWidget(self.txt_c)
+        # Sleek 24px Bridge Action Bar (Visible between Box 1 and Box 2 in Dual Mode)
+        self.dual_bridge_bar = QWidget()
+        self.dual_bridge_bar.setFixedHeight(scale(24))
+        self.dual_bridge_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        bb_layout = QHBoxLayout(self.dual_bridge_bar)
+        bb_layout.setContentsMargins(0, 0, 0, 0)
+        bb_layout.setSpacing(scale(4))
+
+        self.lbl_dual_pair = QLabel(f"{self.dual_source_lang.upper()} ➜ {self.dual_target_lang.upper()}")
+        self.lbl_dual_pair.setStyleSheet(f"""
+            QLabel {{
+                font-weight: 600;
+                font-size: {scale(11)}px;
+                color: {COLORS['brown_text']};
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }}
+        """)
+        bb_layout.addWidget(self.lbl_dual_pair)
+        bb_layout.addStretch()
+
+        action_btn_style = f"""
+            QPushButton {{
+                background-color: {COLORS['glass_bg']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(4)}px;
+                font-size: {scale(11)}px;
+                font-weight: 500;
+                color: {COLORS['brown_text']};
+                padding: {scale(2)}px {scale(7)}px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.7);
+            }}
+            QPushButton:disabled {{
+                color: #94a3b8;
+                background-color: rgba(0, 0, 0, 0.02);
+                border-color: rgba(0, 0, 0, 0.08);
+            }}
+        """
+
+        self.btn_auto_translate = QPushButton(tr_ui("creator.btn_translate", "⚡ Übersetzen"))
+        self.btn_auto_translate.setFixedHeight(scale(22))
+        self.btn_auto_translate.setStyleSheet(action_btn_style)
+        self.btn_auto_translate.setToolTip(tr_ui("creator.tooltip_translate", "Automatisch mit Google Translate übersetzen"))
+        self.btn_auto_translate.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_auto_translate.clicked.connect(self.auto_translate_comment)
+        bb_layout.addWidget(self.btn_auto_translate)
+
+        self.btn_copy_source = QPushButton(tr_ui("creator.btn_copy", "📋 Kopieren"))
+        self.btn_copy_source.setFixedHeight(scale(22))
+        self.btn_copy_source.setStyleSheet(action_btn_style)
+        self.btn_copy_source.setToolTip(tr_ui("creator.tooltip_copy_to_translation", "Quelltext in Übersetzungsfeld kopieren"))
+        self.btn_copy_source.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_copy_source.clicked.connect(self.copy_source_comment_to_dual)
+        bb_layout.addWidget(self.btn_copy_source)
+
+        close_btn_style = f"""
+            QPushButton {{
+                background-color: transparent;
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(4)}px;
+                font-size: {scale(11)}px;
+                color: {COLORS['brown_text']};
+                padding: 0px;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.6);
+                color: #c0392b;
+            }}
+        """
+        self.btn_close_dual = QPushButton("✕")
+        self.btn_close_dual.setFixedSize(scale(22), scale(22))
+        self.btn_close_dual.setStyleSheet(close_btn_style)
+        self.btn_close_dual.setToolTip(tr_ui("creator.tooltip_close_split", "Split-View schließen (Einzelsprache)"))
+        self.btn_close_dual.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_close_dual.clicked.connect(self.disable_dual_comment_mode)
+        bb_layout.addWidget(self.btn_close_dual)
+
+        self.dual_bridge_bar.setVisible(False)
+        cc_layout.addWidget(self.dual_bridge_bar, 0)
+
+        # Bottom / Target Dual Box (Visible in Dual Mode)
+        self.txt_c_dual = QPlainTextEdit()
+        self.txt_c_dual.setPlaceholderText(f"{self.dual_target_lang.upper()} ({tr_ui('creator.target_label', 'Übersetzung')})...")
+        self.txt_c_dual.setMinimumHeight(scale(75))
+        self.txt_c_dual.textChanged.connect(self.on_details_changed)
+        self.txt_c_dual.setVisible(False)
+        cc_layout.addWidget(self.txt_c_dual, 1)
+
+        dv.addWidget(self.comment_container)
 
         sym_layout = QHBoxLayout()
         sym_layout.setSpacing(scale(8))
@@ -3884,6 +4098,7 @@ class CreatorWindow(QMainWindow):
                 ("⩱", tr_ui("creator.sym_black_slightly_better", "Schwarz steht etwas besser")),
                 ("∓", tr_ui("creator.sym_black_better", "Schwarz steht besser")),
                 ("−+", tr_ui("creator.sym_black_much_better", "Schwarz steht deutlich besser"))]
+        self.symbol_buttons = {}
         for s, tooltip in syms:
             btn = QPushButton(s)
             btn.setFixedSize(scale(30), scale(30))
@@ -3891,8 +4106,9 @@ class CreatorWindow(QMainWindow):
 
             btn.setProperty("class", "SymbolButton")
             self.repolish(btn)
-            btn.clicked.connect(lambda _, x=s: self.insert_symbol(x))
+            btn.clicked.connect(lambda _, x=s: self.toggle_symbol(x))
             sym_layout.addWidget(btn)
+            self.symbol_buttons[s] = btn
         sym_layout.addStretch()
 
         # Multilingual Comment Language Selector Button (positioned on the right side of sym_layout)
@@ -4352,7 +4568,7 @@ class CreatorWindow(QMainWindow):
             ] if hasattr(self, "combo_overhaul_level") else []
             db_levels = [(lvl.get("order"), f"Level {lvl.get('order')} ({lvl.get('name')})") for lvl in levels]
             if current_combo_levels != db_levels:
-                self.init_management_slots()
+                self.init_management_slots(preserve_current=True)
             self.update_overhaul_progress()
 
         QTimer.singleShot(0, self.trigger_board_adjust)
@@ -4450,8 +4666,28 @@ class CreatorWindow(QMainWindow):
         menu = QMenu(self)
         menu.setStyleSheet(self.styleSheet())
         
+        # Dual Translation Mode Submenu
+        menu_split = menu.addMenu(tr_ui("creator.menu_translation_split", "🪟 Übersetzungs-Ansicht (Split-View)"))
+        
+        if getattr(self, "dual_comment_mode", False):
+            act_off = menu_split.addAction(tr_ui("creator.split_disable", "✓ Split-View schließen (Einzelsprache)"))
+            act_off.triggered.connect(self.disable_dual_comment_mode)
+            menu_split.addSeparator()
+
+        act_en_de = menu_split.addAction("🇬🇧 EN (Quelle) ➜ 🇩🇪 DE (Ziel)")
+        act_en_de.triggered.connect(lambda: self.enable_dual_comment_mode("en", "de"))
+
+        act_de_en = menu_split.addAction("🇩🇪 DE (Quelle) ➜ 🇬🇧 EN (Ziel)")
+        act_de_en.triggered.connect(lambda: self.enable_dual_comment_mode("de", "en"))
+
+        menu_split.addSeparator()
+        act_custom = menu_split.addAction(tr_ui("creator.split_custom", "+ Anderes Sprachpaar..."))
+        act_custom.triggered.connect(self.choose_custom_dual_pair)
+
+        menu.addSeparator()
+
         # Option to show all languages
-        is_all = (self.active_comment_lang == "all")
+        is_all = (self.active_comment_lang == "all" and not getattr(self, "dual_comment_mode", False))
         prefix_all = "✓ " if is_all else "   "
         act_all = menu.addAction(f"{prefix_all}🌐 {tr_ui('creator.lang_all', 'Alle Sprachen ([:de]... [:en]...)')}")
         act_all.triggered.connect(lambda: self.switch_comment_lang("all"))
@@ -4464,13 +4700,14 @@ class CreatorWindow(QMainWindow):
         # Add any extra custom languages currently in this position's comment dictionary
         known_codes = {code for code, label in langs}
         for code in self.current_position_comments.keys():
-            if code and code not in known_codes:
+            if code and code not in known_codes and len(code) <= 5:
                 langs.append((code, f"🌐 {code.upper()}"))
                 
         for code, label in langs:
-            has_comment = bool(self.current_position_comments.get(code, "").strip())
+            c_val = self.current_position_comments.get(code, "")
+            has_comment = has_meaningful_comment(c_val)
             badge = " 📝" if has_comment else ""
-            is_active = (code == self.active_comment_lang)
+            is_active = (code == self.active_comment_lang and not getattr(self, "dual_comment_mode", False))
             prefix = "✓ " if is_active else "   "
             
             action = menu.addAction(f"{prefix}{label}{badge}")
@@ -4486,6 +4723,22 @@ class CreatorWindow(QMainWindow):
     def switch_comment_lang(self, lang_code):
         if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
             self.save_current_details_now()
+
+        if getattr(self, "dual_comment_mode", False):
+            self.dual_comment_mode = False
+            if hasattr(self, 'dual_bridge_bar'):
+                self.dual_bridge_bar.setVisible(False)
+            if hasattr(self, 'txt_c_dual'):
+                self.txt_c_dual.setVisible(False)
+            if hasattr(self, 'txt_c'):
+                self.txt_c.setMinimumHeight(scale(150))
+                self.txt_c.setMaximumHeight(16777215)
+                self.txt_c.setPlaceholderText(tr_ui("creator.comment_placeholder", "Stellungs-Kommentar hier eingeben..."))
+            if hasattr(self, 'comment_container') and self.comment_container.layout():
+                layout = self.comment_container.layout()
+                layout.setStretch(0, 1)
+                layout.setStretch(1, 0)
+                layout.setStretch(2, 0)
             
         self.active_comment_lang = lang_code.lower()
         
@@ -4499,11 +4752,167 @@ class CreatorWindow(QMainWindow):
                 self.txt_c.setPlainText("")
         else:
             c_text = self.current_position_comments.get(self.active_comment_lang, "")
+            eval_sym = self.get_current_position_eval_symbol()
+            if eval_sym and not c_text:
+                c_text = eval_sym
+                self.current_position_comments[self.active_comment_lang] = eval_sym
             self.txt_c.setPlainText(clean_chessbase_annotations(c_text))
         self.block_signals_details(False)
         
+        self.update_symbol_buttons_style(self.get_current_position_eval_symbol())
         self.update_comment_lang_button_style()
         self.refresh_candidate_moves_table()
+
+    def enable_dual_comment_mode(self, source_lang="en", target_lang="de"):
+        if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
+            self.save_current_details_now()
+            
+        self.dual_comment_mode = True
+        self.dual_source_lang = source_lang.lower().strip()
+        self.dual_target_lang = target_lang.lower().strip()
+        self.active_comment_lang = self.dual_target_lang
+
+        if hasattr(self, 'lbl_dual_pair'):
+            self.lbl_dual_pair.setText(f"{self.dual_source_lang.upper()} ➜ {self.dual_target_lang.upper()}")
+
+        if hasattr(self, 'dual_bridge_bar'):
+            self.dual_bridge_bar.setVisible(True)
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.setVisible(True)
+            self.txt_c_dual.setMinimumHeight(scale(60))
+            self.txt_c_dual.setMaximumHeight(16777215)
+            self.txt_c_dual.setPlaceholderText(f"{self.dual_target_lang.upper()} ({tr_ui('creator.target_label', 'Übersetzung')})...")
+        if hasattr(self, 'txt_c'):
+            self.txt_c.setMinimumHeight(scale(60))
+            self.txt_c.setMaximumHeight(16777215)
+            self.txt_c.setPlaceholderText(f"{self.dual_source_lang.upper()} ({tr_ui('creator.source_label', 'Original')})...")
+        if hasattr(self, 'comment_container') and self.comment_container.layout():
+            layout = self.comment_container.layout()
+            layout.setStretch(0, 1)
+            layout.setStretch(1, 0)
+            layout.setStretch(2, 1)
+
+        self.block_signals_details(True)
+        from opening_fenix.core.utils import clean_chessbase_annotations
+        src_text = self.current_position_comments.get(self.dual_source_lang, "")
+        tgt_text = self.current_position_comments.get(self.dual_target_lang, "")
+
+        eval_sym = self.get_current_position_eval_symbol()
+        if eval_sym and not tgt_text and src_text:
+            tgt_text = eval_sym
+            self.current_position_comments[self.dual_target_lang] = eval_sym
+
+        self.txt_c.setPlainText(clean_chessbase_annotations(src_text))
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.setPlainText(clean_chessbase_annotations(tgt_text))
+        self.block_signals_details(False)
+
+        self.update_symbol_buttons_style(eval_sym)
+        self.update_comment_lang_button_style()
+        self.refresh_candidate_moves_table()
+
+    def disable_dual_comment_mode(self):
+        if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
+            self.save_current_details_now()
+
+        self.dual_comment_mode = False
+        if hasattr(self, 'dual_bridge_bar'):
+            self.dual_bridge_bar.setVisible(False)
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.setVisible(False)
+        if hasattr(self, 'txt_c'):
+            self.txt_c.setMinimumHeight(scale(150))
+            self.txt_c.setMaximumHeight(16777215)
+            self.txt_c.setPlaceholderText(tr_ui("creator.comment_placeholder", "Stellungs-Kommentar hier eingeben..."))
+        if hasattr(self, 'comment_container') and self.comment_container.layout():
+            layout = self.comment_container.layout()
+            layout.setStretch(0, 1)
+            layout.setStretch(1, 0)
+            layout.setStretch(2, 0)
+
+        self.switch_comment_lang(self.active_comment_lang)
+
+    def choose_custom_dual_pair(self):
+        src, ok1 = QInputDialog.getText(
+            self,
+            tr_ui("creator.dlg_split_src_title", "Quellsprache"),
+            tr_ui("creator.dlg_split_src_prompt", "Quell-Sprachcode (z. B. en, de, es):"),
+            text=self.dual_source_lang
+        )
+        if not ok1 or not src.strip(): return
+        tgt, ok2 = QInputDialog.getText(
+            self,
+            tr_ui("creator.dlg_split_tgt_title", "Zielsprache"),
+            tr_ui("creator.dlg_split_tgt_prompt", "Ziel-Sprachcode (z. B. de, en, fr):"),
+            text=self.dual_target_lang
+        )
+        if not ok2 or not tgt.strip(): return
+        self.enable_dual_comment_mode(src.strip().lower()[:5], tgt.strip().lower()[:5])
+
+    def copy_source_comment_to_dual(self):
+        if not hasattr(self, 'txt_c_dual') or not hasattr(self, 'txt_c'):
+            return
+        src_text = self.txt_c.toPlainText()
+        if not src_text.strip():
+            return
+        curr_target = self.txt_c_dual.toPlainText().strip()
+        if curr_target:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                tr_ui("creator.copy_confirm_title", "Übersetzung überschreiben?"),
+                tr_ui("creator.copy_confirm_msg", "Möchtest du das aktuelle Übersetzungsfeld mit dem Quelltext überschreiben?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        self.txt_c_dual.setPlainText(src_text)
+        self.on_details_changed()
+
+    def auto_translate_comment(self):
+        """Translates Box 1 source comment to Box 2 target language asynchronously via Google Translate."""
+        if not hasattr(self, 'txt_c') or not hasattr(self, 'txt_c_dual'):
+            return
+        src_text = self.txt_c.toPlainText().strip()
+        if not src_text:
+            return
+
+        curr_target = self.txt_c_dual.toPlainText().strip()
+        if curr_target:
+            from PyQt6.QtWidgets import QMessageBox
+            reply = QMessageBox.question(
+                self,
+                tr_ui("creator.translate_confirm_title", "Übersetzung überschreiben?"),
+                tr_ui("creator.translate_confirm_msg", "Möchtest du das aktuelle Übersetzungsfeld durch eine automatische Übersetzung überschreiben?"),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._orig_translate_btn_text = self.btn_auto_translate.text()
+        self.btn_auto_translate.setText(tr_ui("creator.translating_status", "⏳ Übersetzen..."))
+        self.btn_auto_translate.setEnabled(False)
+
+        self.translation_thread = CommentTranslationThread(
+            src_text,
+            src_lang=self.dual_source_lang,
+            tgt_lang=self.dual_target_lang,
+            parent=self
+        )
+        self.translation_thread.finished_signal.connect(self._on_comment_translation_finished)
+        self.translation_thread.start()
+
+    def _on_comment_translation_finished(self, translated_text: str, success: bool):
+        from opening_fenix.core.utils import clean_chessbase_annotations
+        if hasattr(self, 'btn_auto_translate') and self.btn_auto_translate:
+            self.btn_auto_translate.setText(getattr(self, '_orig_translate_btn_text', tr_ui("creator.btn_translate", "⚡ Übersetzen")))
+            self.btn_auto_translate.setEnabled(True)
+
+        if hasattr(self, 'txt_c_dual') and self.txt_c_dual:
+            self.txt_c_dual.setPlainText(clean_chessbase_annotations(translated_text))
+            self.on_details_changed()
 
     def on_board_drawings_changed(self):
         """Automatically saves arrows and square highlights drawn on the board to the position comment."""
@@ -4971,9 +5380,15 @@ class CreatorWindow(QMainWindow):
                 self.enrichment_threads.remove(thread)
             if success:
                 if hasattr(self, 'backend') and self.backend:
-                    self.backend.clear_cache()
-                if hasattr(self, 'update_ui_from_fen'):
-                    self.update_ui_from_fen()
+                    self.backend.clear_cache(graph_changed=False)
+                if not self.enrichment_queue:
+                    if getattr(getattr(self, 'board_widget', None), 'dragging_piece', None) is not None:
+                        if hasattr(self, 'refresh_candidate_moves_table'):
+                            QTimer.singleShot(100, self.refresh_candidate_moves_table)
+                    elif hasattr(self, 'refresh_candidate_moves_table'):
+                        self.refresh_candidate_moves_table()
+                    elif hasattr(self, 'update_ui_from_fen'):
+                        self.update_ui_from_fen()
             # Process next position sequentially with a short breather for UI event loop
             QTimer.singleShot(50, self._process_next_enrichment)
 
@@ -5152,7 +5567,19 @@ class CreatorWindow(QMainWindow):
                     # Retroactively load and display [%csl ...] and [%cal ...] tags on the chessboard!
                     self.board_widget.load_user_drawings_from_comment(raw_c)
 
-                    if self.active_comment_lang == "all":
+                    if getattr(self, "dual_comment_mode", False):
+                        src_text = self.current_position_comments.get(self.dual_source_lang, "")
+                        tgt_text = self.current_position_comments.get(self.dual_target_lang, "")
+
+                        eval_sym = self.get_current_position_eval_symbol()
+                        if eval_sym and not tgt_text and src_text:
+                            tgt_text = eval_sym
+                            self.current_position_comments[self.dual_target_lang] = eval_sym
+
+                        self.txt_c.setPlainText(clean_chessbase_annotations(src_text))
+                        if hasattr(self, 'txt_c_dual'):
+                            self.txt_c_dual.setPlainText(clean_chessbase_annotations(tgt_text))
+                    elif self.active_comment_lang == "all":
                         if self.current_position_comments:
                             formatted_all = "\n".join([f"[:{k}] {clean_chessbase_annotations(v)}" for k, v in self.current_position_comments.items()])
                             self.txt_c.setPlainText(formatted_all.strip())
@@ -5160,6 +5587,10 @@ class CreatorWindow(QMainWindow):
                             self.txt_c.setPlainText("")
                     else:
                         c_text = self.current_position_comments.get(self.active_comment_lang, "")
+                        eval_sym = self.get_current_position_eval_symbol()
+                        if eval_sym and not c_text:
+                            c_text = eval_sym
+                            self.current_position_comments[self.active_comment_lang] = eval_sym
                         self.txt_c.setPlainText(clean_chessbase_annotations(c_text))
                 else:
                     self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
@@ -5168,10 +5599,13 @@ class CreatorWindow(QMainWindow):
                     self.current_position_comments = {}
                     self.board_widget.clear_user_drawings(emit_signal=False)
                     self.txt_c.setPlainText("")
+                    if hasattr(self, 'txt_c_dual'):
+                        self.txt_c_dual.setPlainText("")
             finally:
                 self._loading_details = False
             
             self.update_comment_lang_button_style()
+            self.update_symbol_buttons_style(self.get_current_position_eval_symbol())
             
             # Ensure visibility is updated after text changes
             self._update_variant_visibility()
@@ -5209,8 +5643,7 @@ class CreatorWindow(QMainWindow):
             clean_f = " ".join(f.strip().split()[:4])
             clean_root = " ".join(chess.STARTING_FEN.split()[:4])
             if clean_f != clean_root and self.backend and self.backend.session:
-                from opening_fenix.core.db.models import Position as DbPos
-                db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_f + "*")).first()
+                db_p = self.backend._get_pos_by_fen(clean_f)
                 if db_p:
                     p = self.backend._get_pos_prio(db_p.id)
                     if p > 0:
@@ -5388,11 +5821,116 @@ class CreatorWindow(QMainWindow):
         self.i_v2.blockSignals(b)
         self.i_v3.blockSignals(b)
         self.txt_c.blockSignals(b)
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.blockSignals(b)
+
+    def get_current_position_eval_symbol(self):
+        from opening_fenix.core.utils import extract_eval_symbol
+        if hasattr(self, 'txt_c') and self.txt_c:
+            sym = extract_eval_symbol(self.txt_c.toPlainText())
+            if sym: return sym
+        if hasattr(self, 'txt_c_dual') and getattr(self, 'dual_comment_mode', False) and self.txt_c_dual:
+            sym = extract_eval_symbol(self.txt_c_dual.toPlainText())
+            if sym: return sym
+        if hasattr(self, 'current_position_comments') and self.current_position_comments:
+            for val in self.current_position_comments.values():
+                sym = extract_eval_symbol(val)
+                if sym: return sym
+        return None
+
+    def update_symbol_buttons_style(self, active_symbol=None):
+        if not hasattr(self, 'symbol_buttons'):
+            return
+        for s, btn in self.symbol_buttons.items():
+            if active_symbol and s == active_symbol:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: {COLORS['burnt_orange']};
+                        color: white;
+                        border: 2px solid #e67e22;
+                        border-radius: {scale(4)}px;
+                        font-weight: bold;
+                        font-size: {scale(16)}px;
+                        padding: 0px;
+                    }}
+                    QPushButton:hover {{
+                        background-color: #d35400;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet("")
+
+    def toggle_symbol(self, s: str):
+        if not self._is_ui_valid(): return
+        from opening_fenix.core.utils import clean_chessbase_annotations, strip_eval_symbol
+        
+        curr_eval = self.get_current_position_eval_symbol()
+        new_eval = None if (curr_eval == s) else s
+        
+        self.block_signals_details(True)
+        try:
+            target_langs = list(self.current_position_comments.keys())
+            if not target_langs:
+                if getattr(self, "dual_comment_mode", False):
+                    target_langs = [self.dual_source_lang, self.dual_target_lang]
+                else:
+                    target_langs = [self.active_comment_lang if self.active_comment_lang != "all" else "de"]
+
+            for lang in target_langs:
+                val = self.current_position_comments.get(lang, "")
+                clean = strip_eval_symbol(clean_chessbase_annotations(val)).strip()
+                
+                import re
+                tag_matches = re.findall(r'(\[%c[s|a]l [^\]]+\])', val) if val else []
+                tags_part = " ".join(tag_matches) if tag_matches else ""
+                if not tags_part and hasattr(self, 'board_widget'):
+                    tags_part = self.board_widget.get_chessbase_annotation_tags()
+                    
+                if new_eval:
+                    new_val = f"{clean}\n{new_eval}" if clean else new_eval
+                else:
+                    new_val = clean
+                    
+                if tags_part and new_val:
+                    new_val = f"{tags_part} {new_val}".strip()
+                elif tags_part:
+                    new_val = tags_part
+                    
+                if new_val:
+                    self.current_position_comments[lang] = new_val
+                elif lang in self.current_position_comments:
+                    del self.current_position_comments[lang]
+
+            if getattr(self, "dual_comment_mode", False) and new_eval:
+                for d_lang in [self.dual_source_lang, self.dual_target_lang]:
+                    if d_lang not in self.current_position_comments:
+                        self.current_position_comments[d_lang] = new_eval
+
+            if getattr(self, "dual_comment_mode", False):
+                self.txt_c.setPlainText(clean_chessbase_annotations(self.current_position_comments.get(self.dual_source_lang, "")))
+                if hasattr(self, 'txt_c_dual'):
+                    self.txt_c_dual.setPlainText(clean_chessbase_annotations(self.current_position_comments.get(self.dual_target_lang, "")))
+            elif self.active_comment_lang == "all":
+                formatted_all = "\n".join([f"[:{k}] {clean_chessbase_annotations(v)}" for k, v in self.current_position_comments.items()])
+                self.txt_c.setPlainText(formatted_all.strip())
+            else:
+                self.txt_c.setPlainText(clean_chessbase_annotations(self.current_position_comments.get(self.active_comment_lang, "")))
+        finally:
+            self.block_signals_details(False)
+            
+        self.update_symbol_buttons_style(new_eval)
+        self.update_comment_lang_button_style()
+        self.details_changed = True
+        self.save_timer.start()
+        self.refresh_candidate_moves_table()
+
+    def insert_symbol(self, s):
+        self.toggle_symbol(s)
 
     def on_details_changed(self):
         if not self._is_ui_valid(): return
+        if getattr(self, '_loading_details', False): return
         
-        txt = self.txt_c.toPlainText().strip()
         tag_str = self.board_widget.get_chessbase_annotation_tags()
         from opening_fenix.core.utils import clean_chessbase_annotations, parse_pgn_tagged_comment, get_multilingual_comment_dict
 
@@ -5404,7 +5942,20 @@ class CreatorWindow(QMainWindow):
                 return tag_str
             return clean
 
-        if self.active_comment_lang == "all":
+        if getattr(self, "dual_comment_mode", False):
+            txt_src = self.txt_c.toPlainText().strip()
+            txt_tgt = self.txt_c_dual.toPlainText().strip() if hasattr(self, 'txt_c_dual') else ""
+            if txt_src or tag_str:
+                self.current_position_comments[self.dual_source_lang] = attach_tags(txt_src)
+            elif self.dual_source_lang in self.current_position_comments:
+                del self.current_position_comments[self.dual_source_lang]
+
+            if txt_tgt or tag_str:
+                self.current_position_comments[self.dual_target_lang] = attach_tags(txt_tgt)
+            elif self.dual_target_lang in self.current_position_comments:
+                del self.current_position_comments[self.dual_target_lang]
+        elif self.active_comment_lang == "all":
+            txt = self.txt_c.toPlainText().strip()
             tagged = parse_pgn_tagged_comment(txt)
             if tagged:
                 self.current_position_comments = {k: attach_tags(v) for k, v in tagged.items()}
@@ -5413,11 +5964,13 @@ class CreatorWindow(QMainWindow):
             else:
                 self.current_position_comments = {"de": tag_str} if tag_str else {}
         else:
+            txt = self.txt_c.toPlainText().strip()
             if txt or tag_str:
                 self.current_position_comments[self.active_comment_lang] = attach_tags(txt)
             elif self.active_comment_lang in self.current_position_comments:
                 del self.current_position_comments[self.active_comment_lang]
         
+        self.update_symbol_buttons_style(self.get_current_position_eval_symbol())
         self.update_comment_lang_button_style()
         self.details_changed = True
         self.save_timer.start()
@@ -5440,6 +5993,7 @@ class CreatorWindow(QMainWindow):
                 self.current_position_comments = {"de": tag_str}
 
             full_comment = format_multilingual_comment(self.current_position_comments)
+            target_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else self.active_comment_lang
             self.backend.update_position_data(
                 self.board_widget.board.fen(), 
                 full_comment, 
@@ -5447,29 +6001,15 @@ class CreatorWindow(QMainWindow):
                 self.i_v2.text(), 
                 self.i_v3.text(), 
                 auto_review=self.overhaul_active,
-                target_lang=self.active_comment_lang
+                target_lang=target_lang
             )
             self.update_structure_tree()
             if self.overhaul_active:
                 self.update_overhaul_progress()
             # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too
             if hasattr(self, 'tabs') and hasattr(self, 'tab_kontrolle') and self.tabs.currentWidget() == self.tab_kontrolle:
-                self.init_management_slots()
+                self.init_management_slots(preserve_current=True)
             self.details_changed = False
-
-    def insert_symbol(self, s):
-        text = self.txt_c.toPlainText()
-        symbols = ["+−", "±", "⩲", "=", "∞", "⇆", "⩱", "∓", "−+"]
-        lines = text.split('\n')
-        if lines and lines[-1].strip() in symbols:
-            lines[-1] = s
-            new_text = "\n".join(lines)
-        else:
-            if not text: new_text = s
-            elif text.endswith('\n'): new_text = text + s
-            else: new_text = text + "\n" + s
-        self.txt_c.setPlainText(new_text)
-        self.on_details_changed()
 
     def on_tree_click(self, it, col):
         if col == 5:
@@ -5888,7 +6428,7 @@ class CreatorWindow(QMainWindow):
             invalidate_repertoire_levels_cache(getattr(self.backend, 'active_repo_name', None))
             self.backend.clear_cache()
         self.clear_transposition_caches()
-        self.init_management_slots()
+        self.init_management_slots(preserve_current=True)
         self.update_structure_tree()
         if hasattr(self, "tabs") and hasattr(self, "tab_transpositions") and self.tabs.currentWidget() == self.tab_transpositions:
             self.update_transpositions_tab()
@@ -6211,7 +6751,7 @@ class CreatorWindow(QMainWindow):
             QTimer.singleShot(0, self._build_fen_index)
             self.update_ui_from_fen(force_details=True)
             self.update_structure_tree()
-            self.init_management_slots()
+            self.init_management_slots(preserve_current=True)
             QMessageBox.information(self, tr_ui("creator.dlg_success", "Erfolg"), message)
         else:
             QMessageBox.warning(self, tr_ui("creator.dlg_import_error_title", "Import Fehler"), message)
@@ -6269,7 +6809,7 @@ class CreatorWindow(QMainWindow):
             elif d.selected_repo:
                 self.load_repertoire(d.selected_repo)
                 self.set_board_to_fen(chess.STARTING_FEN)
-                self.init_management_slots() # Refresh level dropdown
+                self.init_management_slots(preserve_current=False) # Refresh level dropdown
         else:
             # If no repertoire is currently active, cancel/close returns to previous screen
             if not getattr(self.backend, 'active_repo_name', None) and not getattr(self, 'active_repo_name', None):
@@ -6302,7 +6842,10 @@ class CreatorWindow(QMainWindow):
             if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
                 self.btn_load_repo.update_repo(None)
             self.update_structure_tree()
-            self.init_management_slots()
+            self.overhaul_active = False
+            self.overhaul_paused = True
+            self.overhaul_start = None
+            self.init_management_slots(preserve_current=False)
             self.board_widget.update()
             return
             
@@ -6314,7 +6857,19 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
             self.btn_load_repo.update_repo(repo_name)
         self.update_structure_tree()
-        self.init_management_slots()
+        
+        # Load persistent overhaul session for the newly loaded repertoire
+        session_dt = self.backend.get_overhaul_session_start() if self.backend else None
+        if session_dt:
+            self.overhaul_start = session_dt
+            self.overhaul_active = True
+            self.overhaul_paused = True
+        else:
+            self.overhaul_start = None
+            self.overhaul_active = False
+            self.overhaul_paused = True
+
+        self.init_management_slots(preserve_current=False)
         self.setWindowTitle(f"Creator - {repo_name}")
         self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
         self.board_widget.update()
@@ -7624,8 +8179,8 @@ class CreatorWindow(QMainWindow):
         # 2. Database check via session if available
         if self.backend.session:
             try:
-                from opening_fenix.core.db.models import Position, Move, RepertoireMove
-                db_pos = self.backend.session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+                from opening_fenix.core.db.models import Move, RepertoireMove
+                db_pos = self.backend._get_pos_by_fen(clean_fen)
                 if db_pos:
                     check_ucis = [norm_uci, uci]
                     if alt_uci:
@@ -8057,8 +8612,7 @@ class CreatorWindow(QMainWindow):
             if clean_fen == clean_root:
                 p_reach = 1.0
             else:
-                from opening_fenix.core.db.models import Position as DbPos
-                db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_fen + "*")).first()
+                db_p = self.backend._get_pos_by_fen(clean_fen)
                 if db_p:
                     p_reach = self.backend._get_pos_prio(db_p.id)
                 else:
@@ -8082,8 +8636,7 @@ class CreatorWindow(QMainWindow):
                 if clean_fen == clean_root:
                     p_reach = 1.0
                 else:
-                    from opening_fenix.core.db.models import Position as DbPos
-                    db_p = self.backend.session.query(DbPos).filter(DbPos.fen.op('GLOB')(clean_fen + "*")).first()
+                    db_p = self.backend._get_pos_by_fen(clean_fen)
                     if db_p:
                         p_reach = self.backend._get_pos_prio(db_p.id)
                     else:
@@ -8898,7 +9451,7 @@ class CreatorWindow(QMainWindow):
             if clean_target in self._target_level_cache:
                 l_target = self._target_level_cache[clean_target]
             else:
-                target_pos = self.backend.session.query(Position).filter(Position.fen.op('GLOB')(clean_target + "*")).first()
+                target_pos = self.backend._get_pos_by_fen(clean_target)
                 if target_pos:
                     # First check outgoing moves from target position
                     target_levels = [
@@ -9899,9 +10452,9 @@ class CreatorWindow(QMainWindow):
         # Trigger live update of progress bar
         self.update_overhaul_progress()
 
-    def init_management_slots(self):
-        curr_hole_lvl = self.combo_hole_level.currentData() if hasattr(self, "combo_hole_level") and self.combo_hole_level else None
-        curr_overhaul_lvl = self.combo_overhaul_level.currentData() if hasattr(self, "combo_overhaul_level") and self.combo_overhaul_level else None
+    def init_management_slots(self, preserve_current=False):
+        curr_hole_lvl = self.combo_hole_level.currentData() if (preserve_current and hasattr(self, "combo_hole_level") and self.combo_hole_level) else None
+        curr_overhaul_lvl = self.combo_overhaul_level.currentData() if (preserve_current and hasattr(self, "combo_overhaul_level") and self.combo_overhaul_level) else None
 
         self.combo_overhaul_level.blockSignals(True)
         self.combo_overhaul_level.clear()
@@ -9932,37 +10485,52 @@ class CreatorWindow(QMainWindow):
         self.combo_overhaul_variation.blockSignals(False)
         
         # Persistence Restore: Load from metadata
-        saved_lvl = self.backend.get_meta("overhaul_selected_level", "99") if self.backend else "99"
+        # If an overhaul session is active, restore the level locked to this session
+        session_lvl = self.backend.get_overhaul_session_level() if (self.overhaul_active and self.backend) else None
+        saved_lvl = session_lvl if session_lvl is not None else (self.backend.get_meta("overhaul_selected_level", "99") if self.backend else "99")
         saved_var_json = self.backend.get_meta("overhaul_selected_variation_v2", "All") if self.backend else "All"
         
-        # Restore Level index (prefer currently active selection if valid, otherwise saved_lvl)
-        restore_lvl = curr_overhaul_lvl if curr_overhaul_lvl is not None else saved_lvl
-        for i in range(self.combo_overhaul_level.count()):
-            if str(self.combo_overhaul_level.itemData(i)) == str(restore_lvl):
-                self.combo_overhaul_level.setCurrentIndex(i)
-                break
+        # Restore Level index (prefer currently active selection only if preserve_current is True and valid, otherwise saved_lvl)
+        restore_lvl = curr_overhaul_lvl if (curr_overhaul_lvl is not None and preserve_current) else saved_lvl
         
-        # Restore Variation index
-        try:
-            target_data = json.loads(saved_var_json) if saved_var_json != "All" else None
-            for i in range(self.combo_overhaul_variation.count()):
-                if self.combo_overhaul_variation.itemData(i) == target_data:
-                    self.combo_overhaul_variation.setCurrentIndex(i)
-                    break
-        except: pass
-        
-        # Connect signals for live updates
+        # Disconnect signals before setting index to avoid unintentional metadata writes
         try: self.combo_overhaul_level.currentIndexChanged.disconnect(self.on_overhaul_filter_changed)
         except: pass
         try: self.combo_overhaul_variation.currentIndexChanged.disconnect(self.on_overhaul_filter_changed)
         except: pass
+
+        self.combo_overhaul_level.blockSignals(True)
+        matched_level = False
+        for i in range(self.combo_overhaul_level.count()):
+            if str(self.combo_overhaul_level.itemData(i)) == str(restore_lvl):
+                self.combo_overhaul_level.setCurrentIndex(i)
+                matched_level = True
+                break
+        if not matched_level:
+            self.combo_overhaul_level.setCurrentIndex(0)
+        self.combo_overhaul_level.blockSignals(False)
+        
+        # Restore Variation index
+        self.combo_overhaul_variation.blockSignals(True)
+        try:
+            target_data = json.loads(saved_var_json) if saved_var_json != "All" else None
+            matched_var = False
+            for i in range(self.combo_overhaul_variation.count()):
+                if self.combo_overhaul_variation.itemData(i) == target_data:
+                    self.combo_overhaul_variation.setCurrentIndex(i)
+                    matched_var = True
+                    break
+            if not matched_var:
+                self.combo_overhaul_variation.setCurrentIndex(0)
+        except:
+            self.combo_overhaul_variation.setCurrentIndex(0)
+        self.combo_overhaul_variation.blockSignals(False)
         
         self.combo_overhaul_level.currentIndexChanged.connect(self.on_overhaul_filter_changed)
         self.combo_overhaul_variation.currentIndexChanged.connect(self.on_overhaul_filter_changed)
 
-        # Sync UI state if session was loaded from metadata
-        if self.overhaul_active:
-            self._update_overhaul_ui_state()
+        # Always sync UI state (reflects active, paused, or no session)
+        self._update_overhaul_ui_state()
 
     def run_hole_scan(self):
         if hasattr(self, "hole_thread") and self.hole_thread and self.hole_thread.isRunning():
@@ -10868,6 +11436,8 @@ class CreatorWindow(QMainWindow):
             
             # Save to metadata for persistence
             self.backend.save_overhaul_session_start(self.overhaul_start)
+            self.backend.save_overhaul_session_level(lvl)
+            self.backend.set_meta("overhaul_selected_level", lvl)
             
             # Mark current if valid
             f = self.board_widget.board.fen()
@@ -10884,6 +11454,7 @@ class CreatorWindow(QMainWindow):
                 self.overhaul_paused = False
                 self.overhaul_start = None
                 self.backend.save_overhaul_session_start(None)
+                self.backend.save_overhaul_session_level(None)
         
         self._update_overhaul_ui_state()
         self.update_ui_from_fen()
@@ -10892,6 +11463,8 @@ class CreatorWindow(QMainWindow):
         if not self.overhaul_active:
             # If no session active, just reset progress bar to general total view
             self.overhaul_start = None
+            self.backend.save_overhaul_session_start(None)
+            self.backend.save_overhaul_session_level(None)
             self.update_overhaul_progress()
             self._update_overhaul_ui_state()
             return
@@ -10901,6 +11474,7 @@ class CreatorWindow(QMainWindow):
             self.overhaul_paused = False
             self.overhaul_start = None
             self.backend.save_overhaul_session_start(None)
+            self.backend.save_overhaul_session_level(None)
             self._update_overhaul_ui_state()
             self.update_ui_from_fen()
 

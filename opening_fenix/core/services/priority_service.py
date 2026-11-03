@@ -235,11 +235,103 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         if start_prob <= 0 and clean_start_fen != "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR":
             return True, "No probability to propagate."
 
+        user_turn_char = get_meta(session, "color", "w")
+
+        # ── Fast-path: evaluate immediate outgoing moves of start_pos_id first ──
+        # Only traverse descendant subtrees whose incoming move probability actually changed
+        # or that have uninitialized outgoing moves.
+        start_out_moves = session.query(Move).filter_by(from_position_id=start_pos_id).all()
+        if not start_out_moves:
+            return True, "Local priority scores updated."
+
+        old_scores = {m.id: m.priority_score for m in start_out_moves}
+        new_scores = {}
+        is_start_user_turn = clean_start_fen.split(" ")[1] == user_turn_char
+
+        if is_start_user_turn:
+            active_rep_ids = {
+                rm_id for (rm_id,) in session.query(RepertoireMove.move_id)
+                .filter(RepertoireMove.move_id.in_([m.id for m in start_out_moves]), RepertoireMove.is_active == True)
+                .all()
+            }
+            for m in start_out_moves:
+                new_scores[m.id] = start_prob if m.id in active_rep_ids else 0.0
+        else:
+            ld_row = session.query(LichessData).filter_by(fen=clean_start_fen, elo_range=elo_category).first()
+            lichess_move_data = json.loads(ld_row.moves_json) if (ld_row and ld_row.moves_json) else {}
+            total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
+
+            moves_with_stats = []
+            rare_moves_with_weights = []
+            for m in start_out_moves:
+                info = lichess_move_data.get(m.uci) or lichess_move_data.get(m.san)
+                if not info:
+                    alt_uci = {'e1c1': 'e1a1', 'e1g1': 'e1h1', 'e8c8': 'e8a8', 'e8g8': 'e8h8'}.get(m.uci)
+                    if alt_uci:
+                        info = lichess_move_data.get(alt_uci)
+                if info and info.get('total', 0) > 0:
+                    moves_with_stats.append((m, info))
+                else:
+                    weight = 1
+                    if m.to_position_id:
+                        child_pos = session.get(Position, m.to_position_id)
+                        if child_pos and child_pos.fen:
+                            clean_child_fen = " ".join(child_pos.fen.split(" ")[:4])
+                            child_ld = session.query(LichessData).filter_by(fen=clean_child_fen, elo_range=elo_category).first()
+                            if child_ld and child_ld.moves_json:
+                                child_data = json.loads(child_ld.moves_json)
+                                weight = max(1, sum(m_info.get('total', 0) for m_info in child_data.values()))
+                    rare_moves_with_weights.append((m, weight))
+
+            if moves_with_stats:
+                min_lichess_total = min(stats['total'] for _, stats in moves_with_stats)
+                rare_moves_with_weights = [(m, min(w, min_lichess_total)) for m, w in rare_moves_with_weights]
+
+            total_rare_weight = sum(w for _, w in rare_moves_with_weights)
+            effective_total = total_from_lichess + total_rare_weight
+            if effective_total > 0:
+                for m, stats in moves_with_stats:
+                    new_scores[m.id] = start_prob * (stats['total'] / effective_total)
+                for m, weight in rare_moves_with_weights:
+                    new_scores[m.id] = start_prob * (weight / effective_total)
+            else:
+                split_prob = start_prob / len(start_out_moves)
+                for m in start_out_moves:
+                    new_scores[m.id] = split_prob
+
+        child_ids = [m.to_position_id for m in start_out_moves if m.to_position_id]
+        uninit_children = set()
+        if child_ids:
+            uninit_children = {
+                pid for (pid,) in session.query(Move.from_position_id)
+                .filter(Move.from_position_id.in_(child_ids), Move.priority_score.is_(None))
+                .distinct().all()
+            }
+
+        seed_child_ids = set()
+        any_start_move_dirty = False
+        for m in start_out_moves:
+            ns = new_scores[m.id]
+            os_val = old_scores[m.id]
+            if os_val is None or abs(os_val - ns) > 1e-9:
+                m.priority_score = ns
+                any_start_move_dirty = True
+                if m.to_position_id:
+                    seed_child_ids.add(m.to_position_id)
+            elif m.to_position_id in uninit_children:
+                seed_child_ids.add(m.to_position_id)
+
+        if not seed_child_ids:
+            if any_start_move_dirty:
+                session.flush()
+            return True, "Local priority scores updated."
+
         from sqlalchemy import text
-        # ── 1. Use Recursive CTE to find all reachable position IDs instantly ──
-        sql_reachable = text("""
+        # ── 1. Use Recursive CTE from changed child roots only ──
+        seed_literals = ",".join(str(int(cid)) for cid in seed_child_ids)
+        sql_reachable = text(f"""
             WITH RECURSIVE descendants(id) AS (
-                SELECT :start_id
+                SELECT id FROM positions WHERE id IN ({seed_literals})
                 UNION
                 SELECT m.to_position_id
                 FROM moves m
@@ -248,7 +340,11 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
             )
             SELECT id FROM descendants
         """)
-        reachable_ids = {row[0] for row in session.execute(sql_reachable, {"start_id": start_pos_id}).fetchall()}
+        reachable_ids = {row[0] for row in session.execute(sql_reachable).fetchall()}
+        if not reachable_ids:
+            if any_start_move_dirty:
+                session.flush()
+            return True, "Local priority scores updated."
         
         # ── 2. Bulk fetch all relevant Moves efficiently (handling SQLite limits) ──
         all_moves_in_subtree = []
@@ -278,9 +374,9 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                 incoming_moves_cache[m.to_position_id].append(m)
 
         # ── 3. Build queue dynamically (BFS in memory with max depth tracking) ──
-        pos_depths = {start_pos_id: 0}
-        visit_count = {start_pos_id: 1}
-        queue = deque([start_pos_id])
+        pos_depths = {cid: 0 for cid in seed_child_ids if cid in reachable_ids}
+        visit_count = {cid: 1 for cid in pos_depths}
+        queue = deque(pos_depths.keys())
 
         while queue:
             pos_id = queue.popleft()
@@ -303,17 +399,13 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
             subtree_positions_by_depth[d].append(pid)
         
         id_probabilities = {pid: 0.0 for pid in reachable_ids}
-        id_probabilities[start_pos_id] = start_prob
-        
         for pid in reachable_ids:
-            if pid == start_pos_id: continue
             incoming = incoming_moves_cache.get(pid, [])
             ext_prob = max(((m.priority_score or 0.0) for m in incoming if m.from_position_id not in reachable_ids), default=0.0)
             id_probabilities[pid] = ext_prob
 
         rep_moves_db = session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
         rep_move_ids = {rm.move_id for rm in rep_moves_db}
-        user_turn_char = get_meta(session, "color", "w")
         
         reachable_pos = []
         reachable_ids_list = list(reachable_ids)

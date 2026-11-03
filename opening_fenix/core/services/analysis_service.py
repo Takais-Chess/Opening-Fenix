@@ -632,22 +632,46 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
     logger.info(f"enrich_position: Using DB at {db_path}")
     db = DatabaseManager(db_path)
     session = db.get_session()
-    
+
     try:
+        # ── Phase 1: Quick read-only inspection (release session before slow I/O) ──
         clean_fen = " ".join(fen.strip().split()[:4])
         pos = session.query(Position).filter_by(fen=clean_fen).first()
         if not pos:
-            # Fallback for old databases that might have full FENs or slightly different spacing
-            pos = session.query(Position).filter(Position.fen.like(f"{clean_fen}%")).first()
+            pos = session.query(Position).filter(
+                Position.fen.between(clean_fen + " ", clean_fen + " ~")
+            ).first()
             if not pos:
                 return False, "Position not found in DB."
+
+        pos_id = pos.id
+        pos_fen = pos.fen
+        pos_depth = pos.analysis_depth
 
         positions_to_check = [pos]
         parents = session.query(Position).join(Move, Move.from_position_id == Position.id).filter(Move.to_position_id == pos.id).all()
         positions_to_check.extend(parents)
-        
+
         user_color = get_meta(session, "color", "w")
-        # Support LICHESS_TOKEN from environment for CI/CD
+
+        missing_lichess_fens: List[str] = []
+        for p_obj in positions_to_check:
+            p_clean = " ".join(p_obj.fen.split(" ")[:4])
+            if p_clean not in missing_lichess_fens:
+                existing_lichess = session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first()
+                if not existing_lichess:
+                    missing_lichess_fens.append(p_clean)
+
+        rep_moves_ucis = [
+            rm.uci for rm in session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos_id).all()
+        ]
+        repertoire_uci = rep_moves_ucis[0] if rep_moves_ucis else None
+
+        # Close read session before network and engine work so SQLite is never locked during I/O
+        session.close()
+        session = None
+
+        # ── Phase 2: Lock-free external I/O & Engine evaluation ──
         lichess_token = os.environ.get("LICHESS_TOKEN")
         if not lichess_token:
             config_path = os.path.join(get_user_dir(), "config.json")
@@ -657,86 +681,66 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                         conf = json.load(f)
                         lichess_token = conf.get("lichess_token")
                 except Exception as e:
-                    from opening_fenix.core.logger import logger
                     logger.debug(f"Could not read config.json for Lichess token: {e}")
 
-        for p_obj in positions_to_check:
-            p_clean = " ".join(p_obj.fen.split(" ")[:4])
-            
-            existing_lichess = session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first()
-            if not existing_lichess:
-                ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
-                if elo_category == 'masters':
-                    url = f"https://explorer.lichess.org/masters?variant=standard&fen={urllib.parse.quote(p_clean)}"
-                else:
-                    url = f"https://explorer.lichess.org/lichess?variant=standard&fen={urllib.parse.quote(p_clean)}&ratings={','.join(ratings)}&speeds=rapid,classical"
-                
-                try:
-                    headers = {'User-Agent': 'OpeningFenix/1.0'}
-                    if lichess_token and lichess_token != "YOUR_TOKEN_HERE":
-                        headers['Authorization'] = f'Bearer {lichess_token}'
+        fetched_lichess: List[Tuple[str, str]] = []
+        for p_clean in missing_lichess_fens:
+            ratings = ELO_MAPPING.get(elo_category, ['1800', '2000'])
+            if elo_category == 'masters':
+                url = f"https://explorer.lichess.org/masters?variant=standard&fen={urllib.parse.quote(p_clean)}"
+            else:
+                url = f"https://explorer.lichess.org/lichess?variant=standard&fen={urllib.parse.quote(p_clean)}&ratings={','.join(ratings)}&speeds=rapid,classical"
 
-                    req = urllib.request.Request(url, headers=headers)
-                    with urllib.request.urlopen(req, timeout=10) as response:
-                        data = json.loads(response.read().decode('utf-8'))
-                        moves_data = data.get('moves', [])
-                        if moves_data:
-                            moves_dict = {
-                                move['uci']: {
-                                    'white': move.get('white', 0),
-                                    'draws': move.get('draws', 0),
-                                    'black': move.get('black', 0),
-                                    'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
-                                } for move in moves_data if 'uci' in move
-                            }
-                            # Double check to prevent race condition during long network request
-                            if not session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first():
-                                session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=json.dumps(moves_dict)))
-                                try:
-                                    session.flush()
-                                except Exception as inner_e:
-                                    session.rollback()
-                                    from opening_fenix.core.logger import logger
-                                    logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
-                except Exception as e:
-                    print(f"Lichess fetch failed for enrichment of {p_clean}: {e}")
+            try:
+                headers = {'User-Agent': 'OpeningFenix/1.0'}
+                if lichess_token and lichess_token != "YOUR_TOKEN_HERE":
+                    headers['Authorization'] = f'Bearer {lichess_token}'
 
-        if (pos.analysis_depth is None or pos.analysis_depth < depth) and reuse_other_courses:
-            from opening_fenix.core.services.analysis_sync_service import sync_analysis_data_from_other_repertoires
-            sync_analysis_data_from_other_repertoires(
-                target_session=session,
-                current_repo_name=repo_name,
-                target_depth=depth,
-                player_color=user_color
-            )
-            session.refresh(pos)
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    moves_data = data.get('moves', [])
+                    if moves_data:
+                        moves_dict = {
+                            move['uci']: {
+                                'white': move.get('white', 0),
+                                'draws': move.get('draws', 0),
+                                'black': move.get('black', 0),
+                                'total': move.get('white', 0) + move.get('draws', 0) + move.get('black', 0)
+                            } for move in moves_data if 'uci' in move
+                        }
+                        fetched_lichess.append((p_clean, json.dumps(moves_dict)))
+            except Exception as e:
+                print(f"Lichess fetch failed for enrichment of {p_clean}: {e}")
 
         cache_service = EngineCacheService()
-        if pos.analysis_depth is None or pos.analysis_depth < depth:
-            # 1. Check global engine cache first
-            cached_alt = cache_service.get_alternate_moves(pos.fen, min_depth=depth, require_exhaustive=True)
-            if cached_alt:
-                c_moves = list(cached_alt["good_moves"])
-                rep_moves = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).all()
-                for rm in rep_moves:
-                    if rm.uci not in c_moves:
-                        c_moves.append(rm.uci)
-                pos.good_moves = json.dumps(list(dict.fromkeys(c_moves)))
-                pos.analysis_depth = cached_alt["depth"]
-                session.flush()
-            elif engine_path and os.path.exists(engine_path):
+        cached_alt = None
+        cross_repo_alt = None
+        engine_result = None
+
+        if pos_depth is None or pos_depth < depth:
+            # 1. Check global engine cache first (instant O(1))
+            cached_alt = cache_service.get_alternate_moves(pos_fen, min_depth=depth, require_exhaustive=True)
+
+            # 2. Check other courses via indexed O(1) lookup (without holding a target DB lock)
+            if not cached_alt and reuse_other_courses:
+                from opening_fenix.core.services.analysis_sync_service import find_position_analysis_in_other_repertoires
+                cross_repo_alt = find_position_analysis_in_other_repertoires(
+                    clean_fen=clean_fen,
+                    current_repo_name=repo_name,
+                    target_depth=depth
+                )
+
+            # 3. Run local engine outside DB transaction if still needed
+            if not cached_alt and not cross_repo_alt and engine_path and os.path.exists(engine_path):
                 engine = None
                 try:
                     creationflags = 0
                     if sys.platform == "win32":
-                        # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
                         creationflags = 0x08000000 | 0x00004000
                     engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
                     engine.configure({"Threads": 1})
-                    board = chess.Board(pos.fen)
-
-                    rep_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos.id).first()
-                    repertoire_uci = rep_move.uci if rep_move else None
+                    board = chess.Board(pos_fen)
 
                     max_engine_mpv = 500
                     if hasattr(engine, "options") and isinstance(engine.options, dict) and "MultiPV" in engine.options:
@@ -748,29 +752,69 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                         res = engine.analyse(b, limit, multipv=mpv)
                         return res if isinstance(res, list) else [res]
 
-                    good_moves, is_exhaustive, best_uci, best_score_cp = evaluate_position_alternate_moves(
+                    engine_result = evaluate_position_alternate_moves(
                         analyse_func=analyse_wrapper,
                         board=board,
                         depth=depth,
                         repertoire_uci=repertoire_uci,
                         max_engine_multipv=max_engine_mpv
                     )
-
-                    update_position_alternate_moves(
-                        pos=pos,
-                        depth=depth,
-                        good_moves=good_moves,
-                        is_exhaustive=is_exhaustive,
-                        best_uci=best_uci,
-                        best_score_cp=best_score_cp,
-                        cache_service=cache_service
-                    )
-                    session.flush()
                 except Exception as e:
                     logger.error(f"Engine analysis failed for enrichment: {e}")
                 finally:
                     if engine:
                         engine.quit()
+
+        # ── Phase 3: Ultra-fast write transaction (~1ms) ──
+        session = db.get_session()
+        pos = session.get(Position, pos_id)
+        if not pos:
+            return False, "Position not found in DB."
+
+        for p_clean, moves_json_str in fetched_lichess:
+            if not session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first():
+                session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=moves_json_str))
+                try:
+                    session.flush()
+                except Exception:
+                    session.rollback()
+                    pos = session.get(Position, pos_id)
+                    if not pos:
+                        return False, "Position not found in DB."
+                    logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
+
+        if pos.analysis_depth is None or pos.analysis_depth < depth:
+            if cached_alt:
+                c_moves = list(cached_alt["good_moves"])
+                for r_uci in rep_moves_ucis:
+                    if r_uci not in c_moves:
+                        c_moves.append(r_uci)
+                pos.good_moves = json.dumps(list(dict.fromkeys(c_moves)))
+                pos.analysis_depth = cached_alt["depth"]
+                session.flush()
+            elif cross_repo_alt:
+                best_depth, cand_moves, best_eval = cross_repo_alt
+                merged_moves = list(cand_moves)
+                for r_uci in rep_moves_ucis:
+                    if r_uci not in merged_moves:
+                        merged_moves.append(r_uci)
+                pos.good_moves = json.dumps(list(dict.fromkeys(merged_moves)))
+                pos.analysis_depth = best_depth
+                if best_eval is not None:
+                    pos.engine_eval = best_eval
+                session.flush()
+            elif engine_result:
+                good_moves, is_exhaustive, best_uci, best_score_cp = engine_result
+                update_position_alternate_moves(
+                    pos=pos,
+                    depth=depth,
+                    good_moves=good_moves,
+                    is_exhaustive=is_exhaustive,
+                    best_uci=best_uci,
+                    best_score_cp=best_score_cp,
+                    cache_service=cache_service
+                )
+                session.flush()
 
         parent_moves = session.query(Move).filter_by(to_position_id=pos.id).all()
         if parent_moves:
@@ -778,16 +822,18 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                 calculate_local_priority_scores(session, pm.from_position_id, elo_category)
         else:
             calculate_local_priority_scores(session, pos.id, elo_category)
-            
+
         commit_with_retry(session)
         return True, "Enrichment complete."
 
     except Exception as e:
-        session.rollback()
+        if session:
+            session.rollback()
         print(f"Enrichment error: {e}")
         return False, str(e)
     finally:
-        session.close()
+        if session:
+            session.close()
         db.close()
 
 
