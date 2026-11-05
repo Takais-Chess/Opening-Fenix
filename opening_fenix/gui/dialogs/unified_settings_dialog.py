@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QMessageBox, QStackedWidget, QTextEdit, QPlainTextEdit, QGridLayout, 
     QApplication, QAbstractButton, QSizePolicy, QTreeWidget, QTreeWidgetItem,
     QHeaderView, QTableWidget, QTableWidgetItem, QProgressDialog, QRadioButton,
-    QInputDialog, QAbstractItemView
+    QInputDialog, QAbstractItemView, QLayout
 )
 from PyQt6.QtCore import Qt, QSize, pyqtSignal, QTimer, QThread, QEvent
 from PyQt6.QtGui import QIcon, QFont, QFontMetrics, QPixmap, QPainter, QPainterPath, QColor, QBrush, QImageReader
@@ -438,15 +438,24 @@ class RepertoireConfigCard(QFrame):
         self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
         self.info_layout.addWidget(self.combo_level)
+
+        self.combo_lang = NoWheelComboBox()
+        self.combo_lang.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo_lang.setMinimumWidth(scale(120))
+        self.combo_lang.setFixedHeight(scale(32))
+        self.populate_comment_languages()
+        self.combo_lang.currentIndexChanged.connect(self.on_lang_changed)
+        self.info_layout.addWidget(self.combo_lang)
         
         self.layout.addWidget(self.info_widget, 1)
         
         self.lbl_elo.setVisible(self.is_active)
         self.combo_level.setVisible(self.is_active)
+        self.combo_lang.setVisible(self.is_active)
         
         if self.is_active:
-            self.setMinimumHeight(scale(132))
-            self.setMaximumHeight(scale(162))
+            self.setMinimumHeight(scale(168))
+            self.setMaximumHeight(scale(198))
         else:
             self.setMinimumHeight(scale(68))
             self.setMaximumHeight(scale(78))
@@ -522,13 +531,14 @@ class RepertoireConfigCard(QFrame):
         
         self.lbl_elo.setVisible(self.is_active)
         self.combo_level.setVisible(self.is_active)
+        self.combo_lang.setVisible(self.is_active)
         
         if self.is_active:
-            self.setMinimumHeight(scale(126))
-            self.setMaximumHeight(scale(156))
+            self.setMinimumHeight(scale(168))
+            self.setMaximumHeight(scale(198))
         else:
-            self.setMinimumHeight(scale(66))
-            self.setMaximumHeight(scale(76))
+            self.setMinimumHeight(scale(68))
+            self.setMaximumHeight(scale(78))
         self.adjust_title_font()
         
         if self.main_window and hasattr(self.main_window, 'training_manager'):
@@ -544,6 +554,51 @@ class RepertoireConfigCard(QFrame):
         if level is not None and self.main_window and hasattr(self.main_window, 'training_manager'):
             self.main_window.training_manager.set_active_level(level, self.repo_name)
             self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
+
+    def populate_comment_languages(self):
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
+        from opening_fenix.core.utils import get_lang_display_label
+        from opening_fenix.core.translation import tr_ui
+
+        available = get_repertoire_comment_languages_fast(self.repo_name)
+        curr_lang = "auto"
+        tm = getattr(self.main_window, 'training_manager', None)
+        if tm and hasattr(tm, 'get_comment_language'):
+            curr_lang = tm.get_comment_language(self.repo_name) or "auto"
+
+        self.combo_lang.blockSignals(True)
+        self.combo_lang.clear()
+
+        if not available:
+            self.combo_lang.addItem(tr_ui("open_training.no_comments", "Keine Kommentare"), "auto")
+            self.combo_lang.setEnabled(False)
+        else:
+            self.combo_lang.setEnabled(True)
+            self.combo_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch"), "auto")
+            for lang_code in available:
+                code_lower = lang_code.lower()
+                if code_lower == "de":
+                    label = tr_ui("open_training.comment_lang_de", "Deutsch (DE)")
+                elif code_lower == "en":
+                    label = tr_ui("open_training.comment_lang_en", "Englisch (EN)")
+                else:
+                    label = f"{get_lang_display_label(code_lower)} ({code_lower.upper()})"
+                self.combo_lang.addItem(label, code_lower)
+
+        idx = self.combo_lang.findData(curr_lang)
+        if idx != -1:
+            self.combo_lang.setCurrentIndex(idx)
+        else:
+            self.combo_lang.setCurrentIndex(0)
+        self.combo_lang.blockSignals(False)
+
+    def on_lang_changed(self):
+        lang = self.combo_lang.currentData()
+        if lang is not None and self.main_window and hasattr(self.main_window, 'training_manager'):
+            self.main_window.training_manager.set_comment_language(lang, self.repo_name)
+            if hasattr(self.main_window, 'repertoire_manager') and getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == self.repo_name:
+                if hasattr(self.main_window, 'update_notation_display'):
+                    self.main_window.update_notation_display()
 
     def update_style(self):
         is_selected = (hasattr(self.parent_dlg, "selected_trainer_repo") and self.parent_dlg.selected_trainer_repo == self.repo_name)
@@ -1129,6 +1184,35 @@ TRAINER_SETTINGS_KEYS = {
 }
 
 
+class SettingsStackedWidget(QStackedWidget):
+    """
+    Enhanced QStackedWidget that supports transparently wrapping long pages
+    inside QScrollArea while preserving exact indexOf() lookups for unwrapped
+    widgets.
+    """
+    def currentWidget(self) -> QWidget:
+        w = super().currentWidget()
+        if w is not None:
+            wrapped = getattr(w, '_wrapped_page', None)
+            if wrapped is not None:
+                return wrapped
+            if isinstance(w, QScrollArea) and w.widget() is not None:
+                return w.widget()
+        return w
+
+    def indexOf(self, widget: QWidget) -> int:
+        idx = super().indexOf(widget)
+        if idx != -1:
+            return idx
+        for i in range(self.count()):
+            w = self.widget(i)
+            if getattr(w, '_wrapped_page', None) == widget:
+                return i
+            if isinstance(w, QScrollArea) and w.widget() == widget:
+                return i
+        return -1
+
+
 class UnifiedSettingsDialog(QDialog):
     """
     Central, consolidated settings dialog with a hierarchical, collapsible sidebar navigation.
@@ -1164,8 +1248,12 @@ class UnifiedSettingsDialog(QDialog):
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
         else:
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
-        self.setMinimumSize(scale(1357), scale(760))
-        self.resize(scale(1449), scale(820))
+        self.setMinimumSize(scale(960), scale(560))
+        from opening_fenix.gui.scaling import get_available_geometry
+        avail_w, avail_h = get_available_geometry()
+        target_w = min(scale(1150), int(avail_w * 0.92))
+        target_h = min(scale(750), int(avail_h * 0.90))
+        self.resize(target_w, target_h)
         self.setWindowFlags(
             Qt.WindowType.Window |
             Qt.WindowType.WindowMinMaxButtonsHint |
@@ -1805,7 +1893,7 @@ class UnifiedSettingsDialog(QDialog):
         v_right.addWidget(self.creator_header_bar)
 
         # Content Pages Stack
-        self.pages = QStackedWidget()
+        self.pages = SettingsStackedWidget()
         self.page_item_map = {}
 
         self.build_all_pages()
@@ -1951,6 +2039,25 @@ class UnifiedSettingsDialog(QDialog):
 
     # ─── Sidebar Tree & Navigation ──────────────────────────────────────────
 
+    def _wrap_page_if_needed(self, page_widget: QWidget) -> QWidget:
+        if isinstance(page_widget, QScrollArea):
+            return page_widget
+        # If the page already has a top-level full-page QScrollArea (e.g. FAQ or Creator Tools):
+        if getattr(page_widget, "_no_outer_scroll", False):
+            return page_widget
+        if page_widget == getattr(self, "page_faq", None) or page_widget == getattr(self, "page_cr_tools", None):
+            return page_widget
+        
+        scroll = QScrollArea()
+        scroll._wrapped_page = page_widget
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setStyleSheet("QScrollArea { background: transparent; border: none; }")
+        scroll.setWidget(page_widget)
+        return scroll
+
     def build_all_pages(self):
         self.all_registered_pages = []
 
@@ -1991,7 +2098,7 @@ class UnifiedSettingsDialog(QDialog):
                 self.page_faq               # 4: FAQ
             ]
         for p in ordered_primaries:
-            self.pages.addWidget(p)
+            self.pages.addWidget(self._wrap_page_if_needed(p))
             self.all_registered_pages.append(p)
 
         # 1. GLOBAL SETTINGS
@@ -2035,7 +2142,8 @@ class UnifiedSettingsDialog(QDialog):
 
     def add_nav_item(self, parent_header: QTreeWidgetItem, text: str, page_widget: QWidget, is_creator: bool = False) -> QTreeWidgetItem:
         if page_widget not in self.all_registered_pages:
-            idx = self.pages.addWidget(page_widget)
+            wrapped = self._wrap_page_if_needed(page_widget)
+            idx = self.pages.addWidget(wrapped)
             self.all_registered_pages.append(page_widget)
         else:
             idx = self.pages.indexOf(page_widget)
@@ -2892,8 +3000,8 @@ class UnifiedSettingsDialog(QDialog):
         
         self.scroll_trainer_cards = QScrollArea()
         self.scroll_trainer_cards.setWidgetResizable(True)
-        self.scroll_trainer_cards.setMinimumHeight(scale(424))
-        self.scroll_trainer_cards.setMaximumHeight(scale(440))
+        self.scroll_trainer_cards.setMinimumHeight(scale(180))
+        self.scroll_trainer_cards.setMaximumHeight(scale(220))
         self.scroll_trainer_cards.setStyleSheet("""
             QScrollArea { border: none; background-color: #ffffff; }
         """)
@@ -2920,8 +3028,10 @@ class UnifiedSettingsDialog(QDialog):
 
         # Repertoire Informationen (Vollständige Anzeige mit Cover, Farbe, Elo, Kommentaren, Levels & Beschreibung)
         self.grp_trainer_details = QGroupBox(tr_widget("settings.repo_info_title", "ℹ️ Repertoire Informationen"))
+        self.grp_trainer_details.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
         self.grp_info = self.grp_trainer_details
         info_outer_layout = QVBoxLayout(self.grp_trainer_details)
+        info_outer_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         info_outer_layout.setContentsMargins(scale(16), scale(14), scale(16), scale(14))
         info_outer_layout.setSpacing(0)
 
@@ -2939,6 +3049,7 @@ class UnifiedSettingsDialog(QDialog):
         # Full Content Widget
         self.info_content_widget = QWidget()
         info_main_layout = QHBoxLayout(self.info_content_widget)
+        info_main_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         info_main_layout.setContentsMargins(0, 0, 0, 0)
         info_main_layout.setSpacing(scale(24))
 
@@ -2946,9 +3057,9 @@ class UnifiedSettingsDialog(QDialog):
         left_col_widget = QWidget()
         left_col_widget.setFixedWidth(scale(180))
         left_col = QVBoxLayout(left_col_widget)
+        left_col.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         left_col.setContentsMargins(0, 0, 0, 0)
         left_col.setSpacing(scale(8))
-        left_col.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
 
         self.lbl_info_cover = QLabel()
         self.lbl_info_cover.setFixedSize(scale(180), scale(180))
@@ -2998,6 +3109,8 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_moves = QLabel("-")
         self.lbl_depth.hide()
         self.lbl_moves.hide()
+
+        left_col.addStretch(1)
 
         info_main_layout.addWidget(left_col_widget, 0)
 
@@ -3081,10 +3194,12 @@ class UnifiedSettingsDialog(QDialog):
                     card.btn_toggle.blockSignals(False)
                     card.lbl_elo.setVisible(is_active)
                     card.combo_level.setVisible(is_active)
+                    card.combo_lang.setVisible(is_active)
                     if is_active:
-                        card.setMinimumHeight(scale(132))
-                        card.setMaximumHeight(scale(162))
+                        card.setMinimumHeight(scale(168))
+                        card.setMaximumHeight(scale(198))
                         card.populate_levels()
+                        card.populate_comment_languages()
                     else:
                         card.setMinimumHeight(scale(68))
                         card.setMaximumHeight(scale(78))
@@ -3350,6 +3465,7 @@ class UnifiedSettingsDialog(QDialog):
                 single_levels_pill = QFrame()
                 single_levels_pill.setStyleSheet(f"background: #f8fafc; border: 1px solid #e2e8f0; border-radius: {scale(10)}px;")
                 p_lay = QVBoxLayout(single_levels_pill)
+                p_lay.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
                 p_lay.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
                 p_lay.setSpacing(scale(6))
 

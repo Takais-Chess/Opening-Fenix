@@ -31,12 +31,102 @@ def invalidate_all_repertoires_cache() -> None:
     _cached_all_repos = None
     _cached_all_repos_mtime = None
 
+_comment_languages_cache: Dict[str, List[str]] = {}
+
+def invalidate_repertoire_comment_languages_cache(repo_name: Optional[str] = None) -> None:
+    """Clears cached comment languages for a specific repertoire or all repertoires."""
+    if repo_name:
+        _comment_languages_cache.pop(repo_name, None)
+    else:
+        _comment_languages_cache.clear()
+
 def invalidate_repertoire_levels_cache(repo_name: Optional[str] = None) -> None:
     """Clears cached levels for a specific repertoire or all repertoires."""
     if repo_name:
         _levels_cache.pop(repo_name, None)
     else:
         _levels_cache.clear()
+    invalidate_repertoire_comment_languages_cache(repo_name)
+
+def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
+    """
+    Fast, lightweight fetch of available comment languages in a repertoire (e.g. ['de', 'en']).
+    Uses an in-memory cache, falls back to repertoire metadata 'available_comment_languages',
+    and if missing, performs a lightweight SQLite scan once and caches the result into metadata.
+    """
+    if not repo_name:
+        return []
+
+    if repo_name in _comment_languages_cache:
+        return _comment_languages_cache[repo_name]
+
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return []
+
+    from opening_fenix.core.utils import get_multilingual_comment_dict, has_meaningful_comment
+
+    def _query(conn):
+        c = conn.cursor()
+        # 1. Check if metadata already has available_comment_languages cached
+        c.execute("SELECT value FROM metadata WHERE key = 'available_comment_languages'")
+        row = c.fetchone()
+        if row and row[0]:
+            try:
+                langs = json.loads(row[0])
+                if isinstance(langs, list):
+                    return sorted(set(l.lower() for l in langs if l))
+            except Exception:
+                pass
+
+        # 2. Get repertoire default comment_language from metadata
+        c.execute("SELECT value FROM metadata WHERE key = 'comment_language'")
+        meta_row = c.fetchone()
+        repo_def_lang = meta_row[0].lower() if meta_row and meta_row[0] and meta_row[0] != "auto" else "de"
+
+        # 3. Query all non-empty comments
+        c.execute("SELECT comment FROM positions WHERE comment IS NOT NULL AND comment != ''")
+        comments = c.fetchall()
+
+        detected = set()
+        for (raw_c,) in comments:
+            if not raw_c or not raw_c.strip():
+                continue
+            c_dict = get_multilingual_comment_dict(raw_c, default_lang=repo_def_lang)
+            for lang, val in c_dict.items():
+                if lang and has_meaningful_comment(val):
+                    detected.add(lang.lower())
+
+        sorted_langs = sorted(detected)
+
+        # 4. Save to metadata for future 0-cost lookups
+        try:
+            val_json = json.dumps(sorted_langs)
+            c.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('available_comment_languages', ?)", (val_json,))
+            conn.commit()
+        except Exception:
+            pass
+
+        return sorted_langs
+
+    langs = None
+    try:
+        with sqlite3.connect(db_path, timeout=5) as conn:
+            langs = _query(conn)
+    except Exception:
+        try:
+            import pathlib
+            uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
+            with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+                langs = _query(conn)
+        except Exception as e:
+            logger.warning(f"Fast comment languages fetch failed for {repo_name}: {e}")
+            return []
+
+    if langs is not None:
+        _comment_languages_cache[repo_name] = langs
+        return langs
+    return []
 
 def get_repertoire_meta_fast(repo_name: str) -> Dict[str, str]:
     """
@@ -305,6 +395,8 @@ class RepertoireService:
         gc.collect()
         time.sleep(0.5) 
         success, _ = delete_repertoire_db(repo_name)
+        invalidate_all_repertoires_cache()
+        invalidate_repertoire_comment_languages_cache(repo_name)
         return success
 
     def rename_repertoire(self, old_name: str, new_name: str) -> Tuple[bool, str]:

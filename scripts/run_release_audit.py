@@ -157,6 +157,8 @@ def check_versions():
             for line in f:
                 if 'tag_name = "v' in line:
                     publish_version = line.split('"')[1].lstrip('v')
+                elif 'tag_name = f"v{APP_VERSION}"' in line:
+                    publish_version = app_version
     print(f"  Publish release version: {publish_version}")
 
     matches = (app_version == iss_version == publish_version)

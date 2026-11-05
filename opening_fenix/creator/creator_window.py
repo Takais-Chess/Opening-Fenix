@@ -56,7 +56,7 @@ from opening_fenix.core.version import APP_VERSION
 # Import centralized styles
 from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
-from opening_fenix.gui.scaling import scale
+from opening_fenix.gui.scaling import scale, scaler, get_available_geometry
 from opening_fenix.core.translation import tr_ui
 
 
@@ -2343,7 +2343,11 @@ class CreatorBackend:
                     else:
                         new.comment = parse_comment(np.comment, 'de')
                 else:
-                    new.comment = parse_comment(np.comment, language)
+                    c = parse_comment(np.comment, language)
+                    if not c:
+                        cdict = get_multilingual_comment_dict(np.comment) if np.comment.startswith("{") else {}
+                        c = cdict.get("en") or cdict.get("de") or (next(iter(cdict.values())) if cdict else np.comment)
+                    new.comment = c
             
             mn = board.fullmove_number
             san = localize_san(m_db.san, language)
@@ -3580,11 +3584,16 @@ class CreatorWindow(QMainWindow):
                 screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
             except Exception:
                 screen = QApplication.primaryScreen()
-        if screen:
+        from opening_fenix.gui.scaling import get_available_geometry
+        if scaler.is_emulating:
+            avail_w, avail_h = get_available_geometry()
+            self.setGeometry(0, 0, avail_w, avail_h)
+        elif screen:
             try:
                 self.setGeometry(screen.availableGeometry())
             except Exception:
                 pass
+        self.setMinimumSize(scale(960), scale(600))
 
         self.backend = CreatorBackend(is_test=is_test)
         self.backend.window = self
@@ -4452,7 +4461,7 @@ class CreatorWindow(QMainWindow):
         self.tabs.setContentsMargins(0, 0, 0, 0)
         
         # Set initial sizes so it looks like before (e.g., split 50/50 vertically)
-        self.right_splitter.setSizes([300, 300])
+        self.right_splitter.setSizes([scale(200), scale(260)])
 
         # Ensure "DETAILS" tab is selected by default on initial startup if visible
         for i in range(self.tabs.count()):

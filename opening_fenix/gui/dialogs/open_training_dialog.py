@@ -326,6 +326,42 @@ class OpenTrainingSetupDialog(QDialog):
 
         self.combo_variation.blockSignals(False)
 
+        # 3. Update Comment Language dropdown
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
+        from opening_fenix.core.utils import get_lang_display_label
+        available_langs = get_repertoire_comment_languages_fast(repo_name)
+        curr_comment_lang = "auto"
+        if self.training_manager and hasattr(self.training_manager, 'get_comment_language'):
+            curr_comment_lang = self.training_manager.get_comment_language(repo_name) or "auto"
+        if curr_comment_lang == "auto" and self.training_manager:
+            curr_comment_lang = self.training_manager.get_setting("comment_language") or "auto"
+
+        self.combo_comment_lang.blockSignals(True)
+        self.combo_comment_lang.clear()
+
+        if not available_langs:
+            self.combo_comment_lang.addItem(tr_ui("open_training.no_comments", "Keine Kommentare"), "auto")
+            self.combo_comment_lang.setEnabled(False)
+        else:
+            self.combo_comment_lang.setEnabled(True)
+            self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch (Programmsprache)"), "auto")
+            for lang_code in available_langs:
+                code_lower = lang_code.lower()
+                if code_lower == "de":
+                    lbl = tr_ui("open_training.comment_lang_de", "Deutsch (DE)")
+                elif code_lower == "en":
+                    lbl = tr_ui("open_training.comment_lang_en", "Englisch (EN)")
+                else:
+                    lbl = f"{get_lang_display_label(code_lower)} ({code_lower.upper()})"
+                self.combo_comment_lang.addItem(lbl, code_lower)
+
+        idx_clang = self.combo_comment_lang.findData(curr_comment_lang)
+        if idx_clang != -1:
+            self.combo_comment_lang.setCurrentIndex(idx_clang)
+        else:
+            self.combo_comment_lang.setCurrentIndex(0)
+        self.combo_comment_lang.blockSignals(False)
+
     def _on_start_clicked(self):
         repo_name = self.combo_repo.currentData()
         if not repo_name:
@@ -342,6 +378,8 @@ class OpenTrainingSetupDialog(QDialog):
         self.selected_comment_lang = self.combo_comment_lang.currentData() or "auto"
         if self.training_manager:
             self.training_manager.set_setting("comment_language", self.selected_comment_lang)
+            if hasattr(self.training_manager, 'set_comment_language') and self.selected_repo:
+                self.training_manager.set_comment_language(self.selected_comment_lang, self.selected_repo)
         uninstall_taskbar_close_filter(self._taskbar_filter)
         self._taskbar_filter = None
         self.accept()

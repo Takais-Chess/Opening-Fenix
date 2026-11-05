@@ -11,15 +11,26 @@ from opening_fenix.core.utils import (
 def test_parse_plain_text_comment():
     comment = "Solider Zug im Zentrum."
     assert parse_comment(comment, "de") == "Solider Zug im Zentrum."
-    assert parse_comment(comment, "en") == "Solider Zug im Zentrum."
+    # No fallback: German plain-text comment returns empty for English
+    assert parse_comment(comment, "en") == ""
+    assert parse_comment(comment, "en", default_lang="en") == "Solider Zug im Zentrum."
     assert get_multilingual_comment_dict(comment) == {"de": "Solider Zug im Zentrum."}
 
 def test_parse_json_multilingual_comment():
     raw_json = '{"de": "Weiß kontrolliert d4.", "en": "White controls d4."}'
     assert parse_comment(raw_json, "de") == "Weiß kontrolliert d4."
     assert parse_comment(raw_json, "en") == "White controls d4."
-    # Test fallback to English if requested language is unavailable
-    assert parse_comment(raw_json, "fr") == "White controls d4."
+    # No fallback: returns empty string if requested language is unavailable
+    assert parse_comment(raw_json, "fr") == ""
+
+    # Test single-language JSON comments have no fallback to each other
+    de_only = '{"de": "Nur Deutsch."}'
+    assert parse_comment(de_only, "de") == "Nur Deutsch."
+    assert parse_comment(de_only, "en") == ""
+
+    en_only = '{"en": "Only English."}'
+    assert parse_comment(en_only, "en") == "Only English."
+    assert parse_comment(en_only, "de") == ""
 
 def test_format_multilingual_comment():
     data = {"de": "Guter Zug", "en": "Good move"}

@@ -185,6 +185,8 @@ class DatabaseManager:
                     result = conn.execute(text("PRAGMA table_info(user_repertoire_settings)"))
                     urs_columns = [row[1] for row in result.fetchall()]
                     if urs_columns:
+                        if 'comment_language' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN comment_language VARCHAR DEFAULT 'auto'"))
                         if 'rating' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN rating FLOAT DEFAULT 800.0"))
                         if 'last_rating_update' not in urs_columns:

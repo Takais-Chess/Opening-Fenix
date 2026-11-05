@@ -119,6 +119,7 @@ class UserRepertoireSettings(UserBase):
     __tablename__ = 'user_repertoire_settings'
     repertoire_name = Column(String, primary_key=True)
     active_level = Column(Integer, default=1)
+    comment_language = Column(String, default="auto")
     rating = Column(Float, default=800.0)
     last_rating_update = Column(DateTime, nullable=True)
     

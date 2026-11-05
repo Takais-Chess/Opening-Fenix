@@ -4,7 +4,7 @@ import json
 import re
 import difflib
 import chess
-from typing import Any
+from typing import Any, Optional, Dict, List
 
 ELO_DISPLAY_MAP = {
     "low": "Hobby Spieler",
@@ -789,35 +789,30 @@ def get_multilingual_comment_dict(raw_comment: str, default_lang: str = "de") ->
     return {target: raw}
 
 
-def parse_comment(raw_comment: str, lang: str = "de") -> str:
+def parse_comment(raw_comment: str, lang: str = "de", default_lang: Optional[str] = None) -> str:
     """
     Resolves a position comment for a target language code (e.g. 'de', 'en').
-    Hierarchy: requested lang -> 'en' -> 'de' -> first non-empty -> raw string.
+    Returns the comment in the target language, or an empty string if not available.
+    Does not fall back to other languages if the requested language is missing.
     """
     if not raw_comment or not raw_comment.strip():
         return ""
     
-    # If not a JSON object string, return raw text directly
     raw = raw_comment.strip()
-    if not (raw.startswith("{") and raw.endswith("}")):
-        return raw
-
-    comment_dict = get_multilingual_comment_dict(raw)
-    if not comment_dict:
-        return raw
-
     target_lang = lang.lower() if lang else "de"
-    if target_lang in comment_dict and comment_dict[target_lang]:
-        return comment_dict[target_lang]
-    if "en" in comment_dict and comment_dict["en"]:
-        return comment_dict["en"]
-    if "de" in comment_dict and comment_dict["de"]:
-        return comment_dict["de"]
-    for val in comment_dict.values():
-        if val:
-            return val
-    return raw
 
+    # Multilingual JSON format
+    if raw.startswith("{") and raw.endswith("}"):
+        comment_dict = get_multilingual_comment_dict(raw)
+        if comment_dict:
+            return comment_dict.get(target_lang, "")
+        return ""
+
+    # Plain text comment (non-JSON)
+    def_lang = default_lang.lower() if default_lang else "de"
+    if target_lang == def_lang:
+        return raw
+    return ""
 
 def format_multilingual_comment(comment_dict: dict) -> str:
     """
@@ -1120,7 +1115,7 @@ def strip_eval_symbol(text: str) -> str:
 def has_meaningful_comment(text: str) -> bool:
     """
     Checks if a comment string contains actual verbal commentary,
-    ignoring ChessBase drawing tags ([%csl ...], [%cal ...]) and evaluation symbols (+−, =, etc.).
+    ignoring ChessBase drawing tags ([%csl ...], [%cal ...]) and evaluation symbols (+-, =, etc.).
     Returns True ONLY if there is actual written text.
     """
     if not text or not isinstance(text, str):
@@ -1156,7 +1151,7 @@ def get_lang_display_label(code: str) -> str:
 def translate_chess_comment(comment_text: str, src_lang: str = "en", tgt_lang: str = "de", timeout: float = 6.0) -> str:
     """
     Translates a chess position comment using Google Translate while safely preserving
-    ChessBase diagram tags ([%csl ...], [%cal ...]) and evaluation symbols (+−, =, etc.).
+    ChessBase diagram tags ([%csl ...], [%cal ...]) and evaluation symbols (+-, =, etc.).
     Returns translated text string. If offline or error occurs, returns cleaned original text.
     """
     if not comment_text or not isinstance(comment_text, str) or not comment_text.strip():

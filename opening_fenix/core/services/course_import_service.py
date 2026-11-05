@@ -1255,7 +1255,11 @@ def execute_course_import(
 
         set_meta(session, "ana_cache_count", "-1")
         set_meta(session, "cov_cache_count", "-1")
+        set_meta(session, "available_comment_languages", None)
         session.commit()
+
+        from opening_fenix.core.services.repertoire_core_service import invalidate_repertoire_comment_languages_cache
+        invalidate_repertoire_comment_languages_cache(repo_name)
 
         if progress_callback:
             progress_callback(100, tr_ui("course_import.status_done", "Fertiggestellt!"))

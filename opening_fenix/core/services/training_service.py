@@ -214,7 +214,7 @@ class TrainingManager:
         existing = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
         if is_visible:
             if not existing:
-                new_setting = UserRepertoireSettings(repertoire_name=repo_name, active_level=1)
+                new_setting = UserRepertoireSettings(repertoire_name=repo_name, active_level=1, comment_language="auto")
                 self.user_session.add(new_setting)
         else:
             if existing:
@@ -262,6 +262,33 @@ class TrainingManager:
             self._user_settings_cache = settings
             self._cached_elo = None
         self._td_cache = None
+
+    def get_comment_language(self, repo_name: Optional[str] = None) -> str:
+        if not self.user_session:
+            return "auto"
+        if not repo_name:
+            repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        if not repo_name:
+            return "auto"
+        with self.user_session.no_autoflush:
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+            if settings and hasattr(settings, 'comment_language') and settings.comment_language:
+                return settings.comment_language
+        return "auto"
+
+    def set_comment_language(self, comment_lang: str, repo_name: Optional[str] = None) -> None:
+        if not self.user_session: return
+        if not repo_name:
+            repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        if not repo_name: return
+
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        if not settings:
+            settings = UserRepertoireSettings(repertoire_name=repo_name, comment_language=comment_lang)
+            self.user_session.add(settings)
+        else:
+            settings.comment_language = comment_lang
+        self.user_session.commit()
         
     def close(self) -> None:
         if self.user_session:
@@ -871,7 +898,7 @@ class TrainingManager:
         settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
         if not settings:
             default_lvl = 999 if is_free_training_profile(self.profile_name) else 1
-            settings = UserRepertoireSettings(repertoire_name=repo_name, rating=800.0, active_level=default_lvl, last_rating_update=datetime.datetime.now())
+            settings = UserRepertoireSettings(repertoire_name=repo_name, rating=800.0, active_level=default_lvl, comment_language="auto", last_rating_update=datetime.datetime.now())
             self.user_session.add(settings)
             self.user_session.commit()
         self._user_settings_cache = settings
@@ -889,7 +916,7 @@ class TrainingManager:
 
     def _get_cached_levels(self) -> List[Dict[str, Any]]:
         if self._levels_cache is None:
-            lvls = self.repertoire_manager.get_repertoire_levels() if self.repertoire_manager else []
+            lvls = (self.repertoire_manager.get_repertoire_levels() if (self.repertoire_manager and hasattr(self.repertoire_manager, 'get_repertoire_levels')) else []) or []
             known_orders = {l.get('order') for l in lvls if l.get('order')}
             
             # Ensure every level present in moves has a level entry

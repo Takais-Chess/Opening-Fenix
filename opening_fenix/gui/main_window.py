@@ -160,6 +160,16 @@ class MainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if hasattr(self, 'board_widget') and self.board_widget:
+            self.board_widget.update_animation_metrics()
+        self._fit_board_splitter()
+        # Connect screenChanged if window handle is available
+        if hasattr(self, 'windowHandle') and self.windowHandle():
+            try:
+                self.windowHandle().screenChanged.connect(self._on_screen_changed)
+            except Exception:
+                pass
+
         # Re-apply icon after native handle is created (needed for FramelessWindowHint on Windows)
         QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
@@ -1188,6 +1198,12 @@ class MainWindow(QMainWindow):
 
     def get_effective_comment_language(self) -> str:
         from opening_fenix.core.translation import translator
+        active_repo = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        if self.training_manager and active_repo and hasattr(self.training_manager, 'get_comment_language'):
+            repo_profile_lang = self.training_manager.get_comment_language(active_repo)
+            if repo_profile_lang and repo_profile_lang != "auto":
+                return repo_profile_lang
+
         lang_setting = self.training_manager.get_setting("comment_language")
         if lang_setting and lang_setting != "auto":
             return lang_setting
@@ -1238,7 +1254,13 @@ class MainWindow(QMainWindow):
             san = localize_san(item['san'], notation_lang)
             html += f"<a href='fen:{item['fen']}' style='{style}'>{san}{nag_text}</a> "
             if item.get('comment'):
-                comment_text = parse_comment(item['comment'], comment_lang)
+                repo_default_lang = "de"
+                if self.repertoire_manager and self.repertoire_manager.repo_session:
+                    from opening_fenix.core.data_tools import get_meta
+                    meta_lang = get_meta(self.repertoire_manager.repo_session, "comment_language", "de")
+                    if meta_lang and meta_lang != "auto":
+                        repo_default_lang = meta_lang
+                comment_text = parse_comment(item['comment'], comment_lang, default_lang=repo_default_lang)
                 if comment_text:
                     from opening_fenix.core.utils import clean_chessbase_annotations
                     clean_text = clean_chessbase_annotations(comment_text)
@@ -1330,6 +1352,8 @@ class MainWindow(QMainWindow):
             selected_comment_lang = selections[3] if len(selections) > 3 else "auto"
             if selected_repo:
                 self.training_manager.set_setting("comment_language", selected_comment_lang)
+                if hasattr(self.training_manager, 'set_comment_language'):
+                    self.training_manager.set_comment_language(selected_comment_lang, selected_repo)
                 self.change_repertoire(selected_repo)
                 self.training_manager.set_active_level(selected_level, selected_repo)
                 self.set_variation_filter(selected_variation)
@@ -1538,18 +1562,6 @@ class MainWindow(QMainWindow):
             desired_board_w = h
             desired_side_w = max(scale(280), total_w - desired_board_w)
             self.main_splitter.setSizes([desired_board_w, desired_side_w])
-
-    def showEvent(self, event):
-        super().showEvent(event)
-        if hasattr(self, 'board_widget') and self.board_widget:
-            self.board_widget.update_animation_metrics()
-        self._fit_board_splitter()
-        # Connect screenChanged if window handle is available
-        if hasattr(self, 'windowHandle') and self.windowHandle():
-            try:
-                self.windowHandle().screenChanged.connect(self._on_screen_changed)
-            except Exception:
-                pass
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

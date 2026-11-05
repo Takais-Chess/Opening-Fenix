@@ -37,10 +37,6 @@ def get_faq_items() -> list[tuple[str, str]]:
             tr_ui("faq.q4", "Möchtest du Fehler melden oder Änderungen am Programm vorschlagen?"),
             tr_ui("faq.a4", "Du kannst das auf diesem Discord tun: https://discord.gg/TevW5Wfkc")
         ))
-        faqs.append((
-            tr_ui("faq.q5", "Möchtest du mich unterstützen?"),
-            tr_ui("faq.a5", "Teile das Programm und wenn du mich mit etwas Geld unterstützen möchtest, kannst du das hier tun: buymeacoffee.com/takais")
-        ))
 
     return faqs
 

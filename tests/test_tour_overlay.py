@@ -1,7 +1,11 @@
 import pytest
 from PyQt6.QtWidgets import QWidget, QPushButton, QVBoxLayout
 from PyQt6.QtCore import Qt, QPoint, QRect
+from unittest.mock import MagicMock
+import importlib
 from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
+import opening_fenix.gui.main_window as mw_mod
+from opening_fenix.gui.main_window import MainWindow
 
 @pytest.fixture
 def parent_widget(qtbot):
@@ -90,6 +94,39 @@ def test_tour_skip_button(qtbot, tour_overlay):
         
     assert not tour_overlay.isVisible()
 
-
-
-
+def test_check_for_onboarding_logic(qtbot, monkeypatch, tmp_path):
+    """Verify check_for_onboarding triggers tour when not shown, and suppresses when already shown."""
+    monkeypatch.setattr("opening_fenix.core.utils.get_user_dir", lambda: str(tmp_path))
+    
+    # conftest mocks check_for_onboarding with a lambda. Reload or restore original method:
+    import inspect
+    # Re-extract real check_for_onboarding from source
+    real_func = getattr(mw_mod.MainWindow, "_real_check_for_onboarding", None)
+    if real_func is None:
+        # Reload module cleanly to get unbound original function
+        temp_mod = importlib.import_module("opening_fenix.gui.main_window")
+        importlib.reload(temp_mod)
+        real_func = temp_mod.MainWindow.check_for_onboarding
+    
+    mw = MainWindow.__new__(MainWindow)
+    mw.profile_name = "TestProfile"
+    mw.training_manager = MagicMock()
+    mw.start_guided_tour = MagicMock()
+    
+    # When guide_shown is None or False -> tour must start
+    mw.training_manager.get_setting.return_value = None
+    real_func(mw)
+    mw.start_guided_tour.assert_called_once()
+    
+    # When guide_shown is True -> tour must not start
+    mw.start_guided_tour.reset_mock()
+    mw.training_manager.get_setting.return_value = True
+    real_func(mw)
+    mw.start_guided_tour.assert_not_called()
+    
+    # Free training profile -> tour must not start
+    mw.start_guided_tour.reset_mock()
+    mw.profile_name = "Freies Training"
+    mw.training_manager.get_setting.return_value = None
+    real_func(mw)
+    mw.start_guided_tour.assert_not_called()

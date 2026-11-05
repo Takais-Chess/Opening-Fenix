@@ -2,6 +2,17 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.2] - 2026-11-05
+
+### Added & Improved
+- **Per-Profile Repertoire Comment Language Selection**: Added a language selection dropdown directly to repertoire cards in the Trainer settings, allowing users to configure which language comments to display during training per repertoire. Options are dynamically filtered based on comments present in the course with low-CPU cached scanning.
+- **Strict Comment Language Filtering**: Removed cross-language fallback in the Trainer so that when a specific comment language is chosen, only comments authored in that language are shown.
+
+### Fixed & Polished
+- **Repertoire Information Layout Overlap**: Resolved a layout constraint bug in the Trainer settings where the course title overlapped the cover image and level pills were compressed; ensured the details container expands gracefully to full vertical height without widening the column.
+- **Scrollable Settings Pages & Stacked Widget Resolution**: Enabled outer page scrolling for the Repertoire Configuration page and refined `SettingsStackedWidget.currentWidget()` to transparently resolve wrapped scroll containers.
+- **Repertoire Deletion Cache Invalidation**: Ensured `invalidate_all_repertoires_cache()` is called upon repertoire deletion and renaming to eliminate stale listings.
+
 ## [1.3.1] - 2026-11-03
 
 ### Performance & Improvements

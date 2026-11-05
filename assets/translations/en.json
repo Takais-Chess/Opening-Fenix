@@ -280,9 +280,7 @@
     "q3": "How do I change the training level and when should I do it?",
     "a3": "You can change the level in the Trainer settings under Repertoire Selection. You should increase the level once you are comfortable with the current level and your Elo has exceeded the target Elo for this repertoire level.",
     "q4": "Do you want to report Bugs or suggest Changes to the Program?",
-    "a4": "You can do that on this Discord: https://discord.gg/TevW5Wfkc",
-    "q5": "Do you want to support me?",
-    "a5": "Share the Program and if you want to support me with some money you can do that here: buymeacoffee.com/takais"
+    "a4": "You can do that on this Discord: https://discord.gg/TevW5Wfkc"
   },
   "tour": {
     "btn_next": "NEXT →",
@@ -1197,6 +1195,7 @@
     "comment_lang_auto": "Automatic (Program Language)",
     "comment_lang_en": "English (EN)",
     "comment_lang_de": "German (DE)",
+    "no_comments": "(No comments)",
     "no_repos_item": "(No repertoires)",
     "btn_cancel": "Cancel",
     "btn_start": "🚀 Start Training",
@@ -1257,8 +1256,6 @@
     "a3": "You can change the level in the Trainer settings under Repertoire Selection. You should increase the level once the previous level is solid and your own Elo exceeds the target Elo for that repertoire level.",
     "q4": "Do you want to report Bugs or suggest Changes to the Program?",
     "a4": "You can do that on this Discord: https://discord.gg/TevW5Wfkc",
-    "q5": "Do you want to support me?",
-    "a5": "Share the Program and if you want to support me with some money you can do that here: buymeacoffee.com/takais",
     "q6": "Will the Lichess import for big courses ever get faster?",
     "a6": "We are limited by the Lichess server (who are absolute heroes for providing the data for free), and they have a limit on how many positions we can get per minute.\n\nIf the program ever gets big, I could set up a server, download the whole Lichess database there, and then the import would take seconds instead of hours. But that would consistently cost money, and then I would need to think about some kind of monetization or subscription, and I am not very interested in that.\n\nFor now, we have to be content with having to keep the program running for a while after a big course import."
   },

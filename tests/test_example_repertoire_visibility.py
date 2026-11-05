@@ -35,14 +35,16 @@ def test_filter_repertoires_in_public_mode(monkeypatch):
     assert len(filtered) == 4
 
 def test_faq_dialog_donation_hidden_in_private_mode(monkeypatch):
-    """Ensure donation FAQ item (buymeacoffee) is omitted in Private mode."""
-    monkeypatch.setattr("opening_fenix.core.utils.is_public_version", lambda: False)
+    """Ensure donation FAQ item (buymeacoffee / support me) is omitted in both Private and Public modes."""
     from opening_fenix.gui.dialogs.faq_dialog import get_faq_items
     
-    faqs = get_faq_items()
-    questions = [q for q, a in faqs]
-    answers = [a for q, a in faqs]
-    
-    assert not any("buymeacoffee" in a for a in answers)
-    assert not any("unterstützen" in q.lower() for q in questions)
+    for is_pub in (False, True):
+        monkeypatch.setattr("opening_fenix.core.utils.is_public_version", lambda: is_pub)
+        faqs = get_faq_items()
+        questions = [q for q, a in faqs]
+        answers = [a for q, a in faqs]
+        
+        assert not any("buymeacoffee" in a for a in answers)
+        assert not any("unterstützen" in q.lower() for q in questions)
+        assert not any("support me" in q.lower() for q in questions)
 
