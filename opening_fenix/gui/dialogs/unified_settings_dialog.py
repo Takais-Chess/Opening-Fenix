@@ -3000,8 +3000,9 @@ class UnifiedSettingsDialog(QDialog):
         
         self.scroll_trainer_cards = QScrollArea()
         self.scroll_trainer_cards.setWidgetResizable(True)
-        self.scroll_trainer_cards.setMinimumHeight(scale(180))
-        self.scroll_trainer_cards.setMaximumHeight(scale(220))
+        # Height sized to accommodate 2.5 rows of extended repertoire cards
+        self.scroll_trainer_cards.setMinimumHeight(scale(450))
+        self.scroll_trainer_cards.setMaximumHeight(scale(460))
         self.scroll_trainer_cards.setStyleSheet("""
             QScrollArea { border: none; background-color: #ffffff; }
         """)

@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "1.3.2"
+#define MyAppVersion "1.3.3"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"

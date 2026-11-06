@@ -1362,14 +1362,8 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                         # 1. Check persistent global cache
                                         cached_eval = cache_service.get_eval_data(inter_fen, min_depth=target_engine_depth)
                                         if cached_eval is not None:
-                                            has_scores = cached_eval.get("best_score") is not None
-                                            u2_in_cache = (u2 == cached_eval.get("best_uci")) or (u2 in cached_eval.get("moves", {}))
-                                            if has_scores and u2_in_cache:
-                                                eval_data = cached_eval
-                                                engine_eval_cache[inter_fen] = eval_data
-                                            elif not recheck_unadded:
-                                                eval_data = cached_eval
-                                                engine_eval_cache[inter_fen] = eval_data
+                                            eval_data = cached_eval
+                                            engine_eval_cache[inter_fen] = eval_data
 
                                     need_engine_eval = False
                                     if eval_data is None:
@@ -1377,11 +1371,21 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                     elif recheck_unadded and active_engine is not None:
                                         if eval_data.get("best_score") is None:
                                             need_engine_eval = True
-                                        elif u2 not in eval_data.get("moves", {}):
+                                        elif u2 != eval_data.get("best_uci") and u2 not in eval_data.get("moves", {}):
                                             best_s = eval_data.get("best_score")
                                             moves_dict = eval_data.get("moves", {})
                                             worst_s = min(moves_dict.values()) if moves_dict else None
-                                            if best_s is not None and worst_s is not None and (best_s - worst_s) <= 10:
+                                            # If the worst scored move so far is within 10 cp of best,
+                                            # and we haven't already searched all legal moves or reached 10 moves,
+                                            # widening the search could find u2 within 10 cp.
+                                            # But if the worst move is already >10 cp below best,
+                                            # u2 (ranked lower) cannot possibly be within 10 cp.
+                                            if (
+                                                best_s is not None
+                                                and worst_s is not None
+                                                and (best_s - worst_s) <= 10
+                                                and len(moves_dict) < min(10, p_inter.legal_moves.count())
+                                            ):
                                                 need_engine_eval = True
 
                                     if need_engine_eval and active_engine is not None:

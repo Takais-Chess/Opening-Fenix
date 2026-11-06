@@ -462,9 +462,22 @@ class BackgroundTaskManager(QObject):
     @classmethod
     def get_instance(cls) -> "BackgroundTaskManager":
         with cls._init_lock:
-            if cls._instance is None:
+            need_new = cls._instance is None
+            if not need_new:
+                try:
+                    from PyQt6 import sip
+                    if sip.isdeleted(cls._instance):
+                        need_new = True
+                except Exception:
+                    pass
+            if need_new:
                 cls._instance = BackgroundTaskManager()
             return cls._instance
+
+    @classmethod
+    def reset_instance(cls) -> None:
+        with cls._init_lock:
+            cls._instance = None
 
     def __init__(self):
         super().__init__()

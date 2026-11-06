@@ -2,6 +2,12 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.3] - 2026-11-06
+
+### Fixed & Improved
+- **2-Move Transposition Cache Re-Evaluation Fix**: Fixed a cache lookup flaw in `find_repertoire_transpositions` where positions already evaluated to target engine depth were re-evaluated by Stockfish from scratch when `recheck_unadded` was active, even when the worst candidate move was already verified >10 cp below the best move. Positions with cached evaluations are now properly reused across repeated scans.
+- **Trainer Settings Repertoire Cards Height**: Increased the minimum and maximum height of the repertoire cards scroll container in the Trainer settings to comfortably accommodate 2.5 rows of extended cards without tight clipping.
+
 ## [1.3.2] - 2026-11-05
 
 ### Added & Improved

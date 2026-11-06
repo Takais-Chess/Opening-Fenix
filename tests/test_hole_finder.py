@@ -1838,15 +1838,67 @@ def test_find_repertoire_holes_with_engine_eval_loss(backend, tmp_path):
     assert e5_hole["eval_loss"] == 0.50
 
 
+def test_2move_transposition_recheck_unadded_does_not_reanalyze_cached_spread_over_10cp(backend, tmp_path):
+    """
+    Verify that when intermediate position was already evaluated with MultiPV and
+    the spread between best move and worst move in the results is > 10 cp,
+    running a subsequent scan with recheck_unadded=True does NOT re-analyze with engine.
+    """
+    from opening_fenix.core.services.engine_cache_service import EngineCacheService
 
+    cache_db = str(tmp_path / "eval_cache_spread.db")
+    cache_svc = EngineCacheService(db_path=cache_db)
 
+    session = backend.session
+    session.query(RepertoireMove).delete()
+    session.query(Move).delete()
+    session.query(Position).delete()
+    session.commit()
+    session.add(Metadata(key="color", value="w"))
 
+    p_root = Position(fen=clean_fen(chess.STARTING_FEN))
+    p_e4 = Position(fen=clean_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -"), variation_1="1. e4")
+    p_sic_c5 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -"), variation_1="Sicilian")
+    p_sic_nf3 = Position(fen=clean_fen("rnbqkbnr/pp1ppppp/8/2p5/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -"), variation_1="Sicilian 2.Nf3")
 
+    session.add_all([p_root, p_e4, p_sic_c5, p_sic_nf3])
+    session.flush()
 
+    m_e4 = Move(from_position_id=p_root.id, to_position_id=p_e4.id, uci="e2e4", san="e4")
+    m_nf3 = Move(from_position_id=p_sic_c5.id, to_position_id=p_sic_nf3.id, uci="g1f3", san="Nf3")
+    session.add_all([m_e4, m_nf3])
+    session.flush()
 
+    for m in [m_e4, m_nf3]:
+        session.add(RepertoireMove(move_id=m.id, level=1, is_active=True))
+    session.commit()
 
+    inter_fen = clean_fen(p_sic_c5.fen)
+    cache_svc.set_eval_data(
+        inter_fen,
+        25,
+        "d2d4",
+        {
+            "best_uci": "d2d4",
+            "best_score": 30,
+            "moves": {
+                "d2d4": 30,
+                "a2a3": 10,
+            }
+        }
+    )
 
+    class MockEngine:
+        def __init__(self):
+            self.calls = 0
 
+        def analyse(self, board, limit, multipv=1):
+            self.calls += 1
+            return []
 
+    engine = MockEngine()
 
-
+    scan_recheck = find_repertoire_transpositions(session, engine=engine, cache_service=cache_svc, recheck_unadded=True)
+    match_recheck = [t for t in scan_recheck if t["fen"] == clean_fen(p_e4.fen) and t["depth"] == 2]
+    assert len(match_recheck) == 0
+    assert engine.calls == 0
