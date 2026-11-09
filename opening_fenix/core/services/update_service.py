@@ -11,6 +11,7 @@ from PyQt6.QtCore import QThread, pyqtSignal, QObject
 from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.utils import get_user_dir, safe_urlopen
 from opening_fenix.core.logger import logger
+from opening_fenix.core.translation import tr_ui
 
 GITHUB_REPO = "Takais-Chess/Opening-Fenix"
 GITHUB_RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
@@ -128,6 +129,7 @@ def should_check_for_updates(manual: bool = False, current_version: str = APP_VE
     if manual:
         return True
 
+
     cfg = get_config_dict()
     if cfg.get("auto_check_updates") is False:
         return False
@@ -196,31 +198,63 @@ class UpdateCheckWorker(QThread):
     def run(self):
         try:
             logger.info(f"UpdateCheckWorker: Checking GitHub releases for updates (manual={self.manual})...")
-            req = urllib.request.Request(
-                GITHUB_RELEASES_API,
-                headers={"User-Agent": "OpeningFenix-App"}
-            )
-            with safe_urlopen(req, timeout=10) as resp:
-                if resp.status != 200:
-                    self.check_error.emit(f"HTTP {resp.status}")
+
+            api_data = None
+            headers = {"User-Agent": "OpeningFenix-App"}
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+
+            # 1. Attempt to query GitHub REST API
+            try:
+                req = urllib.request.Request(
+                    GITHUB_RELEASES_API,
+                    headers=headers
+                )
+                with safe_urlopen(req, timeout=10) as resp:
+                    if resp.status == 200:
+                        api_data = json.loads(resp.read().decode('utf-8'))
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    record_update_check_time()
+                    self.no_update_found.emit()
                     return
-                data = json.loads(resp.read().decode('utf-8'))
+                logger.info(f"UpdateCheckWorker: GitHub API returned HTTP {e.code}, falling back to web release resolution...")
+            except Exception as e:
+                logger.info(f"UpdateCheckWorker: GitHub API request failed ({e}), falling back to web release resolution...")
 
-            tag_name = data.get("tag_name", "")
-            title = data.get("name", tag_name)
-            body = data.get("body", "")
-            html_url = data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
+            if api_data:
+                tag_name = api_data.get("tag_name", "")
+                title = api_data.get("name", tag_name)
+                body = api_data.get("body", "")
+                html_url = api_data.get("html_url", f"https://github.com/{GITHUB_REPO}/releases/latest")
 
-            # Look for attached .exe installer asset
-            download_url = None
-            asset_name = None
-            assets = data.get("assets", [])
-            for asset in assets:
-                name = asset.get("name", "")
-                if name.lower().endswith(".exe"):
-                    download_url = asset.get("browser_download_url")
-                    asset_name = name
-                    break
+                # Look for attached .exe installer asset
+                download_url = None
+                asset_name = None
+                assets = api_data.get("assets", [])
+                for asset in assets:
+                    name = asset.get("name", "")
+                    if name.lower().endswith(".exe"):
+                        download_url = asset.get("browser_download_url")
+                        asset_name = name
+                        break
+            else:
+                # 2. Fallback: Query web redirect to latest release without API rate limits
+                web_url = f"https://github.com/{GITHUB_REPO}/releases/latest"
+                web_req = urllib.request.Request(web_url, headers={"User-Agent": "OpeningFenix-App"})
+                with safe_urlopen(web_req, timeout=10) as resp:
+                    final_url = resp.geturl()
+                    m = re.search(r'/tag/([^/?#]+)', final_url)
+                    if not m:
+                        raise RuntimeError(f"Konnte Release-Tag nicht aus {final_url} ermitteln.")
+                    tag_name = m.group(1)
+                    title = f"Opening Fenix {tag_name}"
+                    body = ""
+                    html_url = final_url
+                    clean_tag = tag_name.lstrip("vV")
+                    asset_name = f"OpeningFenix_Setup_v{clean_tag}_Public.exe"
+                    download_url = f"https://github.com/{GITHUB_REPO}/releases/download/{tag_name}/{asset_name}"
 
             check_time = record_update_check_time()
             logger.info(f"UpdateCheckWorker: Check completed at {check_time}. Remote tag: {tag_name}, Local version: {APP_VERSION}")
@@ -247,6 +281,8 @@ class UpdateCheckWorker(QThread):
             record_update_check_time()
             if e.code == 404:
                 self.no_update_found.emit()
+            elif e.code == 403:
+                self.check_error.emit(tr_ui("update_rate_limited", "GitHub-Anfragelimit vorübergehend erreicht. Bitte versuche es in wenigen Minuten erneut."))
             else:
                 self.check_error.emit(f"HTTP Fehler: {e.code}")
         except Exception as e:

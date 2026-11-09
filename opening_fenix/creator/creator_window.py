@@ -3730,6 +3730,9 @@ class CreatorWindow(QMainWindow):
         QTimer.singleShot(2500, self.trigger_lichess_lockout_check)
 
     def check_for_updates(self):
+        import sys
+        if "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or getattr(self, "is_test", False):
+            return
         from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
         if not should_check_for_updates(manual=False):
             return

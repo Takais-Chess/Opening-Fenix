@@ -1610,5 +1610,6 @@
     "unit_hours": "Stunden",
     "unit_days": "Tage",
     "unit_months": "Monate"
-  }
+  },
+  "update_rate_limited": "GitHub-Anfragelimit vorübergehend erreicht. Bitte versuche es in wenigen Minuten erneut."
 }

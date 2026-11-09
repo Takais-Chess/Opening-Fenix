@@ -1610,5 +1610,6 @@
     "unit_hours": "Hours",
     "unit_days": "Days",
     "unit_months": "Months"
-  }
+  },
+  "update_rate_limited": "GitHub API rate limit temporarily exceeded. Please try again in a few minutes."
 }

@@ -92,3 +92,39 @@ def test_record_update_check_emits_signal(tmp_path, monkeypatch):
     assert get_config_dict().get("last_update_check") == ts
 
 
+
+
+def test_update_worker_403_rate_limit_fallback(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock, patch
+    import urllib.error
+    from opening_fenix.core.services.update_service import UpdateCheckWorker
+
+    monkeypatch.setattr("opening_fenix.core.services.update_service.get_user_dir", lambda: str(tmp_path))
+
+    worker = UpdateCheckWorker(manual=True)
+    results = {}
+
+    worker.update_found.connect(lambda info: results.setdefault("found", info))
+    worker.no_update_found.connect(lambda: results.setdefault("none", True))
+    worker.check_error.connect(lambda err: results.setdefault("error", err))
+
+    # Simulate: 1st call to api.github.com raises 403 HTTPError,
+    # 2nd call to web url returns redirect to tag v2.0.0
+    mock_web_resp = MagicMock()
+    mock_web_resp.geturl.return_value = "https://github.com/Takais-Chess/Opening-Fenix/releases/tag/v2.0.0"
+
+    def fake_safe_urlopen(req, timeout=10):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "api.github.com" in url:
+            raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+        ctx = MagicMock()
+        ctx.__enter__.return_value = mock_web_resp
+        return ctx
+
+    with patch("opening_fenix.core.services.update_service.safe_urlopen", side_effect=fake_safe_urlopen):
+        worker.run()
+
+    assert "found" in results
+    assert results["found"]["version"] == "v2.0.0"
+    assert "OpeningFenix_Setup_v2.0.0_Public.exe" in results["found"]["download_url"]
+    assert "error" not in results
