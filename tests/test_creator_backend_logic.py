@@ -217,17 +217,6 @@ def test_deduplicate_comments(backend):
     assert "Grünfeld" in parsed_json["en"]
     assert "Grunfeld" not in parsed_json["en"]
 
-def test_clean_brackets(backend):
-    """Test removing text in brackets from comments."""
-    # This covers lines 1384-1402
-    start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
-    comment = "Hello [remove this] world!"
-    backend.update_position_data(start_fen, comment, "", "", "")
-    count = backend.clean_brackets_in_repo()
-    assert count == 1
-    data = backend.get_position_data(start_fen)
-    assert data["comment"] == "Hello world!"
-
 def test_get_strong_level_impact(backend):
     """Test calculating impact of strong level update."""
     # This covers lines 1044-1085

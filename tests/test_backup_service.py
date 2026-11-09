@@ -183,3 +183,52 @@ def test_repo_settings_dialog_backup_integration(qapp, temp_repo):
     assert any("Löschen" in t for t in button_texts)
 
     dialog.close()
+
+
+def test_restore_legacy_backup_with_wal_and_shm(temp_repo):
+    import zipfile
+    from opening_fenix.core.db.database import DatabaseManager
+
+    repo_name, user_dir = temp_repo
+    db_path = get_repertoire_db_path(repo_name)
+    b_dir = get_repertoire_backup_dir(repo_name)
+
+    # 1. Ensure DB is in WAL mode and has active connections / shm / wal
+    db_manager = DatabaseManager(db_path)
+    session = db_manager.get_session()
+    with db_manager.engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        conn.exec_driver_sql("UPDATE positions SET comment = '{\"en\": \"State before restore\"}' WHERE id = 'pos1'")
+
+    # 2. Fabricate a legacy backup zip that contains .db, .db-shm, and .db-wal members
+    legacy_zip_path = os.path.join(b_dir, f"backup_{repo_name}_legacy.zip")
+    with zipfile.ZipFile(legacy_zip_path, "w") as zf:
+        # Write DB with initial comment
+        conn_init = sqlite3.connect(":memory:")
+        c = conn_init.cursor()
+        c.execute("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT)")
+        c.execute("CREATE TABLE positions (id TEXT PRIMARY KEY, fen TEXT, comment TEXT, level INT, priority REAL)")
+        c.execute("INSERT INTO positions VALUES ('pos1', 'fen', '{\"en\": \"Restored from legacy backup\"}' , 1, 1.0)")
+        mem_db_path = os.path.join(str(user_dir), "temp_mem.db")
+        with open(mem_db_path, "wb") as f_out:
+            for line in conn_init.iterdump():
+                pass
+        conn_init.close()
+
+        # Copy actual db file into zip
+        zf.write(db_path, f"{repo_name}.db")
+        # Legacy backup included .db-shm and .db-wal!
+        zf.writestr(f"{repo_name}.db-shm", b"dummy_shm_bytes")
+        zf.writestr(f"{repo_name}.db-wal", b"dummy_wal_bytes")
+        zf.writestr("manifest.json", json.dumps({"repertoire_name": repo_name}))
+
+    # 3. Restore from the legacy backup while db_manager is open
+    ok = restore_repertoire_from_backup(repo_name, legacy_zip_path)
+    assert ok is True
+
+    # 4. Reconnect and verify data was restored and no Errno 22 was raised
+    new_manager = DatabaseManager(db_path)
+    with new_manager.engine.connect() as conn:
+        row = conn.exec_driver_sql("SELECT comment FROM positions WHERE id = 'pos1'").fetchone()
+        assert row is not None
+    new_manager.close()

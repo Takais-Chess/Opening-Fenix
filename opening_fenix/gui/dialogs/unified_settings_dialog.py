@@ -5279,18 +5279,31 @@ class UnifiedSettingsDialog(QDialog):
                     repo=repo_name, date=dt_str)
         if QMessageBox.question(self, tr_ui("repo_settings.dlg_restore_confirm_title", "Wiederherstellen bestätigen"),
                                 msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
+            # Explicitly close active backend and DB sessions before restoring files
+            backend.close()
+            if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+                if getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == repo_name:
+                    self.main_window.repertoire_manager.close()
+
             ok = restore_repertoire_from_backup(repo_name, path)
+
+            # Reload backend session so in-memory cache is fully synced
+            backend.load_repertoire(repo_name)
+            self.refresh_creator_info()
+            self.refresh_backups_list()
+
+            # If main window has this repo active, reload it too
+            if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
+                if getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == repo_name:
+                    self.main_window.repertoire_manager.load_repertoire(repo_name)
+                    if hasattr(self.main_window, 'update_structure_tree'):
+                        self.main_window.update_structure_tree()
+            elif self.main_window and hasattr(self.main_window, 'update_structure_tree'):
+                self.main_window.update_structure_tree()
+                if hasattr(self.main_window, 'board_widget'):
+                    self.main_window.board_widget.update()
+
             if ok:
-                # Reload backend session so in-memory cache is fully synced
-                backend.load_repertoire(repo_name)
-                self.refresh_creator_info()
-                self.refresh_backups_list()
-                # If main window has this repo active, reload it too
-                if self.main_window and hasattr(self.main_window, 'repertoire_manager'):
-                    if getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == repo_name:
-                        self.main_window.repertoire_manager.load_repertoire(repo_name)
-                        if hasattr(self.main_window, 'update_structure_tree'):
-                            self.main_window.update_structure_tree()
                 QMessageBox.information(self, tr_ui("repo_settings.dlg_restore_success_title", "Erfolgreich"),
                                         tr_ui("repo_settings.dlg_restore_success_msg", "Repertoire wurde erfolgreich auf den Stand vom {date} zurückgesetzt!", date=dt_str))
             else:
@@ -5329,14 +5342,6 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("repo_settings.lbl_dedupe_row", "Doppelte Kommentarblöcke entfernen"),
             tr_ui("repo_settings.lbl_dedupe_sub", "Bereinigt mehrfach identisch eingefügte Absätze innerhalb von Zugkommentaren."),
             btn_dedupe,
-            is_last=False
-        ))
-        btn_brackets = QPushButton(tr_widget("repo_settings.btn_brackets", "❌ Text in [eckigen Klammern] löschen"))
-        btn_brackets.clicked.connect(lambda: QMessageBox.information(self, tr_ui("repo_settings.dlg_cleanup_title", "Bereinigung"), f"{self.ensure_backend_for_active_repo().clean_brackets_in_repo()} Kommentare bereinigt."))
-        v_clean.addWidget(self._make_hairline_row(
-            tr_ui("repo_settings.lbl_brackets_row", "Klammer-Tags bereinigen"),
-            tr_ui("repo_settings.lbl_brackets_sub", "Entfernt technische Annotationen in [eckigen Klammern] aus allen Kommentaren."),
-            btn_brackets,
             is_last=False
         ))
         btn_parens = QPushButton(tr_widget("repo_settings.btn_parens", "🧹 Äußere Klammern ( ) um Kommentare entfernen"))

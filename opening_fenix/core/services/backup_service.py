@@ -1,5 +1,6 @@
 import os
 import io
+import gc
 import json
 import sqlite3
 import hashlib
@@ -296,6 +297,13 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
     }
 
     try:
+        # Checkpoint WAL first so that the .db file has the freshest committed data
+        try:
+            with sqlite3.connect(db_path, timeout=5) as conn:
+                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except Exception as cp_err:
+            logger.debug(f"wal_checkpoint before backup ({repo_name}): {cp_err}")
+
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             # 1. Add DB file
             zf.write(db_path, os.path.basename(db_path))
@@ -305,9 +313,11 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
                 for root, dirs, files in os.walk(repo_dir):
                     is_root = (root == repo_dir)
                     for file in files:
-                        if file.endswith(".db"):
-                            continue  # Already added at root
-                        if file.lower().endswith(".pgn"):
+                        f_lower = file.lower()
+                        # Skip database and SQLite runtime/sidecar files
+                        if f_lower.endswith((".db", ".db-wal", ".db-shm", ".db-journal", "-wal", "-shm", "-journal")):
+                            continue  # Already added main DB at root; never pack temporary SQLite files
+                        if f_lower.endswith(".pgn"):
                             if not is_resource_pgn_file(file, repo_name, is_root):
                                 continue
                         full_p = os.path.join(root, file)
@@ -487,21 +497,46 @@ def restore_repertoire_from_backup(repo_name: str, backup_zip_path: str) -> bool
     except Exception as e:
         logger.warning(f"Pre-restore safety backup failed: {e}")
 
+    # 2. Close active database connections and engine pools bound to this DB
     try:
-        # 2. Extract zip to repertoire directory
+        from opening_fenix.core.db.database import DatabaseManager
+        DatabaseManager.close_all_for_path(db_path)
+    except Exception as e:
+        logger.warning(f"Could not close active DB connections for {db_path}: {e}")
+
+    gc.collect()
+
+    # 3. Clean up existing WAL/SHM sidecars so the restored DB starts completely clean
+    for suffix in ["-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal"]:
+        sidecar = db_path + suffix if suffix.startswith("-") else os.path.join(repo_dir, f"{repo_name}{suffix}")
+        if os.path.exists(sidecar):
+            try:
+                os.remove(sidecar)
+                logger.debug(f"Removed stale DB sidecar before restore: {sidecar}")
+            except Exception as rm_err:
+                logger.warning(f"Could not remove stale DB file {sidecar} before restore: {rm_err}")
+
+    try:
+        # 4. Extract zip to repertoire directory
         with zipfile.ZipFile(backup_zip_path, "r") as zf:
             for member in zf.namelist():
                 if member == "manifest.json":
                     continue
                 
-                if member.endswith(".db") and "/" not in member and "\\" not in member:
+                # Never extract SQLite WAL/SHM runtime files from legacy backups
+                m_norm = member.lower().replace(chr(92), "/")
+                if m_norm.endswith(("-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal")):
+                    continue
+
+                if member.endswith(".db") and "/" not in member and chr(92) not in member:
                     target_db = db_path
                     with open(target_db, "wb") as f_out:
                         f_out.write(zf.read(member))
                 else:
                     out_path = os.path.join(repo_dir, member)
-                    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                    if not member.endswith("/"):
+                    norm_member = member.replace(chr(92), "/")
+                    if not norm_member.endswith("/"):
+                        os.makedirs(os.path.dirname(out_path), exist_ok=True)
                         with open(out_path, "wb") as f_out:
                             f_out.write(zf.read(member))
 

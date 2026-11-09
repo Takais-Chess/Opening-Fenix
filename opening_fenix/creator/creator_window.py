@@ -1336,6 +1336,7 @@ class CreatorBackend:
             db_move.nag = nag
             changed = True
 
+        final_level = None
         rep_move = self.session.query(RepertoireMove).filter_by(move_id=db_move.id).first()
         if not rep_move:
             if level_order is None:
@@ -1367,12 +1368,32 @@ class CreatorBackend:
             self.session.add(RepertoireMove(move_id=db_move.id, level=final_level))
             changed = True
         elif level_order is not None and level_order < rep_move.level:
+            final_level = level_order
             rep_move.level = level_order
             changed = True
 
         if changed:
             commit_with_retry(self.session)
-            self.clear_cache()
+            # Incrementally update in-memory reachable level cache instead of full cold Dijkstra wipe (saves 250ms UI freeze)
+            if self._min_reachable_level_cache is not None:
+                from_lvl = self._min_reachable_level_cache.get(clean_from, 1)
+                m_lvl = final_level if final_level is not None else 1
+                reach_to = max(from_lvl, m_lvl)
+                if clean_to in self._min_reachable_level_cache:
+                    self._min_reachable_level_cache[clean_to] = min(self._min_reachable_level_cache[clean_to], reach_to)
+                else:
+                    self._min_reachable_level_cache[clean_to] = reach_to
+            if getattr(self, "_repo_adj", None) is not None:
+                self._repo_adj.setdefault(clean_from, []).append(clean_to)
+            self.clear_cache(graph_changed=False)
+            self._outgoing_transpositions_cache = {}
+            self._reachable_ids_cache = {}
+            if hasattr(self, "window") and self.window:
+                if hasattr(self.window, "clear_transposition_caches"):
+                    try:
+                        self.window.clear_transposition_caches()
+                    except Exception:
+                        pass
 
     def get_delete_impact(self, from_pos_id, uci):
         """Iteratively built set of move_ids and pos_ids that will be orphaned."""
@@ -1585,26 +1606,6 @@ class CreatorBackend:
 
             new_text = self._dedupe_comment_text(orig)
             if new_text != orig:
-                p.comment = new_text
-                changed += 1
-        if changed:
-            self.session.commit()
-            self.clear_cache()
-        return changed
-
-    def clean_brackets_in_repo(self):
-        """Removes everything inside square brackets [ ] including the brackets from all comments."""
-        if not self.session: return 0
-        changed = 0
-        positions = self.session.query(Position).filter(
-            (Position.comment != None) & (Position.comment != "")
-        ).all()
-        for p in positions:
-            orig_text = p.comment or ""
-            new_text = re.sub(r'\[.*?\]', '', orig_text, flags=re.DOTALL)
-            # Collapse multiple spaces and strip
-            new_text = re.sub(r' +', ' ', new_text).strip()
-            if new_text != orig_text:
                 p.comment = new_text
                 changed += 1
         if changed:
@@ -5144,11 +5145,11 @@ class CreatorWindow(QMainWindow):
                         fen = self.board_widget.board.fen()
                         is_cap = self.board_widget.board.is_capture(move)
                         self.board_widget.board.push(move)
-                        self.board_widget.update()
+                        self.board_widget.repaint()
                         self.play_sound("capture" if is_cap else "move")
                         self.backend.add_move(fen, move.uci(), san)
                         self.update_ui_from_fen()
-                        self.trigger_background_enrichment(self.board_widget.board.fen())
+                        self._schedule_board_move_enrichment(self.board_widget.board.fen())
                 except:
                     pass
 
@@ -5226,11 +5227,11 @@ class CreatorWindow(QMainWindow):
                     fen = self.board_widget.board.fen()
                     is_cap = self.board_widget.board.is_capture(move)
                     self.board_widget.board.push(move)
-                    self.board_widget.update()
+                    self.board_widget.repaint()
                     self.play_sound("capture" if is_cap else "move")
                     self.backend.add_move(fen, move.uci(), san)
                     self.update_ui_from_fen()
-                    self.trigger_background_enrichment(self.board_widget.board.fen())
+                    self._schedule_board_move_enrichment(self.board_widget.board.fen())
             except:
                 pass
 
@@ -5320,12 +5321,26 @@ class CreatorWindow(QMainWindow):
         is_cap = 'x' in s
         
         self.board_widget.board.push(move)
-        self.board_widget.update()
+        self.board_widget.repaint()
         self.play_sound("capture" if is_cap else "move")
         
         self.backend.add_move(from_fen, move.uci(), s)
         self.update_ui_from_fen()
-        self.trigger_background_enrichment(self.board_widget.board.fen())
+        self._schedule_board_move_enrichment(self.board_widget.board.fen())
+
+    def _schedule_board_move_enrichment(self, fen):
+        """Debounces background enrichment during active move input (350ms) to avoid CPU churn and SQLite write locks."""
+        if not hasattr(self, '_move_enrichment_timer'):
+            self._move_enrichment_timer = QTimer(self)
+            self._move_enrichment_timer.setSingleShot(True)
+            self._move_enrichment_timer.timeout.connect(self._on_move_enrichment_timeout)
+        self._pending_move_enrichment_fen = fen
+        self._move_enrichment_timer.start(350)
+
+    def _on_move_enrichment_timeout(self):
+        fen = getattr(self, '_pending_move_enrichment_fen', None)
+        if fen:
+            self.trigger_background_enrichment(fen)
 
     def trigger_background_enrichment(self, fen):
         """
@@ -5808,19 +5823,32 @@ class CreatorWindow(QMainWindow):
         self.update_board_arrows()
         
         # --- TRANSPOSITION DETECTION (badge update) ---
-        outgoing_list = self.backend.find_outgoing_transpositions(f)
-        total_transpos = len(outgoing_list)
         idx = self.tabs.indexOf(self.tab_transpositions)
         if idx != -1:
-            if total_transpos > 0:
-                # Vibrant Gold badge
-                self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
-            else:
-                self.tabs.tabBar().setTabTextColor(idx, QColor())  # Reset to palette default
-            
-            # If current tab is Transpositionen, refresh it
             if self.tabs.currentIndex() == idx:
+                outgoing_list = self.backend.find_outgoing_transpositions(f)
+                total_transpos = len(outgoing_list)
+                if total_transpos > 0:
+                    self.tabs.tabBar().setTabTextColor(idx, QColor("#FFD700"))
+                else:
+                    self.tabs.tabBar().setTabTextColor(idx, QColor())  # Reset to palette default
                 self.update_transpositions_tab(outgoing=outgoing_list)
+            else:
+                # Defer badge color check to next idle tick so move input remains instant
+                def _deferred_transpos_badge(fen_to_check=f):
+                    if not self._is_ui_valid():
+                        return
+                    curr_f = self.board_widget.board.fen() if hasattr(self, 'board_widget') and self.board_widget else ""
+                    if curr_f != fen_to_check:
+                        return
+                    out = self.backend.find_outgoing_transpositions(fen_to_check)
+                    t_idx = self.tabs.indexOf(self.tab_transpositions)
+                    if t_idx != -1:
+                        if len(out) > 0:
+                            self.tabs.tabBar().setTabTextColor(t_idx, QColor("#FFD700"))
+                        else:
+                            self.tabs.tabBar().setTabTextColor(t_idx, QColor())
+                QTimer.singleShot(0, _deferred_transpos_badge)
 
 
     def block_signals_details(self, b):

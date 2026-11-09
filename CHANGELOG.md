@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.4] - 2026-11-09
+
+### Fixed & Improved
+- **Repertoire Backup Restore Fix (SQLite WAL & Memory-Mapped File Lock)**: Resolved `OSError: [Errno 22] Invalid argument` occurring when restoring repertoire backups while the course was actively loaded in Opening Fenix. Actively disposes database engine connections (`DatabaseManager.close_all_for_path` and `backend.close()`) prior to extraction, removes stale `.db-wal` and `.db-shm` sidecars, and skips legacy WAL/SHM archive entries during restoration.
+- **Clean Backup Creation & Transaction Checkpointing**: Backups now issue `PRAGMA wal_checkpoint(PASSIVE)` before archive creation to ensure all recent transactions are committed into the main database, while strictly excluding temporary SQLite runtime files (`.db-wal`, `.db-shm`, `.db-journal`) from being archived.
+- **Database Concurrency & GUI Responsiveness**: Added main-thread Qt event processing during SQLite busy retry loops to prevent interface freezes, deferred Creator transposition badge color checks to idle ticks, and cleaned up obsolete comment cleanup buttons and translations.
+
 ## [1.3.3] - 2026-11-06
 
 ### Fixed & Improved

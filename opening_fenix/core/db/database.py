@@ -31,7 +31,22 @@ def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: fl
                     pass
                 if attempt == max_retries - 1:
                     raise
-                time.sleep(delay)
+                # On Qt main thread, process non-input events during retry delay so GUI stays responsive and doesn't freeze
+                try:
+                    from PyQt6.QtCore import QCoreApplication, QThread, QEventLoop
+                    from PyQt6.QtWidgets import QApplication
+                    app = QApplication.instance()
+                    is_main_thread = app is not None and QThread.currentThread() == app.thread()
+                except Exception:
+                    is_main_thread = False
+
+                if is_main_thread:
+                    t_end = time.perf_counter() + delay
+                    while time.perf_counter() < t_end:
+                        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+                        time.sleep(0.005)
+                else:
+                    time.sleep(delay)
                 delay = min(delay * 1.5, 2.0)
             else:
                 try:
