@@ -111,54 +111,45 @@ def find_headless_browser() -> Optional[str]:
 def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, timeout: int = 120) -> subprocess.CompletedProcess:
     """
     Executes Chromium headless to print HTML to PDF, isolated with its own temporary user data directory.
-    Uses modern --headless=new with fallback to legacy --headless, and CREATE_NO_WINDOW on Windows.
-    Renders to a clean temporary PDF file first to prevent path parsing issues with apostrophes, spaces,
-    or special characters in user-specified paths on Windows.
+    Uses forward-slash paths for Windows Chromium CLI compatibility and multi-strategy fallbacks
+    (--headless=new, --headless=old, --headless) to guarantee generation on any Chromium version.
     """
     file_uri = pathlib.Path(html_path).resolve().as_uri()
     user_data_dir = tempfile.mkdtemp(prefix="fenix_edge_")
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
     temp_render_pdf = os.path.join(tempfile.gettempdir(), f"fenix_render_{uuid.uuid4().hex}.pdf")
+    temp_render_pdf_arg = temp_render_pdf.replace("\\", "/")
+    user_data_dir_arg = user_data_dir.replace("\\", "/")
 
-    cmd = [
-        browser_path,
-        "--headless=new",
-        "--disable-gpu",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-        "--no-pdf-header-footer",
-        "--run-all-compositor-stages-before-draw",
-        "--enable-logging=stderr",
-        "--log-level=1",
-        f"--user-data-dir={user_data_dir}",
-        f"--print-to-pdf={temp_render_pdf}",
-        file_uri
+    strategies = [
+        [browser_path, "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
+        [browser_path, "--headless=old", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
+        [browser_path, "--headless", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri]
     ]
 
+    last_res = None
     try:
-        res = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=creationflags)
-        # If modern headless failed or produced no output, try legacy --headless fallback
-        if (not os.path.isfile(temp_render_pdf) or os.path.getsize(temp_render_pdf) == 0) and res.returncode != 0:
-            cmd_fallback = [
-                browser_path,
-                "--headless",
-                "--disable-gpu",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--no-pdf-header-footer",
-                f"--user-data-dir={user_data_dir}",
-                f"--print-to-pdf={temp_render_pdf}",
-                file_uri
-            ]
-            res = subprocess.run(cmd_fallback, capture_output=True, timeout=timeout, creationflags=creationflags)
+        for cmd in strategies:
+            try:
+                res = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=creationflags)
+                last_res = res
+                if os.path.isfile(temp_render_pdf) and os.path.getsize(temp_render_pdf) > 0:
+                    break
+            except Exception as e:
+                logger.warning(f"Chromium headless strategy failed: {e}")
 
         if os.path.isfile(temp_render_pdf) and os.path.getsize(temp_render_pdf) > 0:
             dest_dir = os.path.dirname(os.path.abspath(output_pdf_path))
             os.makedirs(dest_dir, exist_ok=True)
+            if os.path.exists(output_pdf_path):
+                try:
+                    os.remove(output_pdf_path)
+                except Exception:
+                    pass
             shutil.move(temp_render_pdf, output_pdf_path)
 
-        return res
+        return last_res
     finally:
         if os.path.isfile(temp_render_pdf):
             try:

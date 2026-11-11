@@ -227,10 +227,13 @@ def main():
                     pass
 
         print("\n1. Building PyInstaller Application Bundle...")
+        build_dir = os.path.join(project_root, 'build')
+        safe_rmtree(build_dir)
         PyInstaller.__main__.run([
             '--noconfirm',
+            '--clean',
             '--distpath', os.path.join(project_root, 'dist'),
-            '--workpath', os.path.join(project_root, 'build'),
+            '--workpath', build_dir,
             os.path.join(project_root, 'Opening Fenix.spec')
         ])
 

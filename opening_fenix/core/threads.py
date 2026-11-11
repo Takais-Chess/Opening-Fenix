@@ -984,6 +984,8 @@ class BookExportThread(QThread):
                 return
             self.success_signal.emit(final_file)
         except Exception as e:
+            import traceback
+            logger.error("BookExportThread failed: %s", traceback.format_exc())
             if not self._is_canceled:
                 self.error_signal.emit(str(e))
 
