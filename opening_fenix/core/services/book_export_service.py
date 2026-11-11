@@ -123,10 +123,24 @@ def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, t
     temp_render_pdf_arg = temp_render_pdf.replace("\\", "/")
     user_data_dir_arg = user_data_dir.replace("\\", "/")
 
+    extra_flags = [
+        "--disable-gpu",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--no-pdf-header-footer",
+        "--js-flags=--max-old-space-size=8192",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-sync",
+        "--disable-default-apps",
+        "--mute-audio",
+    ]
     strategies = [
-        [browser_path, "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
-        [browser_path, "--headless=old", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
-        [browser_path, "--headless", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check", "--no-pdf-header-footer", f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri]
+        [browser_path, "--headless=new", "--run-all-compositor-stages-before-draw"] + extra_flags + [f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
+        [browser_path, "--headless=old"] + extra_flags + [f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri],
+        [browser_path, "--headless"] + extra_flags + [f"--user-data-dir={user_data_dir_arg}", f"--print-to-pdf={temp_render_pdf_arg}", file_uri]
     ]
 
     last_res = None
@@ -1021,13 +1035,16 @@ def flatten_subtree(
             has_drawings = bool(parsed_anno.get("arrows") or parsed_anno.get("highlights"))
 
             diag_tracker["plies_since_diagram"] += 1
-            if has_drawings or is_leaf:
+            if has_drawings:
+                should_show_diag = True
+            elif depth == 0 and is_leaf:
+                # Leaf at the end of the chapter's main line
                 should_show_diag = True
             elif diag_tracker["plies_since_diagram"] < 6:
-                # Skip diagram if within last 3 full moves (< 6 plies), no drawings, and not leaf
+                # Skip diagram if within last 3 full moves (< 6 plies)
                 should_show_diag = False
             else:
-                is_major_branch = len(child_moves) >= 3
+                is_major_branch = (len(child_moves) >= 3) and (depth == 0)
                 is_checkpoint = diag_tracker["plies_since_diagram"] >= 8
                 should_show_diag = is_major_branch or is_checkpoint
 
@@ -1130,12 +1147,12 @@ def flatten_subtree(
                     r_child_moves = get_children(r_to_pos)
                     r_is_leaf = len(r_child_moves) == 0
                     diag_tracker["plies_since_diagram"] += 1
-                    if r_has_drawings or r_is_leaf:
+                    if r_has_drawings:
                         r_should_show = True
                     elif diag_tracker["plies_since_diagram"] < 6:
                         r_should_show = False
                     else:
-                        r_should_show = (len(r_child_moves) >= 3) or (diag_tracker["plies_since_diagram"] >= 8)
+                        r_should_show = bool(r_clean_text and diag_tracker["plies_since_diagram"] >= 8)
 
                     diag_svg = ""
                     r_next_moves = 0 if r_should_show else moves_since_diagram + 1
@@ -1173,12 +1190,12 @@ def flatten_subtree(
 
                 s_is_leaf = len(s_child_moves) == 0
                 diag_tracker["plies_since_diagram"] += 1
-                if s_has_drawings or s_is_leaf:
+                if s_has_drawings:
                     s_should_show = True
                 elif diag_tracker["plies_since_diagram"] < 6:
                     s_should_show = False
                 else:
-                    s_should_show = (len(s_child_moves) >= 3) or (diag_tracker["plies_since_diagram"] >= 8)
+                    s_should_show = bool(s_clean_text and diag_tracker["plies_since_diagram"] >= 8)
 
                 diag_svg = ""
                 s_next_moves = 0 if s_should_show else moves_since_diagram + 1
@@ -1719,6 +1736,11 @@ def export_repertoire_book(
                     raise RuntimeError("Kein Chromium-Browser (Microsoft Edge oder Google Chrome) für direkten PDF-Export gefunden.")
 
                 res = _run_chromium_pdf(browser_path, html_temp_path, abs_output_path)
+                if not os.path.isfile(abs_output_path) or os.path.getsize(abs_output_path) == 0:
+                    err = (res.stderr or res.stdout).decode("utf-8", errors="ignore").strip() if res else ""
+                    if not err:
+                        err = f"Chromium beendete die PDF-Erstellung ohne Fehlermeldung (Exit-Code: {res.returncode if res else 'None'}). Möglicherweise übersteigt der Umfang des gesamten Repertoires den Speicher des PDF-Druckers. Bitte exportieren Sie mit Level-Begrenzung (z. B. Level 1 oder 2) oder wählen Sie HTML als Ausgabeformat."
+                    raise RuntimeError(f"PDF-Erstellung fehlgeschlagen: {err}")
 
                 # Inspect generated PDF for exact chapter and index page numbers using fitz
                 page_map = {}
@@ -1781,9 +1803,9 @@ def export_repertoire_book(
                     res = _run_chromium_pdf(browser_path, html_temp_path, abs_output_path)
 
                 if not os.path.isfile(abs_output_path) or os.path.getsize(abs_output_path) == 0:
-                    err = (res.stderr or res.stdout).decode("utf-8", errors="ignore").strip()
+                    err = (res.stderr or res.stdout).decode("utf-8", errors="ignore").strip() if res else ""
                     if not err:
-                        err = f"Chromium beendete die PDF-Erstellung ohne Fehlermeldung (Exit-Code: {res.returncode})."
+                        err = f"Chromium beendete die PDF-Erstellung ohne Fehlermeldung (Exit-Code: {res.returncode if res else 'None'}). Möglicherweise übersteigt der Umfang des gesamten Repertoires den Speicher des PDF-Druckers. Bitte exportieren Sie mit Level-Begrenzung (z. B. Level 1 oder 2) oder wählen Sie HTML als Ausgabeformat."
                     raise RuntimeError(f"PDF-Erstellung fehlgeschlagen: {err}")
 
                 final_path = abs_output_path

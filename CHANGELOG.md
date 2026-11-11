@@ -2,6 +2,14 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.7] - 2026-11-11
+
+### Fixed & Improved
+- **Textbook PDF Export Default Scope & Level Limiting**: Set "Nur bis Level" (level limit) to enabled by default in the export dialog when courses contain levels, defaulting to Level 1 (Starter Course). This prevents accidental massive whole-course exports (>12,000 positions) that overload Chromium's PDF renderer. Added confirmation warnings before exporting entire unfiltered repertoires as PDF.
+- **Diagram Density & Sideline Pruning**: In deep sidelines and sub-variations, diagrams are now focused on moves with tactical arrows/highlights or meaningful explanatory commentary, eliminating thousands of redundant empty board diagrams and dramatically accelerating PDF generation.
+- **Chromium Memory & Renderer Optimization**: Expanded Chromium headless memory limit (`--js-flags=--max-old-space-size=8192`), disabled extraneous extensions, sync, and network background services during rendering, and added early error detection and descriptive, actionable error reporting in Pass 1 and Pass 2.
+- **Localization Parity**: Added full English and German translations for textbook options, level limit hints, and large export confirmation dialogs.
+
 ## [1.3.6] - 2026-11-11
 
 ### Fixed & Improved

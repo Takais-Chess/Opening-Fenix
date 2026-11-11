@@ -178,7 +178,12 @@ class ExportDialog(QDialog):
         self.combo_book_level = NoWheelComboBox()
         for lvl in self.level_data:
             self.combo_book_level.addItem(tr_ui("export.limit_level", "Level {num} ({name})", num=lvl['order'], name=lvl['name']), userData=lvl['order'])
-        self.combo_book_level.setEnabled(False)
+        if self.level_data:
+            self.chk_book_limit.setChecked(True)
+            self.combo_book_level.setEnabled(True)
+            self.combo_book_level.setCurrentIndex(0)
+        else:
+            self.combo_book_level.setEnabled(False)
         self.chk_book_limit.toggled.connect(self.combo_book_level.setEnabled)
 
         h_book_lvl = QHBoxLayout()
@@ -186,6 +191,14 @@ class ExportDialog(QDialog):
         h_book_lvl.addWidget(self.combo_book_level)
         h_book_lvl.addStretch()
         l_book_opt.addRow(h_book_lvl)
+
+        self.lbl_book_hint = QLabel(tr_ui(
+            "export.book_limit_hint",
+            "💡 Tipp: Für große Kurse wird die Level-Begrenzung empfohlen, um ein kompaktes, lesbares Lehrbuch zu erstellen."
+        ))
+        self.lbl_book_hint.setWordWrap(True)
+        self.lbl_book_hint.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(11)}px; font-style: italic;")
+        l_book_opt.addRow(self.lbl_book_hint)
         layout.addWidget(self.g_book_opt)
 
         layout.addSpacing(scale(10))
@@ -314,6 +327,21 @@ class ExportDialog(QDialog):
             max_l = self.combo_book_level.currentData() if self.chk_book_limit.isChecked() else None
             lang = self.combo_book_lang.currentData()
             book_fmt = self.combo_book_fmt.currentData()
+
+            if book_fmt == "pdf" and max_l is None and self.level_data:
+                ret = QMessageBox.warning(
+                    self,
+                    tr_ui("export.confirm_huge_book_title", "Vollständiges Repertoire als PDF exportieren?"),
+                    tr_ui(
+                        "export.confirm_huge_book_text",
+                        "Sie möchten das gesamte Repertoire ohne Level-Begrenzung als PDF exportieren.\n\nBei sehr großen Kursen (mehrere tausend Stellungen) kann die PDF-Erstellung den Speicher des Systems überlasten.\n\nEmpfehlung: Begrenzen Sie den Export auf Level 1 oder 2, oder wählen Sie HTML als Ausgabeformat.\n\nMöchten Sie trotzdem fortfahren?"
+                    ),
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No
+                )
+                if ret != QMessageBox.StandardButton.Yes:
+                    return
+
             self.result_data = (fmt, scope, transpos_mode, max_l, lang, {"book_format": book_fmt})
             self.accept()
             return

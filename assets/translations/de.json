@@ -1255,7 +1255,16 @@
     "confirm_huge_title": "Sehr große PGN-Datei exportieren?",
     "confirm_huge_text": "Die PGN wird durch ungekürzte Transpositionen auf ca. {moves} Züge (~{size_mb} MB, {ratio}x Vergrößerung) expandiert.\n\nDer Export kann mehrere Minuten dauern und externe Programme überlasten.\n\nMöchten Sie wirklich fortfahren?",
     "progress_label": "Exportiere Züge ({curr} / {total})...",
-    "progress_book": "Erstelle Repertoire-Lehrbuch..."
+    "progress_book": "Erstelle Repertoire-Lehrbuch...",
+    "book_options_group": "3. Lehrbuch-Optionen",
+    "book_fmt_label": "Ausgabeformat:",
+    "book_fmt_pdf": "PDF (Direkt druckfertig als PDF speichern)",
+    "book_fmt_html": "HTML (Im Browser öffnen / Drucken)",
+    "book_lang_label": "Sprache:",
+    "book_limit_checkbox": "Nur bis Level:",
+    "book_limit_hint": "💡 Tipp: Für große Kurse wird die Level-Begrenzung empfohlen, um ein kompaktes, lesbares Lehrbuch zu erstellen.",
+    "confirm_huge_book_title": "Vollständiges Repertoire als PDF exportieren?",
+    "confirm_huge_book_text": "Sie möchten das gesamte Repertoire ohne Level-Begrenzung als PDF exportieren.\n\nBei sehr großen Kursen (mehrere tausend Stellungen) kann die PDF-Erstellung den Speicher des Systems überlasten.\n\nEmpfehlung: Begrenzen Sie den Export auf Level 1 oder 2, oder wählen Sie HTML als Ausgabeformat.\n\nMöchten Sie trotzdem fortfahren?"
   },
   "faq": {
     "window_title": "Häufig gestellte Fragen (FAQ)",

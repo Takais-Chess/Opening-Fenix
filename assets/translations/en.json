@@ -1255,7 +1255,16 @@
     "confirm_huge_title": "Export extremely large PGN file?",
     "confirm_huge_text": "The PGN will expand to ~{moves} moves (~{size_mb} MB, {ratio}x expansion) due to uncut transpositions.\n\nThis may take several minutes and overload external chess software.\n\nDo you really want to proceed?",
     "progress_label": "Exporting moves ({curr} / {total})...",
-    "progress_book": "Generating repertoire textbook..."
+    "progress_book": "Generating repertoire textbook...",
+    "book_options_group": "3. Textbook Options",
+    "book_fmt_label": "Output Format:",
+    "book_fmt_pdf": "PDF (Ready to print / save directly as PDF)",
+    "book_fmt_html": "HTML (Open in browser / print)",
+    "book_lang_label": "Language:",
+    "book_limit_checkbox": "Only up to level:",
+    "book_limit_hint": "💡 Tip: For large courses, limiting by level is recommended to produce a compact, readable textbook.",
+    "confirm_huge_book_title": "Export complete repertoire as PDF?",
+    "confirm_huge_book_text": "You are about to export the entire repertoire without a level limit as PDF.\n\nFor very large courses (several thousand positions), PDF rendering can exceed system memory.\n\nRecommendation: Limit the export to Level 1 or 2, or choose HTML as output format.\n\nDo you want to proceed anyway?"
   },
   "faq": {
     "window_title": "Frequently Asked Questions (FAQ)",
