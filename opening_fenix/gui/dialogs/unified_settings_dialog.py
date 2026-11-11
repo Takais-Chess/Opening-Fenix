@@ -1,3 +1,4 @@
+_detached_threads_keepalive = []
 import os
 import sqlite3
 import re
@@ -5187,7 +5188,8 @@ class UnifiedSettingsDialog(QDialog):
 
             def on_error(err_msg):
                 cleanup_progress()
-                QMessageBox.critical(self, "Exportfehler", f"Fehler beim Erstellen des Lehrbuchs:\n{err_msg}")
+                p_w = self if (self and self.isVisible()) else None
+                QMessageBox.critical(p_w, "Exportfehler", f"Fehler beim Erstellen des Lehrbuchs:\n{err_msg}")
 
             def on_cancel():
                 if hasattr(self, "_book_export_thread") and self._book_export_thread and self._book_export_thread.isRunning():
@@ -6656,7 +6658,10 @@ class UnifiedSettingsDialog(QDialog):
                 if hasattr(w, 'cancel'): w.cancel()
                 if hasattr(w, 'stop'): w.stop()
                 w.requestInterruption()
-                w.wait(200)
+                if not w.wait(200):
+                    if w not in _detached_threads_keepalive:
+                        _detached_threads_keepalive.append(w)
+                        w.finished.connect(lambda obj=w: _detached_threads_keepalive.remove(obj) if obj in _detached_threads_keepalive else None)
                     
         if hasattr(self, "loading_timer") and self.loading_timer:
             try: self.loading_timer.stop()

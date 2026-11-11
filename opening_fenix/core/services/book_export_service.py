@@ -28,6 +28,7 @@ import chess
 import chess.svg
 
 from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment, localize_san
+from opening_fenix.core.logger import logger
 
 # ─── TINTENSPAR-PALETTE (Minimal Ink Consumption) ───────────────────────────
 
@@ -108,7 +109,7 @@ def find_headless_browser() -> Optional[str]:
     return None
 
 
-def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, timeout: int = 120) -> subprocess.CompletedProcess:
+def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, timeout: int = 240) -> subprocess.CompletedProcess:
     """
     Executes Chromium headless to print HTML to PDF, isolated with its own temporary user data directory.
     Uses forward-slash paths for Windows Chromium CLI compatibility and multi-strategy fallbacks
@@ -148,6 +149,9 @@ def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, t
                 except Exception:
                     pass
             shutil.move(temp_render_pdf, output_pdf_path)
+        else:
+            err_det = (last_res.stderr or last_res.stdout).decode("utf-8", errors="replace").strip() if last_res else "Keine Ausgabe"
+            logger.error(f"Chromium PDF generation failed after trying all strategies. Exit-Code: {last_res.returncode if last_res else 'None'}, Details: {err_det}")
 
         return last_res
     finally:

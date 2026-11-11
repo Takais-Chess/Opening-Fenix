@@ -2,6 +2,14 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.6] - 2026-11-11
+
+### Fixed & Improved
+- **Book Export Worker Thread Stability (`0xc0000409` Abort Fix)**: Resolved an immediate application crash occurring during book export error handling caused by an unimported `logger` reference in `threads.py` and `book_export_service.py` that triggered an uncaught `NameError` inside `QThread.run()`. All exceptions in `BookExportThread` are now completely trapped and safely routed to the GUI error signal.
+- **Detached Thread Lifetime Management**: Prevented `qFatal("QThread: Destroyed while thread is still running")` crashes by keeping still-running worker threads alive in a global retention list until they cleanly terminate if the settings dialog is closed prematurely.
+- **Chromium Multi-Strategy Headless PDF Rendering**: Chromium execution now uses forward-slash path sanitization and automatically tests modern (`--headless=new`), legacy (`--headless=old`), and standard (`--headless`) flags with an extended 240-second timeout to handle large course exports reliably.
+- **PyInstaller Clean Build Enforcement**: Configured installer compiler to delete `build/` and run PyInstaller with `--clean` on every build to guarantee no stale cached bytecode archives are packaged.
+
 ## [1.3.5] - 2026-11-11
 
 ### Fixed & Improved

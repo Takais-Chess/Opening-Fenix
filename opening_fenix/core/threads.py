@@ -9,6 +9,7 @@ from opening_fenix.core.services.import_service import import_pgn_to_db
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
 from opening_fenix.core.services.repertoire_mistake_service import audit_repertoire_mistakes
 from opening_fenix.core.utils import get_configured_engine_hash
+from opening_fenix.core.logger import logger
 
 
 class AnalysisThread(QThread):
@@ -983,11 +984,17 @@ class BookExportThread(QThread):
             if self._is_canceled:
                 return
             self.success_signal.emit(final_file)
-        except Exception as e:
+        except BaseException as e:
             import traceback
-            logger.error("BookExportThread failed: %s", traceback.format_exc())
-            if not self._is_canceled:
-                self.error_signal.emit(str(e))
+            try:
+                logger.error("BookExportThread failed: %s", traceback.format_exc())
+            except Exception:
+                pass
+            if not getattr(self, "_is_canceled", False):
+                try:
+                    self.error_signal.emit(str(e))
+                except Exception:
+                    pass
 
     def cancel(self):
         self._is_canceled = True
