@@ -2,6 +2,12 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.8] - 2026-11-11
+
+### Fixed & Improved
+- **Installed App Textbook PDF Export Fix (`__COMPAT_LAYER=DetectorsAppHealth`)**: Fixed a critical Windows environment issue where the installed `Opening Fenix.exe` inherited `__COMPAT_LAYER=DetectorsAppHealth` from the Windows Program Compatibility Assistant / installer launch, causing headless Microsoft Edge / Chrome (`msedge.exe` / `chrome.exe`) to immediately abort with Exit-Code 0 and 0 bytes output. `_run_chromium_pdf` now executes Chromium with a sanitized environment dictionary (stripping `__COMPAT_LAYER`, `_PYI_*`, `QT_*`, and `_internal` library paths), `main.py` clears `__COMPAT_LAYER` at startup, and the Inno Setup installer launches the post-install application with `runasoriginaluser`.
+- **90% SVG Diagram Deduplication (`SHARED_SVG_DEFS`)**: Replaced per-diagram duplication of static SVG `<defs>` (piece vector glyphs and board grid/coordinate paths) with a single shared `<defs>` block per textbook and lightweight `<use>` references per board diagram. This shrinks individual diagram SVGs from 31.3 KB to ~2.5 KB, reducing full-course HTML size on 12,000+ position repertoires from 122 MB to 12.6 MB and enabling full-repertoire 540+ page PDF generation in ~30 seconds without Chromium memory exhaustion.
+
 ## [1.3.7] - 2026-11-11
 
 ### Fixed & Improved

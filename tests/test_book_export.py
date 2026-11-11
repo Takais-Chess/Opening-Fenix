@@ -259,4 +259,93 @@ def test_export_repertoire_book_with_apostrophe_in_path(sample_repo_db, tmp_path
     )
     assert os.path.isfile(final_path)
     assert os.path.getsize(final_path) > 0
+
+
+def test_combined_first_page_and_course_icon(sample_repo_db, tmp_path):
+    """Verifies that course cover icon is embedded next to title and TOC starts directly on first page."""
+    # Place a fake cover.png next to sample_repo_db
+    repo_dir = os.path.dirname(sample_repo_db)
+    cover_file = os.path.join(repo_dir, "cover.png")
+    # 1x1 transparent PNG bytes
+    png_1x1 = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+    with open(cover_file, "wb") as f:
+        f.write(png_1x1)
+
+    out_html = str(tmp_path / "combined_first_page.html")
+    res = export_repertoire_book(
+        db_path=sample_repo_db,
+        output_path=out_html,
+        output_format="html",
+        level=1,
+        language="de"
+    )
+    with open(res, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # 1. Course icon embedded as base64 data URI
+    assert "data:image/png;base64," in html
+    assert 'class="cover-icon"' in html
+
+    # 2. Cover header and Inhaltsverzeichnis combined inside .toc-section on page 1
+    assert '<div class="toc-section">' in html
+    assert '<div class="cover-header">' in html
+    assert html.index('<div class="cover-header">') > html.index('<div class="toc-section">')
+    assert html.index('<div class="toc-heading">') > html.index('<div class="cover-header">')
+
+    # 3. No separate .cover-section
+    assert '<div class="cover-section">' not in html
+
     assert "Gawain's" in final_path
+
+
+def test_export_repertoire_book_pdf_ignores_compat_layer(sample_repo_db, tmp_path, monkeypatch):
+    """Regression test: Windows __COMPAT_LAYER=DetectorsAppHealth in installed app must not abort Chromium headless PDF generation."""
+    monkeypatch.setenv("__COMPAT_LAYER", "DetectorsAppHealth")
+    out_pdf = str(tmp_path / "compat_layer_book.pdf")
+
+    final_path = export_repertoire_book(
+        db_path=sample_repo_db,
+        output_path=out_pdf,
+        output_format="pdf",
+        level=1,
+        language="de"
+    )
+    assert os.path.isfile(final_path)
+    assert os.path.getsize(final_path) > 0
+
+
+def test_combined_first_page_and_course_icon(sample_repo_db, tmp_path):
+    """Verifies that course cover icon is embedded next to title and TOC starts directly on first page."""
+    # Place a fake cover.png next to sample_repo_db
+    repo_dir = os.path.dirname(sample_repo_db)
+    cover_file = os.path.join(repo_dir, "cover.png")
+    # 1x1 transparent PNG bytes
+    png_1x1 = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
+    with open(cover_file, "wb") as f:
+        f.write(png_1x1)
+
+    out_html = str(tmp_path / "combined_first_page.html")
+    res = export_repertoire_book(
+        db_path=sample_repo_db,
+        output_path=out_html,
+        output_format="html",
+        level=1,
+        language="de"
+    )
+    with open(res, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # 1. Course icon embedded as base64 data URI
+    assert "data:image/png;base64," in html
+    assert 'class="cover-icon"' in html
+
+    # 2. Cover header and Inhaltsverzeichnis combined inside .toc-section on page 1
+    assert '<div class="toc-section">' in html
+    assert '<div class="cover-header">' in html
+    assert html.index('<div class="cover-header">') > html.index('<div class="toc-section">')
+    assert html.index('<div class="toc-heading">') > html.index('<div class="cover-header">')
+
+    # 3. No separate .cover-section
+    assert '<div class="cover-section">' not in html
+
+

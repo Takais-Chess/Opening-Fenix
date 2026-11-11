@@ -89,6 +89,10 @@ def ensure_default_engine_path():
                 logger.error(f"Could not save config with default engine path: {e}")
 
 if __name__ == "__main__":
+    # Strip Windows Program Compatibility Assistant shim variables inherited from Setup installer
+    # so child processes (such as headless Chromium for PDF textbook export) are not aborted by PCA.
+    os.environ.pop("__COMPAT_LAYER", None)
+
     if sys.platform == 'win32':
         import ctypes
         import winreg

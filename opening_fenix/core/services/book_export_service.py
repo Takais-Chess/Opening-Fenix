@@ -15,7 +15,9 @@ Features:
 import os
 import sys
 import re
+import math
 import json
+import base64
 import sqlite3
 import subprocess
 import shutil
@@ -27,7 +29,7 @@ from typing import Optional, Callable, Dict, List, Tuple, Any
 import chess
 import chess.svg
 
-from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment, localize_san
+from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment, localize_san, parse_variation_name
 from opening_fenix.core.logger import logger
 
 # ─── TINTENSPAR-PALETTE (Minimal Ink Consumption) ───────────────────────────
@@ -144,10 +146,34 @@ def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, t
     ]
 
     last_res = None
+    # Build a clean environment for Chromium without PyInstaller (_PYI_*), Qt, or Windows
+    # Program Compatibility Assistant (__COMPAT_LAYER=DetectorsAppHealth) variables.
+    # When Opening Fenix.exe is launched from the installer or with PCA shims active,
+    # inherited __COMPAT_LAYER causes msedge.exe/chrome.exe to immediately exit with code 0
+    # without generating the PDF.
+    clean_env = {}
+    for k, v in os.environ.items():
+        ku = k.upper()
+        if ku in ("__COMPAT_LAYER", "QT_PLUGIN_PATH", "QML2_IMPORT_PATH") or ku.startswith("_PYI_") or ku.startswith("QT_"):
+            continue
+        if ku == "PATH":
+            parts = [p for p in v.split(os.pathsep) if "_internal" not in p.lower() and "pyqt6" not in p.lower()]
+            clean_env[k] = os.pathsep.join(parts)
+        else:
+            clean_env[k] = v
+
     try:
         for cmd in strategies:
             try:
-                res = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=creationflags)
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    timeout=timeout,
+                    creationflags=creationflags,
+                    env=clean_env,
+                    cwd=tempfile.gettempdir(),
+                    stdin=subprocess.DEVNULL,
+                )
                 last_res = res
                 if os.path.isfile(temp_render_pdf) and os.path.getsize(temp_render_pdf) > 0:
                     break
@@ -185,15 +211,16 @@ def extract_variation_name(
     v1: Optional[str] = None,
     v2: Optional[str] = None,
     v3: Optional[str] = None,
-    exclude_title: Optional[str] = None
+    exclude_title: Optional[str] = None,
+    language: str = "de"
 ) -> Optional[str]:
-    """Extracts variation name from variation_2, variation_3, or variation_1 without translation."""
+    """Extracts variation name from variation_2, variation_3, or variation_1 in the requested language."""
     names = []
-    ex = (exclude_title or "").strip().lower()
+    ex = parse_variation_name(str(exclude_title).strip(), lang=language, default_lang="de" if language == "de" else "en").strip().lower() if exclude_title else ""
     for v in [v2, v3, v1]:
-        if v and v.strip():
-            c = v.strip()
-            if c.lower() != ex and c not in names:
+        if v and str(v).strip():
+            c = parse_variation_name(str(v).strip(), lang=language, default_lang="de" if language == "de" else "en").strip()
+            if c and c.lower() != ex and c not in names:
                 names.append(c)
     return " · ".join(names) if names else None
 
@@ -210,6 +237,54 @@ def format_san(san: str, language: str = "de") -> str:
     return san
 
 
+# ─── SHARED SVG DEFINITIONS (90% Size & Memory Reduction for Large Books) ───
+
+def _build_shared_svg_defs() -> str:
+    all_pieces_board = chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -")
+    sample_svg = chess.svg.board(all_pieces_board, orientation=chess.WHITE, size=195, coordinates=True, colors=INK_SAVER_COLORS)
+    defs_match = re.search(r"<defs>(.*?)</defs>", sample_svg, flags=re.DOTALL)
+    piece_defs_inner = defs_match.group(1) if defs_match else ""
+
+    empty_board = chess.Board(None)
+    empty_w = chess.svg.board(empty_board, orientation=chess.WHITE, size=195, coordinates=True, colors=INK_SAVER_COLORS)
+    empty_b = chess.svg.board(empty_board, orientation=chess.BLACK, size=195, coordinates=True, colors=INK_SAVER_COLORS)
+
+    def _extract_bg(svg_str: str) -> str:
+        inner = re.sub(r"^<svg[^>]*>|</svg>$", "", svg_str)
+        inner = re.sub(r"<desc>.*?</desc>", "", inner, flags=re.DOTALL)
+        inner = re.sub(r"<defs>.*?</defs>", "", inner, flags=re.DOTALL)
+        return inner
+
+    bg_w = _extract_bg(empty_w)
+    bg_b = _extract_bg(empty_b)
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+        'style="position:absolute;width:0;height:0;overflow:hidden;" aria-hidden="true">'
+        f'<defs>{piece_defs_inner}'
+        f'<g id="fenix-board-w">{bg_w}</g>'
+        f'<g id="fenix-board-b">{bg_b}</g>'
+        '</defs></svg>'
+    )
+
+
+SHARED_SVG_DEFS = _build_shared_svg_defs()
+
+PIECE_ID_MAP = {
+    (chess.PAWN, chess.WHITE): "white-pawn",
+    (chess.KNIGHT, chess.WHITE): "white-knight",
+    (chess.BISHOP, chess.WHITE): "white-bishop",
+    (chess.ROOK, chess.WHITE): "white-rook",
+    (chess.QUEEN, chess.WHITE): "white-queen",
+    (chess.KING, chess.WHITE): "white-king",
+    (chess.PAWN, chess.BLACK): "black-pawn",
+    (chess.KNIGHT, chess.BLACK): "black-knight",
+    (chess.BISHOP, chess.BLACK): "black-bishop",
+    (chess.ROOK, chess.BLACK): "black-rook",
+    (chess.QUEEN, chess.BLACK): "black-queen",
+    (chess.KING, chess.BLACK): "black-king",
+}
+
+
 def render_board_svg(
     fen: str,
     parsed_annotations: dict,
@@ -217,36 +292,87 @@ def render_board_svg(
     caption: str = "",
     size: int = 195
 ) -> str:
-    """Renders a standalone, ink-saver vector SVG board diagram with arrows and highlights."""
+    """Renders a compact, ink-saver vector SVG board diagram referencing SHARED_SVG_DEFS."""
     try:
         board = chess.Board(fen)
     except Exception:
         board = chess.Board()
 
-    arrows = []
-    for tail, head, col in parsed_annotations.get("arrows", []):
-        color_val = COLOR_MAP.get(col, COLOR_MAP['green'])
-        arrows.append(chess.svg.Arrow(tail, head, color=color_val))
+    orientation = chess.BLACK if color.lower() == 'b' else chess.WHITE
+    bg_id = "fenix-board-w" if orientation == chess.WHITE else "fenix-board-b"
 
-    fill = {}
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 390 390" width="{size}" height="{size}">',
+        f'<use href="#{bg_id}" xlink:href="#{bg_id}" fill="#ffffff" />',
+    ]
+
+    # Square Highlights
     for item in parsed_annotations.get("highlights", []):
         if isinstance(item, (tuple, list)) and len(item) >= 2:
             sq, col = item[0], item[1]
         else:
             sq, col = item, 'red'
-        fill[sq] = FILL_MAP.get(col, FILL_MAP['red'])
+        col_hex = FILL_MAP.get(col, FILL_MAP['red'])
+        file_idx = chess.square_file(sq)
+        rank_idx = chess.square_rank(sq)
+        x = 15 + (file_idx if orientation == chess.WHITE else 7 - file_idx) * 45
+        y = 15 + (7 - rank_idx if orientation == chess.WHITE else rank_idx) * 45
+        parts.append(f'<rect x="{x}" y="{y}" width="45" height="45" fill="{col_hex}" stroke="none" />')
 
-    orientation = chess.BLACK if color.lower() == 'b' else chess.WHITE
+    # Pieces
+    for sq, piece in board.piece_map().items():
+        file_idx = chess.square_file(sq)
+        rank_idx = chess.square_rank(sq)
+        x = 15 + (file_idx if orientation == chess.WHITE else 7 - file_idx) * 45
+        y = 15 + (7 - rank_idx if orientation == chess.WHITE else rank_idx) * 45
+        pid = PIECE_ID_MAP[(piece.piece_type, piece.color)]
+        parts.append(f'<use href="#{pid}" xlink:href="#{pid}" transform="translate({x}, {y})" />')
 
-    svg_code = chess.svg.board(
-        board=board,
-        orientation=orientation,
-        arrows=arrows,
-        fill=fill,
-        size=size,
-        coordinates=True,
-        colors=INK_SAVER_COLORS
-    )
+    # Arrows & Circles
+    board_offset = 15.0
+    square_size = 45.0
+    for tail, head, col in parsed_annotations.get("arrows", []):
+        color_val = COLOR_MAP.get(col, COLOR_MAP['green'])
+        opacity_attr = ""
+        if len(color_val) == 9 and color_val.startswith("#"):
+            alpha = int(color_val[7:9], 16) / 255.0
+            color_val = color_val[:7]
+            opacity_attr = f' opacity="{alpha:.2f}"'
+        tail_file = chess.square_file(tail)
+        tail_rank = chess.square_rank(tail)
+        head_file = chess.square_file(head)
+        head_rank = chess.square_rank(head)
+        xtail = board_offset + (tail_file + 0.5 if orientation == chess.WHITE else 7.5 - tail_file) * square_size
+        ytail = board_offset + (7.5 - tail_rank if orientation == chess.WHITE else tail_rank + 0.5) * square_size
+        xhead = board_offset + (head_file + 0.5 if orientation == chess.WHITE else 7.5 - head_file) * square_size
+        yhead = board_offset + (7.5 - head_rank if orientation == chess.WHITE else head_rank + 0.5) * square_size
+        if (head_file, head_rank) == (tail_file, tail_rank):
+            parts.append(
+                f'<circle cx="{xhead}" cy="{yhead}" r="{square_size * 0.9 / 2}" stroke-width="{square_size * 0.1}" stroke="{color_val}"{opacity_attr} fill="none" class="circle" />'
+            )
+        else:
+            marker_size = 0.75 * square_size
+            marker_margin = 0.1 * square_size
+            dx, dy = xhead - xtail, yhead - ytail
+            hypot = math.hypot(dx, dy)
+            shaft_x = xhead - dx * (marker_size + marker_margin) / hypot
+            shaft_y = yhead - dy * (marker_size + marker_margin) / hypot
+            xtip = xhead - dx * marker_margin / hypot
+            ytip = yhead - dy * marker_margin / hypot
+            p1x, p1y = xtip, ytip
+            p2x = shaft_x + dy * 0.5 * marker_size / hypot
+            p2y = shaft_y - dx * 0.5 * marker_size / hypot
+            p3x = shaft_x - dy * 0.5 * marker_size / hypot
+            p3y = shaft_y + dx * 0.5 * marker_size / hypot
+            parts.append(
+                f'<line x1="{xtail}" y1="{ytail}" x2="{shaft_x}" y2="{shaft_y}" stroke="{color_val}"{opacity_attr} stroke-width="{square_size * 0.2}" stroke-linecap="butt" class="arrow" />'
+            )
+            parts.append(
+                f'<polygon points="{p1x},{p1y} {p2x},{p2y} {p3x},{p3y}" fill="{color_val}"{opacity_attr} class="arrow" />'
+            )
+
+    parts.append("</svg>")
+    svg_code = "".join(parts)
 
     caption_html = f"<div class='diagram-caption'>{caption}</div>" if caption else ""
     return f"""
@@ -296,6 +422,38 @@ def append_move_to_path(path: str, m_num: int, white_turn: bool, loc_san: str) -
             return f"{path} {m_num}...{loc_san}".strip()
 
 
+def get_course_icon_data_uri(db_path: Optional[str] = None, repo_name: str = "") -> Optional[str]:
+    """
+    Finds the course cover image (cover.png, cover.jpg, etc.) for the repertoire and returns it as a base64 data URI.
+    """
+    candidates = []
+    if db_path:
+        db_dir = os.path.dirname(os.path.abspath(db_path))
+        for ext in ("png", "jpg", "jpeg", "svg"):
+            candidates.append(os.path.join(db_dir, f"cover.{ext}"))
+            candidates.append(os.path.join(db_dir, f"icon.{ext}"))
+    if repo_name:
+        try:
+            from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
+            cp = get_repertoire_cover_path(repo_name)
+            if cp:
+                candidates.append(cp)
+        except Exception:
+            pass
+
+    for path in candidates:
+        if path and os.path.isfile(path):
+            try:
+                ext = os.path.splitext(path)[1].lower().lstrip(".")
+                mime = "image/png" if ext == "png" else "image/jpeg" if ext in ("jpg", "jpeg") else "image/svg+xml" if ext == "svg" else "image/png"
+                with open(path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                return f"data:{mime};base64,{b64}"
+            except Exception as e:
+                logger.warning(f"Failed to encode course cover '{path}': {e}")
+    return None
+
+
 def build_book_html(
     metadata: dict,
     chapters: List[dict],
@@ -314,11 +472,19 @@ def build_book_html(
 
     title_text = f"{repo_name} — Lehrbuch" if language == "de" else f"{repo_name} — Textbook"
     sub_text = f"Repertoire für {color_label} • {level_name}" if language == "de" else f"Repertoire for {color_label} • {level_name}"
+    created_with_text = "Erstellt mit Opening-Fenix" if language == "de" else "Created with Opening-Fenix"
+    toc_heading = "Inhaltsverzeichnis" if language == "de" else "Table of Contents"
+
+    course_icon_uri = metadata.get("course_icon_data_uri") or metadata.get("cover_data_uri")
+    if course_icon_uri:
+        icon_html = f"""<div class="cover-icon-wrap"><img class="cover-icon" src="{course_icon_uri}" alt="" /></div>"""
+    else:
+        icon_html = """<div class="cover-icon-wrap cover-icon-placeholder"><span>♟</span></div>"""
 
     # Table of contents items
     toc_items_html = []
     for idx, chap in enumerate(chapters, start=1):
-        c_title = chap["title"]
+        c_title = parse_variation_name(chap["title"], lang=language, default_lang="de" if language == "de" else "en")
         prefix = chap.get("san_prefix", "")
         m_cnt = chap.get("move_count", 0)
         moves_info = f"({m_cnt} Züge)" if language == "de" else f"({m_cnt} moves)"
@@ -331,7 +497,11 @@ def build_book_html(
 
         subvar_html = ""
         if chap.get("subvars"):
-            subvar_list = " · ".join(chap["subvars"][:6])
+            subvar_list = " · ".join(
+                parse_variation_name(sv, lang=language, default_lang="de" if language == "de" else "en")
+                for sv in chap["subvars"][:6]
+                if sv
+            )
             subvar_html = f'<div class="toc-subvar-row"><span class="toc-subvar-icon">↳</span> <span class="toc-subvar-text">{subvar_list}</span></div>'
 
         toc_items_html.append(f"""
@@ -389,7 +559,7 @@ def build_book_html(
     # Build chapters HTML
     chapters_html = []
     for idx, chap in enumerate(chapters, start=1):
-        c_title = chap["title"]
+        c_title = parse_variation_name(chap["title"], lang=language, default_lang="de" if language == "de" else "en")
         clean_c_title = c_title.replace('"', '\\"')
         chapter_page_rules_list.append(f"""
         @page chapter-{idx} {{
@@ -455,6 +625,12 @@ def build_book_html(
             @bottom-center {{ content: ""; border: none; }}
         }}
 
+        @page toc-page:first {{
+            @top-left {{ content: ""; }}
+            @top-right {{ content: ""; }}
+            @bottom-center {{ content: ""; border: none; }}
+        }}
+
         {chapter_page_rules}
 
         @media print {{
@@ -501,42 +677,74 @@ def build_book_html(
             box-sizing: border-box;
         }}
 
-        /* Cover Title Page */
-        .cover-section {{
-            text-align: center;
-            padding: 40px 20px 30px 20px;
+        /* Cover Header (combined with Table of Contents on first page) */
+        .cover-header {{
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 0 0 16px 0;
             border-bottom: 2pt solid #0f172a;
-            margin-bottom: 30px;
-            page-break-after: always;
+            margin-bottom: 20px;
+        }}
+        .cover-icon-wrap {{
+            flex-shrink: 0;
+            width: 72px;
+            height: 72px;
+        }}
+        .cover-icon {{
+            width: 72px;
+            height: 72px;
+            border-radius: 8px;
+            object-fit: cover;
+            box-shadow: 0 2px 5px rgba(15, 23, 42, 0.12);
+            border: 1px solid #cbd5e1;
+            display: block;
+        }}
+        .cover-icon-placeholder {{
+            width: 72px;
+            height: 72px;
+            border-radius: 8px;
+            background: linear-gradient(135deg, rgba(211, 84, 0, 0.18), rgba(211, 84, 0, 0.05));
+            border: 1px dashed rgba(211, 84, 0, 0.35);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 36px;
+            color: #d35400;
+        }}
+        .cover-text {{
+            flex: 1;
+            min-width: 0;
         }}
         .cover-title {{
-            font-size: 26pt;
+            font-size: 22pt;
             font-weight: bold;
             color: #0f172a;
-            margin: 0 0 10px 0;
+            margin: 0 0 4px 0;
             letter-spacing: -0.02em;
+            line-height: 1.15;
         }}
         .cover-subtitle {{
-            font-size: 13pt;
+            font-size: 11pt;
             color: #475569;
-            margin: 0 0 20px 0;
+            margin: 0 0 3px 0;
         }}
         .cover-meta {{
-            font-size: 10pt;
-            color: #64748b;
+            font-size: 8.5pt;
+            color: #94a3b8;
         }}
 
         /* Table of Contents */
         .toc-section {{
-            margin-bottom: 40px;
+            margin-bottom: 30px;
             page-break-after: always;
         }}
         .toc-heading {{
-            font-size: 16pt;
+            font-size: 15pt;
             font-weight: bold;
             border-bottom: 1.5pt solid #0f172a;
             padding-bottom: 4px;
-            margin-bottom: 16px;
+            margin-bottom: 14px;
         }}
         .toc-row {{
             display: flex;
@@ -869,19 +1077,21 @@ def build_book_html(
     </style>
 </head>
 <body>
+{SHARED_SVG_DEFS}
 
 <div class="book-wrapper">
 
-    <!-- Cover Page -->
-    <div class="cover-section">
-        <h1 class="cover-title">{repo_name}</h1>
-        <div class="cover-subtitle">{sub_text}</div>
-        <div class="cover-meta">Erstellt mit Opening-Fenix</div>
-    </div>
-
-    <!-- Inhaltsverzeichnis -->
+    <!-- Inhaltsverzeichnis mit Titel & Kurs-Icon auf Seite 1 -->
     <div class="toc-section">
-        <div class="toc-heading">Inhaltsverzeichnis</div>
+        <div class="cover-header">
+            {icon_html}
+            <div class="cover-text">
+                <h1 class="cover-title">{repo_name}</h1>
+                <div class="cover-subtitle">{sub_text}</div>
+                <div class="cover-meta">{created_with_text}</div>
+            </div>
+        </div>
+        <div class="toc-heading">{toc_heading}</div>
         {"".join(toc_items_html)}
     </div>
 
@@ -974,7 +1184,7 @@ def flatten_subtree(
 
         # Process Main Move
         m_id, san, to_pos, fen, raw_c, v1, v2, v3 = main_move
-        main_var = extract_variation_name(v1, v2, v3, exclude_title=chap_title)
+        main_var = extract_variation_name(v1, v2, v3, exclude_title=chap_title, language=language)
         if main_var and depth > 0:
             if pending_moves:
                 html_blocks.append(f"<p class='moves'>{' '.join(pending_moves)}</p>")
@@ -1097,7 +1307,7 @@ def flatten_subtree(
             s_clean_text, s_parsed_anno = extract_clean_comment(s_raw_c, language)
             s_has_drawings = bool(s_parsed_anno.get("arrows") or s_parsed_anno.get("highlights"))
 
-            side_var = extract_variation_name(s_v1, s_v2, s_v3, exclude_title=chap_title)
+            side_var = extract_variation_name(s_v1, s_v2, s_v3, exclude_title=chap_title, language=language)
             var_suffix = f" <span class='variation-name'>– {side_var}</span>" if side_var else ""
 
             # Direct transposition on sideline move
@@ -1125,7 +1335,7 @@ def flatten_subtree(
                 }
 
                 if not side_var:
-                    side_var = extract_variation_name(r_v1, r_v2, r_v3, exclude_title=chap_title)
+                    side_var = extract_variation_name(r_v1, r_v2, r_v3, exclude_title=chap_title, language=language)
                     var_suffix = f" <span class='variation-name'>– {side_var}</span>" if side_var else ""
 
                 r_clean_text, r_parsed_anno = extract_clean_comment(r_raw_c, language)
@@ -1268,6 +1478,11 @@ def discover_chapters(
             cnt += count_subtree(to_p, visited)
         return cnt
 
+    def resolve_name(raw: Optional[str]) -> str:
+        if not raw or not str(raw).strip():
+            return ""
+        return parse_variation_name(str(raw).strip(), lang=language, default_lang="de" if language == "de" else "en")
+
     def get_subvars(pos_id, visited=None):
         if visited is None:
             visited = set()
@@ -1276,7 +1491,8 @@ def discover_chapters(
         visited.add(pos_id)
         subvars = []
         for _, _, to_p, _, v1, v2, v3, _ in children.get(pos_id, []):
-            v = (v2 or v3 or "").strip()
+            raw_v = (v2 or v3 or "").strip()
+            v = resolve_name(raw_v)
             if v and v not in subvars:
                 subvars.append(v)
             for sub in get_subvars(to_p, visited):
@@ -1301,11 +1517,11 @@ def discover_chapters(
                     for m3_id, san3, to_pos3, fen3, v1_3, v2_3, v3_3, prio3 in children.get(to_pos2, []):
                         loc_san3 = format_san(san3, language)
                         cnt = count_subtree(to_pos3) + 1
-                        title = (v1_3 or v2_3 or v3_3 or "").strip()
+                        title = resolve_name(v1_3 or v2_3 or v3_3)
                         if not title:
                             # Check if immediate reply has a variation name
                             for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos3, []):
-                                c_title = (cv1 or cv2 or cv3 or "").strip()
+                                c_title = resolve_name(cv1 or cv2 or cv3)
                                 if c_title:
                                     title = c_title
                                     break
@@ -1325,11 +1541,11 @@ def discover_chapters(
                         })
             else:
                 cnt = count_subtree(to_pos) + 1
-                title = (v1 or v2 or v3 or "").strip()
+                title = resolve_name(v1 or v2 or v3)
                 if not title:
                     # Check if immediate reply has a variation name
                     for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos, []):
-                        c_title = (cv1 or cv2 or cv3 or "").strip()
+                        c_title = resolve_name(cv1 or cv2 or cv3)
                         if c_title:
                             title = c_title
                             break
@@ -1354,10 +1570,10 @@ def discover_chapters(
             for m2_id, san2, to_pos2, fen2, v1_2, v2_2, v3_2, prio2 in children.get(to_pos, []):
                 loc_san2 = format_san(san2, language)
                 cnt = count_subtree(to_pos2) + 1
-                title = (v1_2 or v2_2 or v3_2 or "").strip()
+                title = resolve_name(v1_2 or v2_2 or v3_2)
                 if not title:
                     for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos2, []):
-                        c_title = (cv1 or cv2 or cv3 or "").strip()
+                        c_title = resolve_name(cv1 or cv2 or cv3)
                         if c_title:
                             title = c_title
                             break
@@ -1454,7 +1670,7 @@ def generate_variation_index(
             child_is_white = not is_white
             child_m_num = m_num if is_white else m_num + 1
             child_chap = pos_to_chap.get(to_p, active_chap)
-            var_lbl = extract_variation_name(v1, v2, v3)
+            var_lbl = extract_variation_name(v1, v2, v3, language=language)
             child_node = VarNode(san, m_num, is_white, to_p, var_name=var_lbl)
             child_node.chapter_idx = child_chap
 
@@ -1628,6 +1844,10 @@ def export_repertoire_book(
         repo_name = metadata.get("repertoire_display_name") or metadata.get("name") or "Repertoire"
         metadata["name"] = repo_name
 
+        # Resolve course cover image as base64 data URI for textbook cover header
+        course_icon_data_uri = get_course_icon_data_uri(db_path, repo_name=repo_name)
+        metadata["course_icon_data_uri"] = course_icon_data_uri
+
         # Determine level name
         level_name = "Alle Level" if language == "de" else "All Levels"
         if level is not None:
@@ -1747,7 +1967,7 @@ def export_repertoire_book(
                 try:
                     import fitz
                     doc = fitz.open(abs_output_path)
-                    for p_no in range(2, len(doc)):
+                    for p_no in range(1, len(doc)):
                         txt = doc[p_no].get_text().upper()
                         for c_i in range(1, len(chapters) + 1):
                             if c_i not in page_map and f"KAPITEL {c_i}" in txt:

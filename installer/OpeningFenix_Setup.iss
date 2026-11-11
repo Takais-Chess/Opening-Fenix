@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "1.3.7"
+#define MyAppVersion "1.3.8"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -72,7 +72,7 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#MyAppExeName}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall runasoriginaluser
 
 [Code]
 var
