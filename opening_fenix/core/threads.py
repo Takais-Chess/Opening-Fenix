@@ -694,16 +694,15 @@ class InstantMultiPVThread(QThread):
                     delta = -99.0
                 results[t_uci] = {"rank": rank, "delta": delta, "best_san": best_san}
 
-            engine.quit()
         except Exception as e:
             import logging
             logging.error(f"InstantMultiPVThread error: {e}")
+        finally:
             if engine:
                 try:
                     engine.quit()
                 except Exception:
                     pass
-        finally:
             if not self.isInterruptionRequested():
                 self.finished.emit(results)
 
@@ -863,25 +862,23 @@ class PathQualityEvalThread(QThread):
                     "quality_label": "🟡 Möglich" if all_ok else "🔴 mit Fehlern",
                 })
 
-            engine.quit()
-
         except Exception as e:
             import logging
             logging.error(f"PathQualityEvalThread error: {e}")
-            if engine:
-                try:
-                    engine.quit()
-                except Exception:
-                    pass
             # Fallback: return unclassified paths marked as Möglich
             classified = [
                 {**p, "quality": "möglich", "quality_label": "🟡 Möglich"}
                 for p in self.raw_paths
             ]
-
-        # Sort: 🟡 Möglich first (depth ascending), then 🔴 mit Fehlern (depth ascending)
-        classified.sort(key=lambda x: (0 if x["quality"] == "möglich" else 1, x["depth"]))
-        self.finished.emit(classified)
+        finally:
+            if engine:
+                try:
+                    engine.quit()
+                except Exception:
+                    pass
+            # Sort: 🟡 Möglich first (depth ascending), then 🔴 mit Fehlern (depth ascending)
+            classified.sort(key=lambda x: (0 if x["quality"] == "möglich" else 1, x["depth"]))
+            self.finished.emit(classified)
 
 
 class AutoBackupThread(QThread):
@@ -951,3 +948,44 @@ class RepertoireMistakeScanThread(QThread):
     def cancel(self):
         self._is_canceled = True
 
+
+
+class BookExportThread(QThread):
+    progress_signal = pyqtSignal(int, str)
+    success_signal = pyqtSignal(str)
+    error_signal = pyqtSignal(str)
+
+    def __init__(self, db_path: str, output_path: str, output_format: str = "pdf", level: Optional[int] = None, language: str = "de"):
+        super().__init__()
+        self.db_path = db_path
+        self.output_path = output_path
+        self.output_format = output_format
+        self.level = level
+        self.language = language
+        self._is_canceled = False
+
+    def run(self):
+        try:
+            from opening_fenix.core.services.book_export_service import export_repertoire_book
+
+            def cb(pct, total, msg):
+                self.progress_signal.emit(pct, msg)
+                return self._is_canceled
+
+            final_file = export_repertoire_book(
+                db_path=self.db_path,
+                output_path=self.output_path,
+                output_format=self.output_format,
+                level=self.level,
+                language=self.language,
+                progress_callback=cb
+            )
+            if self._is_canceled:
+                return
+            self.success_signal.emit(final_file)
+        except Exception as e:
+            if not self._is_canceled:
+                self.error_signal.emit(str(e))
+
+    def cancel(self):
+        self._is_canceled = True

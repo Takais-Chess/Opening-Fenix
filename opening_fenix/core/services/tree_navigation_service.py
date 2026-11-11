@@ -10,7 +10,7 @@ class TreeNavigationService:
     def __init__(self, session: Session):
         self.repo_session = session
         self._move_parent_cache = None 
-        self._variation_structure_cache: Optional[Dict[str, List[str]]] = None
+        self._variation_structure_cache: Dict[str, Dict[str, List[str]]] = {}
         self._variation_filter_cache: Dict[str, Any] = {}
 
     def get_history_for_move_recursive(self, move_id: int, variation_name: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -24,6 +24,7 @@ class TreeNavigationService:
         params: Dict[str, Any] = {"move_id": move_id}
         if variation_name:
             params["v"] = variation_name
+            params["v_json"] = f'%"{variation_name}"%'
             best_parent_subquery = """
                 SELECT m2.id FROM moves m2
                 JOIN positions p2 ON m2.from_position_id = p2.id
@@ -32,6 +33,8 @@ class TreeNavigationService:
                     CASE WHEN (
                         p2.variation_1 = :v OR p2.variation_2 = :v OR p2.variation_3 = :v
                         OR p2.cached_v1 = :v OR p2.cached_v2 = :v OR p2.cached_v3 = :v
+                        OR p2.variation_1 LIKE :v_json OR p2.variation_2 LIKE :v_json OR p2.variation_3 LIKE :v_json
+                        OR p2.cached_v1 LIKE :v_json OR p2.cached_v2 LIKE :v_json OR p2.cached_v3 LIKE :v_json
                     ) THEN 1 ELSE 0 END DESC,
                     m2.priority_score DESC
                 LIMIT 1
@@ -114,19 +117,23 @@ class TreeNavigationService:
 
     def get_variation_roots(self, variation_name: str) -> Set[int]:
         if not self.repo_session: return set()
+        v_like = f'%"{variation_name}"%'
         roots = self.repo_session.query(Position.id).filter(
-            (Position.variation_1 == variation_name) | (Position.variation_2 == variation_name)
+            (Position.variation_1 == variation_name) | (Position.variation_1.like(v_like)) |
+            (Position.variation_2 == variation_name) | (Position.variation_2.like(v_like))
         ).all()
         return {r.id for r in roots}
 
-    def get_variation_structure(self) -> Dict[str, List[str]]:
+    def get_variation_structure(self, lang: Optional[str] = None) -> Dict[str, List[str]]:
         """
         Scans all positions to build a hierarchy of variations (V1 -> [V2, V2, ...]).
         Handles inheritance: If a position has V2 but no V1, it inherits V1 from its ancestors.
+        Optionally localizes variation names to target language (e.g. 'de', 'en', 'all').
         """
         if not self.repo_session: return {}
-        if self._variation_structure_cache is not None:
-            return self._variation_structure_cache
+        lang_key = (lang or "").lower()
+        if lang_key in self._variation_structure_cache:
+            return self._variation_structure_cache[lang_key]
         
         # 1. Fetch all positions that have ANY variation tag
         # Join with moves to get the max incoming priority for each position
@@ -164,6 +171,12 @@ class TreeNavigationService:
                     v2 = self._find_ancestor_variation(pos_id, 2)
                 
             if not v1: v1 = "Sonstiges"
+            if lang and v1 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                v1 = parse_variation_name(v1, lang=lang)
+            if lang and v2 and v2 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                v2 = parse_variation_name(v2, lang=lang)
             
             v1_prios[v1] = max(v1_prios.get(v1, 0.0), prio)
             if v1 not in structure:
@@ -190,7 +203,7 @@ class TreeNavigationService:
             sorted_v2s = sorted(v2s, key=lambda v2: (-1.0 if v2 == "Sonstiges" else v2_prios.get((v1, v2), 0.0)), reverse=True)
             res[v1] = sorted_v2s
 
-        self._variation_structure_cache = res
+        self._variation_structure_cache[lang_key] = res
         return res
 
     def _find_ancestor_variation(self, pos_id: int, level: int) -> Optional[str]:
@@ -220,10 +233,11 @@ class TreeNavigationService:
             return self._variation_filter_cache[variation_name]
         
         # 1. Find all positions explicitly tagged
+        v_like = f'%"{variation_name}"%'
         roots = self.repo_session.query(Position.id).filter(
-            (Position.variation_1 == variation_name) | 
-            (Position.variation_2 == variation_name) |
-            (Position.variation_3 == variation_name)
+            (Position.variation_1 == variation_name) | (Position.variation_1.like(v_like)) |
+            (Position.variation_2 == variation_name) | (Position.variation_2.like(v_like)) |
+            (Position.variation_3 == variation_name) | (Position.variation_3.like(v_like))
         ).all()
         root_ids = {r.id for r in roots}
         
@@ -264,10 +278,11 @@ class TreeNavigationService:
         if not self.repo_session: return None
         
         # 1. Find all positions explicitly tagged
+        v_like = f'%"{variation_name}"%'
         roots = self.repo_session.query(Position.id, Position.fen).filter(
-            (Position.variation_1 == variation_name) | 
-            (Position.variation_2 == variation_name) |
-            (Position.variation_3 == variation_name)
+            (Position.variation_1 == variation_name) | (Position.variation_1.like(v_like)) |
+            (Position.variation_2 == variation_name) | (Position.variation_2.like(v_like)) |
+            (Position.variation_3 == variation_name) | (Position.variation_3.like(v_like))
         ).all()
         
         if not roots:

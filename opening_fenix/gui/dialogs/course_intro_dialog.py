@@ -136,11 +136,11 @@ class CourseIntroDialog(QDialog):
             lbl_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_name.setWordWrap(True)
             
-            lbl_moves = QLabel(tr_ui("course_intro.moves_count", "♟️ {moves} Züge").format(moves=lvl['moves']))
+            lbl_moves = QLabel(tr_ui("course_intro.moves_count", "♟️ {moves} Züge", moves=lvl['moves']))
             lbl_moves.setStyleSheet(f"background: transparent; border: none; padding: 2px; color: {COLORS['brown_text']}; font-size: {scale(13)}px; font-weight: bold;")
             lbl_moves.setAlignment(Qt.AlignmentFlag.AlignCenter)
             
-            lbl_elo = QLabel(tr_ui("course_intro.target_elo", "🎓 Ziel-Elo: {target_elo}").format(target_elo=lvl['target_elo']))
+            lbl_elo = QLabel(tr_ui("course_intro.target_elo", "🎓 Ziel-Elo: {target_elo}", target_elo=lvl['target_elo']))
             lbl_elo.setStyleSheet(f"background: transparent; border: none; padding: 2px; color: {COLORS['light_text']}; font-size: {scale(12)}px;")
             lbl_elo.setAlignment(Qt.AlignmentFlag.AlignCenter)
             

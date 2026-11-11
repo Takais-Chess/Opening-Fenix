@@ -47,21 +47,26 @@ class ExportDialog(QDialog):
 
         self.r_pgn = QRadioButton(tr_ui("export.format_pgn", "PGN (Textdatei für andere Programme)"))
         self.r_db = QRadioButton(tr_ui("export.format_db", "Datenbank (.db Datei für Backup)"))
+        self.r_book = QRadioButton(tr_ui("export.format_book", "Repertoire-Lehrbuch (.html / .pdf Druckformat)"))
         self.r_pgn.setChecked(True)
         self.bg_fmt.addButton(self.r_pgn, 1)
         self.bg_fmt.addButton(self.r_db, 2)
+        self.bg_fmt.addButton(self.r_book, 3)
         l_fmt.addWidget(self.r_pgn)
         l_fmt.addWidget(self.r_db)
+        l_fmt.addWidget(self.r_book)
         
         # Connect format change to toggle options visibility and update estimation
         self.r_pgn.toggled.connect(self.toggle_options)
         self.r_pgn.toggled.connect(self.update_estimation)
+        self.r_book.toggled.connect(self.toggle_options)
+        self.r_book.toggled.connect(self.update_estimation)
         
         layout.addWidget(g_fmt)
 
         # Scope Selection
-        g_scope = QGroupBox(tr_ui("export.scope_group", "2. Umfang"))
-        l_scope = QVBoxLayout(g_scope)
+        self.g_scope = QGroupBox(tr_ui("export.scope_group", "2. Umfang"))
+        l_scope = QVBoxLayout(self.g_scope)
         l_scope.setSpacing(scale(10))
         self.bg_scope = QButtonGroup(self)
 
@@ -74,7 +79,7 @@ class ExportDialog(QDialog):
         l_scope.addWidget(self.r_curr)
         self.r_all.toggled.connect(self.update_estimation)
         self.r_curr.toggled.connect(self.update_estimation)
-        layout.addWidget(g_scope)
+        layout.addWidget(self.g_scope)
 
         # Options
         self.g_opt = QGroupBox(tr_ui("export.options_group", "3. Zusätzliche PGN Optionen"))
@@ -148,6 +153,40 @@ class ExportDialog(QDialog):
         h_l.addStretch()
         l_opt.addRow(h_l)
         layout.addWidget(self.g_opt)
+
+        # Book Options
+        self.g_book_opt = QGroupBox(tr_ui("export.book_options_group", "3. Lehrbuch-Optionen"))
+        l_book_opt = QFormLayout(self.g_book_opt)
+        l_book_opt.setVerticalSpacing(scale(15))
+
+        self.combo_book_fmt = NoWheelComboBox()
+        self.combo_book_fmt.addItem(tr_ui("export.book_fmt_pdf", "PDF (Direkt druckfertig als PDF speichern)"), "pdf")
+        self.combo_book_fmt.addItem(tr_ui("export.book_fmt_html", "HTML (Im Browser öffnen / Drucken)"), "html")
+        l_book_opt.addRow(tr_ui("export.book_fmt_label", "Ausgabeformat:"), self.combo_book_fmt)
+
+        self.combo_book_lang = NoWheelComboBox()
+        self.combo_book_lang.addItem(tr_ui("export.lang_de", "Deutsch"), "de")
+        self.combo_book_lang.addItem(tr_ui("export.lang_en", "Englisch"), "en")
+        self.combo_book_lang.addItem(tr_ui("export.lang_all", "Alle Sprachen (Mehrsprachig)"), "all")
+        if parent and hasattr(parent, 'get_notation_lang'):
+            blang = parent.get_notation_lang()
+            bidx = self.combo_book_lang.findData(blang)
+            if bidx >= 0: self.combo_book_lang.setCurrentIndex(bidx)
+        l_book_opt.addRow(tr_ui("export.book_lang_label", "Sprache:"), self.combo_book_lang)
+
+        self.chk_book_limit = QCheckBox(tr_ui("export.book_limit_checkbox", "Nur bis Level:"))
+        self.combo_book_level = NoWheelComboBox()
+        for lvl in self.level_data:
+            self.combo_book_level.addItem(tr_ui("export.limit_level", "Level {num} ({name})", num=lvl['order'], name=lvl['name']), userData=lvl['order'])
+        self.combo_book_level.setEnabled(False)
+        self.chk_book_limit.toggled.connect(self.combo_book_level.setEnabled)
+
+        h_book_lvl = QHBoxLayout()
+        h_book_lvl.addWidget(self.chk_book_limit)
+        h_book_lvl.addWidget(self.combo_book_level)
+        h_book_lvl.addStretch()
+        l_book_opt.addRow(h_book_lvl)
+        layout.addWidget(self.g_book_opt)
 
         layout.addSpacing(scale(10))
 
@@ -261,10 +300,24 @@ class ExportDialog(QDialog):
             self.lbl_est_body.setVisible(False)
 
     def toggle_options(self):
-        # Only show PGN options if PGN is selected
-        self.g_opt.setVisible(self.r_pgn.isChecked())
+        is_pgn = self.r_pgn.isChecked()
+        is_book = self.r_book.isChecked()
+        self.g_scope.setVisible(not is_book)
+        self.g_opt.setVisible(is_pgn)
+        self.g_book_opt.setVisible(is_book)
 
     def on_accept(self):
+        if self.r_book.isChecked():
+            fmt = "book"
+            scope = "all"
+            transpos_mode = 0
+            max_l = self.combo_book_level.currentData() if self.chk_book_limit.isChecked() else None
+            lang = self.combo_book_lang.currentData()
+            book_fmt = self.combo_book_fmt.currentData()
+            self.result_data = (fmt, scope, transpos_mode, max_l, lang, {"book_format": book_fmt})
+            self.accept()
+            return
+
         fmt = "pgn" if self.r_pgn.isChecked() else "db"
         scope = "all" if self.r_all.isChecked() else "current"
         

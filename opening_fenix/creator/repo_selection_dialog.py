@@ -334,33 +334,31 @@ class RepoSelectionDialog(QDialog):
             }
         """)
         
-        scroll_content = QWidget()
-        scroll_content.setObjectName("RepoSelectScrollContent")
-        scroll_content.setStyleSheet("#RepoSelectScrollContent { background: transparent; }")
-        self.grid_layout = QGridLayout(scroll_content)
+        self.scroll_content = QWidget()
+        self.scroll_content.setObjectName("RepoSelectScrollContent")
+        self.scroll_content.setStyleSheet("#RepoSelectScrollContent { background: transparent; }")
+        self.grid_layout = QGridLayout(self.scroll_content)
+        self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
 
+        self.repo_buttons = []
+        self._current_cols = None
+
         repo_names = RepertoireService().get_all_repertoires()
-        row = 0
         if not repo_names:
             lbl_empty = QLabel(tr_ui("repo_selection.empty", "Keine Repertoires gefunden."))
             lbl_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             lbl_empty.setStyleSheet("font-style: italic; color: #666;")
             self.grid_layout.addWidget(lbl_empty, 0, 0)
         else:
-            col = 0
             for name in sorted(repo_names):
                 btn = RepoSelectionButton(name)
                 btn.clicked.connect(lambda checked, n=name: self.on_repo_selected(n))
-                self.grid_layout.addWidget(btn, row, col)
-                col += 1
-                if col > 3: # 4 columns
-                    col = 0
-                    row += 1
-                        
-        self.grid_layout.setRowStretch(row + 1, 1)
-        self.scroll_area.setWidget(scroll_content)
+                self.repo_buttons.append(btn)
+            self._reflow_grid(force=True)
+
+        self.scroll_area.setWidget(self.scroll_content)
         container_layout.addWidget(self.scroll_area)
         layout.addWidget(self.grid_container, 1)
         
@@ -457,6 +455,54 @@ class RepoSelectionDialog(QDialog):
                 self.is_new_repo = True
                 self.new_color = color
                 self.accept()
+
+    def _reflow_grid(self, force=False):
+        if not hasattr(self, "repo_buttons") or not self.repo_buttons:
+            return
+
+        viewport = self.scroll_area.viewport()
+        available_width = viewport.width()
+        if available_width <= 1:
+            available_width = max(self.width(), scale(800)) - scale(70)
+
+        card_width = scale(160)
+        card_height = scale(196)
+        spacing = self.grid_layout.spacing()
+
+        # If vertical scrollbar is not currently visible, account for it if rows exceed viewport height
+        if not self.scroll_area.verticalScrollBar().isVisible():
+            sb_width = max(self.scroll_area.verticalScrollBar().sizeHint().width(), scale(16))
+            initial_cols = max(1, (available_width + spacing) // (card_width + spacing))
+            total_items = len(self.repo_buttons)
+            rows = (total_items + initial_cols - 1) // initial_cols
+            needed_height = rows * card_height + max(0, rows - 1) * spacing
+            if needed_height > viewport.height() > 0:
+                available_width -= sb_width
+
+        cols = max(4, (available_width + spacing) // (card_width + spacing))
+
+        if not force and cols == self._current_cols:
+            return
+
+        self._current_cols = cols
+
+        while self.grid_layout.count():
+            self.grid_layout.takeAt(0)
+
+        for idx, btn in enumerate(self.repo_buttons):
+            row = idx // cols
+            col = idx % cols
+            self.grid_layout.addWidget(btn, row, col)
+
+        self.scroll_content.adjustSize()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._reflow_grid()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._reflow_grid(force=True)
 
     def on_repo_selected(self, name):
         self.selected_repo = name

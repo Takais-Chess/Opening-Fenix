@@ -17,19 +17,20 @@ def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: fl
     Commits a SQLAlchemy session, retrying automatically with exponential backoff if 
     a SQLite database lock error ('database is locked' / 'database is busy') occurs.
     """
+    from sqlalchemy.exc import PendingRollbackError, InvalidRequestError
     delay = initial_delay
     for attempt in range(max_retries):
         try:
             session.commit()
             return
-        except (OperationalError, DatabaseError, sqlite3.OperationalError) as e:
+        except (OperationalError, DatabaseError, sqlite3.OperationalError, PendingRollbackError, InvalidRequestError) as e:
             err_str = str(e).lower()
-            if "database is locked" in err_str or "locked" in err_str or "busy" in err_str:
-                try:
-                    session.rollback()
-                except Exception:
-                    pass
+            if "database is locked" in err_str or "locked" in err_str or "busy" in err_str or "pendingrollbackerror" in err_str or "transaction has been rolled back" in err_str:
                 if attempt == max_retries - 1:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
                     raise
                 # On Qt main thread, process non-input events during retry delay so GUI stays responsive and doesn't freeze
                 try:

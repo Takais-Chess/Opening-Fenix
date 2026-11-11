@@ -74,7 +74,12 @@ class MaintenanceOrchestrator:
     def __init__(self, repo_configs, tasks, engine_settings, 
                  overall_progress_callback, repo_status_callback, check_cancel):
         self.repo_configs = repo_configs
-        self.tasks = tasks
+        if isinstance(tasks, (list, tuple, set)):
+            self.tasks = {t: True for t in tasks}
+        elif isinstance(tasks, dict):
+            self.tasks = dict(tasks)
+        else:
+            self.tasks = {}
         self.engine_settings = engine_settings or {}
         self.overall_cb = overall_progress_callback
         self.repo_status_cb = repo_status_callback # (repo_name, task_type, progress, status)

@@ -4,5 +4,7 @@ PyQt6-sip==13.11.1
 chess==1.11.2
 python-chess==1.999
 SQLAlchemy==2.0.35
+pyspellchecker>=0.8.0
+PyMuPDF>=1.24.0
 pytest==9.0.2
 pytest-qt==4.5.0

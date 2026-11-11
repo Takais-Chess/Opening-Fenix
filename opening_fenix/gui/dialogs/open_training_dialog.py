@@ -17,8 +17,8 @@ from opening_fenix.core.services.tree_navigation_service import TreeNavigationSe
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
 
-def fetch_variation_structure_for_repo(repo_name: str) -> Dict[str, List[str]]:
-    """Helper to fetch variation structure for any repertoire by name."""
+def fetch_variation_structure_for_repo(repo_name: str, lang: Optional[str] = None) -> Dict[str, List[str]]:
+    """Helper to fetch variation structure for any repertoire by name, optionally localized to lang."""
     db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return {}
@@ -26,7 +26,7 @@ def fetch_variation_structure_for_repo(repo_name: str) -> Dict[str, List[str]]:
     session = db_manager.get_session()
     try:
         nav = TreeNavigationService(session)
-        return nav.get_variation_structure()
+        return nav.get_variation_structure(lang=lang)
     except Exception:
         return {}
     finally:
@@ -176,6 +176,7 @@ class OpenTrainingSetupDialog(QDialog):
 
         self.combo_comment_lang = QComboBox()
         self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch (Programmsprache)"), "auto")
+        self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_all", "Alle"), "all")
         self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_en", "Englisch (EN)"), "en")
         self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_de", "Deutsch (DE)"), "de")
 
@@ -207,6 +208,7 @@ class OpenTrainingSetupDialog(QDialog):
 
         # Connect repertoire change to update level & variation dropdowns
         self.combo_repo.currentIndexChanged.connect(self._on_repo_changed)
+        self.combo_comment_lang.currentIndexChanged.connect(self._on_comment_lang_changed)
 
         # Initial populate of level and variation for selected repo
         self._on_repo_changed()
@@ -262,6 +264,51 @@ class OpenTrainingSetupDialog(QDialog):
         shadow.setOffset(0, 8)
         self.setGraphicsEffect(shadow)
 
+    def _get_target_variation_language(self) -> Optional[str]:
+        curr_comment_lang = self.combo_comment_lang.currentData() or "auto"
+        if curr_comment_lang == "auto":
+            if hasattr(self, 'main_window') and hasattr(self.main_window, 'get_effective_comment_language'):
+                return self.main_window.get_effective_comment_language()
+            return "de"
+        return curr_comment_lang
+
+    def _update_variations_dropdown(self, repo_name: str):
+        if not repo_name:
+            self.combo_variation.clear()
+            return
+
+        prev_selected = self.combo_variation.currentData()
+        self.combo_variation.blockSignals(True)
+        self.combo_variation.clear()
+
+        self.combo_variation.addItem(tr_ui("open_training.all_variations", "Alle Variationen"), None)
+
+        target_lang = self._get_target_variation_language()
+        structure = fetch_variation_structure_for_repo(repo_name, lang=target_lang)
+        for v1, v2_list in structure.items():
+            self.combo_variation.addItem(v1, v1)
+            if v2_list:
+                for v2 in v2_list:
+                    self.combo_variation.addItem(f"  └ {v2}", v2)
+
+        # Restore previous selection or active variation filter if applicable
+        target_select = prev_selected or (self.main_window.active_variation_filter if (hasattr(self, 'main_window') and repo_name == self.repertoire_manager.active_repertoire_name) else None)
+        if target_select:
+            idx_var = self.combo_variation.findData(target_select)
+            if idx_var != -1:
+                self.combo_variation.setCurrentIndex(idx_var)
+            else:
+                self.combo_variation.setCurrentIndex(0)
+        else:
+            self.combo_variation.setCurrentIndex(0)
+
+        self.combo_variation.blockSignals(False)
+
+    def _on_comment_lang_changed(self):
+        repo_name = self.combo_repo.currentData()
+        if repo_name:
+            self._update_variations_dropdown(repo_name)
+
     def _on_repo_changed(self):
         repo_name = self.combo_repo.currentData()
         if not repo_name:
@@ -302,29 +349,7 @@ class OpenTrainingSetupDialog(QDialog):
         self.combo_level.blockSignals(False)
 
         # 2. Update Variations dropdown
-        self.combo_variation.blockSignals(True)
-        self.combo_variation.clear()
-
-        self.combo_variation.addItem(tr_ui("open_training.all_variations", "Alle Variationen"), None)
-
-        structure = fetch_variation_structure_for_repo(repo_name)
-        for v1, v2_list in structure.items():
-            self.combo_variation.addItem(v1, v1)
-            if v2_list:
-                for v2 in v2_list:
-                    self.combo_variation.addItem(f"  └ {v2}", v2)
-
-        # Pre-select active variation filter if applicable
-        if repo_name == self.repertoire_manager.active_repertoire_name and self.main_window.active_variation_filter:
-            idx_var = self.combo_variation.findData(self.main_window.active_variation_filter)
-            if idx_var != -1:
-                self.combo_variation.setCurrentIndex(idx_var)
-            else:
-                self.combo_variation.setCurrentIndex(0)
-        else:
-            self.combo_variation.setCurrentIndex(0)
-
-        self.combo_variation.blockSignals(False)
+        self._update_variations_dropdown(repo_name)
 
         # 3. Update Comment Language dropdown
         from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
@@ -345,6 +370,8 @@ class OpenTrainingSetupDialog(QDialog):
         else:
             self.combo_comment_lang.setEnabled(True)
             self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch (Programmsprache)"), "auto")
+            if len(available_langs) > 1 or curr_comment_lang == "all":
+                self.combo_comment_lang.addItem(tr_ui("open_training.comment_lang_all", "Alle"), "all")
             for lang_code in available_langs:
                 code_lower = lang_code.lower()
                 if code_lower == "de":

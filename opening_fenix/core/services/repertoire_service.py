@@ -114,9 +114,9 @@ class RepertoireManager:
         set_meta(self.repo_session, "start_move", str(start_move))
         self.repo_session.commit()
 
-    def get_variation_structure(self):
+    def get_variation_structure(self, lang: Optional[str] = None):
         if not self.nav: return {}
-        return self.nav.get_variation_structure()
+        return self.nav.get_variation_structure(lang=lang)
 
     def _prepare_variation_filter(self, variation_name):
         """Internal helper for training_manager and tests."""
@@ -143,8 +143,9 @@ class RepertoireManager:
         prio_sql = ""
         params: Dict[str, Any] = {"pid": pos.id}
         if variation_name:
-            prio_sql = "CASE WHEN (p.variation_1 = :v OR p.variation_2 = :v OR p.variation_3 = :v) THEN 1 ELSE 0 END DESC,"
+            prio_sql = "CASE WHEN (p.variation_1 = :v OR p.variation_2 = :v OR p.variation_3 = :v OR p.variation_1 LIKE :v_json OR p.variation_2 LIKE :v_json OR p.variation_3 LIKE :v_json) THEN 1 ELSE 0 END DESC,"
             params["v"] = variation_name
+            params["v_json"] = f'%"{variation_name}"%'
 
         query = text(f"""
             SELECT m.id FROM moves m

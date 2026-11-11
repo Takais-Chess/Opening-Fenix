@@ -1024,7 +1024,7 @@ class ChessBoardWidget(QWidget):
             print(f"[ANIM DEBUG] Move completed in {duration_ms:.1f}ms | Frames: {frame_count} | FPS: {avg_fps:.1f}")
 
         # Warn if FPS drops below threshold (e.g. < 100 FPS on high refresh displays or < 50 FPS on 60Hz displays)
-        fps_threshold = min(100.0, self.target_fps * 0.8)
+        fps_threshold = min(70.0, self.target_fps * 0.75)
         if avg_fps < fps_threshold and duration_ms > 50:
             logger.warning(
                 f"[ANIM PERF] Low animation FPS detected: {avg_fps:.1f} FPS "

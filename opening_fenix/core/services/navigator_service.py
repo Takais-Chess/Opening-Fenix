@@ -25,19 +25,24 @@ class RepertoireNavigator:
         move_parent_cache = cache_data['move_parent_cache']
 
         # 1. Find all positions explicitly named (V1, V2, or V3) using in-memory pos_cache when populated
+        v_like = f'%"{variation_name}"%'
         if pos_cache:
+            from opening_fenix.core.utils import matches_variation_name
             root_ids = {
                 p.id for p in pos_cache.values()
-                if p.variation_1 == variation_name
-                or p.variation_2 == variation_name
-                or p.variation_3 == variation_name
+                if matches_variation_name(p.variation_1, variation_name)
+                or matches_variation_name(p.variation_2, variation_name)
+                or matches_variation_name(p.variation_3, variation_name)
             }
         else:
             roots = self.repertoire_manager.repo_session.query(Position.id).filter(
                 or_(
                     Position.variation_1 == variation_name, 
+                    Position.variation_1.like(v_like),
                     Position.variation_2 == variation_name,
-                    Position.variation_3 == variation_name
+                    Position.variation_2.like(v_like),
+                    Position.variation_3 == variation_name,
+                    Position.variation_3.like(v_like)
                 )
             ).all()
             root_ids = {r.id for r in roots}
@@ -64,9 +69,10 @@ class RepertoireNavigator:
             if not p: continue
             
             f = {1: None, 2: None, 3: None}
-            if p.variation_1 == variation_name: f[1] = variation_name
-            if p.variation_2 == variation_name: f[2] = variation_name
-            if p.variation_3 == variation_name: f[3] = variation_name
+            from opening_fenix.core.utils import matches_variation_name
+            if matches_variation_name(p.variation_1, variation_name): f[1] = variation_name
+            if matches_variation_name(p.variation_2, variation_name): f[2] = variation_name
+            if matches_variation_name(p.variation_3, variation_name): f[3] = variation_name
             
             if f[2] or f[3]: f[1] = p.variation_1 or p.cached_v1
             if f[3]: f[2] = p.variation_2 or p.cached_v2
@@ -91,7 +97,8 @@ class RepertoireNavigator:
                         child_cv = cv[i-1]
                         
                         if f_name:
-                            if (child_v and child_v != f_name) or (not child_v and child_cv and child_cv != f_name):
+                            from opening_fenix.core.utils import matches_variation_name
+                            if (child_v and not matches_variation_name(child_v, f_name)) or (not child_v and child_cv and not matches_variation_name(child_cv, f_name)):
                                 pruned = True; break
                         else:
                             if child_v:

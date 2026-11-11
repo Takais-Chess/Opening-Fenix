@@ -214,3 +214,31 @@ def test_repo_selection_button_tooltip_not_blacked_out(qtbot, repo_selection_dia
 
 
 
+
+
+def test_repo_selection_auto_adjusts_columns_on_resize(qtbot):
+    from opening_fenix.gui.scaling import scale
+    with patch("opening_fenix.creator.repo_selection_dialog.RepertoireService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service_class.return_value = mock_service
+        mock_service.get_all_repertoires.return_value = [f"Repo {i}" for i in range(12)]
+        
+        dialog = RepoSelectionDialog()
+        qtbot.addWidget(dialog)
+        dialog.show()
+        qtbot.waitExposed(dialog)
+        
+        # At minimum size, columns should be 4
+        dialog.resize(scale(800), scale(640))
+        dialog._reflow_grid()
+        assert dialog._current_cols == 4
+        
+        # When enlarged significantly (e.g. 1.5x width), columns should increase beyond 4
+        dialog.resize(scale(1300), scale(640))
+        dialog._reflow_grid()
+        assert dialog._current_cols >= 6
+        
+        # When resized back to normal width, columns return to 4
+        dialog.resize(scale(800), scale(640))
+        dialog._reflow_grid()
+        assert dialog._current_cols == 4

@@ -697,7 +697,8 @@ class MainWindow(QMainWindow):
         action_all = QAction(f"Alle {self.repertoire_manager.active_repertoire_name}", self)
         action_all.triggered.connect(lambda: self.set_variation_filter(None))
         menu.addAction(action_all); menu.addSeparator()
-        structure = self.repertoire_manager.get_variation_structure()
+        eff_lang = self.get_effective_comment_language()
+        structure = self.repertoire_manager.get_variation_structure(lang=eff_lang)
         for v1, v2_list in structure.items():
             if v2_list:
                 v1_menu = menu.addMenu(v1)
@@ -712,10 +713,13 @@ class MainWindow(QMainWindow):
         self.active_variation_filter = var_name
         self.active_variation_entry_fen = None # Reset cache
         self._preloaded_challenge = None
-        if var_name and len(var_name) > 12:
-            self.btn_filter.setText(tr_ui("main_window.filter_label_short", "{var}.. ▾", var=var_name[:12]))
+        eff_lang = self.get_effective_comment_language()
+        from opening_fenix.core.utils import parse_variation_name
+        display_name = parse_variation_name(var_name, lang=eff_lang) if var_name else ""
+        if display_name and len(display_name) > 12:
+            self.btn_filter.setText(tr_ui("main_window.filter_label_short", "{var}.. ▾", var=display_name[:12]))
         else:
-            self.btn_filter.setText(tr_ui("main_window.filter_label_named", "{var} ▾", var=var_name or "Filter"))
+            self.btn_filter.setText(tr_ui("main_window.filter_label_named", "{var} ▾", var=display_name or "Filter"))
         
         # If a filter is selected, jump the board to the start of that variation
         if var_name:
@@ -1265,7 +1269,17 @@ class MainWindow(QMainWindow):
                     from opening_fenix.core.utils import clean_chessbase_annotations
                     clean_text = clean_chessbase_annotations(comment_text)
                     if clean_text:
-                        html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{clean_text}</p>"
+                        import re
+                        lines = clean_text.split('\n')
+                        formatted_lines = []
+                        for line in lines:
+                            m = re.match(r'^(\[[A-Za-z]{2,3}\])\s*(.*)$', line)
+                            if m:
+                                formatted_lines.append(f"<b>{m.group(1)}</b> {m.group(2)}")
+                            else:
+                                formatted_lines.append(line)
+                        formatted_comment = "<br>".join(formatted_lines)
+                        html += f"<p style='font-style: italic; color: {COLORS['light_text']}; margin: 0 0 10px 15px;'>{formatted_comment}</p>"
         html += "</body>"
         self.txt_notation.setHtml(html)
         # Use a singleShot timer to ensure the layout is complete before scrolling.

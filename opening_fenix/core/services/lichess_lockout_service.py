@@ -1,5 +1,6 @@
 import json
 import urllib.request
+from opening_fenix.core.utils import safe_urlopen
 import urllib.error
 import urllib.parse
 from typing import Tuple, List, Dict, Optional
@@ -31,7 +32,7 @@ def resolve_token_username(token: str) -> Optional[str]:
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as response:
+        with safe_urlopen(req, timeout=6) as response:
             data = json.loads(response.read().decode("utf-8"))
             username = data.get("username")
             if username:
@@ -72,7 +73,7 @@ def check_players_in_game(
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=6) as response:
+        with safe_urlopen(req, timeout=6) as response:
             data = json.loads(response.read().decode("utf-8"))
             
             playing_users: List[str] = []

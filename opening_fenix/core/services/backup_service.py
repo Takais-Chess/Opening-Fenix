@@ -68,7 +68,7 @@ def compute_repertoire_checksum(repo_name: str) -> str:
     # 1. Hash positions table logically
     if os.path.exists(db_path):
         try:
-            conn = sqlite3.connect(db_path)
+            conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, timeout=10.0)
             c = conn.cursor()
             c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
             if c.fetchone():
@@ -169,7 +169,7 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
         # Query database for comments and levels
         if target_db and os.path.exists(target_db):
             try:
-                conn = sqlite3.connect(target_db)
+                conn = sqlite3.connect(f"file:{os.path.abspath(target_db)}?mode=ro", uri=True, timeout=10.0)
                 c = conn.cursor()
 
                 # 1. EN and DE comments
@@ -296,17 +296,32 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
         "pgn_resources": details["pgn_resources"]
     }
 
+    temp_backup_db = None
     try:
-        # Checkpoint WAL first so that the .db file has the freshest committed data
+        # Attempt safe online SQLite backup to ensure WAL pages are included atomically without locking writers
+        db_source_for_zip = db_path
         try:
-            with sqlite3.connect(db_path, timeout=5) as conn:
-                conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-        except Exception as cp_err:
-            logger.debug(f"wal_checkpoint before backup ({repo_name}): {cp_err}")
+            import tempfile
+            fd, temp_backup_db = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            src_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
+            with sqlite3.connect(src_uri, uri=True, timeout=10.0) as src_conn:
+                with sqlite3.connect(temp_backup_db) as dst_conn:
+                    src_conn.backup(dst_conn)
+            db_source_for_zip = temp_backup_db
+        except Exception as bk_err:
+            logger.debug(f"SQLite online backup fallback ({repo_name}): {bk_err}")
+            # Fallback: passive checkpoint
+            try:
+                with sqlite3.connect(db_path, timeout=5) as conn:
+                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            except Exception:
+                pass
+            db_source_for_zip = db_path
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             # 1. Add DB file
-            zf.write(db_path, os.path.basename(db_path))
+            zf.write(db_source_for_zip, os.path.basename(db_path))
             
             # 2. Add resource PGN files (Model Games, Typical Motives, Tactics, etc.) & cover images
             if os.path.exists(repo_dir):
@@ -345,6 +360,10 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             try: os.remove(zip_path)
             except: pass
         return None
+    finally:
+        if temp_backup_db and os.path.exists(temp_backup_db):
+            try: os.remove(temp_backup_db)
+            except Exception: pass
 
 
 def list_repertoire_backups(repo_name: str) -> list[dict]:

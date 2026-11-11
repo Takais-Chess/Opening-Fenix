@@ -209,43 +209,105 @@ def repair_all_databases_cache() -> str:
 
     return "\n".join(results)
 
+def rebuild_cached_names_fast(session: Session, start_pos: Optional[Position] = None) -> int:
+    """
+    High-performance in-memory recalculation and bulk update of downstream
+    cached variation names (cached_v1, cached_v2, cached_v3).
+    Replaces slow recursive N+1 database queries with an in-memory graph traversal.
+    Returns the number of positions whose cached variation names were updated.
+    """
+    from collections import defaultdict, deque
+    from opening_fenix.core.db.database import commit_with_retry
+
+    pos_records = session.query(
+        Position.id, Position.variation_1, Position.variation_2, Position.variation_3,
+        Position.cached_v1, Position.cached_v2, Position.cached_v3, Position.fen
+    ).all()
+    if not pos_records:
+        return 0
+
+    pos_dict = {
+        row.id: {
+            'v1': row.variation_1, 'v2': row.variation_2, 'v3': row.variation_3,
+            'cv1': row.cached_v1, 'cv2': row.cached_v2, 'cv3': row.cached_v3,
+            'fen': row.fen
+        } for row in pos_records
+    }
+
+    moves = session.query(Move.from_position_id, Move.to_position_id, Move.priority_score).all()
+
+    children = defaultdict(list)
+    parents = defaultdict(list)
+    for from_id, to_id, prio in moves:
+        children[from_id].append(to_id)
+        parents[to_id].append((from_id, prio or 0.0))
+
+    for to_id in parents:
+        parents[to_id].sort(key=lambda x: x[1], reverse=True)
+
+    start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+    start_pos_id = start_pos.id if start_pos else next((pid for pid, d in pos_dict.items() if d['fen'] and d['fen'].startswith(start_fen)), None)
+
+    root_ids = [start_pos_id] if start_pos_id else []
+    for pid in pos_dict:
+        if pid not in parents and pid != start_pos_id:
+            root_ids.append(pid)
+
+    queue = deque(root_ids)
+    visited = set()
+    updates = []
+
+    while queue:
+        curr_id = queue.popleft()
+        curr = pos_dict.get(curr_id)
+        if not curr:
+            continue
+
+        new_v1, new_v2, new_v3 = curr['v1'], curr['v2'], curr['v3']
+        if not (new_v1 and new_v2 and new_v3):
+            p_v1, p_v2, p_v3 = None, None, None
+            for p_id, _ in parents.get(curr_id, []):
+                p_data = pos_dict.get(p_id)
+                if not p_data:
+                    continue
+                if p_v1 is None and p_data['cv1']: p_v1 = p_data['cv1']
+                if p_v2 is None and p_data['cv2']: p_v2 = p_data['cv2']
+                if p_v3 is None and p_data['cv3']: p_v3 = p_data['cv3']
+                if p_v1 and p_v2 and p_v3:
+                    break
+            if not new_v1: new_v1 = p_v1
+            if not new_v2: new_v2 = p_v2
+            if not new_v3: new_v3 = p_v3
+
+        changed = (curr['cv1'] != new_v1) or (curr['cv2'] != new_v2) or (curr['cv3'] != new_v3)
+        curr['cv1'], curr['cv2'], curr['cv3'] = new_v1, new_v2, new_v3
+
+        if not changed and curr_id in visited:
+            continue
+        visited.add(curr_id)
+
+        if changed:
+            updates.append({
+                'id': curr_id,
+                'cached_v1': new_v1,
+                'cached_v2': new_v2,
+                'cached_v3': new_v3
+            })
+
+        for child_id in children.get(curr_id, []):
+            queue.append(child_id)
+
+    if updates:
+        batch_size = 500
+        for i in range(0, len(updates), batch_size):
+            session.bulk_update_mappings(Position, updates[i:i + batch_size])
+        commit_with_retry(session)
+
+    return len(updates)
+
+
 def _update_cached_names_recursive_standalone(session: Session, pos: Position, visited: Optional[Set[int]] = None) -> None:
     """
-    Recursively updates cached variation names downstream.
-    Used for database repairs.
+    High-performance wrapper to update cached variation names downstream.
     """
-    if visited is None: visited = set()
-    
-    new_v1, new_v2, new_v3 = pos.variation_1, pos.variation_2, pos.variation_3
-    
-    if not (new_v1 and new_v2 and new_v3):
-        incoming_moves = session.query(Move).filter_by(to_position_id=pos.id).order_by(Move.priority_score.desc()).all()
-        p_v1, p_v2, p_v3 = None, None, None
-        for move in incoming_moves:
-            parent = session.get(Position, move.from_position_id)
-            if not parent: continue
-            if p_v1 is None and parent.cached_v1: p_v1 = parent.cached_v1
-            if p_v2 is None and parent.cached_v2: p_v2 = parent.cached_v2
-            if p_v3 is None and parent.cached_v3: p_v3 = parent.cached_v3
-            if p_v1 and p_v2 and p_v3: break
-        
-        if not new_v1: new_v1 = p_v1
-        if not new_v2: new_v2 = p_v2
-        if not new_v3: new_v3 = p_v3
-            
-    names_changed = (pos.cached_v1 != new_v1) or (pos.cached_v2 != new_v2) or (pos.cached_v3 != new_v3)
-
-    pos.cached_v1 = new_v1
-    pos.cached_v2 = new_v2
-    pos.cached_v3 = new_v3
-    
-    if not names_changed and pos.id in visited:
-        return
-        
-    visited.add(pos.id)
-    
-    children_moves = session.query(Move).filter_by(from_position_id=pos.id).all()
-    for move in children_moves:
-        child_pos = session.get(Position, move.to_position_id)
-        if child_pos:
-            _update_cached_names_recursive_standalone(session, child_pos, visited)
+    rebuild_cached_names_fast(session, start_pos=pos)

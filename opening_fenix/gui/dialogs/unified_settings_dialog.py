@@ -24,7 +24,7 @@ from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.data_tools import (
     get_base_path, get_user_dir, get_default_user_dir, get_custom_data_dir, 
     set_custom_data_dir, migrate_user_data, get_meta, set_meta,
-    copy_repertoire_comments
+    copy_repertoire_comments, copy_repertoire_variations
 )
 from opening_fenix.core.utils import (
     get_repertoire_db_path, get_repertoire_dir, get_elo_display, get_elo_internal,
@@ -575,6 +575,8 @@ class RepertoireConfigCard(QFrame):
         else:
             self.combo_lang.setEnabled(True)
             self.combo_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch"), "auto")
+            if len(available) > 1 or curr_lang == "all":
+                self.combo_lang.addItem(tr_ui("open_training.comment_lang_all", "Alle"), "all")
             for lang_code in available:
                 code_lower = lang_code.lower()
                 if code_lower == "de":
@@ -1386,6 +1388,12 @@ class UnifiedSettingsDialog(QDialog):
 
     def sync_appearance_controls(self):
         """Synchronizes theme, highlight color, volume, etc. with live settings."""
+        if hasattr(self, 'chk_spellcheck'):
+            from opening_fenix.core.spellcheck_service import get_spellcheck_service
+            self.chk_spellcheck.blockSignals(True)
+            self.chk_spellcheck.setChecked(get_spellcheck_service().is_enabled())
+            self.chk_spellcheck.blockSignals(False)
+
         if hasattr(self, 'combo_theme'):
             current_theme = self.get_setting("theme", "Braun (Klassisch)")
             if isinstance(current_theme, str):
@@ -2435,7 +2443,25 @@ class UnifiedSettingsDialog(QDialog):
         v_tabs.addLayout(grid_tabs)
         layout.addWidget(g_tabs)
 
+        # Editor & Rechtschreibung Group
+        g_editor = QGroupBox(tr_widget("repo_settings.group_editor", "✍️ Kommentar-Editor & Rechtschreibung"))
+        v_editor = QVBoxLayout(g_editor)
+        v_editor.setContentsMargins(scale(16), scale(16), scale(16), scale(16))
+        v_editor.setSpacing(scale(8))
+        self.chk_spellcheck = QCheckBox(tr_widget("repo_settings.chk_spellcheck", "Automatische Rechtschreibprüfung in Kommentaren aktivieren"))
+        from opening_fenix.core.spellcheck_service import get_spellcheck_service
+        self.chk_spellcheck.setChecked(get_spellcheck_service().is_enabled())
+        self.chk_spellcheck.toggled.connect(self.on_spellcheck_toggled)
+        v_editor.addWidget(self.chk_spellcheck)
+        layout.addWidget(g_editor)
+
         layout.addStretch()
+
+    def on_spellcheck_toggled(self, checked):
+        from opening_fenix.core.spellcheck_service import get_spellcheck_service
+        get_spellcheck_service().set_enabled(checked)
+        if self.main_window and hasattr(self.main_window, '_refresh_spell_checkers'):
+            self.main_window._refresh_spell_checkers()
 
     def on_theme_changed(self, *args):
         theme_name = self.combo_theme.currentData() or self.combo_theme.currentText()
@@ -3809,6 +3835,12 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_cr_desc.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
         self.txt_cr_desc.setFixedHeight(scale(130))
         self.txt_cr_desc.textChanged.connect(self.save_creator_description)
+
+        from opening_fenix.gui.widgets.spell_text_edit import attach_spell_check
+        self.txt_cr_desc_highlighter = attach_spell_check(
+            self.txt_cr_desc,
+            get_lang_fn=lambda: getattr(self, "current_repo_comment_lang", "de")
+        )
         lbl_desc_hdr = QLabel(tr_ui("repo_settings.label_description", "📝 Beschreibung:"))
         lbl_desc_hdr.setStyleSheet(f"font-weight: 600; color: #0f172a; font-size: {scale(13)}px;")
         v_id.addWidget(lbl_desc_hdr)
@@ -5014,14 +5046,16 @@ class UnifiedSettingsDialog(QDialog):
         h_exp = QHBoxLayout(w_exp_btns)
         h_exp.setContentsMargins(0, 0, 0, 0)
         h_exp.setSpacing(scale(8))
+        btn_book = QPushButton(tr_widget("repo_settings.btn_export_book", "📖 Lehrbuch (PDF)"))
+        btn_book.clicked.connect(self.export_book_direct_dialog)
         btn_export = QPushButton(tr_widget("repo_settings.btn_export_simple", "📤 Export (PGN/DB)"))
         btn_export.clicked.connect(self.export_repertoire_dialog)
         btn_copy = QPushButton(tr_widget("repo_settings.btn_copy_course", "👯 Gesamten Kurs kopieren"))
         btn_copy.clicked.connect(self.copy_active_course)
-        h_exp.addWidget(btn_export); h_exp.addWidget(btn_copy)
+        h_exp.addWidget(btn_book); h_exp.addWidget(btn_export); h_exp.addWidget(btn_copy)
         v_exp.addWidget(self._make_hairline_row(
             tr_ui("repo_settings.lbl_export_row", "Repertoire exportieren oder duplizieren"),
-            tr_ui("repo_settings.lbl_export_sub", "Exportiert das Repertoire als PGN/Datenbank oder erstellt eine lokale Kopie."),
+            tr_ui("repo_settings.lbl_export_sub", "Exportiert als druckfertiges Lehrbuch (PDF/HTML), PGN, Datenbank oder erstellt eine Kopie."),
             w_exp_btns,
             is_last=False
         ))
@@ -5038,40 +5072,134 @@ class UnifiedSettingsDialog(QDialog):
 
         layout.addStretch()
 
+    def export_book_direct_dialog(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend: return
+        d = ExportDialog(backend, self)
+        d.r_book.setChecked(True)
+        if d.exec() == QDialog.DialogCode.Accepted:
+            self._handle_export_result(backend, d.result_data)
+
     def export_repertoire_dialog(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend: return
         d = ExportDialog(backend, self)
         if d.exec() == QDialog.DialogCode.Accepted:
-            result = d.result_data
-            fmt, scope, transpos, max_l, lang = result[:5]
-            est = result[5] if len(result) > 5 else None
-            est_total = est.get("estimated_moves", 0) if isinstance(est, dict) else 0
+            self._handle_export_result(backend, d.result_data)
 
-            if fmt == "pgn":
-                start_fen = None
-                if scope == "current":
-                    if hasattr(backend, "window") and backend.window and hasattr(backend.window, "board_widget"):
-                        start_fen = backend.window.board_widget.board.fen()
+    def _handle_export_result(self, backend, result):
+        if not result:
+            return
+        fmt, scope, transpos, max_l, lang = result[:5]
+        est = result[5] if len(result) > 5 else None
+        est_total = est.get("estimated_moves", 0) if isinstance(est, dict) else 0
 
-                p = QProgressDialog(tr_ui("export.progress_label", "Exportiere Züge..."), tr_ui("export.btn_cancel", "Abbrechen"), 0, est_total or 0, self)
-                p.setWindowModality(Qt.WindowModality.WindowModal)
-                p.setMinimumDuration(300)
+        if fmt == "pgn":
+            start_fen = None
+            if scope == "current":
+                if hasattr(backend, "window") and backend.window and hasattr(backend.window, "board_widget"):
+                    start_fen = backend.window.board_widget.board.fen()
 
-                def update_progress(count):
-                    if est_total > 0:
-                        p.setValue(min(count, est_total))
-                        p.setLabelText(tr_ui("export.progress_label", "Exportiere Züge ({curr} / {total})...", curr=f"{count:,}", total=f"{est_total:,}"))
-                    else:
-                        p.setValue(count)
-                    return p.wasCanceled()
+            p = QProgressDialog(tr_ui("export.progress_label", "Exportiere Züge..."), tr_ui("export.btn_cancel", "Abbrechen"), 0, est_total or 0, self)
+            p.setWindowModality(Qt.WindowModality.WindowModal)
+            p.setMinimumDuration(300)
 
-                pgn = backend.export_pgn(start_fen, transpos, update_progress, max_l, language=lang)
-                if pgn:
-                    path, _ = QFileDialog.getSaveFileName(self, "Export Speichern", f"{backend.active_repo_name}.pgn", "PGN (*.pgn)")
-                    if path:
-                        with open(path, "w", encoding="utf-8") as f: f.write(pgn)
-                        QMessageBox.information(self, "Erfolg", "PGN erfolgreich exportiert.")
+            def update_progress(count):
+                if est_total > 0:
+                    p.setValue(min(count, est_total))
+                    p.setLabelText(tr_ui("export.progress_label", "Exportiere Züge ({curr} / {total})...", curr=f"{count:,}", total=f"{est_total:,}"))
+                else:
+                    p.setValue(count)
+                return p.wasCanceled()
+
+            pgn = backend.export_pgn(start_fen, transpos, update_progress, max_l, language=lang)
+            if pgn:
+                path, _ = QFileDialog.getSaveFileName(self, "Export Speichern", f"{backend.active_repo_name}.pgn", "PGN (*.pgn)")
+                if path:
+                    with open(path, "w", encoding="utf-8") as f: f.write(pgn)
+                    QMessageBox.information(self, "Erfolg", "PGN erfolgreich exportiert.")
+
+        elif fmt == "book":
+            book_fmt = est.get("book_format", "pdf") if isinstance(est, dict) else "pdf"
+            ext_filter = "PDF-Dokument (*.pdf)" if book_fmt == "pdf" else "HTML-Webseite (*.html)"
+            default_ext = ".pdf" if book_fmt == "pdf" else ".html"
+            default_name = f"{backend.active_repo_name} - Lehrbuch{default_ext}"
+            doc_dir = os.path.expanduser("~/Documents")
+            if not os.path.isdir(doc_dir):
+                doc_dir = os.path.expanduser("~")
+            initial_path = os.path.join(doc_dir, default_name)
+
+            path, _ = QFileDialog.getSaveFileName(self, "Lehrbuch Speichern", initial_path, ext_filter)
+            if not path:
+                return
+
+            from opening_fenix.core.threads import BookExportThread
+            db_path = getattr(backend, "db_path", None) or get_repertoire_db_path(backend.active_repo_name)
+
+            p = QProgressDialog(tr_ui("export.progress_book", "Erstelle Repertoire-Lehrbuch..."), tr_ui("export.btn_cancel", "Abbrechen"), 0, 100, self)
+            p.setWindowModality(Qt.WindowModality.WindowModal)
+            p.setMinimumDuration(0)
+            p.setAutoClose(False)
+            p.setAutoReset(False)
+            p.setValue(5)
+            self._book_export_progress = p
+
+            self._book_export_thread = BookExportThread(
+                db_path=db_path,
+                output_path=path,
+                output_format=book_fmt,
+                level=max_l,
+                language=lang
+            )
+
+            def cleanup_progress():
+                dlg = getattr(self, "_book_export_progress", None)
+                if dlg:
+                    self._book_export_progress = None
+                    try:
+                        dlg.blockSignals(True)
+                        dlg.close()
+                        dlg.deleteLater()
+                    except Exception:
+                        pass
+
+            def on_progress(pct, msg):
+                dlg = getattr(self, "_book_export_progress", None)
+                if dlg:
+                    dlg.setValue(pct)
+                    dlg.setLabelText(msg)
+
+            def on_success(final_file):
+                cleanup_progress()
+                res = QMessageBox.information(
+                    self,
+                    "Lehrbuch exportiert",
+                    f"Das Repertoire-Lehrbuch wurde erfolgreich als {book_fmt.upper()} gespeichert:\n\n{final_file}\n\nMöchten Sie die Datei jetzt öffnen?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                )
+                if res == QMessageBox.StandardButton.Yes:
+                    try:
+                        os.startfile(final_file)
+                    except Exception:
+                        import webbrowser
+                        webbrowser.open(final_file)
+
+            def on_error(err_msg):
+                cleanup_progress()
+                QMessageBox.critical(self, "Exportfehler", f"Fehler beim Erstellen des Lehrbuchs:\n{err_msg}")
+
+            def on_cancel():
+                if hasattr(self, "_book_export_thread") and self._book_export_thread and self._book_export_thread.isRunning():
+                    self._book_export_thread.cancel()
+                cleanup_progress()
+
+            p.canceled.connect(on_cancel)
+            self._book_export_thread.progress_signal.connect(on_progress)
+            self._book_export_thread.success_signal.connect(on_success)
+            self._book_export_thread.error_signal.connect(on_error)
+
+            self._book_export_thread.start()
 
     def copy_active_course(self):
         backend = self.ensure_backend_for_active_repo()
@@ -5358,6 +5486,14 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("repo_settings.lbl_transfer_row", "Kommentare zwischen Sprachen kopieren / verschieben"),
             tr_ui("repo_settings.lbl_transfer_sub", "Überträgt vorhandene Kommentare von einer Sprachspalte (z. B. DE) in eine andere (z. B. EN)."),
             btn_trans,
+            is_last=False
+        ))
+        btn_trans_var = QPushButton(tr_widget("repo_settings.btn_transfer_variations", "🏷️ Variantennamen übertragen..."))
+        btn_trans_var.clicked.connect(self.open_variation_transfer_dialog)
+        v_clean.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_transfer_var_row", "Variantennamen zwischen Sprachen kopieren / verschieben"),
+            tr_ui("repo_settings.lbl_transfer_var_sub", "Überträgt alle Variantennamen (V1, V2, V3) von einer Sprache (z. B. DE) in eine andere (z. B. EN)."),
+            btn_trans_var,
             is_last=True
         ))
         layout.addWidget(g_clean)
@@ -5674,6 +5810,53 @@ class UnifiedSettingsDialog(QDialog):
         chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Verschieben")); v.addWidget(chk_r)
         btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Übertragen")); btn.setProperty("class", "Primary")
         btn.clicked.connect(lambda: (copy_repertoire_comments(backend.active_repo_name, c_s.currentText().lower(), c_t.currentText().lower(), chk_o.isChecked(), chk_r.isChecked()), dlg.accept(), self.refresh_creator_info(), QMessageBox.information(self, "Erfolg", "Kommentare übertragen.")))
+        v.addWidget(btn); dlg.exec()
+
+    def open_variation_transfer_dialog(self):
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name: return
+        dlg = QDialog(self); dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_var_title", "Variantennamen übertragen"))
+        v = QVBoxLayout(dlg)
+        f = QFormLayout()
+        c_s = NoWheelComboBox(); c_s.addItems(["DE", "EN", "ES", "FR", "IT", "RU"]); c_s.setCurrentText("DE")
+        c_t = NoWheelComboBox(); c_t.addItems(["EN", "DE", "ES", "FR", "IT", "RU"]); c_t.setCurrentText("EN")
+        f.addRow(tr_ui("repo_settings.dlg_transfer_source", "Quelle:"), c_s)
+        f.addRow(tr_ui("repo_settings.dlg_transfer_target", "Ziel:"), c_t)
+        v.addLayout(f)
+        chk_o = QCheckBox(tr_widget("repo_settings.dlg_transfer_overwrite", "Überschreiben"))
+        v.addWidget(chk_o)
+        chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Verschieben"))
+        v.addWidget(chk_r)
+        btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Übertragen"))
+        btn.setProperty("class", "Primary")
+        def _exec():
+            btn.setEnabled(False)
+            from PyQt6.QtWidgets import QApplication
+            from PyQt6.QtCore import Qt
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                success, msg, count = copy_repertoire_variations(
+                    backend.active_repo_name,
+                    c_s.currentText().lower(),
+                    c_t.currentText().lower(),
+                    overwrite=chk_o.isChecked(),
+                    remove_source=chk_r.isChecked()
+                )
+            finally:
+                QApplication.restoreOverrideCursor()
+                btn.setEnabled(True)
+
+            dlg.accept()
+            self.refresh_creator_info()
+            if hasattr(self, 'main_window') and hasattr(self.main_window, 'creator_window') and self.main_window.creator_window:
+                self.main_window.creator_window.update_structure_tree()
+                if hasattr(self.main_window.creator_window, '_update_variant_inputs_display'):
+                    self.main_window.creator_window._update_variant_inputs_display()
+            if success:
+                QMessageBox.information(self, tr_ui("repo_settings.dlg_done", "Fertig"), msg)
+            else:
+                QMessageBox.warning(self, tr_ui("repo_settings.dlg_cleanup_title", "Hinweis"), msg)
+        btn.clicked.connect(_exec)
         v.addWidget(btn); dlg.exec()
 
     # ─── PAGE 4.6: Database Diagnostics (Creator) ───────────────────────────
@@ -6465,7 +6648,7 @@ class UnifiedSettingsDialog(QDialog):
         workers = [getattr(self, 'stats_loader', None), getattr(self, 'creator_stats_loader', None),
                    getattr(self, 'stats_worker', None), getattr(self, 'w_eng', None),
                    getattr(self, 'w_lich', None), getattr(self, 'm_thread', None),
-                   getattr(self, 'update_worker', None)]
+                   getattr(self, 'update_worker', None), getattr(self, '_book_export_thread', None)]
         for w in workers:
             if w and w.isRunning():
                 try: w.disconnect()

@@ -1292,7 +1292,8 @@ def verify_lichess_token(token: str) -> Tuple[bool, str]:
 
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=8) as response:
+        from opening_fenix.core.utils import safe_urlopen
+        with safe_urlopen(req, timeout=8) as response:
             if response.status == 200:
                 data = json.loads(response.read().decode('utf-8'))
                 username = data.get('username', 'Unbekannt')

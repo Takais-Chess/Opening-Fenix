@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+from PyInstaller.utils.hooks import collect_data_files
 
 is_share = os.environ.get('FENIX_SHARE_BUILD') == '1' or os.environ.get('FENIX_PUBLIC_BUILD') == '1' or os.environ.get('APP_BUILD_TYPE', '').lower() == 'public'
 app_name = 'Opening Fenix Public' if is_share else 'Opening Fenix'
@@ -22,6 +23,11 @@ def get_safe_tree_datas(src_dir):
     return datas
 
 datas_list = [('assets', 'assets'), ('QUICKSTART.md', '.'), ('TECHNICAL_DEEP_DIVE.md', '.')]
+try:
+    datas_list.extend(collect_data_files('spellchecker'))
+except Exception:
+    pass
+
 if os.path.exists('repertoires'):
     datas_list.extend(get_safe_tree_datas('repertoires'))
 
@@ -30,7 +36,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=datas_list,
-    hiddenimports=['certifi'],
+    hiddenimports=['certifi', 'spellchecker', 'fitz', 'pymupdf'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

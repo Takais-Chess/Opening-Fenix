@@ -123,3 +123,47 @@ def test_parse_comment_no_cross_language_fallback():
 
     # When requesting an unsupported language (e.g., Spanish):
     assert parse_comment(multi_comment, "es") == ""
+
+
+def test_parse_comment_all_languages():
+    """Verify that 'all' comment language returns all available translations formatted."""
+    multi_comment = json.dumps({"de": "Guter Springerzug.", "en": "Good knight move."})
+    de_only = json.dumps({"de": "Nur auf Deutsch vorhanden."})
+    en_only = json.dumps({"en": "Only available in English."})
+    plain = "Klassischer Zug."
+    pgn_tagged = "[:de] Text DE [:en] Text EN"
+
+    # Multi: returns [DE] first, then [EN]
+    parsed_multi = parse_comment(multi_comment, "all")
+    assert "[DE] Guter Springerzug." in parsed_multi
+    assert "[EN] Good knight move." in parsed_multi
+    lines = parsed_multi.split("\n")
+    assert lines[0] == "[DE] Guter Springerzug."
+    assert lines[1] == "[EN] Good knight move."
+
+    # Single-language in JSON
+    assert parse_comment(de_only, "all") == "[DE] Nur auf Deutsch vorhanden."
+    assert parse_comment(en_only, "all") == "[EN] Only available in English."
+
+    # Plain text comment
+    assert parse_comment(plain, "all") == "Klassischer Zug."
+
+    # PGN tagged
+    parsed_pgn = parse_comment(pgn_tagged, "all")
+    assert "[DE] Text DE" in parsed_pgn
+    assert "[EN] Text EN" in parsed_pgn
+
+
+def test_training_service_comment_language_all(tmp_path):
+    """Test setting and getting 'all' language in TrainingService."""
+    db_file = str(tmp_path / "ts_profile_all.db")
+    db = DatabaseManager(db_file, base=UserBase)
+
+    ts = TrainingManager("TestProfile", None)
+    ts.user_session = db.get_session()
+
+    ts.set_comment_language("all", "French Defense")
+    assert ts.get_comment_language("French Defense") == "all"
+
+    ts.user_session.close()
+    db.close()

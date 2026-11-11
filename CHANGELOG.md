@@ -2,6 +2,14 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.5] - 2026-11-11
+
+### Fixed & Improved
+- **PDF Repertoire Textbook Export**: Fixed command-line path parsing in headless Chromium (Microsoft Edge/Chrome) when exporting courses with apostrophes (e.g. `Gawain's 1.e4 e5`), spaces, or special characters by isolating output rendering to clean temporary files and safely moving to destination.
+- **SQLite Connection Safety**: Wrapped book export database connections in rigorous `try ... finally: conn.close()` to prevent file locks on cancellation or errors.
+- **Repertoire Switch & Progress Stability**: Safely blocked progress dialog signals prior to destruction to avoid recursive dialog close events, and disconnected/stopped background enrichment and FEN index threads before loading a new repertoire to eliminate `0xc0000005` (Access Violation) and `0xc0000409` aborts.
+- **Translations Completeness**: Added missing translation keys for PDF export and editor settings in German and English.
+
 ## [1.3.4] - 2026-11-09
 
 ### Fixed & Improved

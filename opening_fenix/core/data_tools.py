@@ -11,7 +11,7 @@ from opening_fenix.core.services.lichess_service import (
     is_valid_token_string, clean_lichess_token, verify_lichess_token
 )
 
-from opening_fenix.core.services.repertoire_core_service import copy_repertoire_comments
+from opening_fenix.core.services.repertoire_core_service import copy_repertoire_comments, copy_repertoire_variations
 
 __all__ = [
     'get_base_path', 'get_user_dir', 'get_default_user_dir', 'get_custom_data_dir', 
@@ -22,6 +22,7 @@ __all__ = [
     'calculate_priority_scores', 'calculate_local_priority_scores', 'detect_islands',
     'run_lichess_import', 'run_lichess_import_and_calculate_scores', 'delete_lichess_data', 'ELO_MAPPING',
     'is_valid_token_string', 'clean_lichess_token', 'verify_lichess_token',
-    'copy_repertoire_comments'
+    'copy_repertoire_comments',
+    'copy_repertoire_variations'
 ]
 

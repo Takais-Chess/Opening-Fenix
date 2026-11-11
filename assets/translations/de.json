@@ -814,7 +814,17 @@
     "btn_parens": "🧹 Äußere Klammern ( ) um Kommentare entfernen",
     "lbl_parens_row": "Umschließende runde Klammern entfernen",
     "lbl_parens_sub": "Entfernt überflüssige ( ) um ganze Kommentare oder Abschnitte. Klammern innerhalb von Sätzen bleiben erhalten.",
-    "msg_parens_cleaned": "{count} Kommentare bereinigt."
+    "msg_parens_cleaned": "{count} Kommentare bereinigt.",
+    "btn_transfer_variations": "🏷️ Variantennamen übertragen...",
+    "dlg_transfer_var_title": "Variantennamen übertragen",
+    "lbl_transfer_var_row": "Variantennamen zwischen Sprachen kopieren / verschieben",
+    "lbl_transfer_var_sub": "Überträgt alle Variantennamen (V1, V2, V3) von einer Sprache (z. B. DE) in eine andere (z. B. EN).",
+    "msg_transfer_var_success": "{count} Variantennamen von '{src}' nach '{target}' übertragen.",
+    "msg_transfer_var_move_success": "{count} Variantennamen von '{src}' nach '{target}' verschoben.",
+    "msg_transfer_var_error": "Fehler beim Übertragen der Variantennamen: {error}",
+    "btn_export_book": "📖 Lehrbuch (PDF)",
+    "chk_spellcheck": "Rechtschreibprüfung aktivieren",
+    "group_editor": "Editor & Text"
   },
   "course_intro": {
     "default_repo_name": "Dein neues Repertoire",
@@ -1154,7 +1164,12 @@
     "tooltip_translate": "Automatisch mit Google Translate übersetzen",
     "translating_status": "⏳ Übersetzen...",
     "translate_confirm_title": "Übersetzung überschreiben?",
-    "translate_confirm_msg": "Möchtest du das aktuelle Übersetzungsfeld durch eine automatische Übersetzung überschreiben?"
+    "translate_confirm_msg": "Möchtest du das aktuelle Übersetzungsfeld durch eine automatische Übersetzung überschreiben?",
+    "tooltip_swap_languages": "Sprachen tauschen (Quelle ⇄ Ziel)",
+    "translate_error_title": "Übersetzungsfehler",
+    "translate_error_msg": "Die Übersetzung ist fehlgeschlagen. Bitte prüfe deine Internetverbindung.",
+    "tooltip_suggest_var": "💡 Vorschlag: '{name}' (Klicken zum Übernehmen)",
+    "tooltip_no_suggest_var": "Kein Eröffnungsname für Variante {idx} bekannt"
   },
   "main_window": {
     "window_title": "Opening Fenix - {profile}",
@@ -1189,6 +1204,7 @@
     "lbl_variation": "Variation:",
     "lbl_comment_lang": "Kommentarsprache:",
     "comment_lang_auto": "Automatisch (Programmsprache)",
+    "comment_lang_all": "Alle",
     "comment_lang_en": "Englisch (EN)",
     "comment_lang_de": "Deutsch (DE)",
     "no_comments": "Keine Kommentare",
@@ -1238,7 +1254,8 @@
     "est_warn_critical_body": "Durch ungekürzte Transpositionen wächst die PGN auf ca. {moves} Züge (~{size_mb} MB, {ratio}x Vergrößerung).\n• Export-Dauer: Mehrere Minuten\n• Externe Programme (Lichess, ChessBase) können bei dieser Dateigröße einfrieren oder die PGN ablehnen.\n• Empfehlung: 'Abschneiden (Mit Zugfolge-Kommentar)' wählen.",
     "confirm_huge_title": "Sehr große PGN-Datei exportieren?",
     "confirm_huge_text": "Die PGN wird durch ungekürzte Transpositionen auf ca. {moves} Züge (~{size_mb} MB, {ratio}x Vergrößerung) expandiert.\n\nDer Export kann mehrere Minuten dauern und externe Programme überlasten.\n\nMöchten Sie wirklich fortfahren?",
-    "progress_label": "Exportiere Züge ({curr} / {total})..."
+    "progress_label": "Exportiere Züge ({curr} / {total})...",
+    "progress_book": "Erstelle Repertoire-Lehrbuch..."
   },
   "faq": {
     "window_title": "Häufig gestellte Fragen (FAQ)",
@@ -1611,5 +1628,11 @@
     "unit_days": "Tage",
     "unit_months": "Monate"
   },
-  "update_rate_limited": "GitHub-Anfragelimit vorübergehend erreicht. Bitte versuche es in wenigen Minuten erneut."
+  "update_rate_limited": "GitHub-Anfragelimit vorübergehend erreicht. Bitte versuche es in wenigen Minuten erneut.",
+  "spellcheck.no_suggestions": "Keine Vorschläge",
+  "spellcheck.add_to_dict": "„{word}“ zum Wörterbuch hinzufügen",
+  "spellcheck.ignore": "„{word}“ ignorieren",
+  "spellcheck.enabled": "Rechtschreibprüfung",
+  "repo_settings.group_editor": "✍️ Kommentar-Editor & Rechtschreibung",
+  "repo_settings.chk_spellcheck": "Automatische Rechtschreibprüfung in Kommentaren aktivieren"
 }

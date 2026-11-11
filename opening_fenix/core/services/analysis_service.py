@@ -505,7 +505,15 @@ def run_db_analysis(
                 try:
                     commit_with_retry(session)
                 except Exception as commit_err:
-                    session.rollback()
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                    session = db.get_session()
                     from opening_fenix.core.logger import logger
                     logger.warning(f"Batch commit warning during analysis: {commit_err}")
         
@@ -523,9 +531,20 @@ def run_db_analysis(
         return False, f"Fehler bei der Analyse: {e}"
     finally:
         if engine:
-            engine.quit()
-        session.close()
-        db.close()
+            try:
+                engine.quit()
+            except Exception:
+                pass
+        if session:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if db:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 def _resolve_status(status_key: str) -> str:
     if not status_key:
@@ -697,7 +716,8 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                     headers['Authorization'] = f'Bearer {lichess_token}'
 
                 req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=10) as response:
+                from opening_fenix.core.utils import safe_urlopen
+                with safe_urlopen(req, timeout=10) as response:
                     data = json.loads(response.read().decode('utf-8'))
                     moves_data = data.get('moves', [])
                     if moves_data:
@@ -763,7 +783,10 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
                     logger.error(f"Engine analysis failed for enrichment: {e}")
                 finally:
                     if engine:
-                        engine.quit()
+                        try:
+                            engine.quit()
+                        except Exception:
+                            pass
 
         # ── Phase 3: Ultra-fast write transaction (~1ms) ──
         session = db.get_session()

@@ -427,10 +427,11 @@ class CreatorBackend:
         self._reachable_ids_cache[cache_key] = reachable
         return reachable
 
-    def get_variation_structure(self):
+    def get_variation_structure(self, lang=None):
         """
         Builds a hierarchical dictionary mapping V1 variation names to a list of V2 names.
-        Modified version of the音声's logic for the Creator context.
+        Modified version of the logic for the Creator context.
+        Optionally localizes variation names to target language (e.g. 'de', 'en', 'all').
         """
         if not self.session: return {}
         
@@ -453,6 +454,12 @@ class CreatorBackend:
             final_v2 = v2 if v2 else cv2
 
             if not final_v1: final_v1 = "Sonstiges"
+            if lang and final_v1 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                final_v1 = parse_variation_name(final_v1, lang=lang)
+            if lang and final_v2 and final_v2 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                final_v2 = parse_variation_name(final_v2, lang=lang)
             
             if final_v1 not in structure:
                 structure[final_v1] = set()
@@ -1667,7 +1674,7 @@ class CreatorBackend:
             with open(path, "r", encoding="utf-8") as f: return self.import_pgn_text(f.read(), level)
         except Exception as e: return False, str(e)
 
-    def get_repertoire_structure(self):
+    def get_repertoire_structure(self, lang=None):
         if not self.session: return []
         results = self.session.query(
             Position,
@@ -1688,6 +1695,15 @@ class CreatorBackend:
             priority = prio if prio is not None else 0.0
             if not v1: v1 = p.cached_v1 or "Sonstiges"
             if not v2 and v3: v2 = p.cached_v2 or "Sonstiges"
+            if lang and v1 and v1 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                v1 = parse_variation_name(v1, lang=lang)
+            if lang and v2 and v2 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                v2 = parse_variation_name(v2, lang=lang)
+            if lang and v3 and v3 != "Sonstiges":
+                from opening_fenix.core.utils import parse_variation_name
+                v3 = parse_variation_name(v3, lang=lang)
             if v1:
                 if v1 not in struct:
                     struct[v1] = {"name": v1, "fen": p.fen, "priority": priority, "children": {}}
@@ -3543,7 +3559,12 @@ class CommentTranslationThread(QThread):
         from opening_fenix.core.utils import translate_chess_comment
         from opening_fenix.core.logger import logger
         try:
-            res = translate_chess_comment(self.text, src_lang=self.src_lang, tgt_lang=self.tgt_lang)
+            import inspect
+            sig = inspect.signature(translate_chess_comment)
+            if 'raise_on_error' in sig.parameters:
+                res = translate_chess_comment(self.text, src_lang=self.src_lang, tgt_lang=self.tgt_lang, raise_on_error=True)
+            else:
+                res = translate_chess_comment(self.text, src_lang=self.src_lang, tgt_lang=self.tgt_lang)
             self.finished_signal.emit(res, True)
         except Exception as e:
             logger.warning(f"CommentTranslationThread error: {e}")
@@ -3654,9 +3675,12 @@ class CreatorWindow(QMainWindow):
         self.overhaul_paused = True
         self.overhaul_start = None
 
-        # Multilingual Comment Editor State
+        # Multilingual Comment & Variation Editor State
         self.active_comment_lang = self.get_notation_lang() or "de"
         self.current_position_comments = {}
+        self.current_position_variations = {1: {}, 2: {}, 3: {}}
+        self.current_position_inherited_variations = {1: {}, 2: {}, 3: {}}
+        self.current_position_v_inherited = {1: False, 2: False, 3: False}
         self.dual_comment_mode = False
         self.dual_source_lang = "en"
         self.dual_target_lang = "de"
@@ -4007,6 +4031,16 @@ class CreatorWindow(QMainWindow):
         self.txt_c.textChanged.connect(self.on_details_changed)
         cc_layout.addWidget(self.txt_c, 1)
 
+        from opening_fenix.gui.widgets.spell_text_edit import attach_spell_check
+        self.txt_c_highlighter = attach_spell_check(
+            self.txt_c,
+            get_lang_fn=lambda: (
+                self.dual_source_lang
+                if getattr(self, "dual_comment_mode", False)
+                else (self.active_comment_lang if getattr(self, "active_comment_lang", "de") != "all" else "de")
+            )
+        )
+
         # Sleek 24px Bridge Action Bar (Visible between Box 1 and Box 2 in Dual Mode)
         self.dual_bridge_bar = QWidget()
         self.dual_bridge_bar.setFixedHeight(scale(24))
@@ -4014,20 +4048,6 @@ class CreatorWindow(QMainWindow):
         bb_layout = QHBoxLayout(self.dual_bridge_bar)
         bb_layout.setContentsMargins(0, 0, 0, 0)
         bb_layout.setSpacing(scale(4))
-
-        self.lbl_dual_pair = QLabel(f"{self.dual_source_lang.upper()} ➜ {self.dual_target_lang.upper()}")
-        self.lbl_dual_pair.setStyleSheet(f"""
-            QLabel {{
-                font-weight: 600;
-                font-size: {scale(11)}px;
-                color: {COLORS['brown_text']};
-                background: transparent;
-                border: none;
-                padding: 0px;
-            }}
-        """)
-        bb_layout.addWidget(self.lbl_dual_pair)
-        bb_layout.addStretch()
 
         action_btn_style = f"""
             QPushButton {{
@@ -4048,6 +4068,29 @@ class CreatorWindow(QMainWindow):
                 border-color: rgba(0, 0, 0, 0.08);
             }}
         """
+
+        self.lbl_dual_pair = QLabel(f"{self.dual_source_lang.upper()} ➜ {self.dual_target_lang.upper()}")
+        self.lbl_dual_pair.setStyleSheet(f"""
+            QLabel {{
+                font-weight: 600;
+                font-size: {scale(11)}px;
+                color: {COLORS['brown_text']};
+                background: transparent;
+                border: none;
+                padding: 0px;
+            }}
+        """)
+        bb_layout.addWidget(self.lbl_dual_pair)
+
+        self.btn_swap_dual = QPushButton("⇄")
+        self.btn_swap_dual.setFixedSize(scale(22), scale(22))
+        self.btn_swap_dual.setStyleSheet(action_btn_style)
+        self.btn_swap_dual.setToolTip(tr_ui("creator.tooltip_swap_languages", "Sprachen tauschen (Quelle ⇄ Ziel)"))
+        self.btn_swap_dual.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_swap_dual.clicked.connect(self.swap_dual_comment_languages)
+        bb_layout.addWidget(self.btn_swap_dual)
+
+        bb_layout.addStretch()
 
         self.btn_auto_translate = QPushButton(tr_ui("creator.btn_translate", "⚡ Übersetzen"))
         self.btn_auto_translate.setFixedHeight(scale(22))
@@ -4097,6 +4140,11 @@ class CreatorWindow(QMainWindow):
         self.txt_c_dual.textChanged.connect(self.on_details_changed)
         self.txt_c_dual.setVisible(False)
         cc_layout.addWidget(self.txt_c_dual, 1)
+
+        self.txt_c_dual_highlighter = attach_spell_check(
+            self.txt_c_dual,
+            get_lang_fn=lambda: getattr(self, "dual_target_lang", "de")
+        )
 
         dv.addWidget(self.comment_container)
 
@@ -4154,9 +4202,41 @@ class CreatorWindow(QMainWindow):
         self.i_v2.textChanged.connect(self._update_variant_visibility)
         self.i_v3.textChanged.connect(self.on_details_changed)
 
-        self.variant_layout.addRow(self.i_v1)
-        self.variant_layout.addRow(self.i_v2)
-        self.variant_layout.addRow(self.i_v3)
+        def make_variant_row(line_edit, idx):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(scale(4))
+            row_layout.addWidget(line_edit, 1)
+
+            btn = QPushButton("💡")
+            btn.setFixedSize(scale(26), scale(26))
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: transparent;
+                    border: 1px solid rgba(211, 84, 0, 0.45);
+                    border-radius: {scale(4)}px;
+                    font-size: {scale(12)}px;
+                    padding: 0px;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(211, 84, 0, 0.18);
+                    border-color: {COLORS['burnt_orange']};
+                }}
+            """)
+            btn.setVisible(False)
+            btn.clicked.connect(lambda _, i=idx: self.apply_suggested_variation_name(i))
+            row_layout.addWidget(btn)
+            return row_widget, btn
+
+        self.row_v1, self.btn_suggest_v1 = make_variant_row(self.i_v1, 1)
+        self.row_v2, self.btn_suggest_v2 = make_variant_row(self.i_v2, 2)
+        self.row_v3, self.btn_suggest_v3 = make_variant_row(self.i_v3, 3)
+
+        self.variant_layout.addRow(self.row_v1)
+        self.variant_layout.addRow(self.row_v2)
+        self.variant_layout.addRow(self.row_v3)
         dv.addLayout(self.variant_layout)
         
         # Initial Visibility
@@ -4733,6 +4813,156 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'btn_lang_comment'):
             menu.exec(self.btn_lang_comment.mapToGlobal(QPoint(0, self.btn_lang_comment.height())))
 
+    def _update_variation_suggestions(self, fen: Optional[str] = None):
+        """Updates the 💡 suggestion button for the first empty variation slot if this position starts a recognized opening."""
+        if not self._is_ui_valid(): return
+        if not hasattr(self, 'btn_suggest_v1') or self.btn_suggest_v1 is None or sip.isdeleted(self.btn_suggest_v1): return
+
+        # Hide all suggestion buttons by default so they only appear when an empty slot can be suggested
+        for idx in (1, 2, 3):
+            btn = getattr(self, f"btn_suggest_v{idx}", None)
+            if btn and not sip.isdeleted(btn):
+                btn.setVisible(False)
+
+        if not fen and hasattr(self, 'board_widget') and hasattr(self.board_widget, 'board'):
+            fen = self.board_widget.board.fen()
+        if not fen:
+            self._cached_suggested_name = None
+            return
+
+        edit_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else (self.active_comment_lang if self.active_comment_lang != "all" else "de")
+
+        from opening_fenix.core.services.opening_name_service import get_suggested_variation_names
+        sug = get_suggested_variation_names(fen, lang=edit_lang)
+        if not sug:
+            self._cached_suggested_name = None
+            return
+
+        def is_filled_slot(idx):
+            line_edit = getattr(self, f"i_v{idx}", None)
+            if not line_edit or sip.isdeleted(line_edit):
+                return False
+            has_text = bool(line_edit.text().strip())
+            placeholder = line_edit.placeholderText()
+            default_placeholder = tr_ui(f"creator.variant_placeholder_{idx}", f"Variante {idx}")
+            is_default = (not placeholder) or placeholder.strip() == default_placeholder or placeholder.startswith(default_placeholder + " (")
+            has_inherited = bool(placeholder and placeholder.strip() and not is_default)
+            return has_text or has_inherited
+
+        def get_slot_text(idx):
+            line_edit = getattr(self, f"i_v{idx}", None)
+            txt = line_edit.text().strip() if (line_edit and not sip.isdeleted(line_edit)) else ""
+            if txt:
+                return txt
+            inh_dict = getattr(self, 'current_position_inherited_variations', {}).get(idx, {})
+            return inh_dict.get(edit_lang, "").strip()
+
+        # Find the target slot (first empty slot in this line)
+        target_slot = None
+        for idx in (1, 2, 3):
+            if not is_filled_slot(idx):
+                target_slot = idx
+                break
+
+        if target_slot is None:
+            # All variation slots are already filled in this line
+            self._cached_suggested_name = None
+            return
+
+        # Collect existing variation names in this line
+        existing_names = [get_slot_text(idx).lower() for idx in (1, 2, 3) if get_slot_text(idx)]
+
+        v1_sug = sug.get("v1")
+        v2_sug = sug.get("v2")
+        v3_sug = sug.get("v3")
+        full_sug = sug.get("full_name_localized") or sug.get("full_name") or v1_sug
+
+        # Candidate name appropriate for target slot
+        candidate_name = None
+        if target_slot == 1:
+            candidate_name = full_sug if v2_sug else v1_sug
+        elif target_slot == 2:
+            candidate_name = v2_sug
+        elif target_slot == 3:
+            candidate_name = v3_sug
+
+        if not candidate_name:
+            self._cached_suggested_name = None
+            return
+
+        # Check if the line already contains this variation name
+        def name_already_in_line(cand: str, existing_list: list) -> bool:
+            cand_lower = cand.lower().strip()
+            stop_words = {'variante', 'variation', 'defense', 'verteidigung', 'opening', 'eröffnung', 'erffnung', 'system', 'attack', 'angriff', 'game', 'spiel', 'partie'}
+            for ext in existing_list:
+                ext_lower = ext.lower().strip()
+                if not ext_lower: continue
+                if cand_lower in ext_lower or ext_lower in cand_lower:
+                    return True
+                import re
+                cand_words = [w for w in re.split(r'[\s\-:,]+', cand_lower) if len(w) >= 4 and w not in stop_words]
+                ext_words = [w for w in re.split(r'[\s\-:,]+', ext_lower) if len(w) >= 4 and w not in stop_words]
+                for cw in cand_words:
+                    for ew in ext_words:
+                        prefix_len = min(5, len(cw), len(ew))
+                        if prefix_len >= 4 and (cw.startswith(ew[:prefix_len]) or ew.startswith(cw[:prefix_len])):
+                            return True
+            return False
+
+        if name_already_in_line(candidate_name, existing_names):
+            self._cached_suggested_name = None
+            return
+
+        self._cached_suggested_name = candidate_name
+        self._cached_target_slot = target_slot
+
+        target_btn = getattr(self, f"btn_suggest_v{target_slot}", None)
+        if target_btn and not sip.isdeleted(target_btn):
+            target_btn.setVisible(True)
+            target_btn.setEnabled(True)
+            target_btn.setToolTip(tr_ui("creator.tooltip_suggest_var", "💡 Vorschlag: '{name}' (Klicken zum Übernehmen)", name=candidate_name))
+
+    def apply_suggested_variation_name(self, idx: int):
+        """Applies the cached suggested variation name for slot idx into the line edit."""
+        name = getattr(self, '_cached_suggested_name', None)
+        if not name:
+            return
+        line_edit = getattr(self, f"i_v{idx}", None)
+        if line_edit and not sip.isdeleted(line_edit):
+            line_edit.setText(name)
+            self.on_details_changed()
+            self.save_current_details_now()
+
+    def _update_variant_inputs_display(self):
+        """Updates i_v1, i_v2, i_v3 text and placeholders based on active/dual comment language."""
+        if not self._is_ui_valid(): return
+        if not hasattr(self, 'i_v1') or self.i_v1 is None or sip.isdeleted(self.i_v1): return
+        edit_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else (self.active_comment_lang if self.active_comment_lang != "all" else "de")
+        
+        self.block_signals_details(True)
+        v_inputs = {1: self.i_v1, 2: self.i_v2, 3: self.i_v3}
+        for idx, inp in v_inputs.items():
+            if inp is None or sip.isdeleted(inp):
+                continue
+            v_dict = getattr(self, 'current_position_variations', {}).get(idx, {})
+            inh_dict = getattr(self, 'current_position_inherited_variations', {}).get(idx, {})
+            is_inh = getattr(self, 'current_position_v_inherited', {}).get(idx, False)
+            
+            lang_tag = f" ({edit_lang.upper()})"
+            if not is_inh:
+                inp.setText(v_dict.get(edit_lang, ""))
+            else:
+                inp.setText("")
+            
+            inh_val = inh_dict.get(edit_lang, "")
+            if is_inh and inh_val:
+                inp.setPlaceholderText(f"{inh_val}{lang_tag}")
+            else:
+                inp.setPlaceholderText(f"{tr_ui(f'creator.variant_placeholder_{idx}', f'Variante {idx}')}{lang_tag}")
+        self.block_signals_details(False)
+        self._update_variant_visibility()
+        self._update_variation_suggestions()
+
     def switch_comment_lang(self, lang_code):
         if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
             self.save_current_details_now()
@@ -4774,7 +5004,19 @@ class CreatorWindow(QMainWindow):
         
         self.update_symbol_buttons_style(self.get_current_position_eval_symbol())
         self.update_comment_lang_button_style()
+        self._update_variant_inputs_display()
         self.refresh_candidate_moves_table()
+        self._refresh_spell_checkers()
+
+    def _refresh_spell_checkers(self):
+        """Refreshes spell check highlighting when language or state changes."""
+        try:
+            if hasattr(self, 'txt_c') and hasattr(self.txt_c, '_spell_highlighter'):
+                self.txt_c._spell_highlighter.rehighlight()
+            if hasattr(self, 'txt_c_dual') and hasattr(self.txt_c_dual, '_spell_highlighter'):
+                self.txt_c_dual._spell_highlighter.rehighlight()
+        except Exception:
+            pass
 
     def enable_dual_comment_mode(self, source_lang="en", target_lang="de"):
         if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
@@ -4822,7 +5064,9 @@ class CreatorWindow(QMainWindow):
 
         self.update_symbol_buttons_style(eval_sym)
         self.update_comment_lang_button_style()
+        self._update_variant_inputs_display()
         self.refresh_candidate_moves_table()
+        self._refresh_spell_checkers()
 
     def disable_dual_comment_mode(self):
         if hasattr(self, 'txt_c') and getattr(self, 'details_changed', False):
@@ -4861,6 +5105,62 @@ class CreatorWindow(QMainWindow):
         )
         if not ok2 or not tgt.strip(): return
         self.enable_dual_comment_mode(src.strip().lower()[:5], tgt.strip().lower()[:5])
+
+    def swap_dual_comment_languages(self):
+        """Swaps source and target languages and their comment texts in dual translation mode."""
+        if not getattr(self, "dual_comment_mode", False):
+            return
+
+        tag_str = self.board_widget.get_chessbase_annotation_tags() if hasattr(self, 'board_widget') else ""
+        from opening_fenix.core.utils import clean_chessbase_annotations
+
+        def attach_tags(val: str) -> str:
+            clean = clean_chessbase_annotations(val)
+            if tag_str and clean:
+                return f"{tag_str} {clean}".strip()
+            elif tag_str:
+                return tag_str
+            return clean
+
+        src_text = self.txt_c.toPlainText().strip() if hasattr(self, 'txt_c') else ""
+        tgt_text = self.txt_c_dual.toPlainText().strip() if hasattr(self, 'txt_c_dual') else ""
+
+        if src_text or tag_str:
+            self.current_position_comments[self.dual_source_lang] = attach_tags(src_text)
+        elif self.dual_source_lang in self.current_position_comments:
+            del self.current_position_comments[self.dual_source_lang]
+
+        if tgt_text or tag_str:
+            self.current_position_comments[self.dual_target_lang] = attach_tags(tgt_text)
+        elif self.dual_target_lang in self.current_position_comments:
+            del self.current_position_comments[self.dual_target_lang]
+
+        old_src = self.dual_source_lang
+        old_tgt = self.dual_target_lang
+        self.dual_source_lang = old_tgt
+        self.dual_target_lang = old_src
+        self.active_comment_lang = self.dual_target_lang
+
+        if hasattr(self, 'lbl_dual_pair'):
+            self.lbl_dual_pair.setText(f"{self.dual_source_lang.upper()} ➜ {self.dual_target_lang.upper()}")
+        if hasattr(self, 'txt_c'):
+            self.txt_c.setPlaceholderText(f"{self.dual_source_lang.upper()} ({tr_ui('creator.source_label', 'Original')})...")
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.setPlaceholderText(f"{self.dual_target_lang.upper()} ({tr_ui('creator.target_label', 'Übersetzung')})...")
+
+        self.block_signals_details(True)
+        new_src = self.current_position_comments.get(self.dual_source_lang, "")
+        new_tgt = self.current_position_comments.get(self.dual_target_lang, "")
+        self.txt_c.setPlainText(clean_chessbase_annotations(new_src))
+        if hasattr(self, 'txt_c_dual'):
+            self.txt_c_dual.setPlainText(clean_chessbase_annotations(new_tgt))
+        self.block_signals_details(False)
+
+        self.update_comment_lang_button_style()
+        self._update_variant_inputs_display()
+        self.details_changed = True
+        self.save_timer.start()
+        self._refresh_spell_checkers()
 
     def copy_source_comment_to_dual(self):
         if not hasattr(self, 'txt_c_dual') or not hasattr(self, 'txt_c'):
@@ -4922,6 +5222,15 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'btn_auto_translate') and self.btn_auto_translate:
             self.btn_auto_translate.setText(getattr(self, '_orig_translate_btn_text', tr_ui("creator.btn_translate", "⚡ Übersetzen")))
             self.btn_auto_translate.setEnabled(True)
+
+        if not success:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(
+                self,
+                tr_ui("creator.translate_error_title", "Übersetzungsfehler"),
+                tr_ui("creator.translate_error_msg", "Die Übersetzung ist fehlgeschlagen. Bitte prüfe deine Internetverbindung.")
+            )
+            return
 
         if hasattr(self, 'txt_c_dual') and self.txt_c_dual:
             self.txt_c_dual.setPlainText(clean_chessbase_annotations(translated_text))
@@ -5042,14 +5351,19 @@ class CreatorWindow(QMainWindow):
         def is_filled(line_edit, default_placeholder):
             has_text = bool(line_edit.text().strip())
             placeholder = line_edit.placeholderText()
-            has_inherited = bool(placeholder and placeholder.strip() and placeholder != default_placeholder)
+            is_default = (not placeholder) or placeholder.strip() == default_placeholder or placeholder.startswith(default_placeholder + " (")
+            has_inherited = bool(placeholder and placeholder.strip() and not is_default)
             return has_text or has_inherited
 
         v1_filled = is_filled(self.i_v1, tr_ui("creator.variant_placeholder_1", "Variante 1"))
         self.i_v2.setVisible(v1_filled)
+        if hasattr(self, 'row_v2') and self.row_v2 is not None and not sip.isdeleted(self.row_v2):
+            self.row_v2.setVisible(v1_filled)
         
         v2_filled = is_filled(self.i_v2, tr_ui("creator.variant_placeholder_2", "Variante 2"))
         self.i_v3.setVisible(v1_filled and v2_filled)
+        if hasattr(self, 'row_v3') and self.row_v3 is not None and not sip.isdeleted(self.row_v3):
+            self.row_v3.setVisible(v1_filled and v2_filled)
 
     def set_repertoire_elo(self, elo_cat):
         """Updates the active Lichess Elo category in CreatorWindow and refreshes the UI and enrichment."""
@@ -5580,14 +5894,32 @@ class CreatorWindow(QMainWindow):
             self.block_signals_details(True)
             self._loading_details = True
             try:
-                from opening_fenix.core.utils import clean_chessbase_annotations
+                from opening_fenix.core.utils import clean_chessbase_annotations, get_multilingual_variation_dict
                 if d and isinstance(d, dict):
-                    self.i_v1.setText(str(d.get('variation_1','')) if not d.get('v1_inherited') else "")
-                    self.i_v1.setPlaceholderText(str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else tr_ui("creator.variant_placeholder_1", "Variante 1"))
-                    self.i_v2.setText(str(d.get('variation_2','')) if not d.get('v2_inherited') else "")
-                    self.i_v2.setPlaceholderText(str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else tr_ui("creator.variant_placeholder_2", "Variante 2"))
-                    self.i_v3.setText(str(d.get('variation_3','')) if not d.get('v3_inherited') else "")
-                    self.i_v3.setPlaceholderText(str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else tr_ui("creator.variant_placeholder_3", "Variante 3"))
+                    raw_v1 = str(d.get('variation_1','')) if not d.get('v1_inherited') else ""
+                    raw_v2 = str(d.get('variation_2','')) if not d.get('v2_inherited') else ""
+                    raw_v3 = str(d.get('variation_3','')) if not d.get('v3_inherited') else ""
+                    inh_v1 = str(d.get('variation_1','')) if (d.get('v1_inherited') and d.get('variation_1')) else ""
+                    inh_v2 = str(d.get('variation_2','')) if (d.get('v2_inherited') and d.get('variation_2')) else ""
+                    inh_v3 = str(d.get('variation_3','')) if (d.get('v3_inherited') and d.get('variation_3')) else ""
+
+                    self.current_position_variations = {
+                        1: get_multilingual_variation_dict(raw_v1),
+                        2: get_multilingual_variation_dict(raw_v2),
+                        3: get_multilingual_variation_dict(raw_v3)
+                    }
+                    self.current_position_inherited_variations = {
+                        1: get_multilingual_variation_dict(inh_v1),
+                        2: get_multilingual_variation_dict(inh_v2),
+                        3: get_multilingual_variation_dict(inh_v3)
+                    }
+                    self.current_position_v_inherited = {
+                        1: bool(d.get('v1_inherited')),
+                        2: bool(d.get('v2_inherited')),
+                        3: bool(d.get('v3_inherited'))
+                    }
+                    self._update_variant_inputs_display()
+
                     raw_c = str(d.get('comment',''))
                     self.current_position_comments = get_multilingual_comment_dict(raw_c)
 
@@ -5620,9 +5952,10 @@ class CreatorWindow(QMainWindow):
                             self.current_position_comments[self.active_comment_lang] = eval_sym
                         self.txt_c.setPlainText(clean_chessbase_annotations(c_text))
                 else:
-                    self.i_v1.setText(""); self.i_v1.setPlaceholderText(tr_ui("creator.variant_placeholder_1", "Variante 1"))
-                    self.i_v2.setText(""); self.i_v2.setPlaceholderText(tr_ui("creator.variant_placeholder_2", "Variante 2"))
-                    self.i_v3.setText(""); self.i_v3.setPlaceholderText(tr_ui("creator.variant_placeholder_3", "Variante 3"))
+                    self.current_position_variations = {1: {}, 2: {}, 3: {}}
+                    self.current_position_inherited_variations = {1: {}, 2: {}, 3: {}}
+                    self.current_position_v_inherited = {1: False, 2: False, 3: False}
+                    self._update_variant_inputs_display()
                     self.current_position_comments = {}
                     self.board_widget.clear_user_drawings(emit_signal=False)
                     self.txt_c.setPlainText("")
@@ -5636,6 +5969,7 @@ class CreatorWindow(QMainWindow):
             
             # Ensure visibility is updated after text changes
             self._update_variant_visibility()
+            self._update_variation_suggestions(f)
             
             self.details_changed = False
             self.block_signals_details(False)
@@ -6009,6 +6343,19 @@ class CreatorWindow(QMainWindow):
                 self.current_position_comments[self.active_comment_lang] = attach_tags(txt)
             elif self.active_comment_lang in self.current_position_comments:
                 del self.current_position_comments[self.active_comment_lang]
+
+        # Update current variation dictionary for active language
+        edit_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else (self.active_comment_lang if self.active_comment_lang != "all" else "de")
+        if not hasattr(self, 'current_position_variations') or not self.current_position_variations:
+            self.current_position_variations = {1: {}, 2: {}, 3: {}}
+        v_inputs = {1: self.i_v1, 2: self.i_v2, 3: self.i_v3}
+        for idx, inp in v_inputs.items():
+            if inp is not None and not sip.isdeleted(inp):
+                txt_v = inp.text().strip()
+                if txt_v:
+                    self.current_position_variations[idx][edit_lang] = txt_v
+                elif edit_lang in self.current_position_variations[idx]:
+                    del self.current_position_variations[idx][edit_lang]
         
         self.update_symbol_buttons_style(self.get_current_position_eval_symbol())
         self.update_comment_lang_button_style()
@@ -6032,14 +6379,19 @@ class CreatorWindow(QMainWindow):
             elif tag_str:
                 self.current_position_comments = {"de": tag_str}
 
+            from opening_fenix.core.utils import format_multilingual_variation
+            v1_str = format_multilingual_variation(self.current_position_variations.get(1, {})) if (hasattr(self, 'current_position_variations') and self.current_position_variations.get(1)) else (self.i_v1.text().strip() if self.i_v1 and not sip.isdeleted(self.i_v1) else "")
+            v2_str = format_multilingual_variation(self.current_position_variations.get(2, {})) if (hasattr(self, 'current_position_variations') and self.current_position_variations.get(2)) else (self.i_v2.text().strip() if self.i_v2 and not sip.isdeleted(self.i_v2) else "")
+            v3_str = format_multilingual_variation(self.current_position_variations.get(3, {})) if (hasattr(self, 'current_position_variations') and self.current_position_variations.get(3)) else (self.i_v3.text().strip() if self.i_v3 and not sip.isdeleted(self.i_v3) else "")
+
             full_comment = format_multilingual_comment(self.current_position_comments)
             target_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else self.active_comment_lang
             self.backend.update_position_data(
                 self.board_widget.board.fen(), 
                 full_comment, 
-                self.i_v1.text(), 
-                self.i_v2.text(), 
-                self.i_v3.text(), 
+                v1_str, 
+                v2_str, 
+                v3_str, 
                 auto_review=self.overhaul_active,
                 target_lang=target_lang
             )
@@ -6807,7 +7159,7 @@ class CreatorWindow(QMainWindow):
         if not self.backend.active_repo_name:
             self.combo_structure.blockSignals(False)
             return
-        structure = self.backend.get_repertoire_structure()
+        structure = self.backend.get_repertoire_structure(lang=getattr(self, 'active_comment_lang', 'de'))
         self.combo_structure.addItem("Start Position", userData=chess.STARTING_FEN)
         for v1 in structure:
             self.combo_structure.addItem(f"📂 {v1['name']}", userData=v1['fen'])
@@ -6873,6 +7225,27 @@ class CreatorWindow(QMainWindow):
         
         self.is_test = is_test
         self.clear_search_tab()
+
+        # Stop/disconnect background enrichment and index workers from previous repertoire
+        if hasattr(self, 'enrichment_queue'):
+            self.enrichment_queue.clear()
+        if hasattr(self, 'enrichment_threads'):
+            for t in list(self.enrichment_threads):
+                try:
+                    t.finished_signal.disconnect()
+                    if t.isRunning():
+                        t.wait(50)
+                except Exception:
+                    pass
+            self.enrichment_threads.clear()
+        if hasattr(self, '_fen_index_thread') and self._fen_index_thread and self._fen_index_thread.isRunning():
+            try:
+                self._fen_index_thread.ready.disconnect()
+                self._fen_index_thread.requestInterruption()
+                self._fen_index_thread.wait(50)
+            except Exception:
+                pass
+            self._fen_index_thread = None
         
         if not repo_name:
             self.active_repo_name = None
@@ -11577,7 +11950,12 @@ class CreatorWindow(QMainWindow):
             try:
                 self.engine_thread.stop_engine()
                 self.engine_thread.running = False
-                if not self.engine_thread.wait(200):
+                if not self.engine_thread.wait(1000):
+                    if hasattr(self.engine_thread, 'engine') and self.engine_thread.engine:
+                        try:
+                            self.engine_thread.engine.close()
+                        except Exception:
+                            pass
                     self.engine_thread.terminate()
             except: pass
 

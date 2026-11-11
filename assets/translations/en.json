@@ -814,7 +814,17 @@
     "btn_parens": "🧹 Remove Outer Parentheses ( ) from Comments",
     "lbl_parens_row": "Remove enclosing parentheses",
     "lbl_parens_sub": "Removes redundant ( ) surrounding entire comments or segments. In-sentence parentheses are preserved.",
-    "msg_parens_cleaned": "{count} comments cleaned."
+    "msg_parens_cleaned": "{count} comments cleaned.",
+    "btn_transfer_variations": "🏷️ Transfer Variation Names...",
+    "dlg_transfer_var_title": "Transfer Variation Names",
+    "lbl_transfer_var_row": "Copy / move variation names between languages",
+    "lbl_transfer_var_sub": "Transfers all variation names (V1, V2, V3) from one language (e.g. DE) to another (e.g. EN).",
+    "msg_transfer_var_success": "{count} variation names transferred from '{src}' to '{target}'.",
+    "msg_transfer_var_move_success": "{count} variation names moved from '{src}' to '{target}'.",
+    "msg_transfer_var_error": "Error transferring variation names: {error}",
+    "btn_export_book": "📖 Textbook (PDF)",
+    "chk_spellcheck": "Enable spell checking",
+    "group_editor": "Editor & Text"
   },
   "course_intro": {
     "default_repo_name": "Your New Repertoire",
@@ -1154,7 +1164,12 @@
     "tooltip_translate": "Translate automatically with Google Translate",
     "translating_status": "⏳ Translating...",
     "translate_confirm_title": "Overwrite translation?",
-    "translate_confirm_msg": "Do you want to overwrite the current translation field with an automatic translation?"
+    "translate_confirm_msg": "Do you want to overwrite the current translation field with an automatic translation?",
+    "tooltip_swap_languages": "Swap languages (Source ⇄ Target)",
+    "translate_error_title": "Translation Error",
+    "translate_error_msg": "Translation failed. Please check your internet connection.",
+    "tooltip_suggest_var": "💡 Suggestion: '{name}' (Click to apply)",
+    "tooltip_no_suggest_var": "No opening name known for variation {idx}"
   },
   "main_window": {
     "window_title": "Opening Fenix - {profile}",
@@ -1189,6 +1204,7 @@
     "lbl_variation": "Variation:",
     "lbl_comment_lang": "Comment Language:",
     "comment_lang_auto": "Automatic (Program Language)",
+    "comment_lang_all": "All",
     "comment_lang_en": "English (EN)",
     "comment_lang_de": "German (DE)",
     "no_comments": "(No comments)",
@@ -1238,7 +1254,8 @@
     "est_warn_critical_body": "Due to uncut transpositions, the PGN expands to ~{moves} moves (~{size_mb} MB, {ratio}x expansion).\n• Export duration: Several minutes\n• External programs (Lichess, ChessBase) may freeze or reject files of this size.\n• Recommended: Keep 'Truncate (with move sequence comment)'.",
     "confirm_huge_title": "Export extremely large PGN file?",
     "confirm_huge_text": "The PGN will expand to ~{moves} moves (~{size_mb} MB, {ratio}x expansion) due to uncut transpositions.\n\nThis may take several minutes and overload external chess software.\n\nDo you really want to proceed?",
-    "progress_label": "Exporting moves ({curr} / {total})..."
+    "progress_label": "Exporting moves ({curr} / {total})...",
+    "progress_book": "Generating repertoire textbook..."
   },
   "faq": {
     "window_title": "Frequently Asked Questions (FAQ)",
@@ -1611,5 +1628,11 @@
     "unit_days": "Days",
     "unit_months": "Months"
   },
-  "update_rate_limited": "GitHub API rate limit temporarily exceeded. Please try again in a few minutes."
+  "update_rate_limited": "GitHub API rate limit temporarily exceeded. Please try again in a few minutes.",
+  "spellcheck.no_suggestions": "No suggestions",
+  "spellcheck.add_to_dict": "Add \"{word}\" to dictionary",
+  "spellcheck.ignore": "Ignore \"{word}\"",
+  "spellcheck.enabled": "Spell checking",
+  "repo_settings.group_editor": "✍️ Comment Editor & Spell Checking",
+  "repo_settings.chk_spellcheck": "Enable automatic spell checking in comments"
 }

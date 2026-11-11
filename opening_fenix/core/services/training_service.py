@@ -306,6 +306,7 @@ class TrainingManager:
         self._rep_move_cache = None
         self._pos_cache = None
         self._td_cache = None
+        self._norm_td_cache = None
         self._move_by_id_cache = None
         self._move_by_fen_uci_cache = None
         self._fen_uci_to_move_id = None
@@ -442,9 +443,13 @@ class TrainingManager:
             return
             
         self._td_cache = {}
+        self._norm_td_cache = {}
         tds = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name).all()
         for td in tds:
             self._td_cache[(td.fen, td.move_uci)] = td
+            if td.fen:
+                norm_f = " ".join(td.fen.split()[:4])
+                self._norm_td_cache[(norm_f, td.move_uci)] = td
 
     def _build_variation_move_set(self, variation_name):
         """
@@ -703,9 +708,12 @@ class TrainingManager:
             
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
             reachable_keys = set(reachable_repo_moves)
+            norm_reachable_keys = {(" ".join(f.split()[:4]), u) for (f, u) in reachable_keys}
 
             for item in due_items:
-                if (item.fen, item.move_uci) not in reachable_keys: continue
+                norm_item_fen = " ".join(item.fen.split()[:4]) if item.fen else ""
+                if (item.fen, item.move_uci) not in reachable_keys and (norm_item_fen, item.move_uci) not in norm_reachable_keys:
+                    continue
                 
                 # O(1) move lookup via FEN+UCI index
                 found_move = self._move_by_fen_uci_cache.get((item.fen, item.move_uci))
@@ -760,10 +768,12 @@ class TrainingManager:
                     return self._get_ancestor(lead_up_candidates[0], check_due=False, variation_filter=None), []
 
             learned_keys = set(self._td_cache.keys())
+            norm_learned_keys = set(self._norm_td_cache.keys()) if getattr(self, '_norm_td_cache', None) is not None else {(" ".join(f.split()[:4]), u) for (f, u) in learned_keys}
 
             candidates = []
             for fen, uci in reachable_keys:
-                if (fen, uci) not in learned_keys:
+                norm_f = " ".join(fen.split()[:4]) if fen else ""
+                if (fen, uci) not in learned_keys and (norm_f, uci) not in norm_learned_keys:
                     m = self._move_by_fen_uci_cache.get((fen, uci))
                     if m:
                         if exclude_move_ids and m.id in exclude_move_ids: continue
@@ -1066,7 +1076,10 @@ class TrainingManager:
                 entry.box = 7
                 entry.next_due = datetime.datetime.max
             self.user_session.commit()
-            if self._td_cache is not None: self._td_cache[(fen, move.uci)] = entry
+            if self._td_cache is not None:
+                self._td_cache[(fen, move.uci)] = entry
+                if getattr(self, '_norm_td_cache', None) is not None:
+                    self._norm_td_cache[(" ".join(fen.split()[:4]), move.uci)] = entry
             self._cached_elo = None
             return
 
@@ -1111,6 +1124,8 @@ class TrainingManager:
         # Update cache in-place FIRST so rating calculation sees updated box
         if self._td_cache is not None:
             self._td_cache[(fen, move.uci)] = entry
+            if getattr(self, '_norm_td_cache', None) is not None:
+                self._norm_td_cache[(" ".join(fen.split()[:4]), move.uci)] = entry
 
         # Update Rating in-memory (no standalone commit)
         self.update_rating(move_id, success, auto_commit=False)
@@ -1133,7 +1148,9 @@ class TrainingManager:
         pos = self._pos_cache.get(move.from_position_id)
         if not pos: return False
         fen = pos.fen
-        return (fen, move.uci) not in self._td_cache
+        norm_fen = " ".join(fen.split()[:4]) if fen else ""
+        norm_td = getattr(self, '_norm_td_cache', {}) or {}
+        return (fen, move.uci) not in self._td_cache and (norm_fen, move.uci) not in norm_td
     
     def get_box_distribution(self):
         dist = {i: 0 for i in range(8)}

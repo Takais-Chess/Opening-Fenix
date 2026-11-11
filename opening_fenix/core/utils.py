@@ -791,8 +791,9 @@ def get_multilingual_comment_dict(raw_comment: str, default_lang: str = "de") ->
 
 def parse_comment(raw_comment: str, lang: str = "de", default_lang: Optional[str] = None) -> str:
     """
-    Resolves a position comment for a target language code (e.g. 'de', 'en').
-    Returns the comment in the target language, or an empty string if not available.
+    Resolves a position comment for a target language code (e.g. 'de', 'en') or 'all'.
+    Returns the comment in the target language, or all available languages if 'all',
+    or an empty string if not available.
     Does not fall back to other languages if the requested language is missing.
     """
     if not raw_comment or not raw_comment.strip():
@@ -805,12 +806,30 @@ def parse_comment(raw_comment: str, lang: str = "de", default_lang: Optional[str
     if raw.startswith("{") and raw.endswith("}"):
         comment_dict = get_multilingual_comment_dict(raw)
         if comment_dict:
+            if target_lang == "all":
+                valid_items = {k: v for k, v in comment_dict.items() if v and str(v).strip()}
+                if not valid_items:
+                    return ""
+                sorted_keys = sorted(valid_items.keys(), key=lambda k: ({"de": 0, "en": 1}.get(k, 2), k))
+                return "\n".join(f"[{k.upper()}] {valid_items[k]}" for k in sorted_keys)
             return comment_dict.get(target_lang, "")
         return ""
 
+    # Inline PGN tagged format: [:de] ... [:en] ...
+    if "[:" in raw or (raw.startswith("[") and not raw.startswith("[%")):
+        tagged = parse_pgn_tagged_comment(raw)
+        if tagged:
+            if target_lang == "all":
+                valid_items = {k: v for k, v in tagged.items() if v and str(v).strip()}
+                if not valid_items:
+                    return ""
+                sorted_keys = sorted(valid_items.keys(), key=lambda k: ({"de": 0, "en": 1}.get(k, 2), k))
+                return "\n".join(f"[{k.upper()}] {valid_items[k]}" for k in sorted_keys)
+            return tagged.get(target_lang, "")
+
     # Plain text comment (non-JSON)
     def_lang = default_lang.lower() if default_lang else "de"
-    if target_lang == def_lang:
+    if target_lang in (def_lang, "all"):
         return raw
     return ""
 
@@ -831,6 +850,24 @@ def format_multilingual_comment(comment_dict: dict) -> str:
     return json.dumps(cleaned, ensure_ascii=False)
 
 
+def matches_variation_name(raw_name: Optional[str], target_name: Optional[str]) -> bool:
+    """
+    Checks if a raw variation name (plain text or multilingual JSON) matches a target variation name.
+    Matches either exact string, or any language value inside the JSON dictionary (case-insensitive).
+    """
+    if not raw_name or not target_name:
+        return False
+    r_str = str(raw_name).strip()
+    t_str = str(target_name).strip()
+    if r_str == t_str or r_str.lower() == t_str.lower():
+        return True
+    if r_str.startswith('{') and r_str.endswith('}'):
+        v_dict = get_multilingual_variation_dict(r_str)
+        t_low = t_str.lower()
+        return any(str(v).strip().lower() == t_low for v in v_dict.values())
+    return False
+
+
 def parse_pgn_tagged_comment(comment_text: str) -> dict:
     """
     Parses inline PGN language tags like '[:de] Deutscher Text [:en] English text'
@@ -849,6 +886,86 @@ def parse_pgn_tagged_comment(comment_text: str) -> dict:
                 res[lang.lower()] = t
         return res
     return {}
+
+
+# --- MULTILINGUAL VARIATION HELPERS ---
+
+def get_multilingual_variation_dict(raw_name: str, default_lang: str = "de") -> dict:
+    """
+    Parses a raw variation name string.
+    Returns a dictionary mapping language codes (e.g. 'de', 'en') to variation name strings.
+    If raw_name is a plain string, returns a dict with default_lang key.
+    """
+    if not raw_name or not str(raw_name).strip():
+        return {}
+    raw = str(raw_name).strip()
+    if raw.startswith("{") and raw.endswith("}"):
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {k.lower(): str(v).strip() for k, v in data.items() if v and str(v).strip()}
+        except Exception:
+            pass
+    target = default_lang.lower() if default_lang else "de"
+    return {target: raw}
+
+
+def parse_variation_name(raw_name: str, lang: str = "de", default_lang: Optional[str] = None) -> str:
+    """
+    Resolves a variation name for a target language code (e.g. 'de', 'en') or 'all'.
+    Falls back gracefully to default_lang or any available language if the requested language is missing,
+    ensuring variation names never appear blank in the UI.
+    """
+    if not raw_name or not str(raw_name).strip():
+        return ""
+    raw = str(raw_name).strip()
+    target_lang = lang.lower() if lang else "de"
+    if target_lang == "auto":
+        target_lang = (default_lang or "de").lower()
+
+    if raw.startswith("{") and raw.endswith("}"):
+        v_dict = get_multilingual_variation_dict(raw, default_lang=default_lang or "de")
+        if not v_dict:
+            return ""
+        if target_lang == "all":
+            valid_items = {k: v for k, v in v_dict.items() if v and str(v).strip()}
+            if not valid_items:
+                return ""
+            if len(valid_items) == 1:
+                return next(iter(valid_items.values()))
+            sorted_keys = sorted(valid_items.keys(), key=lambda k: ({"de": 0, "en": 1}.get(k, 2), k))
+            return " / ".join(f"[{k.upper()}] {valid_items[k]}" for k in sorted_keys)
+        
+        if target_lang in v_dict and v_dict[target_lang]:
+            return v_dict[target_lang]
+        
+        # Graceful fallback: default_lang, then de, then first available
+        def_k = (default_lang or "de").lower()
+        if def_k in v_dict and v_dict[def_k]:
+            return v_dict[def_k]
+        if "de" in v_dict and v_dict["de"]:
+            return v_dict["de"]
+        return next(iter(v_dict.values()))
+
+    # Plain text variation name
+    return raw
+
+
+def format_multilingual_variation(variation_dict: dict) -> str:
+    """
+    Serializes a dictionary of language variation names (e.g. {'de': '...', 'en': '...'})
+    into a database-ready string.
+    If only one language is present and it is 'de', returns a plain text string for backward compatibility.
+    Otherwise returns a JSON string.
+    """
+    if not variation_dict:
+        return ""
+    cleaned = {k.lower(): str(v).strip() for k, v in variation_dict.items() if v and str(v).strip()}
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1 and "de" in cleaned:
+        return cleaned["de"]
+    return json.dumps(cleaned, ensure_ascii=False)
 
 
 # --- CHESSBASE PGN ANNOTATIONS ([%csl ...] & [%cal ...]) ---
@@ -1148,11 +1265,12 @@ def get_lang_display_label(code: str) -> str:
     return flags.get(c, f"🌐 {c.upper()}")
 
 
-def translate_chess_comment(comment_text: str, src_lang: str = "en", tgt_lang: str = "de", timeout: float = 6.0) -> str:
+def translate_chess_comment(comment_text: str, src_lang: str = "en", tgt_lang: str = "de", timeout: float = 6.0, raise_on_error: bool = False) -> str:
     """
     Translates a chess position comment using Google Translate while safely preserving
     ChessBase diagram tags ([%csl ...], [%cal ...]) and evaluation symbols (+-, =, etc.).
-    Returns translated text string. If offline or error occurs, returns cleaned original text.
+    Returns translated text string. If offline or error occurs, returns cleaned original text
+    (or raises if raise_on_error=True).
     """
     if not comment_text or not isinstance(comment_text, str) or not comment_text.strip():
         return ""
@@ -1188,14 +1306,30 @@ def translate_chess_comment(comment_text: str, src_lang: str = "en", tgt_lang: s
         tgt = tgt_lang.lower().strip() if tgt_lang else "de"
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={src}&tl={tgt}&dt=t&q={q}"
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with safe_urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             if data and data[0]:
                 chunks = [chunk[0] for chunk in data[0] if chunk and chunk[0]]
                 if chunks:
                     translated_verbal = ''.join(chunks).strip()
+
+        # If translation returned exact original verbal text and src was not auto, try sl=auto as intelligent fallback
+        if src != "auto" and translated_verbal == verbal_text:
+            url_auto = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl={tgt}&dt=t&q={q}"
+            req_auto = urllib.request.Request(url_auto, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
+            try:
+                with safe_urlopen(req_auto, timeout=timeout) as resp_auto:
+                    data_auto = json.loads(resp_auto.read().decode('utf-8'))
+                    if data_auto and data_auto[0]:
+                        chunks_auto = [chunk[0] for chunk in data_auto[0] if chunk and chunk[0]]
+                        if chunks_auto:
+                            translated_verbal = ''.join(chunks_auto).strip()
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Google translate request failed: {e}")
+        if raise_on_error:
+            raise
         return comment_text
 
     # 5. Reassemble: [tags] [translated verbal] [eval_sym]
@@ -1679,7 +1813,14 @@ def get_ssl_context(verify: bool = True):
     """
     import ssl
     if not verify and hasattr(ssl, "_create_unverified_context"):
-        return ssl._create_unverified_context()
+        ctx = ssl._create_unverified_context()
+        try:
+            ctx.set_alpn_protocols(['http/1.1'])
+        except Exception:
+            pass
+        if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
+            ctx.post_handshake_auth = True
+        return ctx
 
     try:
         try:
@@ -1696,6 +1837,12 @@ def get_ssl_context(verify: bool = True):
                             ctx.load_verify_locations(cadata=cert)
                 except Exception:
                     pass
+        try:
+            ctx.set_alpn_protocols(['http/1.1'])
+        except Exception:
+            pass
+        if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
+            ctx.post_handshake_auth = True
         return ctx
     except Exception:
         if hasattr(ssl, "_create_unverified_context"):
@@ -1723,5 +1870,9 @@ def safe_urlopen(req, timeout: int = 15):
         if "CERTIFICATE_VERIFY_FAILED" in err_str or "certificate verify failed" in err_str or "SSLCertVerificationError" in err_str:
             unverified_ctx = get_ssl_context(verify=False)
             return urllib.request.urlopen(req, context=unverified_ctx, timeout=timeout)
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except Exception:
+            pass
         raise
 

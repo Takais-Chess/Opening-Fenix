@@ -90,7 +90,7 @@ def test_get_repertoire_comment_stats_ignores_pure_eval_symbols():
 
 
 def test_translate_chess_comment_mocked(monkeypatch):
-    def mock_urlopen(req, timeout=6.0):
+    def mock_urlopen(req, timeout=6.0, **kwargs):
         class MockResp:
             def __enter__(self): return self
             def __exit__(self, *args): pass
@@ -182,3 +182,73 @@ def test_creator_window_symbol_and_compact_dual_mode(qapp, monkeypatch):
     assert win.txt_c_dual.isHidden()
 
     win.close()
+
+
+def test_swap_dual_comment_languages(qapp, monkeypatch):
+    from unittest.mock import MagicMock
+    from opening_fenix.creator.creator_window import CreatorWindow
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorBackend", MagicMock())
+    monkeypatch.setattr("opening_fenix.creator.creator_window.EngineThread", MagicMock())
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorWindow.new_repertoire_dialog", lambda self: None)
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorWindow.load_repertoire_dialog", lambda self: None)
+
+    win = CreatorWindow()
+    win.enable_dual_comment_mode("en", "de")
+    assert win.dual_source_lang == "en"
+    assert win.dual_target_lang == "de"
+    assert win.lbl_dual_pair.text() == "EN ➜ DE"
+
+    win.txt_c.setPlainText("English note")
+    win.txt_c_dual.setPlainText("Deutsche Notiz")
+    win.on_details_changed()
+
+    # Trigger swap
+    win.swap_dual_comment_languages()
+    assert win.dual_source_lang == "de"
+    assert win.dual_target_lang == "en"
+    assert win.lbl_dual_pair.text() == "DE ➜ EN"
+    assert win.txt_c.toPlainText() == "Deutsche Notiz"
+    assert win.txt_c_dual.toPlainText() == "English note"
+
+    win.close()
+
+
+def test_translate_chess_comment_fallback_and_raise(monkeypatch):
+    from opening_fenix.core.utils import translate_chess_comment
+    import urllib.request
+    import pytest
+
+    # Test raise_on_error on network failure
+    def mock_urlopen_fail(req, timeout=6.0, **kwargs):
+        raise urllib.error.URLError("Network error")
+
+    monkeypatch.setattr("opening_fenix.core.utils.safe_urlopen", mock_urlopen_fail)
+    
+    # When raise_on_error=False, returns original text safely
+    res_safe = translate_chess_comment("Some text", src_lang="en", tgt_lang="de", raise_on_error=False)
+    assert res_safe == "Some text"
+
+    # When raise_on_error=True, raises exception
+    with pytest.raises(urllib.error.URLError):
+        translate_chess_comment("Some text", src_lang="en", tgt_lang="de", raise_on_error=True)
+
+    # Test fallback to sl=auto when wrong source language returns unchanged text
+    call_urls = []
+    def mock_urlopen_fallback(req, timeout=6.0, **kwargs):
+        call_urls.append(req.full_url)
+        class MockResp:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self):
+                # If first call with sl=de, return same text as untranslated
+                if "sl=de" in req.full_url:
+                    return b'[[["English text", "English text", null, null, 1]], null, "de"]'
+                # Fallback call with sl=auto translates correctly
+                return b'[[["Deutscher Text", "English text", null, null, 1]], null, "en"]'
+        return MockResp()
+
+    monkeypatch.setattr("opening_fenix.core.utils.safe_urlopen", mock_urlopen_fallback)
+    res_trans = translate_chess_comment("English text", src_lang="de", tgt_lang="de")
+    assert res_trans == "Deutscher Text"
+    assert any("sl=de" in u for u in call_urls)
+    assert any("sl=auto" in u for u in call_urls)
