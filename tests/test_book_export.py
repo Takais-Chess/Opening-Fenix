@@ -259,42 +259,6 @@ def test_export_repertoire_book_with_apostrophe_in_path(sample_repo_db, tmp_path
     )
     assert os.path.isfile(final_path)
     assert os.path.getsize(final_path) > 0
-
-
-def test_combined_first_page_and_course_icon(sample_repo_db, tmp_path):
-    """Verifies that course cover icon is embedded next to title and TOC starts directly on first page."""
-    # Place a fake cover.png next to sample_repo_db
-    repo_dir = os.path.dirname(sample_repo_db)
-    cover_file = os.path.join(repo_dir, "cover.png")
-    # 1x1 transparent PNG bytes
-    png_1x1 = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\rIDATx\x9cc`\x00\x00\x00\x02\x00\x01H\xaf\xa4q\x00\x00\x00\x00IEND\xaeB`\x82"
-    with open(cover_file, "wb") as f:
-        f.write(png_1x1)
-
-    out_html = str(tmp_path / "combined_first_page.html")
-    res = export_repertoire_book(
-        db_path=sample_repo_db,
-        output_path=out_html,
-        output_format="html",
-        level=1,
-        language="de"
-    )
-    with open(res, "r", encoding="utf-8") as f:
-        html = f.read()
-
-    # 1. Course icon embedded as base64 data URI
-    assert "data:image/png;base64," in html
-    assert 'class="cover-icon"' in html
-
-    # 2. Cover header and Inhaltsverzeichnis combined inside .toc-section on page 1
-    assert '<div class="toc-section">' in html
-    assert '<div class="cover-header">' in html
-    assert html.index('<div class="cover-header">') > html.index('<div class="toc-section">')
-    assert html.index('<div class="toc-heading">') > html.index('<div class="cover-header">')
-
-    # 3. No separate .cover-section
-    assert '<div class="cover-section">' not in html
-
     assert "Gawain's" in final_path
 
 
@@ -347,5 +311,64 @@ def test_combined_first_page_and_course_icon(sample_repo_db, tmp_path):
 
     # 3. No separate .cover-section
     assert '<div class="cover-section">' not in html
+
+
+def test_move_kept_together_with_diagram(tmp_path):
+    """Verifies that the move leading up to a diagram is kept inside .diagram-comment-group."""
+    db_path = str(tmp_path / "diag_group_repo.db")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE metadata (key VARCHAR PRIMARY KEY, value VARCHAR)")
+    cur.execute("INSERT INTO metadata VALUES ('name', 'Test Repertoire')")
+    cur.execute("INSERT INTO metadata VALUES ('color', 'b')")
+    cur.execute("CREATE TABLE repertoire_levels (id INTEGER PRIMARY KEY, name VARCHAR, `order` INTEGER, target_elo INTEGER)")
+    cur.execute("INSERT INTO repertoire_levels VALUES (1, 'Grundlagen', 1, 1500)")
+    cur.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY, fen VARCHAR, comment VARCHAR, variation_1 VARCHAR)")
+    cur.execute("CREATE TABLE moves (id INTEGER PRIMARY KEY, from_position_id INTEGER, to_position_id INTEGER, uci VARCHAR, san VARCHAR, priority_score FLOAT)")
+    cur.execute("CREATE TABLE repertoire_moves (id INTEGER PRIMARY KEY, move_id INTEGER, level INTEGER, is_active BOOLEAN)")
+
+    # 1..5: 1.e4 e5 2.Nf3 Nc6 3.Bb5
+    cur.execute("INSERT INTO positions VALUES (1, 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -', '', '')")
+    cur.execute("INSERT INTO positions VALUES (2, 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -', '', '')")
+    cur.execute("INSERT INTO positions VALUES (3, 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -', '', '')")
+    cur.execute("INSERT INTO positions VALUES (4, 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -', '', '')")
+    cur.execute("INSERT INTO positions VALUES (5, 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -', '', '')")
+    cur.execute("INSERT INTO positions VALUES (6, 'r1bqkbnr/pppp1ppp/2n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R b KQkq -', '', 'Ruy Lopez')")
+    # 7: 3...a6 (has comment and arrow so it gets a diagram)
+    cur.execute("INSERT INTO positions VALUES (7, 'r1bqkbnr/1ppp1ppp/p1n5/1B2p3/4P3/5N2/PPPP1PPP/RNBQK2R w KQkq -', 'Morphy Verteidigung [%cal Ga7a6]', '')")
+
+    cur.execute("INSERT INTO moves VALUES (1, 1, 2, 'e2e4', 'e4', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (2, 2, 3, 'e7e5', 'e5', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (3, 3, 4, 'g1f3', 'Nf3', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (4, 4, 5, 'b8c6', 'Nc6', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (5, 5, 6, 'f1b5', 'Bb5', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (6, 6, 7, 'a7a6', 'a6', 100.0)")
+
+    for m_id in range(1, 7):
+        cur.execute("INSERT INTO repertoire_moves VALUES (?, ?, 1, 1)", (m_id, m_id))
+
+    conn.commit()
+    conn.close()
+
+    out_html = str(tmp_path / "diagram_group.html")
+    res = export_repertoire_book(
+        db_path=db_path,
+        output_path=out_html,
+        output_format="html",
+        level=1,
+        language="de"
+    )
+    with open(res, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # In diagram-comment-group, the move leading to the diagram (3...a6) must be wrapped inside the group
+    import re
+    groups = re.findall(r"<div class=['\"]diagram-comment-group['\"]>(.*?)</div>", html, flags=re.DOTALL)
+    assert len(groups) > 0
+    # Group must contain both 3...a6 and the diagram SVG
+    moves_in_group = [g for g in groups if "3...a6" in g and "column-diagram" in g]
+    assert len(moves_in_group) == 1
+
+
 
 

@@ -1184,6 +1184,12 @@ TRAINER_SETTINGS_KEYS = {
     "anim_speed",
     "master_volume",
     "stop_at_variation_end",
+    "leadup_skip_mode",
+    "leadup_target_box",
+    "leadup_session_limit",
+    "leadup_show_once_per_session",
+    "leadup_new_moves_mode",
+    "leadup_skip_style",
 }
 
 
@@ -3718,7 +3724,103 @@ class UnifiedSettingsDialog(QDialog):
         ))
 
         layout.addWidget(g_limits)
+
+        # 4. Lead-up Animation Card
+        g_leadup = QGroupBox(tr_widget("settings.leadup_title", "\u23ed\ufe0f Lead-up Animation (Varianten-Intro)"))
+        v_leadup = QVBoxLayout(g_leadup)
+        v_leadup.setSpacing(0)
+
+        self.combo_leadup_mode = NoWheelComboBox()
+        self.combo_leadup_mode.setMinimumWidth(scale(260))
+        self.combo_leadup_mode.addItem(tr_ui("settings.leadup_mode_off", "Aus (Immer ab Zug 1)"), "off")
+        self.combo_leadup_mode.addItem(tr_ui("settings.leadup_mode_leitner", "Nach Leitner-Box der Hinf\u00fchrung"), "leitner_box")
+        self.combo_leadup_mode.addItem(tr_ui("settings.leadup_mode_once", "Einmal pro aktiver Session"), "once_per_session")
+        self.combo_leadup_mode.addItem(tr_ui("settings.leadup_mode_session_count", "Nach N-mal pro aktiver Session"), "session_count")
+        self.combo_leadup_mode.addItem(tr_ui("settings.leadup_mode_always", "Immer am Varianten-Start beginnen"), "always")
+        curr_l_mode = self.get_setting("leadup_skip_mode", "leitner_box")
+        idx_lm = self.combo_leadup_mode.findData(curr_l_mode)
+        if idx_lm >= 0: self.combo_leadup_mode.setCurrentIndex(idx_lm)
+        self.combo_leadup_mode.currentIndexChanged.connect(self._on_leadup_mode_changed)
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_mode_label", "Intro \u00fcberspringen (Wiederholung):"),
+            tr_ui("settings.leadup_mode_sub", "Wann die Z\u00fcge bis zum Start der Variante \u00fcbersprungen werden."),
+            self.combo_leadup_mode
+        ))
+
+        self.spin_leadup_box = NoWheelSpinBox()
+        self.spin_leadup_box.setRange(1, 7)
+        self.spin_leadup_box.setMinimumWidth(scale(140))
+        self.spin_leadup_box.setValue(int(self.get_setting("leadup_target_box", 3)))
+        self.spin_leadup_box.valueChanged.connect(lambda v: self.set_setting("leadup_target_box", v))
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_box_label", "Ziel-Leitner-Box:"),
+            tr_ui("settings.leadup_box_sub", "Mindest-Box aller eigenen Z\u00fcge vor der Variante, um das Intro zu \u00fcberspringen."),
+            self.spin_leadup_box
+        ))
+
+        self.spin_leadup_session_limit = NoWheelSpinBox()
+        self.spin_leadup_session_limit.setRange(1, 20)
+        self.spin_leadup_session_limit.setMinimumWidth(scale(140))
+        self.spin_leadup_session_limit.setValue(int(self.get_setting("leadup_session_limit", 3)))
+        self.spin_leadup_session_limit.valueChanged.connect(lambda v: self.set_setting("leadup_session_limit", v))
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_session_limit_label", "Session-Intro-Limit:"),
+            tr_ui("settings.leadup_session_limit_sub", "Wie oft das Intro pro Variante in einer Session gezeigt wird, bevor es \u00fcbersprungen wird."),
+            self.spin_leadup_session_limit
+        ))
+
+        self.chk_leadup_once_per_session = QCheckBox(tr_widget("settings.chk_leadup_once", "Intro mindestens 1\u00d7 pro Session zeigen"))
+        self.chk_leadup_once_per_session.setChecked(bool(self.get_setting("leadup_show_once_per_session", True)))
+        self.chk_leadup_once_per_session.toggled.connect(lambda c: self.set_setting("leadup_show_once_per_session", c))
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_once_title", "Session-Auffrischung:"),
+            tr_ui("settings.leadup_once_sub", "Zeigt das Intro beim ersten Erscheinen einer Variante pro Session einmal an, auch wenn es danach \u00fcbersprungen wird."),
+            self.chk_leadup_once_per_session
+        ))
+
+        self.combo_leadup_new_moves = NoWheelComboBox()
+        self.combo_leadup_new_moves.setMinimumWidth(scale(260))
+        self.combo_leadup_new_moves.addItem(tr_ui("settings.leadup_new_always_start", "Immer ab Zug 1 abspielen"), "always_from_start")
+        self.combo_leadup_new_moves.addItem(tr_ui("settings.leadup_new_follow", "Wie Wiederholungen behandeln"), "follow_review")
+        self.combo_leadup_new_moves.addItem(tr_ui("settings.leadup_new_always_skip", "Immer am Varianten-Start beginnen"), "always_skip")
+        curr_l_new = self.get_setting("leadup_new_moves_mode", "always_from_start")
+        idx_ln = self.combo_leadup_new_moves.findData(curr_l_new)
+        if idx_ln >= 0: self.combo_leadup_new_moves.setCurrentIndex(idx_ln)
+        self.combo_leadup_new_moves.currentIndexChanged.connect(lambda: self.set_setting("leadup_new_moves_mode", self.combo_leadup_new_moves.currentData()))
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_new_label", "Verhalten bei neuen Z\u00fcgen:"),
+            tr_ui("settings.leadup_new_sub", "Wie die Hinf\u00fchrung beim erstmaligen Lernen neuer Z\u00fcge animiert wird."),
+            self.combo_leadup_new_moves
+        ))
+
+        self.combo_leadup_style = NoWheelComboBox()
+        self.combo_leadup_style.setMinimumWidth(scale(260))
+        self.combo_leadup_style.addItem(tr_ui("settings.leadup_style_instant", "Sofort-Sprung zum Varianten-Start"), "instant")
+        self.combo_leadup_style.addItem(tr_ui("settings.leadup_style_turbo", "Turbo-Animation (Schnelldurchlauf)"), "turbo")
+        curr_l_style = self.get_setting("leadup_skip_style", "instant")
+        idx_ls = self.combo_leadup_style.findData(curr_l_style)
+        if idx_ls >= 0: self.combo_leadup_style.setCurrentIndex(idx_ls)
+        self.combo_leadup_style.currentIndexChanged.connect(lambda: self.set_setting("leadup_skip_style", self.combo_leadup_style.currentData()))
+        v_leadup.addWidget(self._make_hairline_row(
+            tr_ui("settings.leadup_style_label", "\u00dcberspring-Stil:"),
+            tr_ui("settings.leadup_style_sub", "Ob direkt zur Variante gesprungen oder die Hinf\u00fchrung im Zeitraffer abgespielt wird."),
+            self.combo_leadup_style,
+            is_last=True
+        ))
+
+        self._update_leadup_controls_state()
+        layout.addWidget(g_leadup)
         layout.addStretch()
+
+    def _on_leadup_mode_changed(self):
+        self.set_setting("leadup_skip_mode", self.combo_leadup_mode.currentData())
+        self._update_leadup_controls_state()
+
+    def _update_leadup_controls_state(self):
+        mode = self.combo_leadup_mode.currentData()
+        self.spin_leadup_box.setEnabled(mode == "leitner_box")
+        self.spin_leadup_session_limit.setEnabled(mode == "session_count")
+        self.chk_leadup_once_per_session.setEnabled(mode != "off")
 
     def on_interval_preset_changed(self):
         from opening_fenix.core.services.training_service import DEFAULT_BOX_INTERVALS

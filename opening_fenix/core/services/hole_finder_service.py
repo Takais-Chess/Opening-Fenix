@@ -735,18 +735,41 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
         else:
             target_level = orders[idx - 1] if idx > 0 else None
 
-    # Pre-build in-memory graph for lightning-fast downstream impact simulation
+    # Pre-build in-memory graph for reachability filtering and downstream impact simulation
+    sp = session.query(Position.id).filter(
+        Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+    ).first()
+    if not sp:
+        return []
+    root_id = sp[0]
+
     rep_moves = (
         session.query(Move.id, Move.from_position_id, Move.to_position_id, RepertoireMove.level)
         .join(RepertoireMove, Move.id == RepertoireMove.move_id)
         .filter(RepertoireMove.is_active == True)
         .all()
     )
+    raw_outgoing = collections.defaultdict(list)
+    for mid, from_id, to_id, _ in rep_moves:
+        raw_outgoing[from_id].append((to_id, mid))
+
+    # Only positions reachable from the starting position via active repertoire moves are active
+    reachable_pos_ids = {root_id}
+    bfs_queue = collections.deque([root_id])
+    while bfs_queue:
+        pid = bfs_queue.popleft()
+        for to_id, _ in raw_outgoing.get(pid, []):
+            if to_id and to_id not in reachable_pos_ids:
+                reachable_pos_ids.add(to_id)
+                bfs_queue.append(to_id)
+
     incoming = collections.defaultdict(list)
     outgoing = collections.defaultdict(list)
     move_levels = {}
     move_to_pos = {}
     for mid, from_id, to_id, lvl in rep_moves:
+        if from_id not in reachable_pos_ids:
+            continue
         lvl_val = lvl if lvl is not None else 1
         move_levels[mid] = lvl_val
         move_to_pos[mid] = to_id
@@ -831,6 +854,8 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
     for move, rm in moves_with_rm:
         if cancel_check and cancel_check():
             return []
+        if move.from_position_id not in reachable_pos_ids:
+            continue
         if only_opponent:
             if not move.from_position or not move.from_position.fen:
                 continue

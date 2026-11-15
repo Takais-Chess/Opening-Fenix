@@ -2,6 +2,19 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.10] - 2026-11-15
+
+### Added & Improved
+- **Smart Lead-up Animation Skipping for Deep Variations**: Added configurable lead-up animation skipping in `MainWindow.start_animation` and `TrainingManager` so deep lines can start directly at the variation's entry point instead of replaying every opening move from move 1.
+- **Configurable Lead-up Settings & Session Controls**: Added a new *Lead-up Animation* section under *Training Behavior* in Settings supporting multiple skip modes (*Off*, *By Lead-up Mastery / Leitner Box* with default target Box 3, *Once per Active Session*, *After N Times per Active Session*, and *Always Start at Variation*), a *Show intro at least 1x per session* refresher toggle, separate behavior for *New Moves*, and *Instant Jump* vs. *Turbo Slide* skip styles.
+- **Localization Parity**: Added complete German and English translations for all lead-up animation settings in `de.json` and `en.json`.
+
+## [1.3.9] - 2026-11-12
+
+### Fixed & Improved
+- **Chapter Transposition Preservation (Option A)**: Resolved an issue where an earlier chapter (e.g. Vienna 1.e4 e5 2.Nc3) reaching a transposition point into a later chapter's opening tabiya (e.g. Four Knights 1.e4 e5 2.Nf3 Nc6 3.Nc3 Nf6) would absorb and generate the entire later chapter's tree into itself with misplaced sub-variation headings. Repertoire textbook generation now maps chapter entry positions beforehand and terminates branches that transpose into another chapter's starting positions with a clear, clickable cross-reference (↳ Zugumstellung auf Kapitel X), leaving each major opening to fully own and display its complete repertoire inside its designated chapter.
+- **Accurate Chapter Move Counts & Scoped Sub-Variations**: discover_chapters now calculates chapter move counts and sub-variation badges strictly within chapter boundaries, avoiding bloated move counts in the table of contents caused by transpositions into other chapters.
+
 ## [1.3.8] - 2026-11-11
 
 ### Fixed & Improved

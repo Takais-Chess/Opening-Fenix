@@ -2518,6 +2518,28 @@ class CreatorBackend:
         self.clear_cache()
         return modified
 
+    def _get_reachable_active_position_ids(self, root_id, outgoing_map=None):
+        """Returns position IDs reachable from root_id via active repertoire moves."""
+        if outgoing_map is None:
+            outgoing_map = collections.defaultdict(list)
+            active_edges = (
+                self.session.query(Move.from_position_id, Move.to_position_id, Move.id)
+                .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+                .filter(RepertoireMove.is_active == True)
+                .all()
+            )
+            for from_id, to_id, mid in active_edges:
+                outgoing_map[from_id].append((to_id, mid))
+        reachable = {root_id}
+        queue = collections.deque([root_id])
+        while queue:
+            pid = queue.popleft()
+            for to_id, _ in outgoing_map.get(pid, []):
+                if to_id and to_id not in reachable:
+                    reachable.add(to_id)
+                    queue.append(to_id)
+        return reachable
+
     def get_priority_level_change_impact(self, mode: str, current_level: int, threshold_pct: float) -> dict:
         """
         Calculates how many positions and moves would change level if promotion/demotion is applied.
@@ -2556,8 +2578,9 @@ class CreatorBackend:
         m = self.session.query(Metadata).filter_by(key="color").first()
         player_color = m.value[0].lower() if (m and m.value) else 'w'
 
-        clean_root = " ".join(chess.STARTING_FEN.split()[:4])
-        root_pos = self.session.query(Position).filter_by(fen=clean_root).first()
+        root_pos = self.session.query(Position).filter(
+            Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+        ).first()
         if not root_pos:
             return {'qualifying_moves': 0, 'positions_changed': 0, 'moves_changed': 0, 'target_level': target_level}
 
@@ -2571,6 +2594,11 @@ class CreatorBackend:
             .all()
         )
 
+        raw_outgoing = collections.defaultdict(list)
+        for mid, from_id, to_id, _, _ in rep_moves:
+            raw_outgoing[from_id].append((to_id, mid))
+        reachable_pos_ids = self._get_reachable_active_position_ids(root_pos.id, raw_outgoing)
+
         incoming = collections.defaultdict(list)
         outgoing = collections.defaultdict(list)
         move_levels = {}
@@ -2578,6 +2606,8 @@ class CreatorBackend:
         qualifying_move_ids = []
 
         for mid, from_id, to_id, prio, lvl in rep_moves:
+            if from_id not in reachable_pos_ids:
+                continue
             prio_val = prio or 0.0
             lvl_val = lvl if lvl is not None else 1
             move_levels[mid] = lvl_val
@@ -2667,8 +2697,17 @@ class CreatorBackend:
             op
         ).all()
 
+        root_pos = self.session.query(Position).filter(
+            Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+        ).first()
+        if not root_pos:
+            return impact
+        reachable_pos_ids = self._get_reachable_active_position_ids(root_pos.id)
+
         qualifying = []
         for move, rm in moves_with_rm:
+            if move.from_position_id not in reachable_pos_ids:
+                continue
             if not move.from_position or not move.from_position.fen:
                 continue
             parts = move.from_position.fen.strip().split()
@@ -4995,7 +5034,7 @@ class CreatorWindow(QMainWindow):
                 self.txt_c.setPlainText("")
         else:
             c_text = self.current_position_comments.get(self.active_comment_lang, "")
-            eval_sym = self.get_current_position_eval_symbol()
+            eval_sym = self.get_current_position_eval_symbol(use_ui=False)
             if eval_sym and not c_text:
                 c_text = eval_sym
                 self.current_position_comments[self.active_comment_lang] = eval_sym
@@ -5052,7 +5091,7 @@ class CreatorWindow(QMainWindow):
         src_text = self.current_position_comments.get(self.dual_source_lang, "")
         tgt_text = self.current_position_comments.get(self.dual_target_lang, "")
 
-        eval_sym = self.get_current_position_eval_symbol()
+        eval_sym = self.get_current_position_eval_symbol(use_ui=False)
         if eval_sym and not tgt_text and src_text:
             tgt_text = eval_sym
             self.current_position_comments[self.dual_target_lang] = eval_sym
@@ -5930,7 +5969,7 @@ class CreatorWindow(QMainWindow):
                         src_text = self.current_position_comments.get(self.dual_source_lang, "")
                         tgt_text = self.current_position_comments.get(self.dual_target_lang, "")
 
-                        eval_sym = self.get_current_position_eval_symbol()
+                        eval_sym = self.get_current_position_eval_symbol(use_ui=False)
                         if eval_sym and not tgt_text and src_text:
                             tgt_text = eval_sym
                             self.current_position_comments[self.dual_target_lang] = eval_sym
@@ -5946,7 +5985,7 @@ class CreatorWindow(QMainWindow):
                             self.txt_c.setPlainText("")
                     else:
                         c_text = self.current_position_comments.get(self.active_comment_lang, "")
-                        eval_sym = self.get_current_position_eval_symbol()
+                        eval_sym = self.get_current_position_eval_symbol(use_ui=False)
                         if eval_sym and not c_text:
                             c_text = eval_sym
                             self.current_position_comments[self.active_comment_lang] = eval_sym
@@ -6198,14 +6237,15 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'txt_c_dual'):
             self.txt_c_dual.blockSignals(b)
 
-    def get_current_position_eval_symbol(self):
+    def get_current_position_eval_symbol(self, use_ui: bool = True):
         from opening_fenix.core.utils import extract_eval_symbol
-        if hasattr(self, 'txt_c') and self.txt_c:
-            sym = extract_eval_symbol(self.txt_c.toPlainText())
-            if sym: return sym
-        if hasattr(self, 'txt_c_dual') and getattr(self, 'dual_comment_mode', False) and self.txt_c_dual:
-            sym = extract_eval_symbol(self.txt_c_dual.toPlainText())
-            if sym: return sym
+        if use_ui:
+            if hasattr(self, 'txt_c') and self.txt_c:
+                sym = extract_eval_symbol(self.txt_c.toPlainText())
+                if sym: return sym
+            if hasattr(self, 'txt_c_dual') and getattr(self, 'dual_comment_mode', False) and self.txt_c_dual:
+                sym = extract_eval_symbol(self.txt_c_dual.toPlainText())
+                if sym: return sym
         if hasattr(self, 'current_position_comments') and self.current_position_comments:
             for val in self.current_position_comments.values():
                 sym = extract_eval_symbol(val)

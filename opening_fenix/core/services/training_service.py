@@ -81,10 +81,17 @@ class TrainingManager:
             "queue_priority_order": "priority_first",
             "max_new_cards_per_day": 0,
             "max_reviews_per_session": 0,
-            "enforce_limit_after_variation": True
+            "enforce_limit_after_variation": True,
+            "leadup_skip_mode": "leitner_box",
+            "leadup_target_box": 3,
+            "leadup_session_limit": 3,
+            "leadup_show_once_per_session": True,
+            "leadup_new_moves_mode": "always_from_start",
+            "leadup_skip_style": "instant",
         }
         
         # Optimization Caches
+        self._session_variation_seen_counts: Dict[Tuple[str, str], int] = {}
         self._variation_move_ids = set()
         self._active_filter_name = None
         self._forward_moves_cache = None
@@ -147,6 +154,104 @@ class TrainingManager:
     def set_setting(self, key: str, value: Any) -> None:
         self.settings[key] = value
         self.save_settings()
+
+    def reset_session_variation_counts(self) -> None:
+        """Resets per-session variation intro view counts."""
+        self._session_variation_seen_counts.clear()
+
+    @staticmethod
+    def get_move_variation_name(move_obj: Any) -> Optional[str]:
+        """Returns the most specific raw variation name for a move's target or source position."""
+        if not move_obj:
+            return None
+        for pos_attr in ("to_position", "from_position"):
+            pos = getattr(move_obj, pos_attr, None)
+            if not pos:
+                continue
+            for field in ("cached_v3", "variation_3", "cached_v2", "variation_2", "cached_v1", "variation_1"):
+                val = getattr(pos, field, None)
+                if val and str(val).strip():
+                    return str(val).strip()
+        return None
+
+    def _are_leadup_moves_mastered(self, history_to_entry: List[Dict[str, Any]], target_box: int) -> bool:
+        """Returns True if every player move in history_to_entry has reached at least target_box."""
+        if not history_to_entry:
+            return False
+
+        self._ensure_td_cache()
+        side_raw = (self.repertoire_manager.get_repertoire_color() or "w").lower() if self.repertoire_manager else "w"
+        player_turn = "w" if side_raw.startswith("w") else "b"
+        starting_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+
+        checked_player_moves = 0
+        for idx, item in enumerate(history_to_entry):
+            from_fen = starting_fen if idx == 0 else (history_to_entry[idx - 1].get("fen") or "")
+            parts = from_fen.split()
+            if len(parts) < 2 or parts[1] != player_turn:
+                continue
+
+            checked_player_moves += 1
+            norm_fen = " ".join(parts[:4])
+            uci = item.get("uci", "")
+            td = self._norm_td_cache.get((norm_fen, uci))
+            if td is None or (td.box or 0) < target_box:
+                return False
+
+        return checked_player_moves > 0
+
+    def should_skip_leadup_animation(
+        self,
+        variation_name: Optional[str],
+        history_to_entry: List[Dict[str, Any]],
+        training_mode: str = "review",
+        record_session_view: bool = True,
+    ) -> bool:
+        """
+        Determines whether the lead-up animation before a variation's entry point should be skipped.
+        Tracks per-session variation intro views when record_session_view is True.
+        """
+        if not variation_name or not history_to_entry:
+            return False
+
+        if training_mode == "new":
+            new_mode = self.get_setting("leadup_new_moves_mode") or "always_from_start"
+            if new_mode == "always_from_start":
+                return False
+            if new_mode == "always_skip":
+                return True
+
+        mode = self.get_setting("leadup_skip_mode") or "leitner_box"
+        if mode == "off":
+            return False
+
+        repo_name = getattr(self.repertoire_manager, "active_repertoire_name", "") or ""
+        key = (repo_name, variation_name)
+        seen_before = self._session_variation_seen_counts.get(key, 0)
+
+        show_once = bool(self.get_setting("leadup_show_once_per_session"))
+        if show_once and seen_before == 0:
+            if record_session_view:
+                self._session_variation_seen_counts[key] = 1
+            return False
+
+        if mode == "always":
+            should_skip = True
+        elif mode == "once_per_session":
+            should_skip = seen_before >= 1
+        elif mode == "session_count":
+            limit = max(1, int(self.get_setting("leadup_session_limit") or 3))
+            should_skip = seen_before >= limit
+        elif mode == "leitner_box":
+            target_box = max(1, int(self.get_setting("leadup_target_box") or 3))
+            should_skip = self._are_leadup_moves_mastered(history_to_entry, target_box)
+        else:
+            should_skip = False
+
+        if record_session_view:
+            self._session_variation_seen_counts[key] = seen_before + 1
+
+        return should_skip
 
     def get_box_interval(self, box: int) -> datetime.timedelta:
         preset = self.get_setting("interval_preset") or "standard"

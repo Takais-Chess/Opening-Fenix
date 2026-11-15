@@ -225,3 +225,101 @@ def test_multilingual_json_variation_names(tmp_path):
 
     conn.close()
 
+
+def test_option_a_earlier_chapter_transposition_to_later_chapter(tmp_path):
+    """
+    Verifies Option A: When an earlier chapter (e.g. Vienna) transposes into
+    the root/tabiya of a later chapter (e.g. Four Knights), the earlier chapter
+    must stop at the transposition point with a cross-reference to the later chapter,
+    leaving the later chapter to fully own and generate its own opening tree.
+    """
+    from opening_fenix.core.services.book_export_service import export_repertoire_book
+
+    db_path = str(tmp_path / "option_a_test.db")
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE metadata (key VARCHAR PRIMARY KEY, value VARCHAR)")
+    cur.execute("INSERT INTO metadata VALUES ('name', 'Option A Test')")
+    cur.execute("INSERT INTO metadata VALUES ('color', 'b')")
+    cur.execute("CREATE TABLE repertoire_levels (id INTEGER PRIMARY KEY, name VARCHAR, `order` INTEGER, target_elo INTEGER)")
+    cur.execute("INSERT INTO repertoire_levels VALUES (1, 'Level 1', 1, 1500)")
+    cur.execute("CREATE TABLE positions (id INTEGER PRIMARY KEY, fen VARCHAR, comment VARCHAR, variation_1 VARCHAR, variation_2 VARCHAR, variation_3 VARCHAR)")
+    cur.execute("CREATE TABLE moves (id INTEGER PRIMARY KEY, from_position_id INTEGER, to_position_id INTEGER, uci VARCHAR, san VARCHAR, priority_score FLOAT)")
+    cur.execute("CREATE TABLE repertoire_moves (id INTEGER PRIMARY KEY, move_id INTEGER, level INTEGER, is_active BOOLEAN)")
+
+    # Pos 1: Start
+    cur.execute("INSERT INTO positions VALUES (1, 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -', '', '', '', '')")
+    # Pos 2: 1.e4
+    cur.execute("INSERT INTO positions VALUES (2, 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -', '', '', '', '')")
+    # Pos 3: 1...e5
+    cur.execute("INSERT INTO positions VALUES (3, 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq -', '', '', '', '')")
+
+    # Chapter A: 2.Nc3 (Vienna) - higher priority (prio=95.0) -> becomes Chapter 1
+    cur.execute("INSERT INTO positions VALUES (20, 'rnbqkbnr/pppp1ppp/8/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR b KQkq -', 'Wiener Partie Ausgangspunkt', 'The Vienna', '', '')")
+    cur.execute("INSERT INTO positions VALUES (21, 'rnbqkb1r/pppp1ppp/5n2/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w KQkq -', '', '', '', '')")
+    cur.execute("INSERT INTO positions VALUES (22, 'rnbqkb1r/pppp1ppp/5n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq -', '', '', '', '')")
+
+    # Chapter B: 2.Nf3 Nc6 3.Nc3 (Four Knights) - lower priority (prio=90.0) -> becomes Chapter 2
+    cur.execute("INSERT INTO positions VALUES (30, 'rnbqkbnr/pppp1ppp/8/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq -', '', '', '', '')")
+    cur.execute("INSERT INTO positions VALUES (31, 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq -', '', '', '', '')")
+    cur.execute("INSERT INTO positions VALUES (32, 'r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R b KQkq -', 'Vierspringer Ausgangspunkt', 'Four Knights', '', '')")
+
+    # Four Knights tabiya reached by both:
+    # From 32: 3...Nf6 -> Pos 50
+    # From 22: 3...Nc6 -> Pos 50!
+    cur.execute("INSERT INTO positions VALUES (50, 'r1bqkb1r/pppp1ppp/2n2n2/4p3/4P3/2N2N2/PPPP1PPP/R1BQKB1R w KQkq -', 'Hauptstellung Vierspringerspiel', 'Four Knights', '', '')")
+    # Subsequent moves of Four Knights (should belong to Chapter 2, NOT Chapter 1!)
+    cur.execute("INSERT INTO positions VALUES (51, 'r1bqkb1r/pppp1ppp/2n2n2/4p3/3PP3/2N2N2/PPP2PPP/R1BQKB1R b KQkq -', 'Schottisch Vierspringer', '', '', '')")
+
+    # Moves setup
+    cur.execute("INSERT INTO moves VALUES (1, 1, 2, 'e2e4', 'e4', 100.0)")
+    cur.execute("INSERT INTO moves VALUES (2, 2, 3, 'e7e5', 'e5', 100.0)")
+
+    # Vienna branch (prio 95)
+    cur.execute("INSERT INTO moves VALUES (3, 3, 20, 'b1c3', 'Nc3', 95.0)")
+    cur.execute("INSERT INTO moves VALUES (4, 20, 21, 'g8f6', 'Nf6', 95.0)")
+    cur.execute("INSERT INTO moves VALUES (5, 21, 22, 'g1f3', 'Nf3', 95.0)")
+    cur.execute("INSERT INTO moves VALUES (6, 22, 50, 'b8c6', 'Nc6', 95.0)")  # Transposition to Pos 50!
+
+    # Four Knights branch (prio 90)
+    cur.execute("INSERT INTO moves VALUES (7, 3, 30, 'g1f3', 'Nf3', 90.0)")
+    cur.execute("INSERT INTO moves VALUES (8, 30, 31, 'b8c6', 'Nc6', 90.0)")
+    cur.execute("INSERT INTO moves VALUES (9, 31, 32, 'b1c3', 'Nc3', 90.0)")
+    cur.execute("INSERT INTO moves VALUES (10, 32, 50, 'g8f6', 'Nf6', 90.0)") # Entry to Pos 50
+    cur.execute("INSERT INTO moves VALUES (11, 50, 51, 'd2d4', 'd4', 90.0)")
+
+    for m_id in range(1, 12):
+        cur.execute("INSERT INTO repertoire_moves VALUES (?, ?, 1, 1)", (m_id, m_id))
+
+    conn.commit()
+
+    out_html = str(tmp_path / "option_a_book.html")
+    res = export_repertoire_book(
+        db_path=db_path,
+        output_path=out_html,
+        output_format="html",
+        level=1,
+        language="de"
+    )
+    assert os.path.isfile(res)
+    with open(res, "r", encoding="utf-8") as f:
+        html = f.read()
+
+    # Vienna is Chapter 1, Four Knights is Chapter 2
+    assert "Kapitel 1" in html
+    assert "Kapitel 2" in html
+
+    # Chapter 1 (Vienna) should cut at 3...Sc6 with a transposition note to Chapter 2!
+    assert "Zugumstellung auf <a href='#chapter-2'" in html or "Zugumstellung auf Kapitel 2" in html
+
+    # The comment for 4.d4 ('Schottisch Vierspringer') must appear in Chapter 2, NOT Chapter 1!
+    chap1_part, chap2_part = html.split("id=\"chapter-2\"")
+    assert "Schottisch Vierspringer" in chap2_part
+    assert "Schottisch Vierspringer" not in chap1_part
+
+    # The mainline variation badge for Four Knights should not be misplaced inside Chapter 1
+    assert "subvar-title'>Four Knights</span></div>" not in chap1_part
+
+    conn.close()
+
+

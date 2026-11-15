@@ -891,6 +891,11 @@ def build_book_html(
             page-break-inside: avoid;
             margin-bottom: 6px;
         }}
+        .diagram-comment-group .moves {{
+            margin-bottom: 4px;
+            break-after: avoid;
+            page-break-after: avoid;
+        }}
 
         .sideline-tag {{
             font-weight: bold;
@@ -1121,7 +1126,9 @@ def flatten_subtree(
     chap_idx: int = 1,
     chap_title: str = "",
     chap_prefix: str = "",
-    page_map: Optional[Dict[Any, int]] = None
+    page_map: Optional[Dict[Any, int]] = None,
+    chap_entry_map: Optional[Dict[int, int]] = None,
+    chapters: Optional[List[dict]] = None
 ) -> str:
     """
     Recursively flattens a subtree into Quality Chess style HTML paragraphs,
@@ -1167,6 +1174,90 @@ def flatten_subtree(
         else:
             html_blocks.append(start_diag)
 
+    # Register start_pos_id in visited_positions so any other chapter transposing directly to it gets caught
+    visited_positions[start_pos_id] = {
+        "chap_idx": chap_idx,
+        "chap_title": chap_title,
+        "san_path": chap_prefix
+    }
+
+    def check_next_move_has_diagram(p_id: int, plies_so_far: int) -> bool:
+        """Checks if the immediate continuation from p_id will render a board diagram."""
+        try:
+            c_moves = get_children(p_id)
+            if not c_moves:
+                return False
+            c_m_id, c_san, c_to_pos, c_fen, c_raw_c, c_v1, c_v2, c_v3 = c_moves[0]
+            c_clean, c_anno = extract_clean_comment(c_raw_c, language)
+            c_has_drawings = bool(c_anno.get("arrows") or c_anno.get("highlights"))
+            if c_has_drawings:
+                return True
+            c_sub_moves = get_children(c_to_pos)
+            if not c_sub_moves:
+                return True  # Leaf at next position receives diagram
+
+            # Check if next move is a White move that merges with Black reply
+            if not c_clean and not c_has_drawings and len(c_sub_moves) >= 1:
+                r_m = c_sub_moves[0]
+                _, _, r_to, _, r_raw, _, _, _ = r_m
+                r_clean, r_anno = extract_clean_comment(r_raw, language)
+                if bool(r_anno.get("arrows") or r_anno.get("highlights")):
+                    return True
+                if not get_children(r_to):
+                    return True  # Merged leaf
+                if r_clean and (plies_so_far + 2) >= 6:
+                    return True
+                return False
+
+            if c_clean and (plies_so_far + 1) >= 6:
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    def get_transposition_info(to_p: int) -> Optional[Tuple[int, str, str]]:
+        """Returns (target_chap_idx, target_chap_title, note_text) if to_p transposes, else None."""
+        if to_p in visited_positions:
+            orig = visited_positions[to_p]
+            t_chap = orig.get("chap_idx", 1)
+            t_title = orig.get("chap_title", "")
+            if t_chap == chap_idx:
+                orig_path = orig.get("san_path", "")
+                last_moves = " ".join(orig_path.split()[-2:]) if orig_path else ""
+                if last_moves:
+                    hint = f"↳ siehe {last_moves}" if language == "de" else f"↳ see {last_moves}"
+                else:
+                    hint = "↳ siehe oben" if language == "de" else "↳ see above"
+                return (t_chap, t_title, hint)
+            else:
+                p_str = ""
+                if page_map and t_chap in page_map:
+                    p_str = f", S. {page_map[t_chap]}" if language == "de" else f", p. {page_map[t_chap]}"
+                if language == "de":
+                    note = f"↳ Zugumstellung auf <a href='#chapter-{t_chap}' title='{t_title}'>Kapitel {t_chap}</a>{p_str}"
+                else:
+                    note = f"↳ Transposition to <a href='#chapter-{t_chap}' title='{t_title}'>Chapter {t_chap}</a>{p_str}"
+                return (t_chap, t_title, note)
+
+        # Option A: Transposition to another chapter's root / tabiya (even if not visited yet)
+        if chap_entry_map and to_p in chap_entry_map:
+            t_chap = chap_entry_map[to_p]
+            if t_chap != chap_idx:
+                t_title = ""
+                if chapters and 1 <= t_chap <= len(chapters):
+                    t_title = parse_variation_name(chapters[t_chap - 1].get("title", ""), lang=language, default_lang="de" if language == "de" else "en")
+                p_str = ""
+                if page_map and t_chap in page_map:
+                    p_str = f", S. {page_map[t_chap]}" if language == "de" else f", p. {page_map[t_chap]}"
+                if language == "de":
+                    note = f"↳ Zugumstellung auf <a href='#chapter-{t_chap}' title='{t_title}'>Kapitel {t_chap}</a>{p_str}"
+                else:
+                    note = f"↳ Transposition to <a href='#chapter-{t_chap}' title='{t_title}'>Chapter {t_chap}</a>{p_str}"
+                return (t_chap, t_title, note)
+
+        return None
+
     def traverse(pos_id, m_num, white_turn, depth=0, parent_tag="", moves_since_diagram=0, pending_moves=None, path_str=None):
         if pending_moves is None:
             pending_moves = []
@@ -1184,12 +1275,6 @@ def flatten_subtree(
 
         # Process Main Move
         m_id, san, to_pos, fen, raw_c, v1, v2, v3 = main_move
-        main_var = extract_variation_name(v1, v2, v3, exclude_title=chap_title, language=language)
-        if main_var and depth > 0:
-            if pending_moves:
-                html_blocks.append(f"<p class='moves'>{' '.join(pending_moves)}</p>")
-                pending_moves = []
-            html_blocks.append(f"<div class='mainline-variation-heading'><span class='subvar-badge'>Variante</span> <span class='subvar-title'>{main_var}</span></div>")
         loc_san = format_san(san, language)
         new_path = append_move_to_path(path_str, m_num, white_turn, loc_san)
         
@@ -1204,28 +1289,10 @@ def flatten_subtree(
 
         clean_text, parsed_anno = extract_clean_comment(raw_c, language)
 
-        def get_transposition_note(orig: dict) -> str:
-            t_chap = orig.get("chap_idx", 1)
-            t_title = orig.get("chap_title", "")
-            if t_chap == chap_idx:
-                orig_path = orig.get("san_path", "")
-                last_moves = " ".join(orig_path.split()[-2:]) if orig_path else ""
-                if last_moves:
-                    return f"↳ siehe {last_moves}" if language == "de" else f"↳ see {last_moves}"
-                return "↳ siehe oben" if language == "de" else "↳ see above"
-            else:
-                p_str = ""
-                if page_map and t_chap in page_map:
-                    p_str = f", S. {page_map[t_chap]}" if language == "de" else f", p. {page_map[t_chap]}"
-                if language == "de":
-                    return f"↳ Zugumstellung auf <a href='#chapter-{t_chap}' title='{t_title}'>Kapitel {t_chap}</a>{p_str}"
-                else:
-                    return f"↳ Transposition to <a href='#chapter-{t_chap}' title='{t_title}'>Chapter {t_chap}</a>{p_str}"
-
         # Transposition Detection for Main Move
-        if to_pos in visited_positions:
-            orig = visited_positions[to_pos]
-            note_text = get_transposition_note(orig)
+        trans_info = get_transposition_info(to_pos)
+        if trans_info is not None:
+            _, _, note_text = trans_info
             inline_html = f"<span class='transposition-inline'>*({note_text})*</span>"
             if pending_moves:
                 html_blocks.append(f"<p class='moves'>{' '.join(pending_moves)} {inline_html}</p>")
@@ -1233,67 +1300,74 @@ def flatten_subtree(
             else:
                 html_blocks.append(f"<p class='transposition-note'>{inline_html}</p>")
             return
+
+        main_var = extract_variation_name(v1, v2, v3, exclude_title=chap_title, language=language)
+        if main_var and depth > 0:
+            if pending_moves:
+                html_blocks.append(f"<p class='moves'>{' '.join(pending_moves)}</p>")
+                pending_moves = []
+            html_blocks.append(f"<div class='mainline-variation-heading'><span class='subvar-badge'>Variante</span> <span class='subvar-title'>{main_var}</span></div>")
+
+        visited_positions[to_pos] = {
+            "chap_idx": chap_idx,
+            "chap_title": chap_title,
+            "san_path": new_path
+        }
+
+        child_moves = get_children(to_pos)
+        is_leaf = len(child_moves) == 0
+        has_drawings = bool(parsed_anno.get("arrows") or parsed_anno.get("highlights"))
+
+        cur_plies = moves_since_diagram + 1
+        if has_drawings:
+            should_show_diag = True
+        elif depth == 0 and is_leaf:
+            # Leaf at the end of the chapter's main line
+            should_show_diag = True
+        elif cur_plies < 6:
+            # Skip diagram if within last 3 full moves (< 6 plies)
+            should_show_diag = False
         else:
-            visited_positions[to_pos] = {
-                "chap_idx": chap_idx,
-                "chap_title": chap_title,
-                "san_path": new_path
-            }
+            is_major_branch = (len(child_moves) >= 3) and (depth == 0)
+            is_checkpoint = cur_plies >= 8
+            should_show_diag = is_major_branch or is_checkpoint
 
-            child_moves = get_children(to_pos)
-            is_leaf = len(child_moves) == 0
-            has_drawings = bool(parsed_anno.get("arrows") or parsed_anno.get("highlights"))
+        has_break = bool(clean_text or should_show_diag)
+        next_moves_since_diagram = 0 if should_show_diag else cur_plies
 
-            diag_tracker["plies_since_diagram"] += 1
-            if has_drawings:
-                should_show_diag = True
-            elif depth == 0 and is_leaf:
-                # Leaf at the end of the chapter's main line
-                should_show_diag = True
-            elif diag_tracker["plies_since_diagram"] < 6:
-                # Skip diagram if within last 3 full moves (< 6 plies)
-                should_show_diag = False
+        if has_break:
+            moves_html = f"<p class='moves'>{' '.join(pending_moves)}</p>" if pending_moves else ""
+            pending_moves = []
+
+            diag_svg = ""
+            if should_show_diag:
+                num_prefix = f"{m_num}." if white_turn else f"{m_num}..."
+                caption = f"Stellung nach {num_prefix}{loc_san}" if language == "de" else f"Position after {num_prefix}{loc_san}"
+                diag_svg = render_board_svg(fen, parsed_anno, color=color, caption=caption, size=195)
+
+            comment_html = ""
+            if clean_text:
+                lines = [l.strip() for l in clean_text.split("\n") if l.strip()]
+                if len(lines) > 1 and any(l.startswith("-") or l.startswith("•") for l in lines[1:]):
+                    bullet_items = "".join(f"<li>{l.lstrip('-•').strip()}</li>" for l in lines[1:] if l.strip())
+                    comment_html = f"<p>{lines[0]}</p>\n<ul class='book-list'>{bullet_items}</ul>\n"
+                else:
+                    comment_html = "".join(f"<p>{line}</p>\n" for line in lines)
+
+            if diag_svg:
+                # Keep move(s) leading to the diagram together with the diagram and comment
+                parts = [p for p in (moves_html, diag_svg, comment_html) if p]
+                html_blocks.append(f"<div class='diagram-comment-group'>\n{chr(10).join(parts)}\n</div>")
             else:
-                is_major_branch = (len(child_moves) >= 3) and (depth == 0)
-                is_checkpoint = diag_tracker["plies_since_diagram"] >= 8
-                should_show_diag = is_major_branch or is_checkpoint
-
-            has_break = bool(clean_text or should_show_diag)
-            next_moves_since_diagram = 0 if should_show_diag else moves_since_diagram + 1
-
-            if has_break:
-                # Flush pending moves
-                if pending_moves:
-                    html_blocks.append(f"<p class='moves'>{' '.join(pending_moves)}</p>")
-                    pending_moves = []
-
-                diag_svg = ""
-                if should_show_diag:
-                    num_prefix = f"{m_num}." if white_turn else f"{m_num}..."
-                    caption = f"Stellung nach {num_prefix}{loc_san}" if language == "de" else f"Position after {num_prefix}{loc_san}"
-                    diag_svg = render_board_svg(fen, parsed_anno, color=color, caption=caption, size=195)
-                    diag_tracker["plies_since_diagram"] = 0
-
-                comment_html = ""
-                if clean_text:
-                    lines = [l.strip() for l in clean_text.split("\n") if l.strip()]
-                    if len(lines) > 1 and any(l.startswith("-") or l.startswith("•") for l in lines[1:]):
-                        bullet_items = "".join(f"<li>{l.lstrip('-•').strip()}</li>" for l in lines[1:] if l.strip())
-                        comment_html = f"<p>{lines[0]}</p>\n<ul class='book-list'>{bullet_items}</ul>\n"
-                    else:
-                        comment_html = "".join(f"<p>{line}</p>\n" for line in lines)
-
-                if diag_svg and comment_html:
-                    html_blocks.append(f"<div class='diagram-comment-group'>\n{diag_svg}\n{comment_html}</div>")
-                elif diag_svg:
-                    html_blocks.append(diag_svg)
-                elif comment_html:
+                if moves_html:
+                    html_blocks.append(moves_html)
+                if comment_html:
                     html_blocks.append(comment_html)
 
-            # Traverse Main Line Continuation
-            next_white = not white_turn
-            next_num = m_num if white_turn else m_num + 1
-            traverse(to_pos, next_num, next_white, depth + 1, parent_tag, next_moves_since_diagram, pending_moves, new_path)
+        # Traverse Main Line Continuation
+        next_white = not white_turn
+        next_num = m_num if white_turn else m_num + 1
+        traverse(to_pos, next_num, next_white, depth + 1, parent_tag, next_moves_since_diagram, pending_moves, new_path)
 
         # Render Sidelines
         for s_idx, s_move in enumerate(sidelines):
@@ -1311,9 +1385,9 @@ def flatten_subtree(
             var_suffix = f" <span class='variation-name'>– {side_var}</span>" if side_var else ""
 
             # Direct transposition on sideline move
-            if s_to_pos in visited_positions:
-                orig = visited_positions[s_to_pos]
-                note_text = get_transposition_note(orig)
+            s_trans_info = get_transposition_info(s_to_pos)
+            if s_trans_info is not None:
+                _, _, note_text = s_trans_info
                 inline_html = f"<span class='transposition-inline'>*({note_text})*</span>"
                 html_blocks.append(f"<div class='variation-heading'><span class='sideline-tag'>{s_tag})</span> <span class='moves'>{s_num_prefix}{s_loc_san}</span>{var_suffix} {inline_html}</div>")
                 continue
@@ -1341,9 +1415,9 @@ def flatten_subtree(
                 r_clean_text, r_parsed_anno = extract_clean_comment(r_raw_c, language)
                 r_has_drawings = bool(r_parsed_anno.get("arrows") or r_parsed_anno.get("highlights"))
 
-                if r_to_pos in visited_positions:
-                    orig = visited_positions[r_to_pos]
-                    note_text = get_transposition_note(orig)
+                r_trans_info = get_transposition_info(r_to_pos)
+                if r_trans_info is not None:
+                    _, _, note_text = r_trans_info
                     inline_html = f"<span class='transposition-inline'>*({note_text})*</span>"
                     html_blocks.append(f"<div class='variation-heading'><span class='sideline-tag'>{s_tag})</span> <span class='moves'>{m_num}.{s_loc_san} {r_loc_san}</span>{var_suffix} {inline_html}</div>")
                 else:
@@ -1356,20 +1430,27 @@ def flatten_subtree(
 
                     r_child_moves = get_children(r_to_pos)
                     r_is_leaf = len(r_child_moves) == 0
-                    diag_tracker["plies_since_diagram"] += 1
+                    r_cur_plies = moves_since_diagram + 2
+                    next_has_diag = check_next_move_has_diagram(r_to_pos, r_cur_plies)
+
                     if r_has_drawings:
                         r_should_show = True
-                    elif diag_tracker["plies_since_diagram"] < 6:
+                    elif r_is_leaf:
+                        r_should_show = True
+                    elif r_clean_text and not next_has_diag:
+                        # Regel-Ergänzung: Nebenvarianten-Start mit Kommentar erhält Einstiegsdiagramm,
+                        # aber NUR wenn im nächsten Zug nicht ohnehin ein Diagramm gezeichnet wird!
+                        r_should_show = True
+                    elif r_cur_plies < 6:
                         r_should_show = False
                     else:
-                        r_should_show = bool(r_clean_text and diag_tracker["plies_since_diagram"] >= 8)
+                        r_should_show = bool(r_clean_text and r_cur_plies >= 8)
 
                     diag_svg = ""
-                    r_next_moves = 0 if r_should_show else moves_since_diagram + 1
+                    r_next_moves = 0 if r_should_show else r_cur_plies
                     if r_should_show:
                         caption = f"Stellung nach {m_num}...{r_loc_san}" if language == "de" else f"Position after {m_num}...{r_loc_san}"
                         diag_svg = render_board_svg(r_fen, r_parsed_anno, color=color, caption=caption, size=195)
-                        diag_tracker["plies_since_diagram"] = 0
 
                     comment_html = ""
                     if r_clean_text:
@@ -1399,20 +1480,27 @@ def flatten_subtree(
                 heading_html = f"<div class='variation-heading'><span class='sideline-tag'>{s_tag})</span> <span class='moves'>{s_num_prefix}{s_loc_san}</span>{var_suffix}</div>"
 
                 s_is_leaf = len(s_child_moves) == 0
-                diag_tracker["plies_since_diagram"] += 1
+                s_cur_plies = moves_since_diagram + 1
+                next_has_diag = check_next_move_has_diagram(s_to_pos, s_cur_plies)
+
                 if s_has_drawings:
                     s_should_show = True
-                elif diag_tracker["plies_since_diagram"] < 6:
+                elif s_is_leaf:
+                    s_should_show = True
+                elif s_clean_text and not next_has_diag:
+                    # Regel-Ergänzung: Nebenvarianten-Start mit Kommentar erhält Einstiegsdiagramm,
+                    # aber NUR wenn im nächsten Zug nicht ohnehin ein Diagramm gezeichnet wird!
+                    s_should_show = True
+                elif s_cur_plies < 6:
                     s_should_show = False
                 else:
-                    s_should_show = bool(s_clean_text and diag_tracker["plies_since_diagram"] >= 8)
+                    s_should_show = bool(s_clean_text and s_cur_plies >= 8)
 
                 diag_svg = ""
-                s_next_moves = 0 if s_should_show else moves_since_diagram + 1
+                s_next_moves = 0 if s_should_show else s_cur_plies
                 if s_should_show:
                     s_caption = f"Stellung nach {s_num_prefix}{s_loc_san}" if language == "de" else f"Position after {s_num_prefix}{s_loc_san}"
                     diag_svg = render_board_svg(s_fen, s_parsed_anno, color=color, caption=s_caption, size=195)
-                    diag_tracker["plies_since_diagram"] = 0
 
                 comment_html = ""
                 if s_clean_text:
@@ -1594,6 +1682,54 @@ def discover_chapters(
 
     # Sort chapters strictly by priority_score descending (with move_count tiebreaker)
     chapters.sort(key=lambda c: (c.get("priority_score", 0.0), c.get("move_count", 0)), reverse=True)
+
+    # Option A: Map chapter entry positions (start position + immediate continuation)
+    chap_entry_map = {}
+    for idx, c in enumerate(chapters, start=1):
+        s_pos = c["start_pos_id"]
+        chap_entry_map[s_pos] = idx
+        for _, _, to_p, _, _, _, _, _ in children.get(s_pos, []):
+            chap_entry_map[to_p] = idx
+
+    def count_chapter_moves(pos_id, this_idx, visited=None):
+        if visited is None:
+            visited = set()
+        if pos_id in visited:
+            return 0
+        visited.add(pos_id)
+        cnt = 0
+        for _, _, to_p, _, _, _, _, _ in children.get(pos_id, []):
+            cnt += 1
+            target_chap = chap_entry_map.get(to_p)
+            if target_chap is not None and target_chap != this_idx:
+                continue
+            cnt += count_chapter_moves(to_p, this_idx, visited)
+        return cnt
+
+    def get_scoped_subvars(pos_id, this_idx, visited=None):
+        if visited is None:
+            visited = set()
+        if pos_id in visited:
+            return []
+        visited.add(pos_id)
+        subvars = []
+        for _, _, to_p, _, v1, v2, v3, _ in children.get(pos_id, []):
+            target_chap = chap_entry_map.get(to_p)
+            if target_chap is not None and target_chap != this_idx:
+                continue
+            raw_v = (v2 or v3 or "").strip()
+            v = resolve_name(raw_v)
+            if v and v not in subvars:
+                subvars.append(v)
+            for sub in get_scoped_subvars(to_p, this_idx, visited):
+                if sub not in subvars:
+                    subvars.append(sub)
+        return subvars
+
+    for idx, c in enumerate(chapters, start=1):
+        c["move_count"] = count_chapter_moves(c["start_pos_id"], idx)
+        c["subvars"] = get_scoped_subvars(c["start_pos_id"], idx)
+
     return chapters
 
 
@@ -1877,6 +2013,18 @@ def export_repertoire_book(
 
         visited_positions = {}
         total_chapters = len(chapters)
+        chap_entry_map = {}
+        for idx, chap in enumerate(chapters, start=1):
+            s_pos = chap["start_pos_id"]
+            chap_entry_map[s_pos] = idx
+            cur.execute("""
+                SELECT m.to_position_id FROM repertoire_moves rm
+                JOIN moves m ON rm.move_id = m.id
+                WHERE m.from_position_id = ? AND rm.is_active = 1
+            """, (s_pos,))
+            for (to_p,) in cur.fetchall():
+                chap_entry_map[to_p] = idx
+
         for idx, chap in enumerate(chapters, start=1):
             if progress_callback:
                 pct = 20 + int(50 * (idx / max(1, total_chapters)))
@@ -1896,7 +2044,9 @@ def export_repertoire_book(
                 visited_positions=visited_positions,
                 chap_idx=idx,
                 chap_title=chap["title"],
-                chap_prefix=chap["san_prefix"]
+                chap_prefix=chap["san_prefix"],
+                chap_entry_map=chap_entry_map,
+                chapters=chapters
             )
             chap["content_html"] = content_html
 
@@ -1999,7 +2149,9 @@ def export_repertoire_book(
                             chap_idx=idx,
                             chap_title=chap["title"],
                             chap_prefix=chap["san_prefix"],
-                            page_map=page_map
+                            page_map=page_map,
+                            chap_entry_map=chap_entry_map,
+                            chapters=chapters
                         )
 
                     var_index_html_final, _ = generate_variation_index(

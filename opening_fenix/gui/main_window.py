@@ -97,6 +97,7 @@ class MainWindow(QMainWindow):
         self.creator_window = None
         self.sounds = {}
         self.animation_moves = []
+        self._turbo_leadup_remaining = 0
         self.sorted_repo_names = None
         self._auto_size_board = True
         
@@ -579,6 +580,7 @@ class MainWindow(QMainWindow):
         self._flush_pending_stats()
         # Cancel any ongoing animations before switching
         self.animation_moves = []
+        self._turbo_leadup_remaining = 0
         self._preloaded_challenge = None
         if hasattr(self.board_widget, 'abort_piece_slide'):
             self.board_widget.abort_piece_slide()
@@ -1401,6 +1403,7 @@ class MainWindow(QMainWindow):
         self.board_widget.skip_all_animations_requested.connect(self.skip_all_animations)
 
     def start_animation(self, path_to_animate):
+        self._turbo_leadup_remaining = 0
         if path_to_animate:
              self.animation_moves = path_to_animate
              self._advance_animation_sequence()
@@ -1436,6 +1439,36 @@ class MainWindow(QMainWindow):
         current_fen = clean_fen(self.board_widget.board.fen())
         target_fen = clean_fen(self.current_move_obj.from_position.fen)
         if current_fen == target_fen: self.finalize_animation_state(); return
+
+        # ?? SMART LEAD-UP SKIP (NO VARIATION FILTER) ??
+        turbo_boundary_idx = -1
+        if not self.active_variation_filter and self.current_move_obj and hasattr(self.training_manager, 'should_skip_leadup_animation'):
+            var_name = self.training_manager.get_move_variation_name(self.current_move_obj)
+            if var_name:
+                entry_fen = self.repertoire_manager.get_variation_entry_point_fen(var_name)
+                if entry_fen:
+                    c_entry = clean_fen(entry_fen)
+                    boundary_idx = -1
+                    for i, item in enumerate(history[:-1]):
+                        if clean_fen(item['fen']) == c_entry:
+                            boundary_idx = i
+                            break
+                    if boundary_idx != -1:
+                        already_in_variation = any(clean_fen(item['fen']) == current_fen for item in history[boundary_idx:-1])
+                        if not already_in_variation:
+                            if self.training_manager.should_skip_leadup_animation(
+                                var_name,
+                                history[:boundary_idx + 1],
+                                training_mode=getattr(self, 'training_mode', 'review'),
+                                record_session_view=True,
+                            ):
+                                skip_style = self.training_manager.get_setting('leadup_skip_style') or 'instant'
+                                if skip_style == 'turbo':
+                                    turbo_boundary_idx = boundary_idx
+                                else:
+                                    reset_fen = entry_fen
+                                    full_moves = full_moves[boundary_idx + 1:]
+                                    history = history[boundary_idx + 1:]
         
         match_idx = -1
         # Check against reset point (STARTING_FEN or VARIATION_ENTRY_FEN)
@@ -1448,11 +1481,15 @@ class MainWindow(QMainWindow):
         
         if match_idx != -1 or current_fen == clean_fen(reset_fen):
             self.animation_moves = full_moves[match_idx + 1:]
+            if turbo_boundary_idx != -1:
+                self._turbo_leadup_remaining = max(0, (turbo_boundary_idx + 1) - (match_idx + 1))
             logger.debug(f"Animation: starting from match_idx {match_idx}, {len(self.animation_moves)} moves remaining.")
         else:
             logger.info(f"Animation: current board position not found in history. Resetting to {reset_fen}.")
             self.board_widget.set_fen(reset_fen)
             self.animation_moves = full_moves
+            if turbo_boundary_idx != -1:
+                self._turbo_leadup_remaining = max(0, turbo_boundary_idx + 1)
 
         if not self.animation_moves:
             self.finalize_animation_state()
@@ -1469,7 +1506,11 @@ class MainWindow(QMainWindow):
                 logger.error(f"Animation: No piece found at {chess.square_name(move.from_square)} for move {move_san}")
                 self.finalize_animation_state()
                 return
-            self.board_widget.start_piece_slide(piece, move.from_square, move.to_square, move)
+            duration_override = None
+            if getattr(self, '_turbo_leadup_remaining', 0) > 0:
+                self._turbo_leadup_remaining -= 1
+                duration_override = 45
+            self.board_widget.start_piece_slide(piece, move.from_square, move.to_square, move, duration_override=duration_override)
         except Exception as e:
             logger.error(f"Animation: Failed to parse or play move '{move_san}': {e}")
             self.finalize_animation_state()
@@ -1481,6 +1522,7 @@ class MainWindow(QMainWindow):
 
     def skip_all_animations(self):
         """Instantly finishes all pending moves in the current animation sequence."""
+        self._turbo_leadup_remaining = 0
         if not (self.board_widget.is_animating or self.animation_moves):
             return
 

@@ -934,7 +934,7 @@ class ChessBoardWidget(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
-    def start_piece_slide(self, piece, from_square, to_square, move):
+    def start_piece_slide(self, piece, from_square, to_square, move, duration_override=None):
         ff, fr = chess.square_file(from_square), chess.square_rank(from_square)
         tf, tr = chess.square_file(to_square), chess.square_rank(to_square)
         if self.flipped: sc, sr, ec, er = 7 - ff, fr, 7 - tf, tr
@@ -946,7 +946,7 @@ class ChessBoardWidget(QWidget):
         # O(1) instant precomputed distance duration lookup
         dx = abs(sc - ec)
         dy = abs(sr - er)
-        self.anim_duration = self._duration_lut.get((dx, dy), self.anim_duration)
+        self.anim_duration = duration_override if duration_override is not None else self._duration_lut.get((dx, dy), self.anim_duration)
             
         self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
         self.last_move = move

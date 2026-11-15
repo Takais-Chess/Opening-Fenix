@@ -252,3 +252,47 @@ def test_translate_chess_comment_fallback_and_raise(monkeypatch):
     assert res_trans == "Deutscher Text"
     assert any("sl=de" in u for u in call_urls)
     assert any("sl=auto" in u for u in call_urls)
+
+
+def test_eval_symbol_does_not_bleed_to_other_positions(qapp, monkeypatch):
+    from unittest.mock import MagicMock
+    from opening_fenix.creator.creator_window import CreatorWindow
+
+    mock_backend = MagicMock()
+    mock_backend.active_repo_name = "TestRepo"
+    mock_backend.get_repertoire_color.return_value = "w"
+    mock_backend.get_candidate_moves.return_value = []
+    mock_backend.get_lichess_common_moves.return_value = []
+    mock_backend._get_pos_prio.return_value = 0.0
+    mock_backend.get_position_data.return_value = {
+        "id": 2,
+        "comment": "",
+        "variation_1": "",
+        "variation_2": "",
+        "variation_3": "",
+        "v1_inherited": False,
+        "v2_inherited": False,
+        "v3_inherited": False,
+    }
+
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorBackend", lambda *a, **kw: mock_backend)
+    monkeypatch.setattr("opening_fenix.creator.creator_window.EngineThread", MagicMock())
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorWindow.new_repertoire_dialog", lambda self: None)
+    monkeypatch.setattr("opening_fenix.creator.creator_window.CreatorWindow.load_repertoire_dialog", lambda self: None)
+
+    win = CreatorWindow()
+    win.toggle_symbol("±")
+    assert win.txt_c.toPlainText() == "±"
+    assert win.symbol_buttons["±"].styleSheet() != ""
+
+    # Navigate to another position with no comment
+    win.save_current_details_now()
+    win.board_widget.board.push_san("e4")
+    win.update_ui_from_fen()
+
+    assert win.txt_c.toPlainText() == ""
+    assert win.current_position_comments == {}
+    assert win.get_current_position_eval_symbol() is None
+    assert win.symbol_buttons["±"].styleSheet() == ""
+
+    win.close()

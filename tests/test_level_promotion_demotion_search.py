@@ -438,3 +438,41 @@ def test_demotion_finds_zero_prio_and_sorts_descending(mock_user_dir, multi_leve
         assert r['impact']['target_level'] == 2
         
     backend.close()
+
+
+def test_inactive_branch_excluded_from_promotion_and_demotion(mock_user_dir, multi_level_repo):
+    """Verifies that moves under an inactive ancestor (whose priority becomes 0) are excluded from promotion & demotion search and bulk apply."""
+    from opening_fenix.core.services.hole_finder_service import find_priority_mismatches
+    backend = CreatorBackend(is_test=True)
+    backend.load_repertoire(multi_level_repo)
+    session = backend.session
+
+    # Initially: 1. e4 (active) -> 1... e5 (L2, prio 0.8) and 1... c5 (L1, prio 0.0005)
+    assert any(r['move_san'] == 'e5' for r in find_priority_mismatches(session, level=2, threshold_pct=1.0, find_rare=False))
+    assert any(r['move_san'] == 'c5' for r in find_priority_mismatches(session, level=1, threshold_pct=0.1, find_rare=True))
+
+    # Mark 1. e4 as inactive and set downstream priority_score to 0.0 (as priority recalculation does)
+    m_e4 = session.query(Move).filter_by(san="e4").first()
+    rm_e4 = session.query(RepertoireMove).filter_by(move_id=m_e4.id).first()
+    rm_e4.is_active = False
+
+    m_e5 = session.query(Move).filter_by(san="e5").first()
+    m_c5 = session.query(Move).filter_by(san="c5").first()
+    m_c5.priority_score = 0.0
+    session.commit()
+
+    # Neither promotion (even while e5 still has prio 0.8) nor demotion (even with prio 0.0) should find them
+    assert find_priority_mismatches(session, level=2, threshold_pct=1.0, find_rare=False) == []
+    assert find_priority_mismatches(session, level=1, threshold_pct=0.1, find_rare=True) == []
+
+    # Bulk impact & apply must also ignore inactive subtrees
+    promo_impact = backend.get_priority_level_change_impact("priority", 2, 1.0)
+    assert promo_impact['qualifying_moves'] == 0
+    demo_impact = backend.get_priority_level_change_impact("level_down", 1, 0.1)
+    assert demo_impact['qualifying_moves'] == 0
+
+    backend.apply_priority_level_change("level_down", 1, 0.1)
+    rm_c5 = session.query(RepertoireMove).filter_by(move_id=m_c5.id).first()
+    assert rm_c5.level == 1
+
+    backend.close()
