@@ -414,8 +414,9 @@ class FenIndexBuilderThread(QThread):
                         fn = " ".join(fen.strip().split()[:4])
                         repo_adj.setdefault(fn, []).append(uci)
                         adj_for_dijkstra[from_pid].append((to_pid, lvl))
-            except Exception:
-                pass   # schema mismatch — fall back to no exclusions
+            except Exception as exc:
+                import logging
+                logging.debug(f"FenIndexBuilderThread move query skipped: {exc}")
 
             # ── 3. Dijkstra Reachable Level Pre-computation ───────────────────────
             min_reach_cache = {clean_root: 1}
@@ -437,8 +438,9 @@ class FenIndexBuilderThread(QThread):
                         fn = id_to_fen.get(pid)
                         if fn:
                             min_reach_cache[fn] = lvl
-            except Exception:
-                pass
+            except Exception as exc:
+                import logging
+                logging.warning(f"FenIndexBuilderThread Dijkstra failed: {exc}")
 
             if self._is_cancelled():
                 return
@@ -703,7 +705,10 @@ class InstantMultiPVThread(QThread):
                 try:
                     engine.quit()
                 except Exception:
-                    pass
+                    try:
+                        engine.close()
+                    except Exception:
+                        pass
             if not self.isInterruptionRequested():
                 self.finished.emit(results)
 
@@ -797,14 +802,18 @@ class PathQualityEvalThread(QThread):
             current = 0
 
             for fn, ucis_needed in fen_to_ucis.items():
-                if current > MAX_EVAL_POSITIONS:
+                if self._stop or self.isInterruptionRequested():
+                    break
+                if current >= MAX_EVAL_POSITIONS:
                     # Skip engine analysis if we hit the cap to prevent freezing
                     for uci in ucis_needed:
                         move_ok[(fn, uci)] = True # Assume OK if not evaluated
+                    current += 1
                     continue
 
                 if current % 5 == 0:
                     self.progress.emit(current, total)
+                current += 1
                 
                 full_fen = fen_norm_to_full[fn]
                 try:
@@ -876,7 +885,10 @@ class PathQualityEvalThread(QThread):
                 try:
                     engine.quit()
                 except Exception:
-                    pass
+                    try:
+                        engine.close()
+                    except Exception:
+                        pass
             # Sort: 🟡 Möglich first (depth ascending), then 🔴 mit Fehlern (depth ascending)
             classified.sort(key=lambda x: (0 if x["quality"] == "möglich" else 1, x["depth"]))
             self.finished.emit(classified)
@@ -984,7 +996,7 @@ class BookExportThread(QThread):
             if self._is_canceled:
                 return
             self.success_signal.emit(final_file)
-        except BaseException as e:
+        except Exception as e:
             import traceback
             try:
                 logger.error("BookExportThread failed: %s", traceback.format_exc())

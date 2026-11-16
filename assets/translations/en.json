@@ -268,7 +268,10 @@
     "leadup_style_instant": "Instant Jump to Variation Start",
     "leadup_style_turbo": "Turbo Slide (Fast-forward)",
     "leadup_style_label": "Skip Style:",
-    "leadup_style_sub": "Whether to jump directly to the variation or fast-forward the lead-up moves."
+    "leadup_style_sub": "Whether to jump directly to the variation or fast-forward the lead-up moves.",
+    "btn_restart_now": "Restart Now",
+    "btn_restart_later": "Later",
+    "btn_restart_app": "🔄 Restart Application"
   },
   "themes": {
     "Dunkel (Modern)": "Dark (Modern)",

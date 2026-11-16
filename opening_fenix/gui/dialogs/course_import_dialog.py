@@ -1948,6 +1948,7 @@ class CourseImportDialog(QDialog):
                 self.analysis_thread.cancel()
                 if not self.analysis_thread.wait(300):
                     self.analysis_thread.terminate()
+                    self.analysis_thread.wait(300)
             except Exception:
                 pass
         if self.import_thread and self.import_thread.isRunning():
@@ -1955,6 +1956,7 @@ class CourseImportDialog(QDialog):
                 self.import_thread.requestInterruption()
                 if not self.import_thread.wait(300):
                     self.import_thread.terminate()
+                    self.import_thread.wait(300)
             except Exception:
                 pass
 
@@ -1974,5 +1976,6 @@ class CourseImportDialog(QDialog):
         super().reject()
 
     def accept(self):
+        self._cancel_and_cleanup_thread()
         self._uninstall_taskbar_close_filter()
         super().accept()

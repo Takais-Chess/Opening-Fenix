@@ -5,11 +5,46 @@ import json
 from collections import deque
 from typing import List, Dict, Tuple, Any, Optional, Set
 from sqlalchemy import or_, and_
-from sqlalchemy.orm import joinedload
+from dataclasses import dataclass
+from sqlalchemy import text
+from sqlalchemy.orm import joinedload, Session
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel, TrainingData, UserBase, UserRepertoireSettings
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.utils import is_free_training_profile, get_user_dir
 from opening_fenix.core.services.navigator_service import RepertoireNavigator
+
+@dataclass(slots=True)
+class _CachedPosition:
+    id: int
+    fen: str
+    comment: Optional[str]
+    good_moves: Optional[str]
+    variation_1: Optional[str]
+    variation_2: Optional[str]
+    variation_3: Optional[str]
+    cached_v1: Optional[str]
+    cached_v2: Optional[str]
+    cached_v3: Optional[str]
+
+
+@dataclass(slots=True)
+class _CachedMove:
+    id: int
+    from_position_id: int
+    to_position_id: int
+    uci: str
+    san: str
+    priority_score: float
+    nag: Optional[int]
+    from_position: Optional[_CachedPosition] = None
+
+
+@dataclass(slots=True)
+class _CachedRepMove:
+    move_id: int
+    level: int
+    is_active: bool
+
 
 DEFAULT_BOX_INTERVALS = {
     "standard": {
@@ -108,7 +143,9 @@ class TrainingManager:
         self._cached_elo: Optional[int] = None
         
         # New: Stat Caching
-        self._reachable_moves_cache = None # List of (fen, uci) reachable for current repo/level
+        self._reachable_moves_cache = None
+        self._reachable_keys_cache = None
+        self._norm_reachable_keys_cache = None # List of (fen, uci) reachable for current repo/level
         self._last_stats_cache = None # (new, due, dist)
         self._user_settings_cache = None # Cached UserRepertoireSettings for active repertoire
         
@@ -419,6 +456,8 @@ class TrainingManager:
         self._levels_cache = None
         self._cached_elo = None
         self._reachable_moves_cache = None
+        self._reachable_keys_cache = None
+        self._norm_reachable_keys_cache = None
         self._last_stats_cache = None
         self._user_settings_cache = None
         if self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
@@ -490,13 +529,25 @@ class TrainingManager:
             self._fen_uci_to_move_id = {}
             self._move_parent_cache = {} # Local parent cache for training algorithms
             
-            # Load all positions to memory
-            for p in self.repertoire_manager.repo_session.query(Position).all():
-                self._pos_cache[p.id] = p
-                
-            # Get all moves via public API
-            all_moves = self.repertoire_manager.core.get_all_moves()
-                
+            repo_sess = self.repertoire_manager.repo_session
+            if isinstance(repo_sess, Session):
+                pos_rows = repo_sess.execute(text(
+                    "SELECT id, fen, comment, good_moves, variation_1, variation_2, variation_3, cached_v1, cached_v2, cached_v3 FROM positions"
+                )).all()
+                pos_cache = self._pos_cache
+                for r in pos_rows:
+                    pos_cache[r[0]] = _CachedPosition(*r)
+                move_rows = repo_sess.execute(text(
+                    "SELECT id, from_position_id, to_position_id, uci, san, priority_score, nag FROM moves"
+                )).all()
+                all_moves = [
+                    _CachedMove(r[0], r[1], r[2], r[3], r[4], r[5] or 0.0, r[6], pos_cache.get(r[1]))
+                    for r in move_rows
+                ]
+            else:
+                for p in repo_sess.query(Position).all():
+                    self._pos_cache[p.id] = p
+                all_moves = self.repertoire_manager.core.get_all_moves()
             for m in all_moves:
                 # Build Forward Cache
                 if m.from_position_id not in self._forward_moves_cache:
@@ -521,9 +572,21 @@ class TrainingManager:
             # Sort parent cache too for predictable ancestor selection
             for k in self._move_parent_cache:
                 self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
+
+            if self.repertoire_manager and getattr(self.repertoire_manager, 'priority_cache', None) is None:
+                self.repertoire_manager.priority_cache = {
+                    (pos_fen, m.uci): (m.priority_score or 0.0)
+                    for (pos_fen, _), m in self._move_by_fen_uci_cache.items()
+                }
             
         if self._rep_move_cache is None or self._moves_by_level is None:
-            all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
+            if isinstance(self.repertoire_manager.repo_session, Session):
+                rm_rows = self.repertoire_manager.repo_session.execute(text(
+                    "SELECT move_id, level, is_active FROM repertoire_moves WHERE is_active = 1"
+                )).all()
+                all_rep_moves = [_CachedRepMove(r[0], r[1] if r[1] is not None else 1, bool(r[2])) for r in rm_rows]
+            else:
+                all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
             self._rep_move_cache = {rm.move_id: rm for rm in all_rep_moves}
             self._moves_by_level = {}
             side = (self.repertoire_manager.get_repertoire_color() or 'w').lower() if self.repertoire_manager else 'w'
@@ -587,6 +650,9 @@ class TrainingManager:
             
         # Re-calculate
         self._reachable_moves_cache = self._calculate_reachable_moves(variation_filter)
+        self._reachable_moves_cache_key = cache_key
+        self._reachable_keys_cache = set(self._reachable_moves_cache)
+        self._norm_reachable_keys_cache = {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in self._reachable_keys_cache}
         self._reachable_moves_cache_key = cache_key
         return self._reachable_moves_cache
 
@@ -812,8 +878,8 @@ class TrainingManager:
                 due_items.sort(key=lambda x: (x.box, -(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0)))
             
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
-            reachable_keys = set(reachable_repo_moves)
-            norm_reachable_keys = {(" ".join(f.split()[:4]), u) for (f, u) in reachable_keys}
+            reachable_keys = self._reachable_keys_cache if self._reachable_keys_cache is not None else set(reachable_repo_moves)
+            norm_reachable_keys = self._norm_reachable_keys_cache if self._norm_reachable_keys_cache is not None else {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in reachable_keys}
 
             for item in due_items:
                 norm_item_fen = " ".join(item.fen.split()[:4]) if item.fen else ""
@@ -849,7 +915,7 @@ class TrainingManager:
         # 3. New Mode
         elif mode == 'new':
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
-            reachable_keys = set(reachable_repo_moves)
+            reachable_keys = self._reachable_keys_cache if self._reachable_keys_cache is not None else set(reachable_repo_moves)
             
             if variation_filter:
                 self._ensure_forward_cache()
@@ -1154,7 +1220,7 @@ class TrainingManager:
 
             return calculated_elo
 
-    def register_success(self, move_id, success, had_alternate_attempt=False, was_new=False):
+    def register_success(self, move_id, success, had_alternate_attempt=False, was_new=False, defer_commit=False):
         # In free training, if move is correct, mark it as learned for the session.
         # If move is wrong, don't create/update entry so it remains in the queue.
         if is_free_training_profile(self.profile_name):
@@ -1200,7 +1266,9 @@ class TrainingManager:
         if not pos: return
         fen = pos.fen
         
-        entry = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci).first()
+        entry = self._td_cache.get((fen, move.uci)) if self._td_cache is not None else None
+        if entry is None:
+            entry = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci).first()
         now = datetime.datetime.now()
         is_first_time = (entry is None or entry.box == 0)
         if not entry:
@@ -1236,10 +1304,23 @@ class TrainingManager:
         self.update_rating(move_id, success, auto_commit=False)
 
         # Update persistent stats cache in-memory (no standalone commit)
-        self.get_stats(use_cache=False, auto_commit=False)
+        settings = self._get_rating_settings()
+        if settings:
+            settings.stats_updated_at = None
 
         # Single batched atomic commit for TrainingData + Rating + StatsCache
-        self.user_session.commit() 
+        if defer_commit:
+            self._has_pending_commit = True
+        else:
+            self.user_session.commit()
+            self._has_pending_commit = False
+
+    def flush_pending_commits(self):
+        if getattr(self, '_has_pending_commit', False) and self.user_session:
+            try:
+                self.user_session.commit()
+            finally:
+                self._has_pending_commit = False
 
     def is_move_new(self, move_id):
         self._ensure_forward_cache()

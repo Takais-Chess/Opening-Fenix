@@ -170,9 +170,9 @@ def audit_repertoire_mistakes(
 
             # Store best move in global cache
             try:
-                cache_service.set(pos.fen, depth, best_uci)
-            except Exception:
-                pass
+                cache_service.set_best_move(pos.fen, depth, best_uci)
+            except Exception as cache_err:
+                logger.debug(f"Could not cache best move for {pos.fen}: {cache_err}")
 
             # Find repertoire move in MultiPV results
             rep_info = None
@@ -318,10 +318,18 @@ def audit_repertoire_mistakes(
         logger.error(f"Error during repertoire mistake audit: {e}", exc_info=True)
         return False, f"Fehler bei der Analyse: {e}", mistakes
     finally:
+        if "cache_service" in locals() and cache_service is not None:
+            try:
+                cache_service.close()
+            except Exception:
+                pass
         if engine:
             try:
                 engine.quit()
             except Exception:
-                pass
+                try:
+                    engine.close()
+                except Exception:
+                    pass
         session.close()
         db.close()

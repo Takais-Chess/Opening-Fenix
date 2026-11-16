@@ -73,15 +73,24 @@ class EngineThread(QThread):
                 logger.error(f"Failed to start engine: {e}")
                 self.info_signal.emit([f"Engine Fehler: {e}"])
 
-    def stop_engine(self):
-        self.running = False
-        self.is_active = False
-        if self.engine:
-            try:
-                self.engine.quit()
-            except Exception:
-                pass
+    def _close_engine_process(self):
+        with self._lock:
+            eng = self.engine
             self.engine = None
+        if eng:
+            try:
+                eng.quit()
+            except Exception:
+                try:
+                    eng.close()
+                except Exception:
+                    pass
+
+    def stop_engine(self):
+        with self._lock:
+            self.running = False
+            self.is_active = False
+        self._close_engine_process()
 
     def set_position(self, fen, force_restart=False):
         with self._lock:
@@ -113,16 +122,20 @@ class EngineThread(QThread):
             if hash_size is not None:
                 self.hash_size = hash_size
         
-        if changed and self.engine:
+        with self._lock:
+            eng = self.engine
+            threads_val = self.threads
+            hash_val = self.hash_size
+        if changed and eng:
             try:
                 config = {}
-                if "Threads" in self.engine.options:
-                    config["Threads"] = self.threads
-                if "Hash" in self.engine.options:
-                    config["Hash"] = self.hash_size
-                
+                if "Threads" in eng.options:
+                    config["Threads"] = threads_val
+                if "Hash" in eng.options:
+                    config["Hash"] = hash_val
+
                 if config:
-                    self.engine.configure(config)
+                    eng.configure(config)
             except Exception as e:
                 logger.warning(f"Error updating engine configuration: {e}")
                 self.info_signal.emit([f"Update Config Error: {e}"])
@@ -222,10 +235,8 @@ class EngineThread(QThread):
                         logger.error(f"Analysis error at {current_board_fen}: {e}")
                         self.info_signal.emit([f"Analysis Error: {e}"])
                         
-                        was_active = self.is_active
-                        self.stop_engine()
+                        self._close_engine_process()
                         self.start_engine()
-                        self.is_active = was_active
                         
                         current_board_fen = None # Force restart on next loop
                         self.msleep(1000)
@@ -235,7 +246,7 @@ class EngineThread(QThread):
                 current_board_fen = None 
                 # LAZY STOP: Release RAM when not analyzing
                 if self.engine:
-                    self.stop_engine()
+                    self._close_engine_process()
                 self.msleep(100)
                 
         self.stop_engine()

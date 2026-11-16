@@ -308,9 +308,21 @@ class DownloaderWorker(QThread):
 
     def run(self):
         import tempfile
+        from urllib.parse import urlparse
         try:
+            parsed = urlparse(self.download_url)
+            allowed_hosts = ("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
+            if parsed.scheme != "https" or not any(
+                parsed.netloc == h or parsed.netloc.endswith("." + h) for h in allowed_hosts
+            ):
+                raise ValueError(f"Untrusted update download URL: {self.download_url}")
+
+            safe_name = os.path.basename(self.file_name or "")
+            if not safe_name or safe_name in (".", ".."):
+                raise ValueError(f"Invalid update filename: {self.file_name!r}")
+
             temp_dir = tempfile.gettempdir()
-            dest_path = os.path.join(temp_dir, self.file_name)
+            dest_path = os.path.join(temp_dir, safe_name)
 
             req = urllib.request.Request(
                 self.download_url,

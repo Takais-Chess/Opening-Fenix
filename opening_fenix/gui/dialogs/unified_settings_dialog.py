@@ -1559,7 +1559,8 @@ class UnifiedSettingsDialog(QDialog):
         self._global_token_worker = _GlobalTestWorker(token)
 
         def on_result(success, msg):
-            if not hasattr(self, 'lbl_global_token_status'):
+            from PyQt6 import sip
+            if sip.isdeleted(self) or not hasattr(self, 'lbl_global_token_status') or sip.isdeleted(self.lbl_global_token_status):
                 return
             if success:
                 self.lbl_global_token_status.setText("✅ " + msg)
@@ -2809,8 +2810,13 @@ class UnifiedSettingsDialog(QDialog):
         btn_open_profs = QPushButton(tr_widget("settings.btn_open_profiles_folder", "📁 Profile-Ordner im Explorer öffnen"))
         btn_open_profs.setMinimumHeight(scale(38))
         btn_open_profs.clicked.connect(self.open_profiles_folder)
+        self.btn_restart_storage = QPushButton(tr_widget("settings.btn_restart_app", "\U0001f504 Anwendung neu starten"))
+        self.btn_restart_storage.setMinimumHeight(scale(38))
+        self.btn_restart_storage.setVisible(False)
+        self.btn_restart_storage.clicked.connect(self.restart_application)
         h_open.addWidget(btn_open_repos)
         h_open.addWidget(btn_open_profs)
+        h_open.addWidget(self.btn_restart_storage)
         v_storage.addLayout(h_open)
 
         layout.addWidget(g_storage)
@@ -2837,8 +2843,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_storage_path.setText(get_user_dir())
         self.populate_active_repo_dropdown()
         self.refresh_trainer_repertoire_cards()
-        QMessageBox.information(self, tr_ui("settings.storage_success_title", "Speicherort geändert"),
-            tr_ui("settings.storage_success_msg", "Speicherort erfolgreich geändert:\n{path}\nBitte starte die Anwendung neu, damit alle Datenbanken aktiv übernommen werden.", path=selected_dir))
+        self._prompt_storage_restart(selected_dir)
 
     def reset_storage_directory(self):
         if not get_custom_data_dir(): return
@@ -2846,9 +2851,29 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("settings.storage_reset_confirm_msg", "Möchtest du zum Standard-Speicherort zurückkehren?"),
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes:
             set_custom_data_dir(None)
-            self.txt_storage_path.setText(get_user_dir())
+            new_path = get_user_dir()
+            self.txt_storage_path.setText(new_path)
             self.populate_active_repo_dropdown()
             self.refresh_trainer_repertoire_cards()
+            self._prompt_storage_restart(new_path)
+
+    def _prompt_storage_restart(self, new_path: str):
+        if hasattr(self, "btn_restart_storage"):
+            self.btn_restart_storage.setVisible(True)
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(QMessageBox.Icon.Information)
+        msg_box.setWindowTitle(tr_ui("settings.storage_success_title", "Speicherort geändert"))
+        msg_box.setText(tr_ui(
+            "settings.storage_success_msg",
+            "Speicherort erfolgreich geändert:\n{path}\nBitte starte die Anwendung neu, damit alle Datenbanken aktiv übernommen werden.",
+            path=new_path
+        ))
+        btn_restart = msg_box.addButton(tr_ui("settings.btn_restart_now", "Jetzt neu starten"), QMessageBox.ButtonRole.AcceptRole)
+        msg_box.addButton(tr_ui("settings.btn_restart_later", "Später"), QMessageBox.ButtonRole.RejectRole)
+        msg_box.setDefaultButton(btn_restart)
+        msg_box.exec()
+        if msg_box.clickedButton() == btn_restart:
+            self.restart_application()
 
     def open_repertoires_folder(self):
         from PyQt6.QtGui import QDesktopServices
@@ -6752,7 +6777,8 @@ class UnifiedSettingsDialog(QDialog):
         workers = [getattr(self, 'stats_loader', None), getattr(self, 'creator_stats_loader', None),
                    getattr(self, 'stats_worker', None), getattr(self, 'w_eng', None),
                    getattr(self, 'w_lich', None), getattr(self, 'm_thread', None),
-                   getattr(self, 'update_worker', None), getattr(self, '_book_export_thread', None)]
+                   getattr(self, 'update_worker', None), getattr(self, '_book_export_thread', None),
+                   getattr(self, '_global_token_worker', None)]
         for w in workers:
             if w and w.isRunning():
                 try: w.disconnect()

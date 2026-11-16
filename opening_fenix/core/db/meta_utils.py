@@ -151,10 +151,12 @@ def check_all_databases_integrity() -> str:
 
     results = []
     for repo_name, db_path in db_paths:
+        db = None
+        session = None
         try:
             db = DatabaseManager(db_path)
             session = db.get_session()
-            
+
             missing_cache = session.query(Position).filter(
                 or_(
                     (Position.variation_1 != None) & (Position.variation_1 != ""),
@@ -163,16 +165,24 @@ def check_all_databases_integrity() -> str:
                 ),
                 Position.cached_v1 == None
             ).first()
-            
+
             if missing_cache:
                 results.append(f"❌ {repo_name}: Cache unvollständig.")
             else:
                 results.append(f"✅ {repo_name}: OK.")
-            
-            session.close()
-            db.close()
         except Exception as e:
             results.append(f"⚠️ {repo_name}: Fehler bei Prüfung ({e})")
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     return "\n".join(results)
 
@@ -187,25 +197,34 @@ def repair_all_databases_cache() -> str:
 
     results = []
     for repo_name, db_path in db_paths:
+        db = None
+        session = None
         try:
             db = DatabaseManager(db_path)
             session = db.get_session()
-            
+
             start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
             start_pos = session.query(Position).filter_by(fen=start_fen).first()
-            
+
             if start_pos:
-                print(f"Repariere {repo_name}...")
                 _update_cached_names_recursive_standalone(session, start_pos)
                 session.commit()
                 results.append(f"✅ {repo_name}: Repariert.")
             else:
                 results.append(f"⚠️ {repo_name}: Startposition nicht gefunden.")
-            
-            session.close()
-            db.close()
         except Exception as e:
             results.append(f"❌ {repo_name}: Fehler bei Reparatur ({e})")
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            if db is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
     return "\n".join(results)
 

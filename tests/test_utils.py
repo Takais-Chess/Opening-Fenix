@@ -150,7 +150,7 @@ def test_get_ssl_context_and_safe_urlopen():
         assert resp == mock_resp
         assert mock_open.call_count == 1
 
-    # 2. SSL error fallback to unverified
+    # 2. SSL error raises by default (no silent MITM downgrade)
     ssl_err = urllib.error.URLError("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed")
     call_count = 0
     def side_effect(r, context=None, timeout=None):
@@ -160,8 +160,16 @@ def test_get_ssl_context_and_safe_urlopen():
             raise ssl_err
         return mock_resp
 
+    import pytest
     with patch("urllib.request.urlopen", side_effect=side_effect):
-        resp = safe_urlopen(req)
+        with pytest.raises(urllib.error.URLError):
+            safe_urlopen(req)
+        assert call_count == 1
+
+    # 3. Explicit opt-in fallback works
+    call_count = 0
+    with patch("urllib.request.urlopen", side_effect=side_effect):
+        resp = safe_urlopen(req, allow_unverified_fallback=True)
         assert resp == mock_resp
         assert call_count == 2
 

@@ -18,12 +18,24 @@ def get_repertoire_elo(repo_name):
     if not os.path.exists(db_path):
         return "high" # Default
     
+    db = None
+    session = None
     try:
         db = DatabaseManager(db_path)
         session = db.get_session()
         val = get_meta(session, "elo") or get_meta(session, "lichess_elo") or "high"
-        session.close()
-        db.close()
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+    try:
         
         val_str = str(val).strip()
         from opening_fenix.core.utils import ELO_INTERNAL_MAP

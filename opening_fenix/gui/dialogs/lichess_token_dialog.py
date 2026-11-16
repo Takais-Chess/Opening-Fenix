@@ -270,7 +270,35 @@ class LichessTokenDialog(QDialog):
         self._worker.finished_signal.connect(self._on_verification_done)
         self._worker.start()
 
+    def _cleanup_worker(self):
+        w = getattr(self, '_worker', None)
+        if w and w.isRunning():
+            try:
+                w.disconnect()
+            except Exception:
+                pass
+            w.requestInterruption()
+            if not w.wait(200):
+                if not hasattr(LichessTokenDialog, '_detached_workers'):
+                    LichessTokenDialog._detached_workers = []
+                LichessTokenDialog._detached_workers.append(w)
+                w.finished.connect(
+                    lambda obj=w: LichessTokenDialog._detached_workers.remove(obj)
+                    if obj in LichessTokenDialog._detached_workers else None
+                )
+
+    def closeEvent(self, event):
+        self._cleanup_worker()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._cleanup_worker()
+        super().reject()
+
     def _on_verification_done(self, success: bool, msg: str):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
         self.btn_test.setEnabled(True)
         if success:
             self.lbl_status.setText("✅ " + msg)
@@ -293,8 +321,9 @@ class LichessTokenDialog(QDialog):
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
-            except Exception:
-                pass
+            except Exception as e:
+                QMessageBox.warning(self, "Fehler", f"Konnte config.json nicht lesen: {e}")
+                return
         cfg["lichess_token"] = token
         try:
             with open(config_path, "w", encoding="utf-8") as f:
@@ -407,8 +436,9 @@ class MissingTokenPromptDialog(QDialog):
                 try:
                     with open(config_path, "r", encoding="utf-8") as f:
                         cfg = json.load(f)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Could not read config.json, aborting suppress_missing_token_warning write: {e}")
+                    return
             cfg["suppress_missing_token_warning"] = True
             try:
                 with open(config_path, "w", encoding="utf-8") as f:

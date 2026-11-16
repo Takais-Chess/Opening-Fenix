@@ -127,8 +127,59 @@ class RepertoireManager:
         if not self.nav: return None
         return self.nav.get_variation_entry_point_fen(variation_name)
 
-    def get_history_for_move(self, move_obj, variation_name: Optional[str] = None):
-        if not self.nav or not move_obj: return []
+    def get_history_for_move(self, move_obj, variation_name: Optional[str] = None, training_manager=None):
+        if not move_obj:
+            return []
+        if training_manager is not None:
+            parent_cache = getattr(training_manager, '_move_parent_cache', None)
+            pos_cache = getattr(training_manager, '_pos_cache', None)
+            move_by_id = getattr(training_manager, '_move_by_id_cache', None)
+            if parent_cache is not None and pos_cache is not None and move_by_id is not None:
+                curr = move_by_id.get(move_obj.id) or move_obj
+                history_rev = []
+                visited_pos = set()
+                matches_fn = None
+                if variation_name:
+                    from opening_fenix.core.utils import matches_variation_name as matches_fn
+                for _ in range(50):
+                    to_pos = pos_cache.get(curr.to_position_id)
+                    if not to_pos:
+                        break
+                    history_rev.append({
+                        'san': curr.san,
+                        'uci': curr.uci,
+                        'fen': to_pos.fen,
+                        'comment': to_pos.comment,
+                        'nag': curr.nag,
+                    })
+                    from_id = curr.from_position_id
+                    if from_id in visited_pos:
+                        break
+                    visited_pos.add(from_id)
+                    parents = parent_cache.get(from_id)
+                    if not parents:
+                        break
+                    if variation_name and len(parents) > 1 and matches_fn is not None:
+                        chosen = parents[0]
+                        for cand in parents:
+                            fp = pos_cache.get(cand.from_position_id)
+                            if fp and (
+                                matches_fn(fp.variation_1, variation_name)
+                                or matches_fn(fp.variation_2, variation_name)
+                                or matches_fn(fp.variation_3, variation_name)
+                                or matches_fn(fp.cached_v1, variation_name)
+                                or matches_fn(fp.cached_v2, variation_name)
+                                or matches_fn(fp.cached_v3, variation_name)
+                            ):
+                                chosen = cand
+                                break
+                        curr = chosen
+                    else:
+                        curr = parents[0]
+                if history_rev:
+                    history_rev.reverse()
+                    return history_rev
+        if not self.nav: return []
         return self.nav.get_history_for_move_recursive(move_obj.id, variation_name=variation_name)
 
     def get_history_for_fen(self, fen, variation_name: Optional[str] = None):

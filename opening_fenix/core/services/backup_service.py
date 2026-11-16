@@ -68,20 +68,24 @@ def compute_repertoire_checksum(repo_name: str) -> str:
     # 1. Hash positions table logically
     if os.path.exists(db_path):
         try:
-            conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, timeout=10.0)
-            c = conn.cursor()
-            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
-            if c.fetchone():
-                c.execute("""
-                    SELECT p.id, p.comment, rm.level, m.priority_score
-                    FROM positions p
-                    LEFT JOIN moves m ON m.from_position_id = p.id
-                    LEFT JOIN repertoire_moves rm ON rm.move_id = m.id
-                    ORDER BY p.id, m.id
-                """)
-                for row in c.fetchall():
-                    hasher.update(str(row).encode("utf-8"))
-            conn.close()
+            conn = None
+            try:
+                conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, timeout=10.0)
+                c = conn.cursor()
+                c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
+                if c.fetchone():
+                    c.execute("""
+                        SELECT p.id, p.comment, rm.level, m.priority_score
+                        FROM positions p
+                        LEFT JOIN moves m ON m.from_position_id = p.id
+                        LEFT JOIN repertoire_moves rm ON rm.move_id = m.id
+                        ORDER BY p.id, m.id
+                    """)
+                    for row in c.fetchall():
+                        hasher.update(str(row).encode("utf-8"))
+            finally:
+                if conn is not None:
+                    conn.close()
         except Exception:
             try:
                 with open(db_path, "rb") as f:
@@ -168,6 +172,7 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
 
         # Query database for comments and levels
         if target_db and os.path.exists(target_db):
+            conn = None
             try:
                 conn = sqlite3.connect(f"file:{os.path.abspath(target_db)}?mode=ro", uri=True, timeout=10.0)
                 c = conn.cursor()
@@ -206,9 +211,14 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
                             levels_info.append({"level": lvl, "name": lvl_name, "moves": cnt})
                             total_moves += cnt
 
-                conn.close()
             except Exception as e:
                 logger.warning(f"Could not compute DB detail stats for target_db: {e}")
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
         # If not reading zip and repo_dir exists, scan directory for resource PGNs
         if not zip_path and os.path.exists(repo_dir):
@@ -465,6 +475,8 @@ def prune_repertoire_backups(repo_name: str):
 
     for b in backups:
         dt = b["created_at"]
+        if dt.tzinfo is not None:
+            dt = dt.astimezone().replace(tzinfo=None)
         age_days = (now - dt).days
 
         if age_days <= 7:
@@ -552,7 +564,10 @@ def restore_repertoire_from_backup(repo_name: str, backup_zip_path: str) -> bool
                     with open(target_db, "wb") as f_out:
                         f_out.write(zf.read(member))
                 else:
-                    out_path = os.path.join(repo_dir, member)
+                    base_real = os.path.realpath(repo_dir)
+                    out_path = os.path.realpath(os.path.join(base_real, member))
+                    if os.path.commonpath([base_real, out_path]) != base_real:
+                        raise ValueError(f"Unsafe path in backup archive: {member!r}")
                     norm_member = member.replace(chr(92), "/")
                     if not norm_member.endswith("/"):
                         os.makedirs(os.path.dirname(out_path), exist_ok=True)

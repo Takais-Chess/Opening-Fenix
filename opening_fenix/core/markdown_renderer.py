@@ -66,9 +66,9 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             text
         )
 
-        # 4. Standalone URLs (not already part of an href attribute)
+        # 4. Standalone URLs (not already inside an <a> tag)
         text = re.sub(
-            r'(?<!href=")(?<!">)(https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+)',
+            r'(?<!href=")(?<!">)(https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+)(?![^<]*</a>)',
             r'<a href="\1" style="color: #0969da; text-decoration: none; font-weight: 500;">\1</a>',
             text
         )
@@ -267,9 +267,17 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
                     while list_stack and list_stack[-1][1] > indent_level:
                         ltype, _ = list_stack.pop()
                         output_html.append(f"</{ltype}>")
+                    if list_stack and list_stack[-1][1] == indent_level and list_stack[-1][0] != current_type:
+                        ltype, _ = list_stack.pop()
+                        output_html.append(f"</{ltype}>")
                     if not list_stack or list_stack[-1][0] != current_type:
                         list_stack.append((current_type, indent_level))
                         output_html.append(f'<{current_type} style="margin-top: 2px; margin-bottom: 4px; padding-left: 18px;">')
+                elif top_type != current_type:
+                    ltype, _ = list_stack.pop()
+                    output_html.append(f"</{ltype}>")
+                    list_stack.append((current_type, indent_level))
+                    output_html.append(f'<{current_type} style="margin-top: 4px; margin-bottom: 8px; padding-left: 18px;">')
 
             task_box = ""
             if item_text.startswith("[ ] "):

@@ -3703,7 +3703,7 @@ class CreatorWindow(QMainWindow):
                 self.config[k] = normalize_text_encoding(self.config[k])
 
         # Debounce Timer for saving details
-        self.save_timer = QTimer()
+        self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(500)
         self.save_timer.timeout.connect(self.save_current_details_now)
@@ -7407,13 +7407,15 @@ class CreatorWindow(QMainWindow):
         self.setUpdatesEnabled(True)
         QTimer.singleShot(0, lambda: set_consistent_icon(self))
         QTimer.singleShot(0, self.trigger_board_adjust)
-        if hasattr(self, 'windowHandle') and self.windowHandle():
-            try:
-                self.windowHandle().screenChanged.connect(self._on_screen_changed)
-            except Exception:
-                pass
-        # Pre-warm creator settings dialog during idle time for instant opening
-        QTimer.singleShot(1500, self._prewarm_repo_settings_dialog)
+        if not getattr(self, '_initial_show_done', False):
+            self._initial_show_done = True
+            if hasattr(self, 'windowHandle') and self.windowHandle():
+                try:
+                    self.windowHandle().screenChanged.connect(self._on_screen_changed)
+                except Exception:
+                    pass
+            # Pre-warm creator settings dialog during idle time for instant opening
+            QTimer.singleShot(1500, self._prewarm_repo_settings_dialog)
 
     def _on_screen_changed(self, screen):
         self._auto_size_board = True
@@ -7561,13 +7563,6 @@ class CreatorWindow(QMainWindow):
             profile_name=active_prof
         )
         dlg.exec()
-
-    def closeEvent(self, event):
-        """Clean up resources before closing."""
-        if self.backend:
-            self.backend.close()
-        self.closed.emit()
-        super().closeEvent(event)
 
     def init_hole_finder_tab(self):
         layout = QVBoxLayout(self.tab_holes)
@@ -9460,7 +9455,7 @@ class CreatorWindow(QMainWindow):
 
     def _build_fen_index(self):
         """Launch a background thread to build the FEN index — zero main-thread blocking."""
-        if not self.backend.session or not self.backend.active_repo_name:
+        if not self.backend.session or not self.backend.active_repo_name or not str(self.backend.active_repo_name).strip():
             return
         db_path = get_repertoire_db_path(
             self.backend.active_repo_name, self.backend.is_test
@@ -11986,6 +11981,33 @@ class CreatorWindow(QMainWindow):
                     try: w.close()
                     except: pass
 
+        if hasattr(self, 'save_timer') and self.save_timer:
+            try:
+                self.save_timer.stop()
+                if getattr(self, 'details_changed', False):
+                    self.save_current_details_now()
+            except Exception:
+                pass
+
+        if hasattr(self, 'hole_anim_timer') and self.hole_anim_timer:
+            try:
+                self.hole_anim_timer.stop()
+            except Exception:
+                pass
+
+        for attr_name in ('hole_thread', 'update_checker', 'lockout_worker', 'translation_thread'):
+            w = getattr(self, attr_name, None)
+            if w and w.isRunning():
+                try:
+                    if hasattr(w, 'stop'):
+                        w.stop()
+                    if hasattr(w, 'cancel'):
+                        w.cancel()
+                    w.requestInterruption()
+                    w.wait(300)
+                except Exception:
+                    pass
+
         if hasattr(self, 'engine_thread') and self.engine_thread:
             try:
                 self.engine_thread.stop_engine()
@@ -11997,7 +12019,9 @@ class CreatorWindow(QMainWindow):
                         except Exception:
                             pass
                     self.engine_thread.terminate()
-            except: pass
+                    self.engine_thread.wait(500)
+            except Exception:
+                pass
 
         if hasattr(self, 'global_transpos_thread') and self.global_transpos_thread and self.global_transpos_thread.isRunning():
             try:
@@ -12020,8 +12044,13 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, 'backend') and self.backend:
             try:
                 self.backend.close()
-            except: pass
-            
+            except Exception:
+                pass
+
+        try:
+            self.closed.emit()
+        except Exception:
+            pass
         super().closeEvent(event)
 
 if __name__ == "__main__":

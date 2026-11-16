@@ -7,7 +7,7 @@
 
 #define MyAppName "Opening Fenix"
 #ifndef MyAppVersion
-#define MyAppVersion "1.3.10"
+#define MyAppVersion "1.3.11"
 #endif
 #define MyAppPublisher "Opening Fenix Team"
 #define MyAppURL "https://github.com"
@@ -36,7 +36,7 @@ SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 UsePreviousLanguage=yes
-ShowLanguageDialog=auto
+ShowLanguageDialog=yes
 CloseApplications=yes
 
 [Languages]
@@ -222,7 +222,9 @@ begin
   LichessLinkLabel.Parent := LichessPage.Surface;
   LichessLinkLabel.Caption := ExpandConstant('{cm:LichessLinkText}');
   LichessLinkLabel.Left := 0;
-  LichessLinkLabel.Top := DescLabel.Top + DescLabel.Height + 15;
+  LichessLinkLabel.Top := DescLabel.Top + DescLabel.Height + ScaleY(12);
+  LichessLinkLabel.Width := LichessPage.SurfaceWidth;
+  LichessLinkLabel.WordWrap := True;
   LichessLinkLabel.Font.Color := clBlue;
   LichessLinkLabel.Font.Style := [fsUnderline];
   LichessLinkLabel.Cursor := crHand;
@@ -232,12 +234,14 @@ begin
   PromptLabel.Parent := LichessPage.Surface;
   PromptLabel.Caption := ExpandConstant('{cm:LichessPrompt}');
   PromptLabel.Left := 0;
-  PromptLabel.Top := LichessLinkLabel.Top + 35;
+  PromptLabel.Top := LichessLinkLabel.Top + LichessLinkLabel.Height + ScaleY(16);
+  PromptLabel.Width := LichessPage.SurfaceWidth;
+  PromptLabel.WordWrap := True;
 
   LichessEdit := TNewEdit.Create(LichessPage);
   LichessEdit.Parent := LichessPage.Surface;
   LichessEdit.Left := 0;
-  LichessEdit.Top := PromptLabel.Top + 20;
+  LichessEdit.Top := PromptLabel.Top + PromptLabel.Height + ScaleY(6);
   LichessEdit.Width := LichessPage.SurfaceWidth;
   if ExistingLichessToken <> '' then
   begin
@@ -248,7 +252,7 @@ begin
   SkipLabel.Parent := LichessPage.Surface;
   SkipLabel.Caption := ExpandConstant('{cm:LichessSkipHint}');
   SkipLabel.Left := 0;
-  SkipLabel.Top := LichessEdit.Top + 35;
+  SkipLabel.Top := LichessEdit.Top + LichessEdit.Height + ScaleY(10);
   SkipLabel.Width := LichessPage.SurfaceWidth;
   SkipLabel.WordWrap := True;
   SkipLabel.Font.Style := [fsItalic];

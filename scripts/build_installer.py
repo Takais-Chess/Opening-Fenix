@@ -101,7 +101,7 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                 dst = os.path.join(target_base, 'repertoires')
                 if os.path.exists(dst):
                     safe_rmtree(dst)
-                shutil.copytree('repertoires', dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock'))
+                shutil.copytree('repertoires', dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock', '*.db-shm', '*.db-wal'))
                 print(f" -> Synced repertoires to {dst}")
 
     # Remove example/sample repertoires (private installer only ships non-example repos)

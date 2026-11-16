@@ -1050,11 +1050,20 @@ class LoginDialog(QDialog):
                 name = name.strip()
                 logger.info(f"Profile name entered: '{name}'")
                 # Basic validation
-                if any(c in name for c in '/\\:*?"<>|'):
+                if any(c in name for c in '/\\:*?"<>|') or name in (".", "..") or is_free_training_profile(name):
                     QMessageBox.warning(
                         self,
                         tr_ui("login.invalid_name_error", "Ungültiger Name"),
                         tr_ui("login.invalid_name_error_msg", "Der Profilname darf nicht leer sein und keine Sonderzeichen enthalten.")
+                    )
+                    return
+
+                candidate_db = os.path.join(get_user_dir(), "profiles", f"{name}.db")
+                if os.path.exists(candidate_db):
+                    QMessageBox.warning(
+                        self,
+                        tr_ui("login.invalid_name_error", "Profil existiert bereits"),
+                        tr_ui("login.profile_exists_error_msg", f"Ein Profil mit dem Namen '{name}' existiert bereits.")
                     )
                     return
 

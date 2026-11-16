@@ -556,11 +556,40 @@ def get_configured_engine_hash(default: int = 256) -> int:
 def normalize_fen(board):
     return " ".join(board.fen().split(" ")[:4])
 
+def validate_safe_name(name: str, label: str = "Name") -> str:
+    """Validates that a repertoire or profile name cannot traverse directories."""
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"{label} must be a non-empty string.")
+    if "\x00" in name or "/" in name or "\\" in name or name.strip() in (".", ".."):
+        raise ValueError(f"Invalid {label}: {name!r}")
+    return name
+
+
+def write_json_atomic(path: str, data: dict, indent: int = 4) -> None:
+    """Atomically writes a JSON file via a temporary file in the same directory."""
+    import tempfile
+    parent = os.path.dirname(os.path.abspath(path))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".tmp_", suffix=".json", dir=parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, ensure_ascii=False)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+
+
 def get_repertoire_dir(repo_name, is_test=None):
     """
     Returns the path to the repertoire's specific folder.
     Now more robust: if is_test is None, it checks both the regular and test subfolders.
     """
+    validate_safe_name(repo_name, "Repertoire name")
     repo_base = os.path.join(get_user_dir(), "repertoires")
     
     # If is_test is explicitly provided, respect it
@@ -1845,18 +1874,14 @@ def get_ssl_context(verify: bool = True):
             ctx.post_handshake_auth = True
         return ctx
     except Exception:
-        if hasattr(ssl, "_create_unverified_context"):
-            return ssl._create_unverified_context()
         return ssl.create_default_context()
 
 
-def safe_urlopen(req, timeout: int = 15):
+def safe_urlopen(req, timeout: int = 15, allow_unverified_fallback: bool = False):
     """
-    Executes urllib.request.urlopen with robust SSL handling:
-    1. Tries first using an enhanced SSLContext (certifi + Windows certificate store).
-    2. If an SSL Certificate Verify Failed error occurs (e.g. strict corporate proxy,
-       antivirus SSL inspection, or outdated root certificates), falls back to an
-       unverified context so network operations (updates, downloads) continue working seamlessly.
+    Executes urllib.request.urlopen with verified TLS (certifi + Windows certificate store).
+    Does NOT silently downgrade to unverified TLS on certificate errors unless
+    allow_unverified_fallback=True is explicitly requested.
     """
     import ssl
     import urllib.request
@@ -1868,11 +1893,8 @@ def safe_urlopen(req, timeout: int = 15):
     except (urllib.error.URLError, ssl.SSLError, Exception) as e:
         err_str = str(e)
         if "CERTIFICATE_VERIFY_FAILED" in err_str or "certificate verify failed" in err_str or "SSLCertVerificationError" in err_str:
-            unverified_ctx = get_ssl_context(verify=False)
-            return urllib.request.urlopen(req, context=unverified_ctx, timeout=timeout)
-        try:
-            return urllib.request.urlopen(req, timeout=timeout)
-        except Exception:
-            pass
+            if allow_unverified_fallback:
+                unverified_ctx = get_ssl_context(verify=False)
+                return urllib.request.urlopen(req, context=unverified_ctx, timeout=timeout)
         raise
 

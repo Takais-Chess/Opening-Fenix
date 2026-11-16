@@ -8,6 +8,8 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from opening_fenix.core.logger import logger
 
+import threading as _threading
+_TOKEN_CACHE_LOCK = _threading.Lock()
 _CACHED_TOKEN_USERNAME: Optional[str] = None
 _CACHED_TOKEN: Optional[str] = None
 
@@ -21,8 +23,9 @@ def resolve_token_username(token: str) -> Optional[str]:
     if not token or token == "YOUR_TOKEN_HERE":
         return None
     
-    if _CACHED_TOKEN == token and _CACHED_TOKEN_USERNAME:
-        return _CACHED_TOKEN_USERNAME
+    with _TOKEN_CACHE_LOCK:
+        if _CACHED_TOKEN == token and _CACHED_TOKEN_USERNAME:
+            return _CACHED_TOKEN_USERNAME
 
     url = "https://lichess.org/api/account"
     headers = {
@@ -36,8 +39,9 @@ def resolve_token_username(token: str) -> Optional[str]:
             data = json.loads(response.read().decode("utf-8"))
             username = data.get("username")
             if username:
-                _CACHED_TOKEN = token
-                _CACHED_TOKEN_USERNAME = username
+                with _TOKEN_CACHE_LOCK:
+                    _CACHED_TOKEN = token
+                    _CACHED_TOKEN_USERNAME = username
                 logger.info(f"Resolved Lichess account from token: {username}")
                 return username
     except Exception as e:

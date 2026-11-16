@@ -411,7 +411,7 @@ class RepertoireService:
         import re
         # Allow letters, digits, spaces, and characters valid in Windows filenames
         # (underscore, hyphen, apostrophe, dot, parens, exclamation, ampersand, plus, comma)
-        if not re.match(r"^[a-zA-Z0-9äöüÄÖÜß _\-'\.&!()+,]+$", new_name):
+        if not re.match(r"^[a-zA-Z0-9äöüÄÖÜß _\-'\.&!()+,]+$", new_name) or new_name.strip() in (".", ".."):
             return False, "Ungültige Zeichen im Namen."
 
         old_dir = get_repertoire_dir(old_name)
@@ -487,24 +487,39 @@ class RepertoireService:
 
 
             # 7. Update Metadata inside the DB
+            db = None
+            session = None
             try:
                 db = DatabaseManager(new_db, base=Base)
                 session = db.get_session()
                 # Update meta "name" (internal display name)
                 set_meta(session, "name", new_name)
                 session.commit()
-                session.close()
-                db.close()
-                
-                # Checkpoint WAL immediately to flush the metadata write and avoid leaving open WAL locks
-                try:
-                    conn = sqlite3.connect(new_db, timeout=5)
-                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    conn.close()
-                except Exception:
-                    pass
             except Exception as e:
                 logger.error(f"Renamed files but failed to update internal metadata: {e}")
+            finally:
+                if session is not None:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                if db is not None:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+            conn = None
+            try:
+                conn = sqlite3.connect(new_db, timeout=5)
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except Exception:
+                pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
             
             # 8. Re-load if it was active
             if active_was_old:

@@ -2,6 +2,16 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.11] - 2026-11-16
+
+### Added & Improved
+- **Trainer Performance & Preloading Overhaul**:
+  - Added background repertoire preloading (`_schedule_repertoire_preload`) on repertoire switch to warm up caches and pre-fetch the first training challenge so starting training is instant.
+  - Replaced SQLAlchemy ORM hydration in `_ensure_forward_cache` with raw SQL tuple loading into lightweight `@dataclass(slots=True)` objects (~3x faster cold cache build on 40k+ position repertoires).
+  - Added verified-database fast path in `DatabaseManager.__init__` and tuned SQLite PRAGMAs (`cache_size=-64000`, `mmap_size=268435456`) to eliminate redundant integrity/schema checks when switching repertoires.
+  - Added in-memory `get_history_for_move` parent walking, debounced `user_session` commits during training, background `preload_next_challenge`, hoisted comment-language metadata lookups, and avoided rebuilding repertoire tab widgets on tab clicks.
+- **Storage, Sync & Stability Improvements**: Improved storage/profile handling, cloud sync resilience, and general UI/service stability.
+
 ## [1.3.10] - 2026-11-15
 
 ### Added & Improved

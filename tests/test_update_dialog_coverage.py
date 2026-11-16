@@ -70,7 +70,7 @@ def test_update_dialog_download_error(qtbot, sample_release_info, monkeypatch):
     assert "Browser" in dialog.btn_download.text()
 
 def test_downloader_worker_run(tmp_path, monkeypatch):
-    worker = DownloaderWorker("https://example.com/fake.exe", "test_setup.exe")
+    worker = DownloaderWorker("https://github.com/OpeningFenix/Opening-Fenix/releases/download/v1.0.0/fake.exe", "test_setup.exe")
     
     # Mock urllib context manager response
     mock_resp = MagicMock()
@@ -80,7 +80,7 @@ def test_downloader_worker_run(tmp_path, monkeypatch):
     progress_updates = []
     worker.progress.connect(lambda cur, tot: progress_updates.append((cur, tot)))
     
-    with patch("urllib.request.urlopen") as mock_urlopen:
+    with patch("opening_fenix.core.services.update_service.safe_urlopen") as mock_urlopen:
         mock_urlopen.return_value.__enter__.return_value = mock_resp
         worker.run()
         

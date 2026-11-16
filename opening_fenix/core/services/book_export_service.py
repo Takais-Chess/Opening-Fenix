@@ -1137,7 +1137,7 @@ def flatten_subtree(
     Detects transpositions and replaces duplicated subtrees with informative cross-references.
     """
     cur = conn.cursor()
-    lvl_filter = f"AND rm.level <= {level}" if level is not None else ""
+    lvl_filter = "AND rm.level <= ?" if level is not None else ""
     if visited_positions is None:
         visited_positions = {}
 
@@ -1147,6 +1147,7 @@ def flatten_subtree(
     v3_expr = "p.variation_3" if "variation_3" in pos_cols else "NULL"
 
     def get_children(p_id):
+        params = (p_id, level) if level is not None else (p_id,)
         cur.execute(f"""
             SELECT m.id, m.san, m.to_position_id, p.fen, p.comment, {v1_expr}, {v2_expr}, {v3_expr}
             FROM repertoire_moves rm
@@ -1154,7 +1155,7 @@ def flatten_subtree(
             JOIN positions p ON m.to_position_id = p.id
             WHERE m.from_position_id = ? AND rm.is_active = 1 {lvl_filter}
             ORDER BY m.priority_score DESC
-        """, (p_id,))
+        """, params)
         return cur.fetchall()
 
     html_blocks = []

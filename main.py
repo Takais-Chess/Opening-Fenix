@@ -13,36 +13,49 @@ gc.set_threshold(50000, 50, 50)
 from PyQt6.QtGui import QIcon
 
 from opening_fenix.core.utils import get_base_path, get_user_dir
+from opening_fenix.core.version import APP_VERSION
 from opening_fenix.gui.styles import set_consistent_icon, setup_light_palette
 from opening_fenix.gui.window_manager import WindowManager
 from opening_fenix.core.logger import logger
 
 def cleanup_temp_db_files():
     """
-    Attempts to clean up SQLite WAL files by running a checkpoint 
-    and then deleting the side-files if they are no longer needed.
+    Attempts to clean up SQLite WAL files by running a checkpoint
+    and only deleting side-files for databases that checkpointed cleanly.
     """
     repo_dir = os.path.join(get_user_dir(), "repertoires")
     profiles_dir = os.path.join(get_user_dir(), "profiles")
-    
-    for folder in [repo_dir, profiles_dir]:
-        if not os.path.exists(folder):
+
+    for base_folder in [repo_dir, profiles_dir]:
+        if not os.path.exists(base_folder):
             continue
-        for f in os.listdir(folder):
-            if f.endswith(".db"):
-                db_path = os.path.join(folder, f)
+        for root, _, files in os.walk(base_folder):
+            for f in files:
+                if not f.endswith(".db"):
+                    continue
+                db_path = os.path.join(root, f)
+                checkpoint_ok = False
+                conn = None
                 try:
-                    conn = sqlite3.connect(db_path)
+                    conn = sqlite3.connect(db_path, timeout=2.0)
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-                    conn.close()
+                    checkpoint_ok = True
                 except Exception as e:
                     logger.debug(f"Could not checkpoint {f}: {e}")
-            
-            if f.endswith(".db-wal") or f.endswith(".db-shm"):
-                try:
-                    os.remove(os.path.join(folder, f))
-                except Exception as e:
-                    logger.debug(f"Could not remove WAL/SHM file {f}: {e}")
+                finally:
+                    if conn is not None:
+                        try:
+                            conn.close()
+                        except Exception:
+                            pass
+                if checkpoint_ok:
+                    for suffix in ("-wal", "-shm"):
+                        sidecar = db_path + suffix
+                        if os.path.exists(sidecar):
+                            try:
+                                os.remove(sidecar)
+                            except Exception as e:
+                                logger.debug(f"Could not remove WAL/SHM file {sidecar}: {e}")
 
 def ensure_default_engine_path():
     """
@@ -105,7 +118,6 @@ if __name__ == "__main__":
         except Exception:
             pass
             
-        from opening_fenix.core.version import APP_VERSION
         myappid = f'OpeningFenix.Lab.V{APP_VERSION}' 
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)

@@ -7,6 +7,7 @@ import chess.pgn
 import webbrowser
 import math
 import time
+import threading
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, 
@@ -86,6 +87,13 @@ class MainWindow(QMainWindow):
         self._preloaded_challenge = None
         self._had_alternate_attempt = False
         self.session_review_count = 0
+        self._preload_lock = threading.Lock()
+        self._repo_preload_gen = 0
+        self._preloaded_start_challenge = None
+        self._challenge_preload_gen = 0
+        self._db_commit_timer = QTimer(self)
+        self._db_commit_timer.setSingleShot(True)
+        self._db_commit_timer.timeout.connect(self._flush_db_commits)
         self.waiting_for_next = False
         self.show_comments = True
         self.mode = "TRAINER"
@@ -574,7 +582,7 @@ class MainWindow(QMainWindow):
         self.btn_scroll_right.setVisible(sb.value() < sb.maximum())
 
     def on_repertoire_button_clicked(self, button):
-        self.change_repertoire(button.property("repo_name"))
+        self.change_repertoire(button.property("repo_name"), refresh_buttons=False)
 
     def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
         self._flush_pending_stats()
@@ -596,6 +604,12 @@ class MainWindow(QMainWindow):
             return
 
         # Reset all caches and trainer state
+        self._preloaded_start_challenge = None
+        self._repo_preload_gen += 1
+        self._challenge_preload_gen += 1
+        self._flush_db_commits()
+        with self._preload_lock:
+            pass
         try:
             self.repertoire_manager.set_active_repertoire(repo_name)
         except DatabaseCorruptedException as e:
@@ -641,6 +655,8 @@ class MainWindow(QMainWindow):
         self._check_for_course_intro(repo_name)
         
         # Check for logical corruption
+        if repo_name:
+            self._schedule_repertoire_preload()
         if repo_name:
             orphaned = self.repertoire_manager.core.check_logical_integrity()
             if orphaned > 0:
@@ -829,52 +845,117 @@ class MainWindow(QMainWindow):
         elo = self.training_manager.get_current_elo()
         self.lbl_elo.setText(f"🎓 {elo}")
 
+    def _flush_db_commits(self):
+        if getattr(self, '_db_commit_timer', None) and self._db_commit_timer.isActive():
+            self._db_commit_timer.stop()
+        if getattr(self, 'training_manager', None) and hasattr(self.training_manager, 'flush_pending_commits'):
+            try:
+                self.training_manager.flush_pending_commits()
+            except Exception as e:
+                logger.error(f"Error flushing pending DB commits: {e}")
+
+    def _schedule_repertoire_preload(self):
+        """Warms up training caches and pre-fetches the first challenge in a background thread."""
+        repo_name = self.repertoire_manager.active_repertoire_name
+        if not repo_name:
+            return
+        gen = self._repo_preload_gen
+        mode = self.training_mode
+        var_filter = self.active_variation_filter
+
+        def _worker():
+            with self._preload_lock:
+                if self._repo_preload_gen != gen or self.repertoire_manager.active_repertoire_name != repo_name:
+                    return
+                try:
+                    self.training_manager._ensure_forward_cache()
+                    if self._repo_preload_gen != gen:
+                        return
+                    self.training_manager._ensure_td_cache()
+                    if self._repo_preload_gen != gen:
+                        return
+                    self.training_manager._ensure_reachable_moves_cache(var_filter)
+                    if self._repo_preload_gen != gen:
+                        return
+                    next_move, _ = self.training_manager.get_next_move(mode=mode, variation_filter=var_filter)
+                    if self._repo_preload_gen == gen:
+                        self._preloaded_start_challenge = (repo_name, mode, var_filter, next_move)
+                except Exception as e:
+                    logger.debug(f"Background repertoire preload skipped: {e}")
+
+        t = threading.Thread(target=_worker, daemon=True)
+        self._challenge_preload_thread = t
+        t.start()
+
     def preload_next_challenge(self):
-        """Preloads the next challenge/move sequence while the user is thinking."""
+        """Preloads the next challenge/move sequence in a background thread while the user is thinking."""
         if not self.repertoire_manager.active_repertoire_name or not self.current_move_obj:
             self._preloaded_challenge = None
             return
 
-        try:
-            last_move = self.current_move_obj
-            # Calculate next move (continuation)
-            next_move, path = self.training_manager.get_next_move(
-                mode=self.training_mode,
-                last_move_obj=last_move,
-                last_was_success=True,
-                only_continuation=True,
-                variation_filter=self.active_variation_filter
-            )
-            
-            if next_move:
-                self._preloaded_challenge = {
-                    'type': 'continuation',
-                    'next_move': next_move,
-                    'path': path,
-                    'source_move_id': last_move.id
-                }
-            elif self.training_manager.get_setting("stop_at_variation_end"):
-                self._preloaded_challenge = {
-                    'type': 'stop_at_end',
-                    'last_move': last_move,
-                    'source_move_id': last_move.id
-                }
-            else:
-                # Auto-continue: jump to next variation/challenge in the queue
-                next_challenge_move, _ = self.training_manager.get_next_move(
-                    mode=self.training_mode,
-                    variation_filter=self.active_variation_filter,
-                    exclude_move_ids={last_move.id}
-                )
-                self._preloaded_challenge = {
-                    'type': 'auto_continue',
-                    'next_move': next_challenge_move,
-                    'path': [],
-                    'source_move_id': last_move.id
-                }
-        except Exception as e:
-            logger.error(f"Error in preload_next_challenge: {e}")
-            self._preloaded_challenge = None
+        repo_name = self.repertoire_manager.active_repertoire_name
+        last_move = self.current_move_obj
+        mode = self.training_mode
+        var_filter = self.active_variation_filter
+        r_gen = self._repo_preload_gen
+        c_gen = self._challenge_preload_gen
+        stop_at_end = self.training_manager.get_setting("stop_at_variation_end")
+
+        def _worker():
+            with self._preload_lock:
+                if (
+                    self._repo_preload_gen != r_gen
+                    or self._challenge_preload_gen != c_gen
+                    or self.repertoire_manager.active_repertoire_name != repo_name
+                ):
+                    return
+                try:
+                    next_move, path = self.training_manager.get_next_move(
+                        mode=mode,
+                        last_move_obj=last_move,
+                        last_was_success=True,
+                        only_continuation=True,
+                        variation_filter=var_filter,
+                    )
+                    if self._repo_preload_gen != r_gen or self._challenge_preload_gen != c_gen:
+                        return
+
+                    if next_move:
+                        result = {
+                            'type': 'continuation',
+                            'next_move': next_move,
+                            'path': path,
+                            'source_move_id': last_move.id,
+                        }
+                    elif stop_at_end:
+                        result = {
+                            'type': 'stop_at_end',
+                            'last_move': last_move,
+                            'source_move_id': last_move.id,
+                        }
+                    else:
+                        next_challenge_move, _ = self.training_manager.get_next_move(
+                            mode=mode,
+                            variation_filter=var_filter,
+                            exclude_move_ids={last_move.id},
+                        )
+                        result = {
+                            'type': 'auto_continue',
+                            'next_move': next_challenge_move,
+                            'path': [],
+                            'source_move_id': last_move.id,
+                        }
+
+                    if self._repo_preload_gen == r_gen and self._challenge_preload_gen == c_gen:
+                        self._preloaded_challenge = result
+                except Exception as e:
+                    logger.error(f"Error in preload_next_challenge: {e}")
+                    if self._repo_preload_gen == r_gen and self._challenge_preload_gen == c_gen:
+                        self._preloaded_challenge = None
+
+        t = threading.Thread(target=_worker, daemon=True)
+        self._challenge_preload_thread = t
+        t.start()
 
     def _is_training_limit_reached(self) -> bool:
         if is_free_training_profile(self.profile_name):
@@ -1019,7 +1100,20 @@ class MainWindow(QMainWindow):
                 self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
                 self.btn_smart.setEnabled(False)
                 return
-            self.current_move_obj, _ = self.training_manager.get_next_move(mode=self.training_mode, variation_filter=self.active_variation_filter)
+            pre_start = None
+            with self._preload_lock:
+                if (
+                    self._preloaded_start_challenge is not None
+                    and self._preloaded_start_challenge[0] == self.repertoire_manager.active_repertoire_name
+                    and self._preloaded_start_challenge[1] == self.training_mode
+                    and self._preloaded_start_challenge[2] == self.active_variation_filter
+                ):
+                    pre_start = self._preloaded_start_challenge[3]
+                    self._preloaded_start_challenge = None
+            if pre_start is not None:
+                self.current_move_obj = pre_start
+            else:
+                self.current_move_obj, _ = self.training_manager.get_next_move(mode=self.training_mode, variation_filter=self.active_variation_filter)
 
         if self.current_move_obj:
             self.start_animation(path_to_animate or [])
@@ -1123,6 +1217,7 @@ class MainWindow(QMainWindow):
 
     def check_user_move(self, move):
         if self.button_state not in ['waiting_for_move', 'show_solution_prompt'] or not self.current_move_obj: return
+        self._challenge_preload_gen += 1
         if move.uci() == self.current_move_obj.uci:
             is_cap = self.board_widget.board.is_capture(move)
             self.play_sound("capture" if is_cap else "move")
@@ -1141,7 +1236,9 @@ class MainWindow(QMainWindow):
             def record_stats():
                 if was_waiting:
                     was_new = self.training_manager.is_move_new(current_move.id)
-                    self.training_manager.register_success(current_move.id, True, had_alternate_attempt=had_alt, was_new=was_new)
+                    self.training_manager.register_success(current_move.id, True, had_alternate_attempt=had_alt, was_new=was_new, defer_commit=True)
+                    if getattr(self, '_db_commit_timer', None):
+                        self._db_commit_timer.start(1500)
                     if self.training_mode == 'due':
                         self.session_review_count = getattr(self, 'session_review_count', 0) + 1
                     self.update_stats_display()
@@ -1167,7 +1264,9 @@ class MainWindow(QMainWindow):
                         current_move = self.current_move_obj
                         self.set_button_state('show_solution_prompt')
                         def process_after_fail():
-                            self.training_manager.register_success(current_move.id, False)
+                            self.training_manager.register_success(current_move.id, False, defer_commit=True)
+                            if getattr(self, '_db_commit_timer', None):
+                                self._db_commit_timer.start(1500)
                             self.update_stats_display()
                         QTimer.singleShot(0, process_after_fail)
                     return
@@ -1224,7 +1323,7 @@ class MainWindow(QMainWindow):
         return self.training_manager.get_setting("notation_language") or "de"
 
     def update_notation_display(self, temp_hist=None, reveal_move=False):
-        hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter)
+        hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter, training_manager=self.training_manager)
         if not hist:
             self.txt_notation.clear()
             return
@@ -1233,6 +1332,12 @@ class MainWindow(QMainWindow):
         start_move_offset = self.repertoire_manager.get_repertoire_start_move() - 1
         notation_lang = self.training_manager.get_setting("notation_language") or "en"
         comment_lang = self.get_effective_comment_language()
+        repo_default_lang = "de"
+        if self.repertoire_manager and self.repertoire_manager.repo_session:
+            from opening_fenix.core.data_tools import get_meta
+            meta_lang = get_meta(self.repertoire_manager.repo_session, "comment_language", "de")
+            if meta_lang and meta_lang != "auto":
+                repo_default_lang = meta_lang
         
         # Determine if the first move in history is Black (to adjust numbering/dots)
         # In hist, 'fen' is the position AFTER the move. If 'w' follows, Black just moved.
@@ -1260,12 +1365,6 @@ class MainWindow(QMainWindow):
             san = localize_san(item['san'], notation_lang)
             html += f"<a href='fen:{item['fen']}' style='{style}'>{san}{nag_text}</a> "
             if item.get('comment'):
-                repo_default_lang = "de"
-                if self.repertoire_manager and self.repertoire_manager.repo_session:
-                    from opening_fenix.core.data_tools import get_meta
-                    meta_lang = get_meta(self.repertoire_manager.repo_session, "comment_language", "de")
-                    if meta_lang and meta_lang != "auto":
-                        repo_default_lang = meta_lang
                 comment_text = parse_comment(item['comment'], comment_lang, default_lang=repo_default_lang)
                 if comment_text:
                     from opening_fenix.core.utils import clean_chessbase_annotations
@@ -1286,7 +1385,18 @@ class MainWindow(QMainWindow):
         self.txt_notation.setHtml(html)
         # Use a singleShot timer to ensure the layout is complete before scrolling.
         # moveCursor(End) is more robust than manually setting scrollbar values.
-        QTimer.singleShot(50, lambda: self.txt_notation.moveCursor(QTextCursor.MoveOperation.End))
+        self._scroll_notation_to_bottom()
+        QTimer.singleShot(50, self._scroll_notation_to_bottom)
+
+    def _scroll_notation_to_bottom(self):
+        doc = self.txt_notation.document()
+        if doc and doc.documentLayout():
+            doc.documentLayout().documentSize()
+        self.txt_notation.moveCursor(QTextCursor.MoveOperation.End)
+        self.txt_notation.ensureCursorVisible()
+        sb = self.txt_notation.verticalScrollBar()
+        if sb is not None:
+            sb.setValue(sb.maximum())
 
     def _prewarm_settings_dialog(self):
         from PyQt6 import sip
@@ -1409,7 +1519,7 @@ class MainWindow(QMainWindow):
              self._advance_animation_sequence()
              return
 
-        history = self.repertoire_manager.get_history_for_move(self.current_move_obj)
+        history = self.repertoire_manager.get_history_for_move(self.current_move_obj, training_manager=self.training_manager)
         full_moves = [h['san'] for h in history[:-1]]
         def clean_fen(f): return " ".join(f.split(" ")[:4])
         
@@ -1638,6 +1748,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
+        self._repo_preload_gen += 1
+        self._challenge_preload_gen += 1
+        self._flush_pending_stats()
+        self._flush_db_commits()
         self._flush_pending_stats()
         from PyQt6.QtWidgets import QDialog, QApplication
         for w in list(QApplication.topLevelWidgets()):

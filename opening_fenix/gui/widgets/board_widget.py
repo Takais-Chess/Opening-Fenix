@@ -969,6 +969,14 @@ class ChessBoardWidget(QWidget):
         self.precise_anim_timer.start(self.timer_interval)
         self.update() 
 
+    def hideEvent(self, event):
+        self.abort_piece_slide()
+        super().hideEvent(event)
+
+    def closeEvent(self, event):
+        self.abort_piece_slide()
+        super().closeEvent(event)
+
     def abort_piece_slide(self):
         """Immediately stops any ongoing animation and clears animation data."""
         if self.is_animating:

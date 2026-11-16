@@ -268,7 +268,10 @@
     "leadup_style_instant": "Sofort-Sprung zum Varianten-Start",
     "leadup_style_turbo": "Turbo-Animation (Schnelldurchlauf)",
     "leadup_style_label": "Überspring-Stil:",
-    "leadup_style_sub": "Ob direkt zur Variante gesprungen oder die Hinführung im Zeitraffer abgespielt wird."
+    "leadup_style_sub": "Ob direkt zur Variante gesprungen oder die Hinführung im Zeitraffer abgespielt wird.",
+    "btn_restart_now": "Jetzt neu starten",
+    "btn_restart_later": "Später",
+    "btn_restart_app": "🔄 Anwendung neu starten"
   },
   "themes": {
     "Dunkel (Modern)": "Dunkel (Modern)",

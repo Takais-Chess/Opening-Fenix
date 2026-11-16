@@ -32,6 +32,8 @@ def migrate_legacy_profiles():
                 data = json.load(f)
             
             # 2. Initialize new DB
+            db = None
+            session = None
             db = DatabaseManager(db_path, base=UserBase)
             session = db.get_session()
             
@@ -70,31 +72,30 @@ def migrate_legacy_profiles():
                 import sqlite3
                 import chess
                 
-                repo_files = [f for f in os.listdir(repo_dir) if f.endswith(".db")]
-                
-                for repo_file in repo_files:
-                    repo_name = repo_file.replace(".db", "")
-                    
-                    # Only migrate data for active repos to save time/space? 
-                    # No, migrate everything found in JSON that matches a repo.
-                    
-                    repo_db_path = os.path.join(repo_dir, repo_file)
+                repo_db_paths = []
+                for root_r, _, files_r in os.walk(repo_dir):
+                    for f_r in files_r:
+                        if f_r.endswith(".db"):
+                            repo_db_paths.append((f_r[:-3], os.path.join(root_r, f_r)))
+
+                for repo_name, repo_db_path in repo_db_paths:
+                    conn = None
                     try:
-                        conn = sqlite3.connect(repo_db_path)
-                        cursor = conn.cursor()
-                        
-                        # Get all moves: uci, from_fen
-                        # We need to reconstruct the board to get the resulting EPD
-                        # This is slow but necessary.
-                        
-                        # Optimization: Get all positions and moves
-                        cursor.execute("SELECT id, fen FROM positions")
-                        positions = {row[0]: row[1] for row in cursor.fetchall()}
-                        
-                        cursor.execute("SELECT from_position_id, uci FROM moves")
-                        moves = cursor.fetchall()
-                        
-                        conn.close()
+                        try:
+                            conn = sqlite3.connect(repo_db_path)
+                            cursor = conn.cursor()
+
+                            cursor.execute("SELECT id, fen FROM positions")
+                            positions = {row[0]: row[1] for row in cursor.fetchall()}
+
+                            cursor.execute("SELECT from_position_id, uci FROM moves")
+                            moves = cursor.fetchall()
+                        finally:
+                            if conn is not None:
+                                try:
+                                    conn.close()
+                                except Exception:
+                                    pass
                         
                         for from_pos_id, uci in moves:
                             if from_pos_id not in positions: continue
@@ -125,7 +126,7 @@ def migrate_legacy_profiles():
                                         if next_due_str:
                                             try:
                                                 next_due = datetime.datetime.fromisoformat(next_due_str)
-                                            except:
+                                            except Exception:
                                                 next_due = datetime.datetime.now()
                                         else:
                                             next_due = datetime.datetime.now()
@@ -149,19 +150,32 @@ def migrate_legacy_profiles():
             
             session.commit()
             session.close()
+            session = None
             db.close()
-            
+            db = None
+
             # Rename old JSON to .json.bak to prevent re-migration
             os.rename(os.path.join(profiles_dir, json_file), os.path.join(profiles_dir, json_file + ".bak"))
             logger.info(f"Profile '{profile_name}' migrated successfully.")
-            
+
         except Exception as e:
             logger.error(f"Failed to migrate profile '{profile_name}': {e}")
+            if locals().get("session") is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            if locals().get("db") is not None:
+                try:
+                    db.close()
+                except Exception:
+                    pass
             # Clean up partial DB
             if os.path.exists(db_path):
                 try:
                     os.remove(db_path)
-                except: pass
+                except Exception:
+                    pass
 
 if __name__ == "__main__":
     migrate_legacy_profiles()

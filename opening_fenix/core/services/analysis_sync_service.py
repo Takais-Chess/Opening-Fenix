@@ -83,32 +83,37 @@ def sync_analysis_data_from_other_repertoires(
             continue
 
         try:
-            conn = sqlite3.connect(other_db_path, timeout=5.0)
-            cursor = conn.cursor()
+            conn = None
+            try:
+                conn = sqlite3.connect(other_db_path, timeout=5.0)
+                cursor = conn.cursor()
 
-            # Ensure table exists
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
-            if not cursor.fetchone():
-                conn.close()
-                continue
+                # Ensure table exists
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
+                if not cursor.fetchone():
+                    continue
 
-            cursor.execute("PRAGMA table_info(positions)")
-            cols = [row[1] for row in cursor.fetchall()]
-            if 'analysis_depth' not in cols or 'good_moves' not in cols or 'fen' not in cols:
-                conn.close()
-                continue
+                cursor.execute("PRAGMA table_info(positions)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if 'analysis_depth' not in cols or 'good_moves' not in cols or 'fen' not in cols:
+                    continue
 
-            has_eval = 'engine_eval' in cols
-            select_eval = ", engine_eval" if has_eval else ", NULL"
+                has_eval = 'engine_eval' in cols
+                select_eval = ", engine_eval" if has_eval else ", NULL"
 
-            query = (
-                f"SELECT fen, analysis_depth, good_moves{select_eval} "
-                f"FROM positions WHERE analysis_depth IS NOT NULL "
-                f"AND analysis_depth >= ? AND good_moves IS NOT NULL"
-            )
-            cursor.execute(query, (target_depth,))
-            rows = cursor.fetchall()
-            conn.close()
+                query = (
+                    f"SELECT fen, analysis_depth, good_moves{select_eval} "
+                    f"FROM positions WHERE analysis_depth IS NOT NULL "
+                    f"AND analysis_depth >= ? AND good_moves IS NOT NULL"
+                )
+                cursor.execute(query, (target_depth,))
+                rows = cursor.fetchall()
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
             for r_fen, r_depth, r_gm, r_eval in rows:
                 if not r_fen or not r_gm:

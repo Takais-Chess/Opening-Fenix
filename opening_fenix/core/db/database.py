@@ -11,6 +11,7 @@ from sqlalchemy.exc import DatabaseError, OperationalError
 from opening_fenix.core.db.models import Base, UserBase
 
 _db_init_lock = threading.RLock()
+_verified_db_keys: set[tuple[str, int]] = set()
 
 def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: float = 0.1) -> None:
     """
@@ -93,12 +94,21 @@ class DatabaseManager:
                     try:
                         dbapi_connection.execute("PRAGMA busy_timeout=60000")
                         dbapi_connection.execute("PRAGMA synchronous=NORMAL")
-                        dbapi_connection.execute("PRAGMA cache_size=-16000")
+                        dbapi_connection.execute("PRAGMA cache_size=-64000")
+                        dbapi_connection.execute("PRAGMA mmap_size=268435456")
                         dbapi_connection.execute("PRAGMA temp_store=MEMORY")
                     except Exception:
                         pass
 
             try:
+                norm_key = (os.path.abspath(db_filename), id(base)) if db_filename != ":memory:" else None
+                if (
+                    norm_key is not None
+                    and os.path.exists(db_filename)
+                    and os.path.getsize(db_filename) > 0
+                    and norm_key in _verified_db_keys
+                ):
+                    return
                 base.metadata.create_all(self.engine)
                 if db_filename != ":memory:":
                     try:
@@ -108,6 +118,8 @@ class DatabaseManager:
                         pass
                 self._check_integrity()
                 self._migrate_schema(base)
+                if norm_key is not None:
+                    _verified_db_keys.add(norm_key)
             except DatabaseError as e:
                 from opening_fenix.core.logger import logger
                 logger.error(f"Database error during initialization: {e}")

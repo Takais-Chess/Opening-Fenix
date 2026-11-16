@@ -212,6 +212,8 @@ def test_preload_next_challenge_excludes_current_move(main_window):
     main_window.training_manager.get_next_move = mock_get_next_move
     
     main_window.preload_next_challenge()
+    if getattr(main_window, '_challenge_preload_thread', None):
+        main_window._challenge_preload_thread.join(timeout=2.0)
     
     assert called_with_exclude == {42}
 

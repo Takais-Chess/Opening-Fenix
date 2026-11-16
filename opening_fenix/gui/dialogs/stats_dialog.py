@@ -113,6 +113,9 @@ class StatisticsWorker(QThread):
         self.selected_level = selected_level
 
     def run(self):
+        if not self.repo_name or not str(self.repo_name).strip():
+            self.stats_ready.emit({})
+            return
         data = calculate_repertoire_statistics(
             self.repo_name, self.is_test, self.elo_range, self.profile_name, selected_level=self.selected_level
         )
@@ -790,6 +793,9 @@ class RepertoireStatisticsDialog(QDialog):
         self.profile_worker.start()
 
     def _on_profile_box_stats_ready(self, req_id: int, prof_data: Dict[str, Any]):
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
         if req_id < self._profile_req_id:
             return
         self.update_profile_box_ui(prof_data)
@@ -887,8 +893,41 @@ class RepertoireStatisticsDialog(QDialog):
         self.worker.stats_ready.connect(self.on_statistics_ready)
         self.worker.start()
 
+    def _cleanup_workers(self):
+        if not hasattr(RepertoireStatisticsDialog, '_detached_workers'):
+            RepertoireStatisticsDialog._detached_workers = []
+        for attr_name in ('worker', 'profile_worker'):
+            w = getattr(self, attr_name, None)
+            if w and w.isRunning():
+                try:
+                    w.disconnect()
+                except Exception:
+                    pass
+                w.requestInterruption()
+                if not w.wait(200):
+                    RepertoireStatisticsDialog._detached_workers.append(w)
+                    w.finished.connect(
+                        lambda obj=w: RepertoireStatisticsDialog._detached_workers.remove(obj)
+                        if obj in RepertoireStatisticsDialog._detached_workers else None
+                    )
+
+    def closeEvent(self, event):
+        self._cleanup_workers()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._cleanup_workers()
+        super().reject()
+
+    def accept(self):
+        self._cleanup_workers()
+        super().accept()
+
     def on_statistics_ready(self, data: Dict[str, Any]):
         """Populates the dialog UI with the calculated statistics data."""
+        from PyQt6 import sip
+        if sip.isdeleted(self):
+            return
         self.btn_refresh.setEnabled(True)
 
         # 1. Scope Banner

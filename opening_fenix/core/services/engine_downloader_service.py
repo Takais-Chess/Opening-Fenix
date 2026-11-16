@@ -115,14 +115,19 @@ class StockfishDownloaderWorker(QThread):
             if self._is_cancelled:
                 return
 
+            from urllib.parse import urlparse
+            parsed = urlparse(download_url)
+            if parsed.scheme != "https" or not parsed.netloc:
+                raise ValueError(f"Untrusted Stockfish download URL: {download_url}")
+
             self.status.emit("Connecting to official download server...")
             req = urllib.request.Request(
                 download_url,
                 headers={"User-Agent": "OpeningFenix-App"}
             )
 
-            temp_dir = tempfile.gettempdir()
-            temp_zip_path = os.path.join(temp_dir, f"sf_download_{os.getpid()}.zip")
+            fd, temp_zip_path = tempfile.mkstemp(prefix="sf_download_", suffix=".zip")
+            os.close(fd)
 
             with safe_urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get("Content-Length", 0))

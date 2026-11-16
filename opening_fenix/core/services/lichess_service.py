@@ -56,6 +56,7 @@ class LichessConnectionManager:
                 if resp.status == 200:
                     return body
                 else:
+                    self.close()
                     raise urllib.error.HTTPError(url, resp.status, resp.reason, dict(resp.getheaders()), None)
             except (http.client.RemoteDisconnected, http.client.CannotSendRequest,
                     BrokenPipeError, ConnectionResetError, OSError):
@@ -531,24 +532,30 @@ def sync_lichess_data_from_other_repertoires(
             continue
 
         try:
-            conn = sqlite3.connect(other_db_path)
-            cursor = conn.cursor()
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lichess_data'")
-            if not cursor.fetchone():
-                conn.close()
-                continue
+            conn = None
+            try:
+                conn = sqlite3.connect(other_db_path)
+                cursor = conn.cursor()
+                cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='lichess_data'")
+                if not cursor.fetchone():
+                    continue
 
-            cursor.execute("PRAGMA table_info(lichess_data)")
-            cols = [row[1] for row in cursor.fetchall()]
-            has_fetched_at = 'fetched_at' in cols
+                cursor.execute("PRAGMA table_info(lichess_data)")
+                cols = [row[1] for row in cursor.fetchall()]
+                has_fetched_at = 'fetched_at' in cols
 
-            if has_fetched_at:
-                cursor.execute("SELECT fen, moves_json, fetched_at FROM lichess_data WHERE elo_range = ?", (elo_category,))
-            else:
-                cursor.execute("SELECT fen, moves_json, NULL FROM lichess_data WHERE elo_range = ?", (elo_category,))
+                if has_fetched_at:
+                    cursor.execute("SELECT fen, moves_json, fetched_at FROM lichess_data WHERE elo_range = ?", (elo_category,))
+                else:
+                    cursor.execute("SELECT fen, moves_json, NULL FROM lichess_data WHERE elo_range = ?", (elo_category,))
 
-            rows = cursor.fetchall()
-            conn.close()
+                rows = cursor.fetchall()
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
 
             for r_fen, r_moves_json, r_fetched_at in rows:
                 if r_fen not in missing_fen_set:
