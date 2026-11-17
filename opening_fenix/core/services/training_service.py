@@ -146,6 +146,7 @@ class TrainingManager:
         self._reachable_moves_cache = None
         self._reachable_keys_cache = None
         self._norm_reachable_keys_cache = None # List of (fen, uci) reachable for current repo/level
+        self._reachable_moves_by_key = {}
         self._last_stats_cache = None # (new, due, dist)
         self._user_settings_cache = None # Cached UserRepertoireSettings for active repertoire
         
@@ -395,11 +396,17 @@ class TrainingManager:
             self.user_session.add(settings)
         else:
             settings.active_level = level_order
+            settings.stats_updated_at = None
+            settings.last_dist_json = None
         self.user_session.commit()
         # Invalidate caches
         if repo_name == self.repertoire_manager.active_repertoire_name:
             self._variation_move_ids = set()
             self._rep_move_cache = None
+            self._reachable_moves_cache = None
+            self._reachable_keys_cache = None
+            self._norm_reachable_keys_cache = None
+            self._reachable_moves_by_key = {}
             self._last_stats_cache = None
             self._user_settings_cache = settings
             self._cached_elo = None
@@ -458,6 +465,7 @@ class TrainingManager:
         self._reachable_moves_cache = None
         self._reachable_keys_cache = None
         self._norm_reachable_keys_cache = None
+        self._reachable_moves_by_key = {}
         self._last_stats_cache = None
         self._user_settings_cache = None
         if self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
@@ -475,13 +483,24 @@ class TrainingManager:
         """Invalidates all internal caches when priority scores or repertoire data change."""
         self.on_repertoire_changed()
 
-    def reset_repertoire_progress(self) -> Tuple[bool, str]:
-        if not self.repertoire_manager.active_repertoire_name: return False, "Kein Repertoire aktiv."
+    def reset_repertoire_progress(self, repo_name: Optional[str] = None) -> Tuple[bool, str]:
+        target_repo = repo_name or (self.repertoire_manager.active_repertoire_name if self.repertoire_manager else None)
+        if not target_repo: return False, "Kein Repertoire aktiv."
         try:
-            num_deleted = self.user_session.query(TrainingData).filter(TrainingData.repertoire_name == self.repertoire_manager.active_repertoire_name).delete(synchronize_session=False)
+            num_deleted = self.user_session.query(TrainingData).filter(TrainingData.repertoire_name == target_repo).delete(synchronize_session=False)
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=target_repo).first()
+            if settings:
+                settings.last_dist_json = None
+                settings.last_new_count = 0
+                settings.last_due_count = 0
+                settings.stats_updated_at = None
+                settings.rating = 800.0
             self.user_session.commit()
             # Invalidate caches
             self._td_cache = None
+            self._norm_td_cache = None
+            self._cached_elo = None
+            self._last_stats_cache = None
             return True, f"{num_deleted} Fortschritts-Einträge zurückgesetzt."
         except Exception as e:
             self.user_session.rollback()
@@ -645,14 +664,27 @@ class TrainingManager:
         active_level = self.get_active_level()
         cache_key = (self.repertoire_manager.active_repertoire_name, active_level, variation_filter)
         
-        if getattr(self, "_reachable_moves_cache_key", None) == cache_key and self._reachable_moves_cache is not None:
+        if self._reachable_moves_cache is None:
+            self._reachable_moves_by_key = {}
+        elif getattr(self, "_reachable_moves_cache_key", None) == cache_key:
             return self._reachable_moves_cache
             
-        # Re-calculate
-        self._reachable_moves_cache = self._calculate_reachable_moves(variation_filter)
-        self._reachable_moves_cache_key = cache_key
-        self._reachable_keys_cache = set(self._reachable_moves_cache)
-        self._norm_reachable_keys_cache = {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in self._reachable_keys_cache}
+        by_key = getattr(self, "_reachable_moves_by_key", None)
+        if by_key is None:
+            by_key = {}
+            self._reachable_moves_by_key = by_key
+
+        if cache_key in by_key:
+            moves_list, keys_set, norm_keys_set = by_key[cache_key]
+        else:
+            moves_list = self._calculate_reachable_moves(variation_filter)
+            keys_set = set(moves_list)
+            norm_keys_set = {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in keys_set}
+            by_key[cache_key] = (moves_list, keys_set, norm_keys_set)
+
+        self._reachable_moves_cache = moves_list
+        self._reachable_keys_cache = keys_set
+        self._norm_reachable_keys_cache = norm_keys_set
         self._reachable_moves_cache_key = cache_key
         return self._reachable_moves_cache
 
@@ -721,6 +753,12 @@ class TrainingManager:
     def get_stats_for_repertoire(self, repo_name: str) -> Tuple[int, int, Dict[int, int]]:
         """Fast path for checking persistent stats cache without full repertoire switch."""
         if not self.user_session: return 0, 0, {}
+        if (
+            self.repertoire_manager
+            and repo_name == self.repertoire_manager.active_repertoire_name
+            and self.repertoire_manager.repo_session
+        ):
+            return self.get_stats(variation_filter=None)
         settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
         if settings and settings.last_dist_json:
             try:
@@ -1252,6 +1290,9 @@ class TrainingManager:
                 if getattr(self, '_norm_td_cache', None) is not None:
                     self._norm_td_cache[(" ".join(fen.split()[:4]), move.uci)] = entry
             self._cached_elo = None
+            settings = self._get_rating_settings()
+            if settings:
+                settings.stats_updated_at = None
             return
 
         self._ensure_forward_cache()

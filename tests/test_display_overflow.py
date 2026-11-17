@@ -16,7 +16,7 @@ def clean_emulation():
 
 
 @pytest.mark.parametrize("profile_key", ["768p", "1080p_laptop", "1080p"])
-def test_dialog_minimum_sizes_fit_viewports(profile_key):
+def test_dialog_minimum_sizes_fit_viewports(profile_key, mock_user_dir):
     """
     Ensures no dialog has a minimumSize that exceeds the available screen viewport
     on HD (768p), FHD Laptop (125% DPI), and FHD Desktop (100% DPI).

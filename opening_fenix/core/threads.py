@@ -5,7 +5,7 @@ import sys
 from opening_fenix.core.services.analysis_service import run_db_analysis, enrich_position
 from opening_fenix.core.services.priority_service import detect_islands
 from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
-from opening_fenix.core.services.import_service import import_pgn_to_db
+from opening_fenix.core.services.import_service import import_pgn_to_db, import_pgn_drawings_only
 from opening_fenix.core.services.hole_finder_service import run_hole_finder_task
 from opening_fenix.core.services.repertoire_mistake_service import audit_repertoire_mistakes
 from opening_fenix.core.utils import get_configured_engine_hash
@@ -118,7 +118,7 @@ class PGNImportThread(QThread):
     progress_signal = pyqtSignal(int)
     finished_signal = pyqtSignal(bool, str)
 
-    def __init__(self, pgn_path, repo_name, side, level_name, level_order, target_lang="de", subvariations_as_comments: bool = False):
+    def __init__(self, pgn_path, repo_name, side, level_name, level_order, target_lang="de", subvariations_as_comments: bool = False, drawings_only: bool = False):
         super().__init__()
         self.pgn_path = pgn_path
         self.repo_name = repo_name
@@ -127,18 +127,26 @@ class PGNImportThread(QThread):
         self.level_order = level_order
         self.target_lang = target_lang
         self.subvariations_as_comments = subvariations_as_comments
+        self.drawings_only = drawings_only
 
     def run(self):
-        success, msg = import_pgn_to_db(
-            self.pgn_path,
-            self.repo_name,
-            self.side,
-            self.level_name,
-            self.level_order,
-            progress_callback=self.progress_signal.emit,
-            target_lang=self.target_lang,
-            subvariations_as_comments=self.subvariations_as_comments
-        )
+        if self.drawings_only:
+            success, msg = import_pgn_drawings_only(
+                self.pgn_path,
+                self.repo_name,
+                progress_callback=self.progress_signal.emit,
+            )
+        else:
+            success, msg = import_pgn_to_db(
+                self.pgn_path,
+                self.repo_name,
+                self.side,
+                self.level_name,
+                self.level_order,
+                progress_callback=self.progress_signal.emit,
+                target_lang=self.target_lang,
+                subvariations_as_comments=self.subvariations_as_comments
+            )
         self.finished_signal.emit(success, msg)
 
 

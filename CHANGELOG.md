@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.12] - 2026-11-17
+
+### Added & Improved
+- **Drawings-Only PGN Import**: Added `import_pgn_drawings_only` and Creator/Settings UI options to import only arrows and square highlights (`[%cal]`/`[%csl]`) for existing repertoire positions without adding moves, levels, or text comments, with full DE/EN localization.
+- **Course Import & Task Center Improvements**: Improved `CourseImportDialog` responsiveness with lazy chapter population, enhanced `TaskManagerService` and `TaskCenterDialog` job cancellation/restart handling, and added `DatabaseManager` orphaned-pages integrity checks.
+- **Board Animation, Audio & UI Stability**: Refined `BoardWidget` animation timing and async Windows sound playback (`_WinAsyncSoundEffect`), debounced stats/DB commit timers, and expanded unit/UI test coverage.
+
 ## [1.3.11] - 2026-11-16
 
 ### Added & Improved

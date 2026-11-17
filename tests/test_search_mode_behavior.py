@@ -29,10 +29,10 @@ def test_search_mode_button_state_and_stop_click(creator_window, qapp, monkeypat
     # Mock long-running search that respects cancel_check
     def slow_task(*args, **kwargs):
         cancel_check = kwargs.get("cancel_check")
-        for _ in range(50):
+        for _ in range(200):
             if cancel_check and cancel_check():
                 break
-            time.sleep(0.05)
+            time.sleep(0.005)
         return []
 
     monkeypatch.setattr("opening_fenix.core.threads.run_hole_finder_task", slow_task)
@@ -54,7 +54,7 @@ def test_search_mode_button_state_and_stop_click(creator_window, qapp, monkeypat
     # Click the button to stop the search
     creator_window.btn_hole_scan.click()
     qapp.processEvents()
-    time.sleep(0.1)
+    time.sleep(0.02)
     qapp.processEvents()
 
     # Thread stopped, button reset to Suchen/Search, status updated to abgebrochen/cancelled
@@ -69,10 +69,10 @@ def test_search_mode_change_cancels_running_search(creator_window, qapp, monkeyp
 
     def slow_task(*args, **kwargs):
         cancel_check = kwargs.get("cancel_check")
-        for _ in range(50):
+        for _ in range(200):
             if cancel_check and cancel_check():
                 break
-            time.sleep(0.05)
+            time.sleep(0.005)
         return []
 
     monkeypatch.setattr("opening_fenix.core.threads.run_hole_finder_task", slow_task)
@@ -90,7 +90,7 @@ def test_search_mode_change_cancels_running_search(creator_window, qapp, monkeyp
     # Change mode to unanswered (index 1)
     creator_window.combo_hole_mode.setCurrentIndex(1)
     qapp.processEvents()
-    time.sleep(0.1)
+    time.sleep(0.02)
     qapp.processEvents()
 
     # Active thread must be cancelled and reset
@@ -166,10 +166,10 @@ def test_changing_level_or_threshold_cancels_running_search(creator_window, qapp
 
     def slow_task(*args, **kwargs):
         cancel_check = kwargs.get("cancel_check")
-        for _ in range(50):
+        for _ in range(200):
             if cancel_check and cancel_check():
                 break
-            time.sleep(0.05)
+            time.sleep(0.005)
         return []
 
     monkeypatch.setattr("opening_fenix.core.threads.run_hole_finder_task", slow_task)
@@ -185,7 +185,7 @@ def test_changing_level_or_threshold_cancels_running_search(creator_window, qapp
     # Change threshold
     creator_window._on_hole_level_or_threshold_changed()
     qapp.processEvents()
-    time.sleep(0.1)
+    time.sleep(0.02)
     qapp.processEvents()
 
     assert creator_window.hole_thread is None

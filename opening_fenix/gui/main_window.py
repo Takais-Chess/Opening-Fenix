@@ -28,16 +28,14 @@ from PyQt6.QtMultimedia import QSoundEffect
 
 from opening_fenix.core.repertoire import RepertoireManager
 from opening_fenix.core.training import TrainingManager
-from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status
-from opening_fenix.core.utils import localize_san, parse_comment, is_free_training_profile
+from opening_fenix.core.utils import get_base_path, get_user_dir, localize_san, parse_comment, is_free_training_profile
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget
 from opening_fenix.gui.widgets.charts import PieChartWidget
 from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame
-from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
-from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
 from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
-from opening_fenix.gui.dialogs.faq_dialog import FAQDialog
-from opening_fenix.creator.creator_window import CreatorWindow
+
+# Lazy-loaded dialog/window classes (CreatorWindow kept at module level for test monkeypatching)
+CreatorWindow = None
 
 # Import centralized styles
 from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon
@@ -49,6 +47,116 @@ from opening_fenix.core.logger import logger
 from opening_fenix.core.db.database import DatabaseCorruptedException
 from opening_fenix.core.version import APP_VERSION
 from opening_fenix.core.translation import tr_ui
+
+import array
+import queue
+import tempfile
+import wave
+
+if sys.platform == "win32":
+    try:
+        import winsound
+    except ImportError:
+        winsound = None
+else:
+    winsound = None
+
+_WIN_SOUND_QUEUE: "queue.SimpleQueue[str | None]" = queue.SimpleQueue()
+_WIN_SOUND_WORKER_STARTED = False
+_WIN_SOUND_LOCK = threading.Lock()
+
+
+def _ensure_win_sound_worker():
+    global _WIN_SOUND_WORKER_STARTED
+    if _WIN_SOUND_WORKER_STARTED or winsound is None:
+        return
+    with _WIN_SOUND_LOCK:
+        if _WIN_SOUND_WORKER_STARTED:
+            return
+        _WIN_SOUND_WORKER_STARTED = True
+
+        def _worker():
+            try:
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+            while True:
+                wav_path = _WIN_SOUND_QUEUE.get()
+                if wav_path is None:
+                    break
+                try:
+                    winsound.PlaySound(
+                        wav_path,
+                        winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True, name="OpeningFenixAudioWorker").start()
+
+
+class _WinAsyncSoundEffect:
+    """
+    Zero-latency asynchronous Windows sound effect wrapper using a dedicated background
+    WinMM thread and cached volume-scaled PCM WAV files.
+    Eliminates the 35-65ms Qt6 WASAPI QSoundEffect.play() main-thread freeze between moves.
+    """
+    _scaled_file_cache: dict[tuple[str, int], str] = {}
+
+    def __init__(self, name: str, source_path: str, volume: float = 1.0):
+        self.name = name
+        self.source_path = source_path
+        self._volume = 1.0
+        self._active_path = source_path
+        _ensure_win_sound_worker()
+        self.setVolume(volume)
+
+    def volume(self) -> float:
+        return self._volume
+
+    def setVolume(self, vol: float) -> None:
+        self._volume = max(0.0, min(1.0, float(vol)))
+        vol_pct = int(round(self._volume * 100))
+        if vol_pct <= 0:
+            self._active_path = ""
+            return
+        if vol_pct >= 99:
+            self._active_path = self.source_path
+            return
+        key = (self.source_path, vol_pct)
+        cached = self._scaled_file_cache.get(key)
+        if cached and os.path.exists(cached):
+            self._active_path = cached
+            return
+        try:
+            cache_dir = os.path.join(tempfile.gettempdir(), "opening_fenix_sounds")
+            os.makedirs(cache_dir, exist_ok=True)
+            out_path = os.path.join(cache_dir, f"{self.name}_{vol_pct}.wav")
+            if not os.path.exists(out_path):
+                with wave.open(self.source_path, "rb") as r:
+                    params = r.getparams()
+                    raw = r.readframes(params.nframes)
+                if params.sampwidth == 2:
+                    samples = array.array("h")
+                    samples.frombytes(raw)
+                    scale_f = self._volume
+                    for i in range(len(samples)):
+                        samples[i] = int(samples[i] * scale_f)
+                    scaled_bytes = samples.tobytes()
+                else:
+                    scaled_bytes = raw
+                with wave.open(out_path, "wb") as w:
+                    w.setparams(params)
+                    w.writeframes(scaled_bytes)
+            self._scaled_file_cache[key] = out_path
+            self._active_path = out_path
+        except Exception:
+            self._active_path = self.source_path
+
+    def play(self) -> None:
+        if not self._active_path or winsound is None:
+            return
+        _WIN_SOUND_QUEUE.put_nowait(self._active_path)
 
 
 class MainWindow(QMainWindow):
@@ -91,9 +199,14 @@ class MainWindow(QMainWindow):
         self._repo_preload_gen = 0
         self._preloaded_start_challenge = None
         self._challenge_preload_gen = 0
+        self._cached_anim_history = None
+        self._auto_continue_timer = QTimer(self)
+        self._auto_continue_timer.setSingleShot(True)
+        self._auto_continue_timer.timeout.connect(self._on_auto_continue_timeout)
+        self._pending_auto_continue = None
         self._db_commit_timer = QTimer(self)
         self._db_commit_timer.setSingleShot(True)
-        self._db_commit_timer.timeout.connect(self._flush_db_commits)
+        self._db_commit_timer.timeout.connect(self._on_db_commit_timer)
         self.waiting_for_next = False
         self.show_comments = True
         self.mode = "TRAINER"
@@ -107,12 +220,13 @@ class MainWindow(QMainWindow):
         self.animation_moves = []
         self._turbo_leadup_remaining = 0
         self.sorted_repo_names = None
+        self.repo_mini_donuts = {}
         self._auto_size_board = True
         
         # Debounce timer for updating the large stats pie chart
         self.stats_update_timer = QTimer()
         self.stats_update_timer.setSingleShot(True)
-        self.stats_update_timer.timeout.connect(self._do_update_stats_display)
+        self.stats_update_timer.timeout.connect(self._on_stats_timer_timeout)
         self._pending_stats_task = None
 
         self.init_ui()
@@ -283,6 +397,7 @@ class MainWindow(QMainWindow):
     def on_tour_finished(self):
         """Mark the tour as shown, show the FAQ dialog, then proceed to course intro if needed."""
         self.training_manager.set_setting("guide_shown", True)
+        from opening_fenix.gui.dialogs.faq_dialog import FAQDialog
         FAQDialog(self).exec()
         
         # After FAQ is closed, ensure we show the intro for the correctly prioritized repertoire
@@ -298,9 +413,6 @@ class MainWindow(QMainWindow):
             self.change_repertoire(active_repo, refresh_buttons=False)
 
     def init_ui(self):
-        self.setStyleSheet(get_main_window_style())
-
-
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
@@ -585,11 +697,13 @@ class MainWindow(QMainWindow):
         self.change_repertoire(button.property("repo_name"), refresh_buttons=False)
 
     def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
+        self._cancel_auto_continue()
         self._flush_pending_stats()
         # Cancel any ongoing animations before switching
         self.animation_moves = []
         self._turbo_leadup_remaining = 0
         self._preloaded_challenge = None
+        self._cached_anim_history = None
         if hasattr(self.board_widget, 'abort_piece_slide'):
             self.board_widget.abort_piece_slide()
 
@@ -684,6 +798,7 @@ class MainWindow(QMainWindow):
             # BUGFIX: Don't show if the onboarding tour is currently active or not yet shown
             guide_shown = self.training_manager.get_setting("guide_shown")
             if learned == 0 and due == 0 and repo_name and not is_free_training_profile(self.profile_name) and guide_shown:
+                from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
                 repo_info = self.repertoire_manager.get_repertoire_info()
                 self._current_intro = CourseIntroDialog(self, repo_info)
                 self._current_intro.setWindowModality(Qt.WindowModality.NonModal)
@@ -728,9 +843,11 @@ class MainWindow(QMainWindow):
         menu.exec(self.btn_filter.mapToGlobal(QPoint(0, self.btn_filter.height())))
 
     def set_variation_filter(self, var_name):
+        self._cancel_auto_continue()
         self.active_variation_filter = var_name
         self.active_variation_entry_fen = None # Reset cache
         self._preloaded_challenge = None
+        self._cached_anim_history = None
         eff_lang = self.get_effective_comment_language()
         from opening_fenix.core.utils import parse_variation_name
         display_name = parse_variation_name(var_name, lang=eff_lang) if var_name else ""
@@ -755,6 +872,7 @@ class MainWindow(QMainWindow):
 
     def refresh_repertoire_buttons(self):
         scroll_pos = self.repo_scroll.horizontalScrollBar().value()
+        self.repo_mini_donuts = {}
         while self.repo_tabs_layout.count():
             item = self.repo_tabs_layout.takeAt(0)
             if item.widget(): item.widget().deleteLater()
@@ -808,6 +926,7 @@ class MainWindow(QMainWindow):
             mini_donut = PieChartWidget(parent=container, show_text=False)
             mini_donut.setFixedSize(scale(24), scale(24))
             mini_donut.update_stats(new, due, dist)
+            self.repo_mini_donuts[repo_name] = mini_donut
 
 
             btn = QPushButton(repo_name)
@@ -833,17 +952,38 @@ class MainWindow(QMainWindow):
             delay = 150 if self.button_state in ('waiting_for_move', 'correct') else 50
             self.stats_update_timer.start(delay)
             
+    def _on_stats_timer_timeout(self):
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            self.stats_update_timer.start(100)
+            return
+        self._do_update_stats_display()
+
     def _do_update_stats_display(self):
-        if not self.repertoire_manager.active_repertoire_name:
+        active_repo = self.repertoire_manager.active_repertoire_name
+        if not active_repo:
             self.progress_bar.update_stats(0, 0, {})
             self.lbl_elo.setText("🎓 800")
             return
         new, due, done_dist = self.training_manager.get_stats(variation_filter=self.active_variation_filter)
         self.progress_bar.update_stats(new, due, done_dist)
         
+        mini_donut = getattr(self, 'repo_mini_donuts', {}).get(active_repo)
+        if mini_donut is not None and not sip.isdeleted(mini_donut):
+            if self.active_variation_filter:
+                r_new, r_due, r_dist = self.training_manager.get_stats(variation_filter=None, auto_commit=False)
+                mini_donut.update_stats(r_new, r_due, r_dist)
+            else:
+                mini_donut.update_stats(new, due, done_dist)
+        
         # Update Elo display
         elo = self.training_manager.get_current_elo()
         self.lbl_elo.setText(f"🎓 {elo}")
+
+    def _on_db_commit_timer(self):
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            self._db_commit_timer.start(300)
+            return
+        self._flush_db_commits()
 
     def _flush_db_commits(self):
         if getattr(self, '_db_commit_timer', None) and self._db_commit_timer.isActive():
@@ -854,8 +994,48 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 logger.error(f"Error flushing pending DB commits: {e}")
 
-    def _schedule_repertoire_preload(self):
-        """Warms up training caches and pre-fetches the first challenge in a background thread."""
+    def _cancel_auto_continue(self):
+        """Cancels any pending delayed auto-continue transition."""
+        if getattr(self, '_auto_continue_timer', None) and self._auto_continue_timer.isActive():
+            self._auto_continue_timer.stop()
+        self._pending_auto_continue = None
+
+    def _on_auto_continue_timeout(self):
+        pending = getattr(self, '_pending_auto_continue', None)
+        self._pending_auto_continue = None
+        if pending is None:
+            return
+        path, anim_ctx = pending
+        self._load_new_challenge_sequence(path, anim_ctx=anim_ctx)
+
+    def _precompute_move_anim_context(self, move_obj, var_filter):
+        """Precomputes history and lead-up entry FEN in memory so animation starts with zero DB/tree lag."""
+        if not move_obj:
+            return None
+        try:
+            history = self.repertoire_manager.get_history_for_move(
+                move_obj,
+                variation_name=var_filter,
+                training_manager=self.training_manager,
+            )
+            var_name = None
+            entry_fen = None
+            if not var_filter and hasattr(self.training_manager, 'get_move_variation_name'):
+                var_name = self.training_manager.get_move_variation_name(move_obj)
+                if var_name:
+                    entry_fen = self.repertoire_manager.get_variation_entry_point_fen(var_name)
+            return {
+                'move_id': getattr(move_obj, 'id', None),
+                'var_filter': var_filter,
+                'history': history,
+                'var_name': var_name,
+                'entry_fen': entry_fen,
+            }
+        except Exception:
+            return None
+
+    def _schedule_repertoire_preload(self, exclude_move_ids=None):
+        """Warms up training caches and pre-fetches the next start challenge + history in a background thread."""
         repo_name = self.repertoire_manager.active_repertoire_name
         if not repo_name:
             return
@@ -877,9 +1057,16 @@ class MainWindow(QMainWindow):
                     self.training_manager._ensure_reachable_moves_cache(var_filter)
                     if self._repo_preload_gen != gen:
                         return
-                    next_move, _ = self.training_manager.get_next_move(mode=mode, variation_filter=var_filter)
+                    next_move, _ = self.training_manager.get_next_move(
+                        mode=mode,
+                        variation_filter=var_filter,
+                        exclude_move_ids=exclude_move_ids,
+                    )
+                    if self._repo_preload_gen != gen:
+                        return
+                    anim_ctx = self._precompute_move_anim_context(next_move, var_filter) if next_move else None
                     if self._repo_preload_gen == gen:
-                        self._preloaded_start_challenge = (repo_name, mode, var_filter, next_move)
+                        self._preloaded_start_challenge = (repo_name, mode, var_filter, next_move, anim_ctx)
                 except Exception as e:
                     logger.debug(f"Background repertoire preload skipped: {e}")
 
@@ -939,10 +1126,16 @@ class MainWindow(QMainWindow):
                             variation_filter=var_filter,
                             exclude_move_ids={last_move.id},
                         )
+                        anim_ctx = (
+                            self._precompute_move_anim_context(next_challenge_move, var_filter)
+                            if next_challenge_move
+                            else None
+                        )
                         result = {
                             'type': 'auto_continue',
                             'next_move': next_challenge_move,
                             'path': [],
+                            'anim_ctx': anim_ctx,
                             'source_move_id': last_move.id,
                         }
 
@@ -989,7 +1182,29 @@ class MainWindow(QMainWindow):
             self.board_widget.load_user_drawings_from_comment(final_comment)
             self.board_widget.update()
 
+    def _handle_variation_end_stop(self, last_move):
+        """Updates UI when stopping at the end of a variation and warms up the next start challenge."""
+        self.current_move_obj = last_move
+        self.update_notation_display(reveal_move=True)
+        self.set_button_state('start')
+        self.current_move_obj = None
+        last_id = getattr(last_move, 'id', None)
+        self._schedule_repertoire_preload(exclude_move_ids={last_id} if last_id is not None else None)
+
+    def _schedule_auto_continue(self, path=None, anim_ctx=None, exclude_move_id=None):
+        """Transitions to the next variation immediately or after auto_delay (preloading during the wait)."""
+        delay = self.training_manager.get_setting("auto_delay") or 0
+        if delay > 0:
+            if self.current_move_obj is None:
+                exclude_ids = {exclude_move_id} if exclude_move_id is not None else None
+                self._schedule_repertoire_preload(exclude_move_ids=exclude_ids)
+            self._pending_auto_continue = (path or [], anim_ctx)
+            self._auto_continue_timer.start(delay)
+        else:
+            self._load_new_challenge_sequence(path or [], anim_ctx=anim_ctx)
+
     def load_next_challenge(self, last_success=False, last_move=None):
+        self._cancel_auto_continue()
         self.waiting_for_next = False
         if not self.repertoire_manager.active_repertoire_name: return
 
@@ -1028,25 +1243,20 @@ class MainWindow(QMainWindow):
                         return
 
                     if self.training_manager.get_setting("stop_at_variation_end"):
-                        self.current_move_obj = last_move
-                        self.update_notation_display(reveal_move=True)
-                        self.set_button_state('start')
-                        self.current_move_obj = None  # Reset so next start loads a new challenge
+                        self._handle_variation_end_stop(last_move)
                         return
                     else:
+                        anim_ctx = None
                         if pre['type'] == 'auto_continue':
                             self.current_move_obj = pre['next_move']
+                            anim_ctx = pre.get('anim_ctx')
                         else:
                             next_challenge_move, _ = self.training_manager.get_next_move(
                                 mode=self.training_mode,
                                 variation_filter=self.active_variation_filter
                             )
                             self.current_move_obj = next_challenge_move
-                        delay = self.training_manager.get_setting("auto_delay") or 0
-                        if delay > 0:
-                            QTimer.singleShot(delay, lambda: self._load_new_challenge_sequence(pre.get('path', [])))
-                        else:
-                            self._load_new_challenge_sequence(pre.get('path', []))
+                        self._schedule_auto_continue(pre.get('path', []), anim_ctx=anim_ctx, exclude_move_id=last_move.id)
                         return
             else:
                 logger.debug(f"Preloaded challenge MISS: source_move_id mismatch. Expected {last_move.id}, got {pre.get('source_move_id')}")
@@ -1070,19 +1280,13 @@ class MainWindow(QMainWindow):
                     return
 
                 if self.training_manager.get_setting("stop_at_variation_end"):
-                    # Variation ended, stay on the current notation
-                    self.current_move_obj = last_move
-                    self.update_notation_display(reveal_move=True)
-                    self.set_button_state('start')
-                    self.current_move_obj = None # Reset so next start loads a new challenge
+                    self._handle_variation_end_stop(last_move)
                     return
                 else:
-                    # Auto-Weiter: Jump to next variation with delay
+                    # Auto-Weiter: Jump to next variation with delay (preload during delay)
                     self.current_move_obj = None
-                    delay = self.training_manager.get_setting("auto_delay") or 0
-                    if delay > 0:
-                        QTimer.singleShot(delay, self._load_new_challenge_sequence)
-                        return
+                    self._schedule_auto_continue(exclude_move_id=getattr(last_move, 'id', None))
+                    return
 
         if limit_reached:
             self.current_move_obj = None
@@ -1092,7 +1296,7 @@ class MainWindow(QMainWindow):
 
         self._load_new_challenge_sequence(path_to_animate)
 
-    def _load_new_challenge_sequence(self, path_to_animate=None):
+    def _load_new_challenge_sequence(self, path_to_animate=None, anim_ctx=None):
         self._had_alternate_attempt = False
         self.board_widget.clear_user_drawings()
         if not self.current_move_obj:
@@ -1109,6 +1313,8 @@ class MainWindow(QMainWindow):
                     and self._preloaded_start_challenge[2] == self.active_variation_filter
                 ):
                     pre_start = self._preloaded_start_challenge[3]
+                    if len(self._preloaded_start_challenge) > 4:
+                        anim_ctx = self._preloaded_start_challenge[4]
                     self._preloaded_start_challenge = None
             if pre_start is not None:
                 self.current_move_obj = pre_start
@@ -1116,7 +1322,7 @@ class MainWindow(QMainWindow):
                 self.current_move_obj, _ = self.training_manager.get_next_move(mode=self.training_mode, variation_filter=self.active_variation_filter)
 
         if self.current_move_obj:
-            self.start_animation(path_to_animate or [])
+            self.start_animation(path_to_animate or [], anim_ctx=anim_ctx)
             if not self.board_widget.is_animating:
                 reveal = (self.training_mode == 'new')
                 self.update_notation_display(reveal_move=reveal)
@@ -1161,6 +1367,10 @@ class MainWindow(QMainWindow):
             self.creator_window.raise_()
             self.creator_window.activateWindow()
         else:
+            global CreatorWindow
+            if CreatorWindow is None:
+                from opening_fenix.creator.creator_window import CreatorWindow as _CreatorWindow
+                CreatorWindow = _CreatorWindow
             self.creator_window = CreatorWindow(
                 repertoire_name=active_repo, 
                 initial_fen=target_fen, 
@@ -1199,6 +1409,7 @@ class MainWindow(QMainWindow):
             self.btn_smart.setText(tr_ui("main_window.btn_wrong", "FALSCH! LÖSUNG ANZEIGEN")); self.btn_smart.setEnabled(True)
 
     def on_smart_click(self):
+        self._cancel_auto_continue()
         if self.button_state == 'start':
             self.load_next_challenge()
         elif self.button_state == 'show_solution_prompt':
@@ -1399,19 +1610,31 @@ class MainWindow(QMainWindow):
             sb.setValue(sb.maximum())
 
     def _prewarm_settings_dialog(self):
+        """Warms up repertoire metadata caches in a background thread without blocking the GUI main thread."""
         from PyQt6 import sip
         if sip.isdeleted(self):
             return
-        if not hasattr(self, 'settings_dialog') or not self.settings_dialog or sip.isdeleted(self.settings_dialog):
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            QTimer.singleShot(500, self._prewarm_settings_dialog)
+            return
+
+        def _bg_prewarm():
             try:
-                self.settings_dialog = SettingsDialog(self)
-                self.settings_dialog.finished.connect(self._on_settings_closed)
+                from opening_fenix.core.services.repertoire_core_service import (
+                    RepertoireService, get_repertoire_levels_fast, get_repertoire_comment_languages_fast
+                )
+                for repo_name in RepertoireService().get_all_repertoires():
+                    get_repertoire_levels_fast(repo_name)
+                    get_repertoire_comment_languages_fast(repo_name)
             except Exception as e:
-                logger.debug(f"Settings prewarm deferred: {e}")
+                logger.debug(f"Background settings metadata prewarm skipped: {e}")
+
+        threading.Thread(target=_bg_prewarm, daemon=True, name="SettingsMetadataPrewarm").start()
 
     def open_settings(self):
         from PyQt6 import sip
         if not hasattr(self, 'settings_dialog') or not self.settings_dialog or sip.isdeleted(self.settings_dialog):
+            from opening_fenix.gui.dialogs.settings_dialog import SettingsDialog
             self.settings_dialog = SettingsDialog(self)
             self.settings_dialog.finished.connect(self._on_settings_closed)
         else:
@@ -1424,6 +1647,7 @@ class MainWindow(QMainWindow):
     def _on_settings_closed(self):
         self.refresh_repertoire_buttons()
         self.update_settings_from_manager()
+        self._do_update_stats_display()
 
     def update_settings_from_manager(self):
         self.apply_theme()
@@ -1444,6 +1668,7 @@ class MainWindow(QMainWindow):
         self.change_repertoire(self.repertoire_manager.active_repertoire_name, reset_filter=False)
 
     def toggle_auto_continue_btn(self):
+        self._cancel_auto_continue()
         self.training_manager.set_setting("stop_at_variation_end", not self.btn_auto_continue.isChecked())
         # Invalidate preloaded challenge since the auto-continue preference changed
         self._preloaded_challenge = None
@@ -1499,11 +1724,20 @@ class MainWindow(QMainWindow):
                 QTimer.singleShot(100, self.on_smart_click)
 
     def init_sounds(self):
-        volume = self.training_manager.get_setting("master_volume") or 100
+        volume = self.training_manager.get_setting("master_volume")
+        if volume is None:
+            volume = 100
+        vol_float = max(0.0, min(1.0, float(volume) / 100.0))
         for s in ["move", "capture", "error"]:
             path = os.path.join(get_base_path(), "assets", "sounds", f"{s}.wav")
             if os.path.exists(path):
-                eff = QSoundEffect(); eff.setSource(QUrl.fromLocalFile(os.path.abspath(path))); eff.setVolume(volume / 100.0); self.sounds[s] = eff
+                if sys.platform == "win32":
+                    self.sounds[s] = _WinAsyncSoundEffect(s, os.path.abspath(path), vol_float)
+                else:
+                    eff = QSoundEffect()
+                    eff.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
+                    eff.setVolume(vol_float)
+                    self.sounds[s] = eff
 
     def play_sound(self, name):
         if name in self.sounds: self.sounds[name].play()
@@ -1512,14 +1746,28 @@ class MainWindow(QMainWindow):
         self.board_widget.piece_slide_finished.connect(self.animation_step)
         self.board_widget.skip_all_animations_requested.connect(self.skip_all_animations)
 
-    def start_animation(self, path_to_animate):
+    def start_animation(self, path_to_animate, anim_ctx=None):
         self._turbo_leadup_remaining = 0
         if path_to_animate:
-             self.animation_moves = path_to_animate
+             self.animation_moves = list(path_to_animate)
              self._advance_animation_sequence()
              return
 
-        history = self.repertoire_manager.get_history_for_move(self.current_move_obj, training_manager=self.training_manager)
+        move_id = getattr(self.current_move_obj, 'id', None)
+        if (
+            anim_ctx
+            and anim_ctx.get('move_id') == move_id
+            and anim_ctx.get('var_filter') == self.active_variation_filter
+            and anim_ctx.get('history')
+        ):
+            history = anim_ctx['history']
+        else:
+            history = self.repertoire_manager.get_history_for_move(
+                self.current_move_obj,
+                variation_name=self.active_variation_filter,
+                training_manager=self.training_manager,
+            )
+        self._cached_anim_history = (move_id, self.active_variation_filter, history)
         full_moves = [h['san'] for h in history[:-1]]
         def clean_fen(f): return " ".join(f.split(" ")[:4])
         
@@ -1553,9 +1801,15 @@ class MainWindow(QMainWindow):
         # ?? SMART LEAD-UP SKIP (NO VARIATION FILTER) ??
         turbo_boundary_idx = -1
         if not self.active_variation_filter and self.current_move_obj and hasattr(self.training_manager, 'should_skip_leadup_animation'):
-            var_name = self.training_manager.get_move_variation_name(self.current_move_obj)
+            use_precomputed = (
+                anim_ctx is not None
+                and anim_ctx.get('move_id') == move_id
+                and anim_ctx.get('var_filter') is None
+                and anim_ctx.get('var_name') is not None
+            )
+            var_name = anim_ctx['var_name'] if use_precomputed else self.training_manager.get_move_variation_name(self.current_move_obj)
             if var_name:
-                entry_fen = self.repertoire_manager.get_variation_entry_point_fen(var_name)
+                entry_fen = anim_ctx['entry_fen'] if use_precomputed else self.repertoire_manager.get_variation_entry_point_fen(var_name)
                 if entry_fen:
                     c_entry = clean_fen(entry_fen)
                     boundary_idx = -1
@@ -1678,11 +1932,16 @@ class MainWindow(QMainWindow):
         self.board_widget.clear_user_drawings()
             
         self.board_widget.update()
-        self.update_notation_display(reveal_move=(self.training_mode == 'new'))
+        cached_hist = None
+        cached = getattr(self, '_cached_anim_history', None)
+        self._cached_anim_history = None
+        if cached and self.current_move_obj and cached[0] == getattr(self.current_move_obj, 'id', None) and cached[1] == self.active_variation_filter:
+            cached_hist = cached[2]
+        self.update_notation_display(temp_hist=cached_hist, reveal_move=(self.training_mode == 'new'))
         
         # Preload the next challenge in the background while user is thinking
         self._preloaded_challenge = None
-        QTimer.singleShot(50, self.preload_next_challenge)
+        QTimer.singleShot(0, self.preload_next_challenge)
 
     def open_lichess_analysis(self):
         if not self.repertoire_manager.active_repertoire_name: return
@@ -1748,6 +2007,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up resources before closing."""
+        self._cancel_auto_continue()
         self._repo_preload_gen += 1
         self._challenge_preload_gen += 1
         self._flush_pending_stats()
@@ -1778,6 +2038,8 @@ class MainWindow(QMainWindow):
                 self.update_checker.wait(200)
             except Exception: pass
 
+        with self._preload_lock:
+            pass
         if self.training_manager:
             self.training_manager.close()
         if self.repertoire_manager:

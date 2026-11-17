@@ -99,7 +99,7 @@ def test_maintenance_orchestrator_full_run(mock_priority, mock_lichess, mock_ana
 def test_maintenance_orchestrator_cancel(mock_analysis):
     import time
     def mock_run(*args, **kwargs):
-        time.sleep(1)
+        time.sleep(0.02)
         return (True, "OK")
     mock_analysis.side_effect = mock_run
     

@@ -90,6 +90,14 @@ DISPLAY_PROFILES: Dict[str, Dict[str, Any]] = {
         "taskbar": 40,
         "dpr": 1.0,
     },
+    # 2.8K 16:10 OLED Laptop with 200% scaling -> logical 1440x900
+    "2.8k_oled": {
+        "name": "2.8K OLED Laptop (2880x1800 @ 200% DPI)",
+        "width": 1440,
+        "height": 900,
+        "taskbar": 40,
+        "dpr": 2.0,
+    },
 }
 
 

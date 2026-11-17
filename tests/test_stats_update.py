@@ -103,3 +103,32 @@ def test_register_success_performance_and_in_memory_elo(window, sample_repertoir
     assert elo_duration_ms < 2.0, f"get_current_elo took too long: {elo_duration_ms:.2f}ms"
     assert duration_ms < 50.0, f"register_success took too long: {duration_ms:.2f}ms"
 
+def test_mini_donut_updates_after_training_move_and_tab_switch(window, sample_repertoire):
+    """Test that the active tab's mini donut ring chart updates after training moves and tab clicks."""
+    window.training_manager.set_repo_visibility(sample_repertoire, True)
+    window.refresh_repertoire_buttons()
+    window.change_repertoire(sample_repertoire, refresh_buttons=False)
+
+    assert sample_repertoire in window.repo_mini_donuts
+    mini_donut = window.repo_mini_donuts[sample_repertoire]
+    initial_new = mini_donut.data.get("new", 0)
+    assert initial_new > 0
+
+    window.training_mode = 'new'
+    window.load_next_challenge()
+    window.skip_all_animations()
+    assert window.current_move_obj is not None
+
+    window.button_state = 'waiting_for_move'
+    target_move = window.current_move_obj.uci
+    window.check_user_move(chess.Move.from_uci(target_move))
+
+    QTest.qWait(250)
+    if window.stats_update_timer.isActive():
+        window.stats_update_timer.stop()
+        window._do_update_stats_display()
+
+    assert mini_donut.data.get("new", 0) == initial_new - 1
+    assert mini_donut.data == window.progress_bar.data
+
+

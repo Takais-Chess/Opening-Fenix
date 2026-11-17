@@ -5,7 +5,16 @@ from typing import Tuple, Optional, Callable
 from opening_fenix.core.db.models import Position, Move, RepertoireMove, RepertoireLevel
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
-from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, initialize_repertoire_assets, combine_comments, normalize_castling_uci
+from opening_fenix.core.utils import (
+    get_user_dir,
+    get_repertoire_db_path,
+    initialize_repertoire_assets,
+    combine_comments,
+    normalize_castling_uci,
+    parse_chessbase_annotations,
+    update_comment_with_annotations,
+    get_multilingual_comment_dict,
+)
 from opening_fenix.core.services.repair_service import repair_repertoire_health
 from opening_fenix.core.services.course_import_service import SanitizedPGNReader, format_variation_tree_as_text
 from opening_fenix.core.translation import tr_ui
@@ -300,6 +309,155 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
             session.rollback()
             return False, tr_ui("creator.msg_import_no_moves", "Keine neuen Züge in der PGN-Datei gefunden, die importiert werden konnten.")
 
+    except Exception as e:
+        session.rollback()
+        import traceback
+        print(traceback.format_exc())
+        return False, tr_ui("creator.msg_import_error", "Fehler beim Import: {error}", error=str(e))
+    finally:
+        session.close()
+        db.close()
+
+
+def _collect_drawings_from_text(text: str, fen: str, drawings_by_fen: dict) -> None:
+    """Extracts [%csl] highlights and [%cal] arrows from PGN comment text into drawings_by_fen."""
+    if not text:
+        return
+    parsed = parse_chessbase_annotations(text)
+    if not parsed["arrows"] and not parsed["highlights"]:
+        return
+
+    entry = drawings_by_fen.setdefault(fen, {"arrows": {}, "highlights": {}})
+    for sq, color_name in parsed["highlights"]:
+        entry["highlights"][sq] = color_name
+    for from_sq, to_sq, color_name in parsed["arrows"]:
+        entry["arrows"][(from_sq, to_sq)] = color_name
+
+
+def _extract_existing_drawings(raw_comment: Optional[str]) -> Tuple[dict, dict]:
+    """Extracts existing arrows and highlights from a Position.comment (plain or multilingual JSON)."""
+    arrows = {}
+    highlights = {}
+    if not raw_comment or not isinstance(raw_comment, str):
+        return arrows, highlights
+
+    stripped = raw_comment.strip()
+    texts = (
+        list(get_multilingual_comment_dict(stripped).values())
+        if stripped.startswith("{") and stripped.endswith("}")
+        else [raw_comment]
+    )
+    for text in texts:
+        parsed = parse_chessbase_annotations(text)
+        for sq, col in parsed["highlights"]:
+            highlights[sq] = col
+        for from_sq, to_sq, col in parsed["arrows"]:
+            arrows[(from_sq, to_sq)] = col
+    return arrows, highlights
+
+
+def import_pgn_drawings_only(
+    pgn_path: str,
+    repo_name: str,
+    progress_callback: Optional[Callable[[int], None]] = None,
+) -> Tuple[bool, str]:
+    """Imports only ChessBase drawings ([%cal], [%csl]) from a PGN into existing repertoire positions."""
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return False, tr_ui(
+            "creator.msg_import_drawings_no_repo",
+            "Repertoire '{repo}' nicht gefunden.",
+            repo=repo_name,
+        )
+
+    drawings_by_fen = {}
+    total_file_size = os.path.getsize(pgn_path) if os.path.exists(pgn_path) else 0
+    with open(pgn_path, "r", encoding="utf-8", errors="ignore") as f_pgn:
+        reader = SanitizedPGNReader(f_pgn)
+        while True:
+            game = chess.pgn.read_game(reader)
+            if game is None:
+                break
+
+            if progress_callback and total_file_size > 0:
+                processed_bytes = f_pgn.tell()
+                progress_callback(min(100, int((processed_bytes / total_file_size) * 100)))
+
+            initial_board = game.board()
+            root_fen = " ".join(initial_board.fen().split(" ")[:4])
+            if game.comment:
+                _collect_drawings_from_text(game.comment, root_fen, drawings_by_fen)
+
+            node_stack = [(node, initial_board.copy()) for node in reversed(game.variations)]
+            while node_stack:
+                current_node, board = node_stack.pop()
+                try:
+                    board.push(current_node.move)
+                except Exception:
+                    continue
+
+                to_fen = " ".join(board.fen().split(" ")[:4])
+                parts = []
+                if current_node.starting_comment:
+                    parts.append(current_node.starting_comment.strip())
+                if current_node.comment:
+                    parts.append(current_node.comment.strip())
+                if parts:
+                    _collect_drawings_from_text(" ".join(parts), to_fen, drawings_by_fen)
+
+                for var in reversed(current_node.variations):
+                    node_stack.append((var, board.copy()))
+
+    if not drawings_by_fen:
+        return False, tr_ui(
+            "creator.msg_import_drawings_none",
+            "Keine neuen Zeichnungen für vorhandene Positionen in der PGN-Datei gefunden.",
+        )
+
+    try:
+        from opening_fenix.core.services.backup_service import create_repertoire_backup
+        create_repertoire_backup(repo_name, trigger_type="pre_import_safety")
+    except Exception:
+        pass
+
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    updated_count = 0
+
+    try:
+        fens_with_drawings = list(drawings_by_fen.keys())
+        chunk_size = 900
+        for i in range(0, len(fens_with_drawings), chunk_size):
+            chunk_fens = fens_with_drawings[i:i + chunk_size]
+            positions = session.query(Position).filter(Position.fen.in_(chunk_fens)).all()
+            for pos in positions:
+                incoming = drawings_by_fen[pos.fen]
+                existing_arrows, existing_highlights = _extract_existing_drawings(pos.comment)
+                merged_arrows = {**existing_arrows, **incoming["arrows"]}
+                merged_highlights = {**existing_highlights, **incoming["highlights"]}
+
+                new_comment = update_comment_with_annotations(
+                    pos.comment,
+                    arrows=merged_arrows,
+                    highlights=merged_highlights,
+                )
+                if new_comment != (pos.comment or ""):
+                    pos.comment = new_comment
+                    updated_count += 1
+
+        if updated_count > 0:
+            session.commit()
+            return True, tr_ui(
+                "creator.msg_import_drawings_success",
+                "Zeichnungen für {count} Position(en) erfolgreich importiert.",
+                count=updated_count,
+            )
+
+        session.rollback()
+        return False, tr_ui(
+            "creator.msg_import_drawings_none",
+            "Keine neuen Zeichnungen für vorhandene Positionen in der PGN-Datei gefunden.",
+        )
     except Exception as e:
         session.rollback()
         import traceback

@@ -15,7 +15,7 @@ if sys.platform == "win32":
 
 from PyQt6.QtWidgets import QWidget, QSizePolicy
 from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFont
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QSize, QVariantAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QRect, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QSize, QVariantAnimation, QEasingCurve
 from PyQt6.QtSvg import QSvgRenderer
 from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.core.logger import logger
@@ -184,22 +184,36 @@ class ChessBoardWidget(QWidget):
         self.enable_piece_lift = False  # Set False for Lichess-style flat 2D slide (no 1.15 scale jitter)
         self._anim_start_time = 0.0
         self._anim_frame_times = []
+        self._anim_setup_ms = 0.0
+        self._inter_move_ms = 0.0
+        self._last_slide_end_time = 0.0
         self._last_anim_stats = None
         self._last_configured_anim_speed = None
         self._duration_lut = {}
         self._gc_disabled_for_anim = False
         self._coord_color = QColor("#4b4b4b")
+        self._coord_font_cache = None
         self._board_snapshot = None
+        self._snapshot_buffer = None
         self._snapshot_flipped = None
         self._snapshot_size = None
+        self._squares_pixmap = None
+        self._squares_pixmap_key = None
+        self._last_anim_dirty_rect = None
+        self._last_drag_dirty_rect = None
+        self._needs_full_board_paint = True
         self.update_animation_metrics()
 
     def _invalidate_snapshot(self):
         """Invalidates the cached static board snapshot."""
         self._board_snapshot = None
+        self._last_anim_dirty_rect = None
 
     def resizeEvent(self, event):
         self._invalidate_snapshot()
+        self._squares_pixmap = None
+        self._squares_pixmap_key = None
+        self._needs_full_board_paint = True
         super().resizeEvent(event)
 
     def update_animation_metrics(self, anim_speed=None, target_fps=None):
@@ -263,7 +277,10 @@ class ChessBoardWidget(QWidget):
             self.light_color, self.dark_color = THEMES["Braun (Klassisch)"]
         self._light_brush = QBrush(self.light_color)
         self._dark_brush = QBrush(self.dark_color)
+        self._squares_pixmap = None
+        self._squares_pixmap_key = None
         self._invalidate_snapshot()
+        self._needs_full_board_paint = True
         self.update()
 
     def set_highlight_color(self, color_name_or_color):
@@ -282,6 +299,7 @@ class ChessBoardWidget(QWidget):
                 self.highlight_color = HIGHLIGHT_COLORS["Gelb (Standard)"]
         self._highlight_brush = QBrush(self.highlight_color)
         self._invalidate_snapshot()
+        self._needs_full_board_paint = True
         self.update()
 
     def load_pieces(self):
@@ -322,6 +340,7 @@ class ChessBoardWidget(QWidget):
         self.explorer_arrows = []
         self.clear_user_drawings()
         self._invalidate_snapshot()
+        self._needs_full_board_paint = True
         self.update() 
 
     def get_square_from_pos(self, pos):
@@ -361,6 +380,8 @@ class ChessBoardWidget(QWidget):
         self.drawing_color = None
         self.drawing_highlight_color = None
         self._invalidate_snapshot()
+        if had_drawings:
+            self._needs_full_board_paint = True
         if had_drawings and emit_signal:
             self.drawings_changed.emit()
 
@@ -427,6 +448,7 @@ class ChessBoardWidget(QWidget):
         for from_sq, to_sq, col_name in parsed["arrows"]:
             self.user_arrows[(from_sq, to_sq)] = USER_ARROW_COLORS.get(col_name, USER_ARROW_COLORS["green"])
         self._invalidate_snapshot()
+        self._needs_full_board_paint = True
         self.update()
 
     def get_chessbase_annotation_tags(self) -> str:
@@ -482,6 +504,7 @@ class ChessBoardWidget(QWidget):
                     self.dragging_piece = piece
                     self.drag_start_square = square
                     self.mouse_pos = event.position()
+                    self._last_drag_dirty_rect = self._get_drag_dirty_rect()
                     self.update()
 
     def mouseMoveEvent(self, event):
@@ -494,7 +517,10 @@ class ChessBoardWidget(QWidget):
 
         if self.dragging_piece:
             self.mouse_pos = event.position()
-            self.update()
+            cur_rect = self._get_drag_dirty_rect()
+            upd_rect = cur_rect.united(self._last_drag_dirty_rect) if self._last_drag_dirty_rect else cur_rect
+            self._last_drag_dirty_rect = cur_rect
+            self.update(upd_rect)
 
     def mouseReleaseEvent(self, event):
         # Right-click release: Finalize arrow or square highlight
@@ -537,6 +563,7 @@ class ChessBoardWidget(QWidget):
             # Clear dragging state immediately so any repaint inside the signal handler knows the drag is done
             self.dragging_piece = None
             self.drag_start_square = None
+            self._last_drag_dirty_rect = None
             
             if end_square is not None and drag_start is not None:
                 move = None
@@ -645,22 +672,33 @@ class ChessBoardWidget(QWidget):
     def _paint_coordinates(self, painter, square_size):
         """Draws coordinates (rank numbers and file letters) with native font antialiasing."""
         painter.setPen(self._coord_color)
-        font = painter.font()
-        font.setBold(True)
-        font.setPointSize(max(9, int(square_size / 6.0)))
-        painter.setFont(font)
-        
-        fm = painter.fontMetrics()
-        baseline_y = 8 * square_size + (self.padding + fm.ascent() - fm.descent()) / 2.0
-        
-        for i in range(8):
-            rank_num = i + 1 if self.flipped else 8 - i
-            rank_rect = QRectF(-self.padding, i * square_size, self.padding - scale(5), square_size)
-            painter.drawText(rank_rect, Qt.AlignmentFlag.AlignCenter, str(rank_num))
-            
-            file_char = chr(ord('h') - i if self.flipped else ord('a') + i)
-            x_center = (i + 0.5) * square_size
-            painter.drawText(QPointF(x_center - fm.horizontalAdvance(file_char) / 2.0, baseline_y), file_char)
+        pt_size = max(9, int(square_size / 6.0))
+        cache_key = (pt_size, round(square_size, 2), self.flipped, self.padding)
+        if getattr(self, '_coord_font_cache', None) is None or self._coord_font_cache[0] != cache_key:
+            font = QFont(painter.font())
+            font.setBold(True)
+            font.setPointSize(pt_size)
+            painter.setFont(font)
+            fm = painter.fontMetrics()
+            baseline_y = 8 * square_size + (self.padding + fm.ascent() - fm.descent()) / 2.0
+            ranks = []
+            files = []
+            for i in range(8):
+                rank_str = str(i + 1 if self.flipped else 8 - i)
+                rank_rect = QRectF(-self.padding, i * square_size, self.padding - scale(5), square_size)
+                ranks.append((rank_rect, rank_str))
+                file_char = chr(ord('h') - i if self.flipped else ord('a') + i)
+                x_center = (i + 0.5) * square_size - fm.horizontalAdvance(file_char) / 2.0
+                files.append((QPointF(x_center, baseline_y), file_char))
+            self._coord_font_cache = (cache_key, font, ranks, files)
+        else:
+            _, font, ranks, files = self._coord_font_cache
+            painter.setFont(font)
+
+        for rank_rect, rank_str in ranks:
+            painter.drawText(rank_rect, Qt.AlignmentFlag.AlignCenter, rank_str)
+        for file_pt, file_char in files:
+            painter.drawText(file_pt, file_char)
 
     def _paint_board_base(self, painter, square_size):
         """Draws squares, last-move highlight, and coordinates."""
@@ -695,10 +733,12 @@ class ChessBoardWidget(QWidget):
                 and self.drawing_highlight_color is not None):
             self._draw_circle(painter, self.drawing_start_sq, self.drawing_highlight_color, square_size)
 
-    def _paint_pieces(self, painter, square_size, skip_square=None):
-        """Draws all pieces, optionally skipping one square (the animating piece's origin)."""
+    def _paint_pieces(self, painter, square_size, skip_square=None, skip_squares=None):
+        """Draws all pieces, optionally skipping one or more squares (e.g. animating piece origins)."""
         for sq, piece in self.board.piece_map().items():
             if skip_square is not None and sq == skip_square:
+                continue
+            if skip_squares and sq in skip_squares:
                 continue
             if self.drag_start_square == sq and self.dragging_piece:
                 continue
@@ -707,6 +747,34 @@ class ChessBoardWidget(QWidget):
             col = 7 - f if self.flipped else f
             row = r if self.flipped else 7 - r
             self.draw_piece(painter, piece, col, row, square_size)
+
+    def _ensure_squares_pixmap(self, w_px, h_px, dpr, rem_dx_phys, rem_dy_phys, x_offset, y_offset, square_size):
+        """Caches the static 8x8 checkerboard squares layer so snapshots avoid 64 rect fills per move."""
+        key = (
+            w_px, h_px, round(dpr, 4),
+            round(rem_dx_phys, 4), round(rem_dy_phys, 4),
+            round(x_offset, 4), round(y_offset, 4), round(square_size, 4),
+            self.light_color.rgba(), self.dark_color.rgba(),
+        )
+        if self._squares_pixmap is not None and self._squares_pixmap_key == key:
+            return self._squares_pixmap
+
+        sq_pm = QPixmap(w_px, h_px)
+        sq_pm.setDevicePixelRatio(dpr)
+        sq_pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(sq_pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(rem_dx_phys / dpr + x_offset, rem_dy_phys / dpr + y_offset)
+        p.setPen(Qt.PenStyle.NoPen)
+        for row in range(8):
+            for col in range(8):
+                p.setBrush(self._light_brush if (row + col) % 2 == 0 else self._dark_brush)
+                p.drawRect(QRectF(col * square_size, row * square_size, square_size, square_size))
+        p.end()
+
+        self._squares_pixmap = sq_pm
+        self._squares_pixmap_key = key
+        return sq_pm
 
     def _build_board_snapshot(self, rem_dx_phys=None, rem_dy_phys=None):
         """
@@ -733,24 +801,41 @@ class ChessBoardWidget(QWidget):
 
         w_px = max(1, round(self.width() * dpr)) + 2
         h_px = max(1, round(self.height() * dpr)) + 2
-        snapshot = QPixmap(w_px, h_px)
-        snapshot.setDevicePixelRatio(dpr)
+        buf = self._snapshot_buffer
+        if buf is None or buf.width() != w_px or buf.height() != h_px or abs(buf.devicePixelRatio() - dpr) > 1e-4:
+            buf = QPixmap(w_px, h_px)
+            buf.setDevicePixelRatio(dpr)
+            self._snapshot_buffer = buf
+        snapshot = buf
         snapshot.fill(Qt.GlobalColor.transparent)
+
+        side, square_size, x_offset, y_offset = self.get_metrics()
+        self._update_pixmap_cache(square_size)
+        squares_pm = self._ensure_squares_pixmap(
+            w_px, h_px, dpr, rem_dx_phys, rem_dy_phys, x_offset, y_offset, square_size
+        )
 
         painter = QPainter(snapshot)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
-
-        side, square_size, x_offset, y_offset = self.get_metrics()
-        self._update_pixmap_cache(square_size)
+        painter.drawPixmap(QPointF(0.0, 0.0), squares_pm)
 
         skip_square = None
+        skip_squares = None
         if self.animating_piece_data:
             skip_square = self.animating_piece_data['from_square']
+            if 'rook_from_square' in self.animating_piece_data:
+                skip_squares = {skip_square, self.animating_piece_data['rook_from_square']}
 
         painter.translate(rem_dx_phys / dpr + x_offset, rem_dy_phys / dpr + y_offset)
-        self._paint_squares(painter, square_size)
-        self._paint_pieces(painter, square_size, skip_square=skip_square)
+        if self.last_move:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._highlight_brush)
+            for sq in [self.last_move.from_square, self.last_move.to_square]:
+                f, r = chess.square_file(sq), chess.square_rank(sq)
+                rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+                painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+        self._paint_pieces(painter, square_size, skip_square=skip_square, skip_squares=skip_squares)
         self._paint_circles(painter, square_size)
         self._paint_arrows(painter, square_size)
         painter.end()
@@ -826,16 +911,27 @@ class ChessBoardWidget(QWidget):
 
             if self._board_snapshot is not None:
                 painter.drawPixmap(QPointF(-rem_dx_phys / dpr, -rem_dy_phys / dpr), self._board_snapshot)
+                clip_rect = event.rect() if event is not None else QRect()
+                inner_board_rect = QRect(
+                    int(math.ceil(x_offset)) + 1,
+                    int(math.ceil(y_offset)) + 1,
+                    max(0, int(math.floor(side)) - 2),
+                    max(0, int(math.floor(side)) - 2),
+                )
                 painter.translate(x_offset, y_offset)
-                self._paint_coordinates(painter, square_size)
+                if clip_rect.isEmpty() or not inner_board_rect.contains(clip_rect):
+                    self._paint_coordinates(painter, square_size)
             else:
+                skip_squares = {self.animating_piece_data['from_square']}
+                if 'rook_from_square' in self.animating_piece_data:
+                    skip_squares.add(self.animating_piece_data['rook_from_square'])
                 painter.translate(x_offset, y_offset)
                 self._paint_board_base(painter, square_size)
-                self._paint_pieces(painter, square_size, skip_square=self.animating_piece_data['from_square'])
+                self._paint_pieces(painter, square_size, skip_square=self.animating_piece_data['from_square'], skip_squares=skip_squares)
                 self._paint_circles(painter, square_size)
                 self._paint_arrows(painter, square_size)
 
-            # 2. Draw moving piece at interpolated position
+            # 2. Draw moving piece(s) at interpolated position
             self._anim_frame_times.append(time.perf_counter())
             d = self.animating_piece_data
             p = d['progress']
@@ -844,6 +940,14 @@ class ChessBoardWidget(QWidget):
             lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
             scale_factor = 1.0 + (0.15 * lift)
             self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
+
+            if 'rook_piece' in d:
+                rp = d.get('rook_progress', 0.0)
+                r_col = d['rook_start_col'] + (d['rook_end_col'] - d['rook_start_col']) * rp
+                r_row = d['rook_start_row'] + (d['rook_end_row'] - d['rook_start_row']) * rp
+                r_lift = math.sin(rp * math.pi) if self.enable_piece_lift else 0.0
+                r_scale = 1.0 + (0.15 * r_lift)
+                self.draw_piece(painter, d['rook_piece'], r_col, r_row, square_size, scale_factor=r_scale)
 
         else:
             skip_square = self.drag_start_square if is_drag else None
@@ -865,6 +969,13 @@ class ChessBoardWidget(QWidget):
         if self.debug_anim:
             painter.resetTransform()
             self._paint_debug_overlay(painter)
+
+        if event is None or (
+            event.rect().width() >= max(1, self.width() - 2)
+            and event.rect().height() >= max(1, self.height() - 2)
+        ):
+            self._needs_full_board_paint = False
+            self._last_painted_flipped = self.flipped
 
     def get_screen_refresh_rate(self):
         """
@@ -893,11 +1004,79 @@ class ChessBoardWidget(QWidget):
                 target_screen = QApplication.primaryScreen()
 
             if target_screen and target_screen.refreshRate() > 0:
-                rate = target_screen.refreshRate()
+                rate = float(target_screen.refreshRate())
+                if sys.platform == "win32" and rate <= 60.5:
+                    drr_rate = self._get_win32_virtual_refresh_rate()
+                    if drr_rate and drr_rate > rate:
+                        rate = float(drr_rate)
                 return min(240, max(30, int(round(rate))))
         except Exception:
             pass
         return 60
+
+    @staticmethod
+    def _get_win32_virtual_refresh_rate():
+        """
+        Queries Windows 11 QueryDisplayConfig with QDC_VIRTUAL_REFRESH_RATE_AWARE (0x40)
+        so displays with 'Dynamic Refresh Rate' (60Hz or 120Hz) report their true 120Hz+ target rate
+        instead of the 60Hz base divider rate returned to legacy EnumDisplaySettingsW / QScreen.
+        """
+        if sys.platform != "win32":
+            return None
+        try:
+            from ctypes import wintypes
+
+            class _LUID(ctypes.Structure):
+                _fields_ = [("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG)]
+
+            class _RATIONAL(ctypes.Structure):
+                _fields_ = [("Numerator", wintypes.UINT), ("Denominator", wintypes.UINT)]
+
+            class _2DREGION(ctypes.Structure):
+                _fields_ = [("cx", wintypes.UINT), ("cy", wintypes.UINT)]
+
+            class _VIDEO_SIGNAL_INFO(ctypes.Structure):
+                _fields_ = [
+                    ("pixelRate", ctypes.c_uint64),
+                    ("hSyncFreq", _RATIONAL),
+                    ("vSyncFreq", _RATIONAL),
+                    ("activeSize", _2DREGION),
+                    ("totalSize", _2DREGION),
+                    ("videoStandard", wintypes.UINT),
+                    ("scanLineOrdering", wintypes.UINT),
+                ]
+
+            class _PATH_INFO(ctypes.Structure):
+                _fields_ = [("raw", ctypes.c_byte * 72)]
+
+            class _MODE_INFO(ctypes.Structure):
+                _fields_ = [
+                    ("infoType", wintypes.UINT),
+                    ("id", wintypes.UINT),
+                    ("adapterId", _LUID),
+                    ("targetVideoSignalInfo", _VIDEO_SIGNAL_INFO),
+                ]
+
+            flags = 0x00000002 | 0x00000040  # QDC_ONLY_ACTIVE_PATHS | QDC_VIRTUAL_REFRESH_RATE_AWARE
+            num_paths = wintypes.UINT(0)
+            num_modes = wintypes.UINT(0)
+            if ctypes.windll.user32.GetDisplayConfigBufferSizes(flags, ctypes.byref(num_paths), ctypes.byref(num_modes)) != 0:
+                return None
+            paths = (_PATH_INFO * num_paths.value)()
+            modes = (_MODE_INFO * num_modes.value)()
+            if ctypes.windll.user32.QueryDisplayConfig(flags, ctypes.byref(num_paths), paths, ctypes.byref(num_modes), modes, None) != 0:
+                return None
+            max_hz = 0.0
+            for i in range(num_modes.value):
+                if modes[i].infoType == 2:  # DISPLAYCONFIG_MODE_INFO_TYPE_TARGET
+                    vs = modes[i].targetVideoSignalInfo.vSyncFreq
+                    if vs.Denominator > 0:
+                        hz = float(vs.Numerator) / float(vs.Denominator)
+                        if 30.0 <= hz <= 360.0 and hz > max_hz:
+                            max_hz = hz
+            return int(round(max_hz)) if max_hz > 0 else None
+        except Exception:
+            return None
 
     def _paint_debug_overlay(self, painter):
         """Draws a sleek debug stats overlay showing FPS, frame count, and timing info."""
@@ -934,9 +1113,86 @@ class ChessBoardWidget(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
         painter.restore()
 
+    def _col_row_widget_rect(self, col: float, row: float, square_size: float, x_offset: float, y_offset: float, pad: int) -> QRect:
+        """Converts board (col, row) coordinates into a widget-space dirty rectangle."""
+        x = int(math.floor(x_offset + col * square_size)) - pad
+        y = int(math.floor(y_offset + row * square_size)) - pad
+        sz = int(math.ceil(square_size)) + pad * 2
+        return QRect(x, y, sz, sz)
+
+    def _get_anim_dirty_rect(self) -> QRect:
+        """Computes the tight widget-space bounding rectangle of currently animating piece(s)."""
+        if not self.animating_piece_data:
+            return QRect()
+        _, square_size, x_offset, y_offset = self.get_metrics()
+        d = self.animating_piece_data
+        p = d['progress']
+        cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
+        cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
+        pad = max(6, int(math.ceil(square_size * (0.12 if self.enable_piece_lift else 0.04))))
+        rect = self._col_row_widget_rect(cur_col, cur_row, square_size, x_offset, y_offset, pad)
+        if 'rook_piece' in d:
+            rp = d.get('rook_progress', 0.0)
+            r_col = d['rook_start_col'] + (d['rook_end_col'] - d['rook_start_col']) * rp
+            r_row = d['rook_start_row'] + (d['rook_end_row'] - d['rook_start_row']) * rp
+            rect = rect.united(self._col_row_widget_rect(r_col, r_row, square_size, x_offset, y_offset, pad))
+        return rect.intersected(self.rect())
+
+    def _get_drag_dirty_rect(self) -> QRect:
+        """Computes the tight widget-space bounding rectangle of the dragged piece."""
+        _, square_size, _, _ = self.get_metrics()
+        pad = 6
+        x = int(math.floor(self.mouse_pos.x() - square_size / 2.0)) - pad
+        y = int(math.floor(self.mouse_pos.y() - square_size / 2.0)) - pad
+        sz = int(math.ceil(square_size)) + pad * 2
+        return QRect(x, y, sz, sz).intersected(self.rect())
+
+    def _square_widget_rect(self, sq: int, pad: int = 6) -> QRect:
+        """Computes the widget-space bounding rectangle of a single board square."""
+        _, square_size, x_offset, y_offset = self.get_metrics()
+        f = chess.square_file(sq)
+        r = chess.square_rank(sq)
+        col = 7 - f if self.flipped else f
+        row = r if self.flipped else 7 - r
+        return self._col_row_widget_rect(col, row, square_size, x_offset, y_offset, pad).intersected(self.rect())
+
     def start_piece_slide(self, piece, from_square, to_square, move, duration_override=None):
+        slide_call_time = time.perf_counter()
+        prev_last_move = self.last_move
+        is_castling = bool(move and self.board.is_castling(move))
+        king_to_sq = to_square
+        rook_data = None
+
+        if is_castling:
+            rank = chess.square_rank(from_square)
+            is_ks = self.board.is_kingside_castling(move)
+            king_to_sq = chess.square(6 if is_ks else 2, rank)
+            rook_to_sq = chess.square(5 if is_ks else 3, rank)
+            target_p = self.board.piece_at(to_square)
+            if target_p and target_p.piece_type == chess.ROOK and target_p.color == piece.color:
+                rook_from_sq = to_square
+            else:
+                rook_from_sq = chess.square(7 if is_ks else 0, rank)
+            rook_piece = self.board.piece_at(rook_from_sq) or chess.Piece(chess.ROOK, piece.color)
+            rff, rfr = chess.square_file(rook_from_sq), chess.square_rank(rook_from_sq)
+            rtf, rtr = chess.square_file(rook_to_sq), chess.square_rank(rook_to_sq)
+            if self.flipped:
+                rsc, rsr, rec, rer = 7 - rff, rfr, 7 - rtf, rtr
+            else:
+                rsc, rsr, rec, rer = rff, 7 - rfr, rtf, 7 - rtr
+            rook_data = {
+                'rook_piece': rook_piece,
+                'rook_from_square': rook_from_sq,
+                'rook_to_square': rook_to_sq,
+                'rook_start_col': rsc,
+                'rook_start_row': rsr,
+                'rook_end_col': rec,
+                'rook_end_row': rer,
+                'rook_progress': 0.0,
+            }
+
         ff, fr = chess.square_file(from_square), chess.square_rank(from_square)
-        tf, tr = chess.square_file(to_square), chess.square_rank(to_square)
+        tf, tr = chess.square_file(king_to_sq), chess.square_rank(king_to_sq)
         if self.flipped: sc, sr, ec, er = 7 - ff, fr, 7 - tf, tr
         else: sc, sr, ec, er = ff, 7 - fr, tf, 7 - tr
         
@@ -948,26 +1204,55 @@ class ChessBoardWidget(QWidget):
         dy = abs(sr - er)
         self.anim_duration = duration_override if duration_override is not None else self._duration_lut.get((dx, dy), self.anim_duration)
             
-        self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': to_square, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
+        self.animating_piece_data = {'piece': piece, 'from_square': from_square, 'to_square': king_to_sq, 'start_col': sc, 'start_row': sr, 'end_col': ec, 'end_row': er, 'progress': 0.0, 'move': move}
+        if rook_data:
+            self.animating_piece_data.update(rook_data)
         self.last_move = move
         self.is_animating = True
-        self._invalidate_snapshot()
-        self._board_snapshot = self._build_board_snapshot()
 
         # Suspend Python cyclic GC during active piece slide to prevent 30-50ms main-thread freeze
         if not getattr(self, '_gc_disabled_for_anim', False):
             gc.disable()
             self._gc_disabled_for_anim = True
 
+        self._invalidate_snapshot()
+        self._board_snapshot = self._build_board_snapshot()
+        self._last_anim_dirty_rect = self._get_anim_dirty_rect()
+
         # Reset Debug Timing
         self._anim_start_time = time.perf_counter()
-        self._anim_frame_times = [self._anim_start_time]
+        self._anim_setup_ms = (self._anim_start_time - slide_call_time) * 1000.0
+        last_end = getattr(self, '_last_slide_end_time', 0.0)
+        if last_end > 0 and (self._anim_start_time - last_end) < 0.250:
+            self._inter_move_ms = (self._anim_start_time - last_end) * 1000.0
+        else:
+            self._inter_move_ms = 0.0
+        self._anim_frame_times = []
         
         # Configure and start High-Precision Timer matching monitor refresh rate
         self.precise_anim_timer.stop()
         self.move_anim.stop()
         self.precise_anim_timer.start(self.timer_interval)
-        self.update() 
+        if (
+            not self.debug_anim
+            and not getattr(self, '_needs_full_board_paint', True)
+            and getattr(self, '_last_painted_flipped', None) == self.flipped
+        ):
+            start_rect = QRect(self._last_anim_dirty_rect) if self._last_anim_dirty_rect else QRect()
+            for sq in (from_square, king_to_sq):
+                start_rect = start_rect.united(self._square_widget_rect(sq))
+            if rook_data:
+                start_rect = start_rect.united(self._square_widget_rect(rook_data['rook_from_square']))
+                start_rect = start_rect.united(self._square_widget_rect(rook_data['rook_to_square']))
+            if prev_last_move:
+                start_rect = start_rect.united(self._square_widget_rect(prev_last_move.from_square))
+                start_rect = start_rect.united(self._square_widget_rect(prev_last_move.to_square))
+            if not start_rect.isEmpty():
+                self.update(start_rect)
+            else:
+                self.update()
+        else:
+            self.update() 
 
     def hideEvent(self, event):
         self.abort_piece_slide()
@@ -994,6 +1279,9 @@ class ChessBoardWidget(QWidget):
         if self.animating_piece_data:
             if value is not None:
                 self.animating_piece_data['progress'] = value
+                if 'rook_piece' in self.animating_piece_data:
+                    rook_raw = 0.0 if value <= 0.25 else min(1.0, (float(value) - 0.25) / 0.75)
+                    self.animating_piece_data['rook_progress'] = math.sin(rook_raw * (math.pi / 2.0))
             self._anim_frame_times.append(time.perf_counter())
             self.update()
 
@@ -1010,39 +1298,79 @@ class ChessBoardWidget(QWidget):
         eased_progress = math.sin(raw_progress * (math.pi / 2.0))
         
         self.animating_piece_data['progress'] = eased_progress
-        self.update()
+        if 'rook_piece' in self.animating_piece_data:
+            if raw_progress <= 0.25:
+                rook_eased = 0.0
+            else:
+                rook_raw = min(1.0, (raw_progress - 0.25) / 0.75)
+                rook_eased = math.sin(rook_raw * (math.pi / 2.0))
+            self.animating_piece_data['rook_progress'] = rook_eased
 
         if raw_progress >= 1.0:
             self.precise_anim_timer.stop()
             self._on_animation_finished()
+            return
+
+        if self.debug_anim:
+            self.update()
+        else:
+            cur_rect = self._get_anim_dirty_rect()
+            prev_rect = self._last_anim_dirty_rect
+            upd_rect = cur_rect.united(prev_rect) if (prev_rect is not None and not prev_rect.isEmpty()) else cur_rect
+            self._last_anim_dirty_rect = cur_rect
+            if not upd_rect.isEmpty():
+                self.update(upd_rect)
+            else:
+                self.update()
 
     def _on_animation_finished(self):
         if not self.animating_piece_data: return
         end_time = time.perf_counter()
+        self._last_slide_end_time = end_time
         duration_ms = (end_time - self._anim_start_time) * 1000.0
         frame_count = len(self._anim_frame_times)
         avg_fps = (frame_count / (duration_ms / 1000.0)) if duration_ms > 0 else 0.0
+
+        # Compute maximum frame-to-frame gap to catch micro-stutters even when average FPS looks okay
+        max_gap_ms = 0.0
+        if self._anim_frame_times:
+            first_gap = (self._anim_frame_times[0] - self._anim_start_time) * 1000.0
+            if first_gap > max_gap_ms:
+                max_gap_ms = first_gap
+            for i in range(1, len(self._anim_frame_times)):
+                gap = (self._anim_frame_times[i] - self._anim_frame_times[i - 1]) * 1000.0
+                if gap > max_gap_ms:
+                    max_gap_ms = gap
+        setup_ms = getattr(self, '_anim_setup_ms', 0.0)
+        inter_move_ms = getattr(self, '_inter_move_ms', 0.0)
         
         self._last_anim_stats = {
             "fps": round(avg_fps, 1),
             "frames": frame_count,
-            "ms": round(duration_ms, 1)
+            "ms": round(duration_ms, 1),
+            "max_gap_ms": round(max_gap_ms, 1),
+            "setup_ms": round(setup_ms, 1),
+            "inter_move_ms": round(inter_move_ms, 1),
         }
         if self.debug_anim:
-            print(f"[ANIM DEBUG] Move completed in {duration_ms:.1f}ms | Frames: {frame_count} | FPS: {avg_fps:.1f}")
-
-        # Warn if FPS drops below threshold (e.g. < 100 FPS on high refresh displays or < 50 FPS on 60Hz displays)
-        fps_threshold = min(70.0, self.target_fps * 0.75)
-        if avg_fps < fps_threshold and duration_ms > 50:
-            logger.warning(
-                f"[ANIM PERF] Low animation FPS detected: {avg_fps:.1f} FPS "
-                f"(Target: {self.target_fps}Hz, Frames: {frame_count}, Duration: {duration_ms:.1f}ms)"
+            print(
+                f"[ANIM DEBUG] Move completed in {duration_ms:.1f}ms | Frames: {frame_count} "
+                f"| FPS: {avg_fps:.1f} | MaxGap: {max_gap_ms:.1f}ms | Setup: {setup_ms:.1f}ms"
             )
 
-        # Restore Python cyclic GC
-        if getattr(self, '_gc_disabled_for_anim', False):
-            gc.enable()
-            self._gc_disabled_for_anim = False
+        # Warn if FPS drops below 75% of target display refresh rate (without artificial 70 FPS cap)
+        # or if a severe single-frame hitch / inter-move freeze occurred
+        fps_threshold = self.target_fps * 0.75
+        gap_threshold_ms = max(45.0, (1000.0 / max(30, self.target_fps)) * 2.5)
+        low_fps = (avg_fps < fps_threshold and duration_ms >= 35)
+        frame_stutter = (max_gap_ms > gap_threshold_ms and duration_ms >= 35)
+        inter_move_stall = (inter_move_ms > 35.0)
+        if low_fps or frame_stutter or inter_move_stall:
+            logger.warning(
+                f"[ANIM PERF] Low animation FPS detected: {avg_fps:.1f} FPS "
+                f"(Target: {self.target_fps}Hz, Frames: {frame_count}, Duration: {duration_ms:.1f}ms, "
+                f"MaxGap: {max_gap_ms:.1f}ms, Setup: {setup_ms:.1f}ms, InterMove: {inter_move_ms:.1f}ms)"
+            )
 
         d = self.animating_piece_data
         self.is_animating = False
@@ -1055,7 +1383,13 @@ class ChessBoardWidget(QWidget):
         self._invalidate_snapshot()
         self.clear_user_drawings()
         self.piece_slide_finished.emit()
-        self.update()
+
+        # Restore Python cyclic GC only once the entire animation sequence is done
+        if not self.is_animating:
+            if getattr(self, '_gc_disabled_for_anim', False):
+                gc.enable()
+                self._gc_disabled_for_anim = False
+            self.update()
 
     def draw_piece(self, painter, piece, col, row, size, scale_factor=1.0):
         key = PIECE_KEY_MAP.get((piece.piece_type, piece.color))

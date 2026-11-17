@@ -10,7 +10,7 @@ from opening_fenix.core.translation import translator
 
 
 @pytest.fixture
-def dlg(qapp):
+def dlg(qapp, mock_user_dir):
     dialog = UnifiedSettingsDialog(initial_section="trainer")
     yield dialog
     dialog.close()

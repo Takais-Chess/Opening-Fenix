@@ -170,3 +170,162 @@ def test_gc_suspension_lifecycle(board_widget):
     assert board_widget.is_animating is False
     assert board_widget._gc_disabled_for_anim is False
     assert gc.isenabled() is True
+
+
+def test_high_refresh_display_low_fps_warning_not_capped_at_70(board_widget):
+    """Verify that on a 144Hz display, dropping to ~80 FPS triggers a warning (no 70 FPS cap)."""
+    move = chess.Move.from_uci('e2e4')
+    piece = board_widget.board.piece_at(chess.E2)
+
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
+    board_widget.target_fps = 144
+
+    # 16 frames in 200ms = 80 FPS (< 144 * 0.75 = 108 FPS)
+    board_widget._anim_start_time = time.perf_counter() - 0.200
+    board_widget._anim_frame_times = [board_widget._anim_start_time + (i * 0.012) for i in range(16)]
+
+    with patch('opening_fenix.gui.widgets.board_widget.logger.warning') as mock_warn:
+        board_widget._on_animation_finished()
+        mock_warn.assert_called_once()
+        assert 'Target: 144Hz' in mock_warn.call_args[0][0]
+
+
+def test_single_frame_stutter_triggers_warning(board_widget):
+    """Verify that a severe single-frame hitch (>45ms gap) triggers a warning even if average FPS is acceptable."""
+    move = chess.Move.from_uci('e2e4')
+    piece = board_widget.board.piece_at(chess.E2)
+
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move)
+    board_widget.target_fps = 60
+
+    # 12 frames in 200ms (60 FPS average), but with a 70ms freeze on the first frame
+    start_t = time.perf_counter() - 0.200
+    board_widget._anim_start_time = start_t
+    board_widget._anim_frame_times = [start_t + 0.070 + (i * 0.010) for i in range(12)]
+
+    with patch('opening_fenix.gui.widgets.board_widget.logger.warning') as mock_warn:
+        board_widget._on_animation_finished()
+        mock_warn.assert_called_once()
+        assert 'MaxGap:' in mock_warn.call_args[0][0]
+
+
+def test_gc_stays_disabled_across_chained_multi_move_sequence(board_widget):
+    """Verify that GC stays disabled across chained moves and is re-enabled after the final move."""
+    import gc
+    gc.enable()
+
+    m1 = chess.Move.from_uci('e2e4')
+    m2 = chess.Move.from_uci('e7e5')
+    p1 = board_widget.board.piece_at(chess.E2)
+    gc_states_during_chain = []
+
+    def on_first_finished():
+        board_widget.piece_slide_finished.disconnect(on_first_finished)
+        gc_states_during_chain.append(gc.isenabled())
+        p2 = board_widget.board.piece_at(chess.E7)
+        board_widget.start_piece_slide(p2, chess.E7, chess.E5, m2)
+
+    board_widget.piece_slide_finished.connect(on_first_finished)
+    board_widget.start_piece_slide(p1, chess.E2, chess.E4, m1)
+    assert gc.isenabled() is False
+
+    # Finishing m1 chains immediately into m2; GC must stay disabled throughout
+    board_widget._on_animation_finished()
+    assert gc_states_during_chain == [False]
+    assert board_widget.is_animating is True
+    assert gc.isenabled() is False
+
+    # Finishing m2 ends the sequence; GC is now re-enabled
+    board_widget._on_animation_finished()
+    assert board_widget.is_animating is False
+    assert gc.isenabled() is True
+
+
+def test_castling_staggered_rook_animation(board_widget):
+    """Verify that castling animates both king and rook, with rook starting at 25% and both finishing at 100%."""
+    board_widget.set_fen("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1")
+    move = chess.Move.from_uci("e1g1")
+    king = board_widget.board.piece_at(chess.E1)
+
+    board_widget.start_piece_slide(king, chess.E1, chess.G1, move, duration_override=200.0)
+    data = board_widget.animating_piece_data
+    assert data is not None
+    assert data['from_square'] == chess.E1
+    assert data['to_square'] == chess.G1
+    assert data['rook_from_square'] == chess.H1
+    assert data['rook_to_square'] == chess.F1
+    assert data['rook_progress'] == 0.0
+
+    # At 20% elapsed time (before 25% threshold): king moves, rook stays at 0.0
+    board_widget._anim_start_time = time.perf_counter() - 0.040
+    board_widget._on_precise_anim_tick()
+    assert board_widget.animating_piece_data['progress'] > 0.30
+    assert board_widget.animating_piece_data['rook_progress'] == 0.0
+
+    # At 62.5% elapsed time (halfway through rook's 25%..100% window -> rook_raw = 0.5):
+    board_widget._anim_start_time = time.perf_counter() - 0.125
+    board_widget._on_precise_anim_tick()
+    assert board_widget.animating_piece_data['progress'] > 0.80
+    assert 0.69 < board_widget.animating_piece_data['rook_progress'] < 0.72
+
+    # At 100% elapsed time: both finish together
+    board_widget._anim_start_time = time.perf_counter() - 0.205
+    board_widget._on_precise_anim_tick()
+    assert board_widget.is_animating is False
+    assert board_widget.board.piece_at(chess.G1) == chess.Piece(chess.KING, chess.WHITE)
+    assert board_widget.board.piece_at(chess.F1) == chess.Piece(chess.ROOK, chess.WHITE)
+
+
+def test_dirty_rect_updates_during_animation(board_widget):
+    """Verify intermediate animation ticks request tight dirty-rect repaints instead of full-widget repaints."""
+    from PyQt6.QtCore import QRect
+
+    board_widget.debug_anim = False
+    move = chess.Move.from_uci("e2e4")
+    piece = board_widget.board.piece_at(chess.E2)
+    board_widget.start_piece_slide(piece, chess.E2, chess.E4, move, duration_override=200.0)
+
+    update_calls = []
+    orig_update = board_widget.update
+
+    def spy_update(*args):
+        update_calls.append(args)
+        return orig_update(*args)
+
+    with patch.object(board_widget, "update", side_effect=spy_update):
+        board_widget._anim_start_time = time.perf_counter() - 0.080
+        board_widget._on_precise_anim_tick()
+
+    assert len(update_calls) == 1
+    assert len(update_calls[0]) == 1
+    dirty = update_calls[0][0]
+    assert isinstance(dirty, QRect)
+    assert not dirty.isEmpty()
+    assert dirty.width() < board_widget.width()
+    assert dirty.height() < board_widget.height()
+    board_widget.abort_piece_slide()
+
+
+def test_squares_pixmap_cache_and_snapshot_buffer_reuse(board_widget):
+    """Verify checkerboard QPixmap is cached across moves and snapshot QPixmap buffer is reused."""
+    m1 = chess.Move.from_uci("e2e4")
+    p1 = board_widget.board.piece_at(chess.E2)
+    board_widget.start_piece_slide(p1, chess.E2, chess.E4, m1)
+    sq_pm_1 = board_widget._squares_pixmap
+    buf_1 = board_widget._snapshot_buffer
+    assert sq_pm_1 is not None
+    assert buf_1 is not None
+    board_widget._on_animation_finished()
+
+    m2 = chess.Move.from_uci("e7e5")
+    p2 = board_widget.board.piece_at(chess.E7)
+    board_widget.start_piece_slide(p2, chess.E7, chess.E5, m2)
+    assert board_widget._squares_pixmap is sq_pm_1
+    assert board_widget._snapshot_buffer is buf_1
+    board_widget._on_animation_finished()
+
+    # Theme change must invalidate the cached checkerboard layer
+    board_widget.set_theme("Grün")
+    assert board_widget._squares_pixmap is None
+
+

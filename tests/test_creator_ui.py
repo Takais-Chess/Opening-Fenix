@@ -138,8 +138,10 @@ def test_auto_save_on_details_change(creator_window, qtbot, monkeypatch):
     monkeypatch.setattr(creator_window.backend, "update_position_data", mock_update)
     
     creator_window.txt_c.setPlainText("New Comment")
-    # Wait for the timer (1s) to trigger on_details_changed timeout
-    qtbot.wait(1200)
+    # Speed up debounce timer and wait until callback fires
+    if hasattr(creator_window, "save_timer"):
+        creator_window.save_timer.start(10)
+    qtbot.waitUntil(lambda: mock_called, timeout=1500)
     assert mock_called
 
 

@@ -9,9 +9,6 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from opening_fenix.core.logger import logger
 from opening_fenix.core.translation import tr_ui
-from opening_fenix.core.services.analysis_service import run_db_analysis
-from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
-from opening_fenix.core.services.maintenance_service import run_group_maintenance
 
 
 class JobStatus(Enum):
@@ -72,8 +69,11 @@ class LichessJob(BackgroundJob):
         self.lichess_status: str = ""
 
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
+        from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
         tm = get_task_manager()
         def on_prog(pct, *args):
+            if self.is_canceled():
+                return
             p = max(0, min(100, int(pct)))
             self.lichess_pct = p
             progress_cb(p)
@@ -112,8 +112,11 @@ class EngineScanJob(BackgroundJob):
         self.engine_status: str = ""
 
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
+        from opening_fenix.core.services.analysis_service import run_db_analysis
         tm = get_task_manager()
         def on_prog(pct, *args):
+            if self.is_canceled():
+                return
             p = max(0, min(100, int(pct)))
             self.engine_pct = p
             progress_cb(p)
@@ -127,6 +130,8 @@ class EngineScanJob(BackgroundJob):
             tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
 
         def on_st(st: str):
+            if self.is_canceled():
+                return
             self.engine_status = str(st)
             status_cb(self.engine_status)
             tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
@@ -169,6 +174,8 @@ class CombinedSyncJob(BackgroundJob):
 
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
         import threading
+        from opening_fenix.core.services.analysis_service import run_db_analysis
+        from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
         tm = get_task_manager()
 
         lich_prog = [0]
@@ -196,6 +203,8 @@ class CombinedSyncJob(BackgroundJob):
 
         def run_lich():
             def on_lich_prog(pct, *args):
+                if self.is_canceled():
+                    return
                 with lock:
                     lich_prog[0] = max(0, min(100, pct))
                     if args and isinstance(args[0], (str, int)):
@@ -226,6 +235,8 @@ class CombinedSyncJob(BackgroundJob):
 
         def run_eng():
             def on_eng_prog(pct, *args):
+                if self.is_canceled():
+                    return
                 with lock:
                     eng_prog[0] = max(0, min(100, pct))
                     if args and isinstance(args[0], (str, int)):
@@ -236,6 +247,8 @@ class CombinedSyncJob(BackgroundJob):
                 update_combined("engine")
 
             def on_eng_st(st):
+                if self.is_canceled():
+                    return
                 with lock:
                     eng_status[0] = str(st)
                 update_combined("engine")
@@ -268,13 +281,12 @@ class CombinedSyncJob(BackgroundJob):
         t_lich.start()
         t_eng.start()
 
+        # Always wait for both child threads to finish cleanly (including on cancel)
+        # so no background thread continues writing to SQLite or running Stockfish
+        # after CombinedSyncJob.execute() returns.
         while t_lich.is_alive() or t_eng.is_alive():
-            if self.is_canceled():
-                break
-            time.sleep(0.1)
-
-        t_lich.join(timeout=2.0)
-        t_eng.join(timeout=2.0)
+            t_lich.join(timeout=0.1)
+            t_eng.join(timeout=0.1)
 
         if self.is_canceled():
             return False, tr_ui("task_center.job_canceled", "Vom Benutzer abgebrochen.")
@@ -326,6 +338,7 @@ class BatchMaintenanceJob(BackgroundJob):
         self.engine_status: str = ""
 
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
+        from opening_fenix.core.services.maintenance_service import run_group_maintenance
         tm = get_task_manager()
         total_repos = max(1, len(self.repo_configs))
         num_tasks = max(1, len(self.active_tasks))
@@ -395,7 +408,7 @@ class _WorkerThread(QThread):
 
     def run(self):
         while True:
-            job = self.manager._get_next_job()
+            job = self.manager._get_next_job_or_finish()
             if not job:
                 break
 
@@ -406,10 +419,14 @@ class _WorkerThread(QThread):
             self.manager.task_started.emit(job)
 
             def on_progress(pct: int):
+                if job.is_canceled():
+                    return
                 job.progress = max(0, min(100, pct))
                 self.manager.task_progress.emit(job, job.progress, job.status_message)
 
             def on_status(text: str):
+                if job.is_canceled():
+                    return
                 job.status_message = text
                 self.manager.task_progress.emit(job, job.progress, job.status_message)
 
@@ -417,7 +434,8 @@ class _WorkerThread(QThread):
                 success, message = job.execute(on_progress, on_status)
                 if job.is_canceled():
                     job.status = JobStatus.CANCELED
-                    job.status_message = tr_ui("task_center.job_canceled", "Vom Benutzer abgebrochen.")
+                    job.status_message = message if message and ("abgebrochen" in message.lower() or "cancel" in message.lower()) else tr_ui("task_center.job_canceled", "Vom Benutzer abgebrochen.")
+                    success = False
                 elif success:
                     job.status = JobStatus.COMPLETED
                     job.status_message = message or tr_ui("task_center.job_completed", "Erfolgreich abgeschlossen.")
@@ -437,8 +455,6 @@ class _WorkerThread(QThread):
             job.finished_at = time.time()
             self.manager._finish_current_job(job, success, message)
 
-        self.manager._on_worker_finished()
-
 
 class BackgroundTaskManager(QObject):
     """
@@ -448,6 +464,7 @@ class BackgroundTaskManager(QObject):
     """
     task_enqueued = pyqtSignal(object)
     task_started = pyqtSignal(object)
+    task_canceling = pyqtSignal(object)
     task_progress = pyqtSignal(object, int, str)
     sub_progress = pyqtSignal(object, str, int, str)
     batch_repo_status = pyqtSignal(object, str, str, int, str)
@@ -485,6 +502,7 @@ class BackgroundTaskManager(QObject):
         self._history: List[BackgroundJob] = []
         self._current_job: Optional[BackgroundJob] = None
         self._worker: Optional[_WorkerThread] = None
+        self._retired_workers: set = set()
         self._lock = threading.RLock()
 
     def enqueue(self, job: BackgroundJob) -> None:
@@ -500,8 +518,10 @@ class BackgroundTaskManager(QObject):
         """Requests cancellation of the currently executing job."""
         with self._lock:
             if self._current_job and self._current_job.status == JobStatus.RUNNING:
-                logger.info(f"[TaskManager] Canceling current job: {self._current_job.title}")
-                self._current_job.cancel()
+                if not self._current_job.is_canceled():
+                    logger.info(f"[TaskManager] Canceling current job: {self._current_job.title}")
+                    self._current_job.cancel()
+                    self.task_canceling.emit(self._current_job)
 
     def cancel_task(self, job_id: str) -> None:
         """Cancels a specific job by ID (either current or in queue)."""
@@ -549,8 +569,20 @@ class BackgroundTaskManager(QObject):
 
     def _ensure_worker_running(self):
         if self._worker is None or not self._worker.isRunning():
-            self._worker = _WorkerThread(self)
+            worker = _WorkerThread(self)
+            self._retired_workers.add(worker)
+            worker.finished.connect(lambda w=worker: self._retired_workers.discard(w))
+            self._worker = worker
             self._worker.start(QThread.Priority.LowPriority)
+
+    def _get_next_job_or_finish(self) -> Optional[BackgroundJob]:
+        with self._lock:
+            if self._queue:
+                return self._queue.popleft()
+            self._worker = None
+            if self._current_job is None:
+                self.all_completed.emit()
+            return None
 
     def _get_next_job(self) -> Optional[BackgroundJob]:
         with self._lock:
@@ -570,12 +602,6 @@ class BackgroundTaskManager(QObject):
             logger.info(f"[TaskManager] Finished job: {job.title} | Success: {success} | Msg: {message}")
             self.task_finished.emit(job, success, message)
             self.queue_updated.emit()
-
-    def _on_worker_finished(self):
-        with self._lock:
-            self._worker = None
-            if len(self._queue) == 0 and self._current_job is None:
-                self.all_completed.emit()
 
 
 def get_task_manager() -> BackgroundTaskManager:

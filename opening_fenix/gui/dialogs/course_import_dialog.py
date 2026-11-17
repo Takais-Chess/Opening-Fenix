@@ -250,13 +250,15 @@ class ChapterLinesDialog(QDialog):
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(scale(32))
         self.table.setShowGrid(False)
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(0, scale(36))
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.table.setColumnWidth(2, scale(110))
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.table.setColumnWidth(3, scale(230))
 
@@ -278,64 +280,66 @@ class ChapterLinesDialog(QDialog):
                 padding: {scale(6)}px {scale(8)}px;
                 color: {COLORS['brown_text']};
             }}
+            {self._get_combo_style()}
         """)
 
-        for row, g in enumerate(self.chapter.games):
-            self.table.setRowHeight(row, scale(32))
+        self._target_label_map = dict(self.target_options)
+        self._search_index: List[tuple] = []
+        lazy_table_combos = len(self.chapter.games) > 80
 
-            # Checkbox item
-            chk_item = QTableWidgetItem()
-            chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
-            chk_item.setCheckState(Qt.CheckState.Unchecked)
-            chk_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 0, chk_item)
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row, g in enumerate(self.chapter.games):
+                # Checkbox item
+                chk_item = QTableWidgetItem()
+                chk_item.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                chk_item.setCheckState(Qt.CheckState.Unchecked)
+                chk_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, 0, chk_item)
 
-            # Title item
-            title_item = QTableWidgetItem(g.title)
-            title_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            title_item.setToolTip(f"{g.title}\n{g.chapter_name}")
-            self.table.setItem(row, 1, title_item)
+                # Title item
+                title_item = QTableWidgetItem(g.title)
+                title_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                title_item.setToolTip(f"{g.title}\n{g.chapter_name}")
+                self.table.setItem(row, 1, title_item)
 
-            # Type / Info item
-            if g.is_puzzle:
-                txt_type = "🧩 Puzzle"
-            elif g.is_model:
-                txt_type = "🏆 Muster"
-            elif g.is_intro:
-                txt_type = "📖 Einleitung"
-            elif g.eco:
-                txt_type = f"ECO {g.eco}"
-            else:
-                txt_type = tr_ui("course_import.line_badge", "Linie")
-            type_item = QTableWidgetItem(txt_type)
-            type_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 2, type_item)
+                # Type / Info item
+                if g.is_puzzle:
+                    txt_type = "🧩 Puzzle"
+                elif g.is_model:
+                    txt_type = "🏆 Muster"
+                elif g.is_intro:
+                    txt_type = "📖 Einleitung"
+                elif g.eco:
+                    txt_type = f"ECO {g.eco}"
+                else:
+                    txt_type = tr_ui("course_import.line_badge", "Linie")
+                type_item = QTableWidgetItem(txt_type)
+                type_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(row, 2, type_item)
 
-            # ComboBox
-            cb = NoWheelComboBox()
-            cb.setFixedHeight(scale(26))
-            cb.setStyleSheet(self._get_combo_style())
-            for cat_id, cat_label in self.target_options:
-                cb.addItem(cat_label, cat_id)
-            
-            curr_target = resolve_game_target(
-                g.game_id,
-                self.default_target,
-                self.game_targets,
-                g.is_puzzle,
-                g.is_model,
-                g.is_intro
-            )
-            idx = cb.findData(curr_target)
-            if idx >= 0:
-                cb.setCurrentIndex(idx)
-            
-            cb.currentIndexChanged.connect(
-                lambda _, c=cb, gid=g.game_id: self._on_line_target_changed(gid, c.currentData())
-            )
-            self.table.setCellWidget(row, 3, cb)
-            self.table_combos[g.game_id] = cb
+                self._search_index.append((g.title.lower(), txt_type.lower()))
+
+                curr_target = resolve_game_target(
+                    g.game_id,
+                    self.default_target,
+                    self.game_targets,
+                    g.is_puzzle,
+                    g.is_model,
+                    g.is_intro
+                )
+                target_item = QTableWidgetItem(self._target_label_map.get(curr_target, curr_target))
+                target_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self.table.setItem(row, 3, target_item)
+
+                if not lazy_table_combos:
+                    self._create_row_combo(row, g, curr_target)
+        finally:
+            self.table.setUpdatesEnabled(True)
+
+        if lazy_table_combos:
+            self.table.cellClicked.connect(self._on_table_cell_clicked)
 
         layout.addWidget(self.table, 1)
 
@@ -492,51 +496,103 @@ class ChapterLinesDialog(QDialog):
         else:
             self.badges_container.setVisible(False)
 
+    def _create_row_combo(self, row: int, g: CourseGameInfo, curr_target: str) -> NoWheelComboBox:
+        if g.game_id in self.table_combos:
+            return self.table_combos[g.game_id]
+        cb = NoWheelComboBox()
+        cb.setFixedHeight(scale(26))
+        cb.blockSignals(True)
+        for cat_id, cat_label in self.target_options:
+            cb.addItem(cat_label, cat_id)
+        idx = cb.findData(curr_target)
+        if idx >= 0:
+            cb.setCurrentIndex(idx)
+        cb.blockSignals(False)
+        cb.currentIndexChanged.connect(
+            lambda _, c=cb, gid=g.game_id: self._on_line_target_changed(gid, c.currentData())
+        )
+        self.table.setCellWidget(row, 3, cb)
+        self.table_combos[g.game_id] = cb
+        return cb
+
+    def _on_table_cell_clicked(self, row: int, col: int):
+        if col != 3 or row < 0 or row >= len(self.chapter.games):
+            return
+        g = self.chapter.games[row]
+        if g.game_id not in self.table_combos:
+            curr_target = resolve_game_target(
+                g.game_id,
+                self.default_target,
+                self.game_targets,
+                g.is_puzzle,
+                g.is_model,
+                g.is_intro
+            )
+            cb = self._create_row_combo(row, g, curr_target)
+            cb.showPopup()
+
     def _on_line_target_changed(self, game_id: int, target: str):
         self.game_targets[game_id] = target
         self._refresh_header_breakdown()
 
     def on_search_changed(self, text: str):
         q = text.strip().lower()
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 1)
-            item_type = self.table.item(row, 2)
-            title = item.text().lower() if item else ""
-            t_info = item_type.text().lower() if item_type else ""
-            match = (q in title) or (q in t_info)
-            self.table.setRowHidden(row, not match)
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row, (title_l, type_l) in enumerate(self._search_index):
+                match = (not q) or (q in title_l) or (q in type_l)
+                self.table.setRowHidden(row, not match)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def on_select_all(self):
-        for row in range(self.table.rowCount()):
-            if not self.table.isRowHidden(row):
-                item = self.table.item(row, 0)
-                if item:
-                    item.setCheckState(Qt.CheckState.Checked)
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                if not self.table.isRowHidden(row):
+                    item = self.table.item(row, 0)
+                    if item:
+                        item.setCheckState(Qt.CheckState.Checked)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def on_deselect_all(self):
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item:
-                item.setCheckState(Qt.CheckState.Unchecked)
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item:
+                    item.setCheckState(Qt.CheckState.Unchecked)
+        finally:
+            self.table.setUpdatesEnabled(True)
 
     def on_apply_bulk(self):
         target = self.bulk_combo.currentData()
+        target_label = self._target_label_map.get(target, target)
         count = 0
-        for row in range(self.table.rowCount()):
-            if self.table.isRowHidden(row):
-                continue
-            item = self.table.item(row, 0)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                g = self.chapter.games[row]
-                self.game_targets[g.game_id] = target
-                cb = self.table_combos.get(g.game_id)
-                if cb:
-                    cb.blockSignals(True)
-                    idx = cb.findData(target)
-                    if idx >= 0:
-                        cb.setCurrentIndex(idx)
-                    cb.blockSignals(False)
-                count += 1
+        self.table.setUpdatesEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                if self.table.isRowHidden(row):
+                    continue
+                item = self.table.item(row, 0)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    g = self.chapter.games[row]
+                    self.game_targets[g.game_id] = target
+                    cb = self.table_combos.get(g.game_id)
+                    if cb:
+                        cb.blockSignals(True)
+                        idx = cb.findData(target)
+                        if idx >= 0:
+                            cb.setCurrentIndex(idx)
+                        cb.blockSignals(False)
+                    else:
+                        target_item = self.table.item(row, 3)
+                        if target_item:
+                            target_item.setText(target_label)
+                    count += 1
+        finally:
+            self.table.setUpdatesEnabled(True)
         
         self._refresh_header_breakdown()
         
@@ -1073,7 +1129,8 @@ class CourseImportDialog(QDialog):
             tr_ui("course_import.col_target", "Ziel-Zuweisung")
         ])
         self.tree_details.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.tree_details.header().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.tree_details.header().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.tree_details.setColumnWidth(1, scale(260))
         self.tree_details.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
         self.tree_details.setColumnWidth(2, scale(230))
         self.tree_details.setUniformRowHeights(True)
@@ -1111,6 +1168,68 @@ class CourseImportDialog(QDialog):
                 font-weight: bold;
                 padding: {scale(6)}px {scale(10)}px;
                 color: {COLORS['brown_text']};
+            }}
+            QTreeWidget QLabel#ChapterCountLabel {{
+                font-size: {scale(11)}px;
+                color: {COLORS['brown_text']};
+                border: none;
+                background: transparent;
+            }}
+            QTreeWidget QLabel#ChapterMixedBadge {{
+                background-color: rgba(254, 249, 231, 0.95);
+                border: 1px solid #f39c12;
+                border-radius: {scale(4)}px;
+                padding: 0 {scale(6)}px;
+                font-size: {scale(11)}px;
+                font-weight: bold;
+                color: #d35400;
+            }}
+            QTreeWidget QPushButton#EditLinesBtn {{
+                background-color: rgba(255, 255, 255, 0.85);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(4)}px;
+                padding: 0 {scale(8)}px;
+                font-size: {scale(11)}px;
+                font-weight: bold;
+                color: {COLORS['burnt_orange']};
+            }}
+            QTreeWidget QPushButton#EditLinesBtn:hover {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+            }}
+            QTreeWidget QComboBox {{
+                background-color: rgba(255, 255, 255, 0.95);
+                border: 1px solid rgba(0, 0, 0, 0.15);
+                border-radius: {scale(6)}px;
+                padding: 0 {scale(24)}px 0 {scale(8)}px;
+                font-size: {scale(11)}px;
+                color: {COLORS['brown_text']};
+            }}
+            QTreeWidget QComboBox:hover, QTreeWidget QComboBox:focus {{
+                border: 1.5px solid {COLORS['burnt_orange']};
+            }}
+            QTreeWidget QComboBox::drop-down {{
+                border: none;
+                width: {scale(20)}px;
+                subcontrol-origin: padding;
+                subcontrol-position: center right;
+            }}
+            QTreeWidget QComboBox::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(10)}px;
+                height: {scale(10)}px;
+                margin-right: {scale(6)}px;
+            }}
+            QTreeWidget QComboBox QAbstractItemView {{
+                min-width: {scale(75)}px;
+                background-color: {COLORS['beige']};
+                color: {COLORS['brown_text']};
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(6)}px;
+                selection-background-color: rgba(211, 84, 0, 0.15);
+                selection-color: {COLORS['burnt_orange']};
+                padding: {scale(2)}px;
+                outline: none;
             }}
         """)
         self.tree_details.setVisible(False)
@@ -1466,11 +1585,12 @@ class CourseImportDialog(QDialog):
             self.game_to_chapter.clear()
 
             self._target_options = target_options
+            self._target_label_map = dict(target_options)
             self._combo_style = combo_style
 
             total_games = self.analysis_result.total_games if self.analysis_result else 0
-            lazy_child_combos = (total_games > 150)
-            target_label_map = dict(target_options)
+            lazy_children = (total_games > 150)
+            self._lazy_children = lazy_children
 
             for ch in chapters:
                 # 1. Top-level Chapter Item
@@ -1485,6 +1605,7 @@ class CourseImportDialog(QDialog):
                 ch_item.setSizeHint(2, QSize(scale(230), scale(36)))
 
                 self.chapter_items[ch.name] = ch_item
+                ch_item._chapter = ch
 
                 target = self.custom_chapter_targets.get(ch.name, ch.target_type)
 
@@ -1495,42 +1616,18 @@ class CourseImportDialog(QDialog):
                 col1_layout.setSpacing(scale(8))
 
                 lbl_cnt = QLabel("")
-                lbl_cnt.setStyleSheet(f"font-size: {scale(11)}px; color: {COLORS['brown_text']}; border: none; background: transparent;")
+                lbl_cnt.setObjectName("ChapterCountLabel")
                 col1_layout.addWidget(lbl_cnt)
 
                 lbl_mixed = QLabel("")
-                lbl_mixed.setStyleSheet(f"""
-                    QLabel {{
-                        background-color: rgba(254, 249, 231, 0.95);
-                        border: 1px solid #f39c12;
-                        border-radius: {scale(4)}px;
-                        padding: 0 {scale(6)}px;
-                        font-size: {scale(11)}px;
-                        font-weight: bold;
-                        color: #d35400;
-                    }}
-                """)
+                lbl_mixed.setObjectName("ChapterMixedBadge")
                 lbl_mixed.setVisible(False)
                 col1_layout.addWidget(lbl_mixed)
 
                 btn_edit = QPushButton(tr_ui("course_import.btn_edit_lines", "🔍 Linien anpassen"))
+                btn_edit.setObjectName("EditLinesBtn")
                 btn_edit.setFixedHeight(scale(24))
                 btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
-                btn_edit.setStyleSheet(f"""
-                    QPushButton {{
-                        background-color: rgba(255, 255, 255, 0.85);
-                        border: 1px solid {COLORS['glass_border']};
-                        border-radius: {scale(4)}px;
-                        padding: 0 {scale(8)}px;
-                        font-size: {scale(11)}px;
-                        font-weight: bold;
-                        color: {COLORS['burnt_orange']};
-                    }}
-                    QPushButton:hover {{
-                        background-color: {COLORS['burnt_orange']};
-                        color: white;
-                    }}
-                """)
                 btn_edit.clicked.connect(lambda _, c=ch: self.open_chapter_lines_dialog(c))
                 col1_layout.addWidget(btn_edit)
                 col1_layout.addStretch()
@@ -1559,60 +1656,82 @@ class CourseImportDialog(QDialog):
                 self.tree_details.setItemWidget(ch_item, 2, ch_combo)
                 self.chapter_combos[ch.name] = ch_combo
 
-                # 2. Child Game Items
                 for g in ch.games:
                     self.game_to_chapter[g.game_id] = ch
 
-                    g_item = QTreeWidgetItem(ch_item)
-                    g_item.setText(0, f"↳  {g.title}")
-                    g_font = g_item.font(0)
-                    g_font.setPointSize(max(9, g_font.pointSize() - 1))
-                    g_item.setFont(0, g_font)
-                    g_item.setToolTip(0, f"{g.title}\n{g.chapter_name}")
-                    g_item.setSizeHint(0, QSize(scale(200), scale(32)))
-                    g_item.setSizeHint(1, QSize(scale(80), scale(32)))
-                    g_item.setSizeHint(2, QSize(scale(230), scale(32)))
-
-                    # Game Details Badge
-                    if g.is_puzzle:
-                        g_item.setText(1, "🧩 Puzzle")
-                    elif g.is_model:
-                        g_item.setText(1, "🏆 Muster")
-                    elif g.is_intro:
-                        g_item.setText(1, "📖 Einleitung")
-                    elif g.eco:
-                        g_item.setText(1, f"ECO {g.eco}")
-                    else:
-                        g_item.setText(1, tr_ui("course_import.line_badge", "Linie"))
-                    g_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
-
-                    curr_g_target = resolve_game_target(
-                        g.game_id,
-                        target,
-                        self.custom_game_targets,
-                        g.is_puzzle,
-                        g.is_model,
-                        g.is_intro
-                    )
-                    g_item.setText(2, target_label_map.get(curr_g_target, curr_g_target))
-
-                    if not lazy_child_combos:
-                        self._create_game_combo(g_item, g)
-                    else:
-                        g_item._needs_combo = True
-                        g_item._game = g
+                if lazy_children:
+                    ch_item._children_populated = False
+                    if ch.games:
+                        ch_item.setChildIndicatorPolicy(QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
+                else:
+                    ch_item._children_populated = False
+                    self._populate_chapter_children(ch_item, create_combos=True)
         finally:
             self.tree_details.setUpdatesEnabled(True)
+
+    def _populate_chapter_children(self, ch_item: QTreeWidgetItem, create_combos: bool = False):
+        if getattr(ch_item, "_children_populated", True):
+            return
+        ch = getattr(ch_item, "_chapter", None)
+        if not ch:
+            ch_item._children_populated = True
+            return
+
+        target = self.custom_chapter_targets.get(ch.name, ch.target_type)
+        target_label_map = getattr(self, "_target_label_map", {})
+        line_badge = tr_ui("course_import.line_badge", "Linie")
+        sz0 = QSize(scale(200), scale(32))
+        sz1 = QSize(scale(80), scale(32))
+        sz2 = QSize(scale(230), scale(32))
+
+        for g in ch.games:
+            g_item = QTreeWidgetItem(ch_item)
+            g_item.setText(0, f"↳  {g.title}")
+            g_font = g_item.font(0)
+            g_font.setPointSize(max(9, g_font.pointSize() - 1))
+            g_item.setFont(0, g_font)
+            g_item.setToolTip(0, f"{g.title}\n{g.chapter_name}")
+            g_item.setSizeHint(0, sz0)
+            g_item.setSizeHint(1, sz1)
+            g_item.setSizeHint(2, sz2)
+
+            if g.is_puzzle:
+                g_item.setText(1, "🧩 Puzzle")
+            elif g.is_model:
+                g_item.setText(1, "🏆 Muster")
+            elif g.is_intro:
+                g_item.setText(1, "📖 Einleitung")
+            elif g.eco:
+                g_item.setText(1, f"ECO {g.eco}")
+            else:
+                g_item.setText(1, line_badge)
+            g_item.setTextAlignment(1, Qt.AlignmentFlag.AlignCenter)
+
+            curr_g_target = resolve_game_target(
+                g.game_id,
+                target,
+                self.custom_game_targets,
+                g.is_puzzle,
+                g.is_model,
+                g.is_intro
+            )
+            g_item.setText(2, target_label_map.get(curr_g_target, curr_g_target))
+
+            g_item._game = g
+            if create_combos:
+                self._create_game_combo(g_item, g)
+                g_item._needs_combo = False
+            else:
+                g_item._needs_combo = True
+
+        ch_item._children_populated = True
 
     def _create_game_combo(self, g_item: QTreeWidgetItem, g: CourseGameInfo):
         if g.game_id in self.game_combos:
             return self.game_combos[g.game_id]
-        combo_style = getattr(self, "_combo_style", "")
         target_options = getattr(self, "_target_options", [])
         g_combo = NoWheelComboBox()
         g_combo.setFixedHeight(scale(26))
-        if combo_style:
-            g_combo.setStyleSheet(combo_style)
         g_combo.blockSignals(True)
         for cat_id, cat_label in target_options:
             g_combo.addItem(cat_label, cat_id)
@@ -1711,18 +1830,18 @@ class CourseImportDialog(QDialog):
         if item.parent() is None and column == 0:
             item.setExpanded(not item.isExpanded())
         elif item.parent() is not None and getattr(item, "_needs_combo", False):
-            self._ensure_chapter_combos(item.parent())
+            combo = self._create_game_combo(item, item._game)
+            item._needs_combo = False
+            if column == 2 and combo:
+                combo.showPopup()
 
     def on_tree_item_expanded(self, item: QTreeWidgetItem):
-        # Ensure child combos are created if on-demand and widgets are visible
-        self._ensure_chapter_combos(item)
-        for i in range(item.childCount()):
-            child = item.child(i)
-            w = self.tree_details.itemWidget(child, 2)
-            if w:
-                w.show()
-                w.update()
-        self.tree_details.updateGeometries()
+        # Populate child rows lazily for large courses; combos are created on-demand on click
+        self.tree_details.setUpdatesEnabled(False)
+        try:
+            self._populate_chapter_children(item, create_combos=False)
+        finally:
+            self.tree_details.setUpdatesEnabled(True)
 
     def open_chapter_lines_dialog(self, ch: CourseChapterInfo):
         ch_target = self.custom_chapter_targets.get(ch.name, ch.target_type)
@@ -1810,13 +1929,8 @@ class CourseImportDialog(QDialog):
         try:
             for i in range(self.tree_details.topLevelItemCount()):
                 item = self.tree_details.topLevelItem(i)
-                self._ensure_chapter_combos(item)
+                self._populate_chapter_children(item, create_combos=False)
                 item.setExpanded(True)
-                for j in range(item.childCount()):
-                    child = item.child(j)
-                    w = self.tree_details.itemWidget(child, 2)
-                    if w:
-                        w.show()
         finally:
             self.tree_details.blockSignals(False)
             self.tree_details.setUpdatesEnabled(True)

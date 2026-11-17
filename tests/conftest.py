@@ -16,6 +16,9 @@ def temp_dir():
     dir_path = tempfile.mkdtemp()
     yield dir_path
     
+    # Close any lingering SQLite engines in this temp directory before deleting
+    DatabaseManager.close_all_for_directory(dir_path)
+
     # Robust cleanup for Windows
     def remove_readonly(func, path, excinfo):
         os.chmod(path, 0o777)
@@ -31,7 +34,7 @@ def temp_dir():
             if i == max_retries - 1:
                 # Final attempt: just try to delete what we can
                 pass
-            time.sleep(0.1) # Wait a bit for file handles to release
+            time.sleep(0.05) # Wait a bit for file handles to release
 
 @pytest.fixture
 def mock_user_dir(temp_dir, monkeypatch):
@@ -62,7 +65,9 @@ def _apply_mock_user_dir(monkeypatch, temp_dir):
         "opening_fenix.core.services.explorer_service.get_user_dir",
         "opening_fenix.core.services.profile_service.get_user_dir",
         "opening_fenix.core.services.statistics_service.get_user_dir",
-        "opening_fenix.core.services.engine_cache_service.get_user_dir"
+        "opening_fenix.core.services.engine_cache_service.get_user_dir",
+        "opening_fenix.core.services.maintenance_service.get_user_dir",
+        "opening_fenix.gui.dialogs.unified_settings_dialog.get_user_dir",
     ]
     for path in paths_to_mock:
         try:
@@ -196,18 +201,32 @@ def silence_ui(monkeypatch):
     monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args, **kwargs: ("/path/to/save.pgn", "PGN Files (*.pgn)"))
     monkeypatch.setattr(QFileDialog, "getExistingDirectory", lambda *args, **kwargs: "/path/to/dir")
 
-    # Mock CreatorWindow dialogs that can fire via QTimer on startup
+    # Mock CreatorWindow dialogs and background index builder that can fire via QTimer on startup
     try:
         from opening_fenix.creator.creator_window import CreatorWindow
         monkeypatch.setattr(CreatorWindow, "new_repertoire_dialog", lambda *args, **kwargs: None)
         monkeypatch.setattr(CreatorWindow, "load_repertoire_dialog", lambda *args, **kwargs: None)
+        monkeypatch.setattr(CreatorWindow, "trigger_lichess_lockout_check", lambda *args, **kwargs: None)
+        monkeypatch.setattr(CreatorWindow, "_prewarm_repo_settings_dialog", lambda *args, **kwargs: None)
+        monkeypatch.setattr(CreatorWindow, "_build_fen_index", lambda *args, **kwargs: None)
+        monkeypatch.setattr(CreatorWindow, "init_sounds", lambda *args, **kwargs: None)
     except (ImportError, AttributeError):
         pass
     
-    # Mock MainWindow.check_for_onboarding
+    # Mock MainWindow.check_for_onboarding and lockout check
     try:
         from opening_fenix.gui.main_window import MainWindow
         monkeypatch.setattr(MainWindow, "check_for_onboarding", lambda *args, **kwargs: None)
+        monkeypatch.setattr(MainWindow, "trigger_lichess_lockout_check", lambda *args, **kwargs: None)
+        monkeypatch.setattr(MainWindow, "_prewarm_settings_dialog", lambda *args, **kwargs: None)
+        monkeypatch.setattr(MainWindow, "init_sounds", lambda *args, **kwargs: None)
+    except (ImportError, AttributeError):
+        pass
+
+    # Prevent BackgroundEnrichmentThread from making live Lichess HTTP requests during UI tests
+    try:
+        import opening_fenix.core.threads
+        monkeypatch.setattr(opening_fenix.core.threads, "enrich_position", lambda *args, **kwargs: (True, "Mocked"))
     except (ImportError, AttributeError):
         pass
 
@@ -219,16 +238,14 @@ def window_cleanup(qapp):
     from PyQt6 import sip
     
     # Close all windows
-    for widget in QApplication.topLevelWidgets():
+    closed_any = False
+    for widget in qapp.topLevelWidgets():
         if not sip.isdeleted(widget):
             widget.close()
             widget.deleteLater()
+            closed_any = True
             
     # Process events to allow deletion to occur
-    for _ in range(5):
-        QApplication.processEvents()
-    
-    import time
-    # On Windows, we need to be extra careful with file locks
-    if os.name == 'nt':
-        time.sleep(0.05)
+    if closed_any:
+        for _ in range(3):
+            qapp.processEvents()

@@ -1081,13 +1081,18 @@ class TaskCenterDialog(QDialog):
 
     def _on_start_single_lichess(self):
         curr = self.tm.get_current_job()
-        if curr and curr.job_type == JobType.LICHESS and curr.status == JobStatus.RUNNING and curr.repo_name == self.combo_repo.currentText():
-            self.tm.cancel_current()
+        selected_repo = self.combo_repo.currentText()
+        if curr and curr.job_type == JobType.LICHESS and curr.status == JobStatus.RUNNING and curr.repo_name == selected_repo:
+            if not curr.is_canceled():
+                self.tm.cancel_current()
             return
 
-        repo = self.combo_repo.currentText()
+        repo = selected_repo
         if not repo:
             QMessageBox.warning(self, tr_ui("task_center.msg_hint", "Hinweis"), tr_ui("task_center.msg_select_repo", "Bitte wähle ein Repertoire aus."))
+            return
+
+        if any(j.job_type == JobType.LICHESS and j.repo_name == repo for j in self.tm.get_queue()):
             return
 
         from opening_fenix.gui.dialogs.lichess_token_dialog import prompt_lichess_token_if_missing
@@ -1099,20 +1104,28 @@ class TaskCenterDialog(QDialog):
         max_age = self.combo_max_age.currentData()
         reuse = self.chk_lich_reuse.isChecked()
 
+        will_queue = self.tm.is_running()
         self.pb_single_lich.setValue(0)
-        self.lbl_single_lich_status.setText(tr_ui("task_center.job_started", "Gestartet..."))
+        self.lbl_single_lich_status.setText(
+            tr_ui("task_center.job_queued", "In Warteschlange...") if will_queue else tr_ui("task_center.job_started", "Gestartet...")
+        )
         job = LichessJob(repo, elo, reuse_other_courses=reuse, max_data_age_days=max_age)
         self.tm.enqueue(job)
 
     def _on_start_single_engine(self):
         curr = self.tm.get_current_job()
-        if curr and curr.job_type == JobType.ENGINE_SCAN and curr.status == JobStatus.RUNNING and curr.repo_name == self.combo_repo.currentText():
-            self.tm.cancel_current()
+        selected_repo = self.combo_repo.currentText()
+        if curr and curr.job_type == JobType.ENGINE_SCAN and curr.status == JobStatus.RUNNING and curr.repo_name == selected_repo:
+            if not curr.is_canceled():
+                self.tm.cancel_current()
             return
 
-        repo = self.combo_repo.currentText()
+        repo = selected_repo
         if not repo:
             QMessageBox.warning(self, tr_ui("task_center.msg_hint", "Hinweis"), tr_ui("task_center.msg_select_repo", "Bitte wähle ein Repertoire aus."))
+            return
+
+        if any(j.job_type == JobType.ENGINE_SCAN and j.repo_name == repo for j in self.tm.get_queue()):
             return
 
         from opening_fenix.gui.dialogs.engine_setup_dialog import prompt_engine_if_missing
@@ -1124,20 +1137,28 @@ class TaskCenterDialog(QDialog):
         threads = int(self.combo_threads.currentText())
         reuse = self.chk_eng_reuse.isChecked()
 
+        will_queue = self.tm.is_running()
         self.pb_single_eng.setValue(0)
-        self.lbl_single_eng_status.setText(tr_ui("task_center.job_started", "Gestartet..."))
+        self.lbl_single_eng_status.setText(
+            tr_ui("task_center.job_queued", "In Warteschlange...") if will_queue else tr_ui("task_center.job_started", "Gestartet...")
+        )
         job = EngineScanJob(repo, depth, threads, ep, reuse_other_courses=reuse)
         self.tm.enqueue(job)
 
     def _on_start_combined(self):
         curr = self.tm.get_current_job()
-        if curr and curr.job_type == JobType.COMBINED and curr.status == JobStatus.RUNNING and curr.repo_name == self.combo_repo.currentText():
-            self.tm.cancel_current()
+        selected_repo = self.combo_repo.currentText()
+        if curr and curr.job_type == JobType.COMBINED and curr.status == JobStatus.RUNNING and curr.repo_name == selected_repo:
+            if not curr.is_canceled():
+                self.tm.cancel_current()
             return
 
-        repo = self.combo_repo.currentText()
+        repo = selected_repo
         if not repo:
             QMessageBox.warning(self, tr_ui("task_center.msg_hint", "Hinweis"), tr_ui("task_center.msg_select_repo", "Bitte wähle ein Repertoire aus."))
+            return
+
+        if any(j.job_type == JobType.COMBINED and j.repo_name == repo for j in self.tm.get_queue()):
             return
 
         from opening_fenix.gui.dialogs.lichess_token_dialog import prompt_lichess_token_if_missing
@@ -1157,10 +1178,12 @@ class TaskCenterDialog(QDialog):
         reuse_lich = self.chk_lich_reuse.isChecked()
         reuse_eng = self.chk_eng_reuse.isChecked()
 
+        will_queue = self.tm.is_running()
+        queued_or_started = tr_ui("task_center.job_queued", "In Warteschlange...") if will_queue else tr_ui("task_center.job_started", "Gestartet...")
         self.pb_single_lich.setValue(0)
         self.pb_single_eng.setValue(0)
-        self.lbl_single_lich_status.setText(tr_ui("task_center.job_started", "Gestartet..."))
-        self.lbl_single_eng_status.setText(tr_ui("task_center.job_started", "Gestartet..."))
+        self.lbl_single_lich_status.setText(queued_or_started)
+        self.lbl_single_eng_status.setText(queued_or_started)
         job = CombinedSyncJob(repo, elo, depth, threads, ep, reuse_other_courses=(reuse_lich and reuse_eng), max_data_age_days=max_age)
         self.tm.enqueue(job)
 
@@ -1260,6 +1283,7 @@ class TaskCenterDialog(QDialog):
 
     def _connect_signals(self):
         self.tm.task_started.connect(self._on_task_started)
+        self.tm.task_canceling.connect(self._on_task_canceling)
         self.tm.task_progress.connect(self._on_task_progress)
         self.tm.sub_progress.connect(self._on_sub_progress)
         self.tm.batch_repo_status.connect(self._on_batch_repo_status)
@@ -1287,35 +1311,66 @@ class TaskCenterDialog(QDialog):
         selected_repo = self.combo_repo.currentText() if hasattr(self, 'combo_repo') else ""
 
         # Reset buttons to default state first
+        self.btn_start_lich.setEnabled(True)
         self.btn_start_lich.setText(tr_ui("task_center.btn_start_lich", "🌐 Lichess-Import starten").replace("&", "&&").replace("&&&&", "&&"))
         self._style_single_btn(self.btn_start_lich, "#0284c7", "#0369a1")
 
+        self.btn_start_eng.setEnabled(True)
         self.btn_start_eng.setText(tr_ui("task_center.btn_start_eng", "🤖 Engine-Scan starten"))
         self._style_single_btn(self.btn_start_eng, "#2563eb", "#1d4ed8")
 
+        self.btn_start_comb.setEnabled(True)
         self.btn_start_comb.setText(tr_ui("task_center.btn_start_comb", "⚡ Vollständiges Update starten"))
         self._style_single_btn(self.btn_start_comb, "#16a34a", "#15803d")
 
         if not curr or curr.status != JobStatus.RUNNING or curr.repo_name != selected_repo:
             return
 
+        is_canceling = curr.is_canceled()
+        stopping_txt = tr_ui("task_center.btn_stopping", "⏳ Wird gestoppt...")
+
         if curr.job_type == JobType.LICHESS:
-            self.btn_start_lich.setText(tr_ui("repo_settings.btn_stop_fetch", "🛑 Import stoppen"))
+            self.btn_start_lich.setEnabled(not is_canceling)
+            self.btn_start_lich.setText(stopping_txt if is_canceling else tr_ui("repo_settings.btn_stop_fetch", "🛑 Import stoppen"))
             self._style_single_btn(self.btn_start_lich, "#ef4444", "#dc2626")
             self.pb_single_lich.setValue(getattr(curr, 'lichess_pct', curr.progress))
-            self.lbl_single_lich_status.setText(getattr(curr, 'lichess_status', curr.status_message) or "...")
+            self.lbl_single_lich_status.setText(
+                tr_ui("task_center.job_canceling", "Wird abgebrochen...") if is_canceling
+                else (getattr(curr, 'lichess_status', curr.status_message) or "...")
+            )
         elif curr.job_type == JobType.ENGINE_SCAN:
-            self.btn_start_eng.setText(tr_ui("repo_settings.btn_stop_scan", "🛑 Engine-Scan stoppen"))
+            self.btn_start_eng.setEnabled(not is_canceling)
+            self.btn_start_eng.setText(stopping_txt if is_canceling else tr_ui("repo_settings.btn_stop_scan", "🛑 Engine-Scan stoppen"))
             self._style_single_btn(self.btn_start_eng, "#ef4444", "#dc2626")
             self.pb_single_eng.setValue(getattr(curr, 'engine_pct', curr.progress))
-            self.lbl_single_eng_status.setText(getattr(curr, 'engine_status', curr.status_message) or "...")
+            self.lbl_single_eng_status.setText(
+                tr_ui("task_center.job_canceling", "Wird abgebrochen...") if is_canceling
+                else (getattr(curr, 'engine_status', curr.status_message) or "...")
+            )
         elif curr.job_type == JobType.COMBINED:
-            self.btn_start_comb.setText(tr_ui("task_center.btn_cancel", "🛑 Abbrechen"))
+            self.btn_start_comb.setEnabled(not is_canceling)
+            self.btn_start_comb.setText(stopping_txt if is_canceling else tr_ui("task_center.btn_cancel", "🛑 Abbrechen"))
             self._style_single_btn(self.btn_start_comb, "#ef4444", "#dc2626")
             self.pb_single_lich.setValue(getattr(curr, 'lichess_pct', 0))
-            self.lbl_single_lich_status.setText(getattr(curr, 'lichess_status', "") or "...")
+            self.lbl_single_lich_status.setText(
+                tr_ui("task_center.job_canceling", "Wird abgebrochen...") if is_canceling
+                else (getattr(curr, 'lichess_status', "") or "...")
+            )
             self.pb_single_eng.setValue(getattr(curr, 'engine_pct', 0))
-            self.lbl_single_eng_status.setText(getattr(curr, 'engine_status', "") or "...")
+            self.lbl_single_eng_status.setText(
+                tr_ui("task_center.job_canceling", "Wird abgebrochen...") if is_canceling
+                else (getattr(curr, 'engine_status', "") or "...")
+            )
+
+    def _on_task_canceling(self, job):
+        if sip.isdeleted(self):
+            return
+        self.btn_cancel_curr.setEnabled(False)
+        self.lbl_curr_status.setText(tr_ui("task_center.job_canceling", "Wird abgebrochen..."))
+        if job.job_type == JobType.BATCH_MAINTENANCE:
+            self.lbl_batch_overall.setText(tr_ui("repo_settings.stopping_maintenance", "Wartung wird gestoppt..."))
+            self.btn_run_batch.setEnabled(False)
+        self._update_single_tab_for_current_job()
 
     def _on_task_started(self, job):
         if sip.isdeleted(self):
@@ -1354,6 +1409,8 @@ class TaskCenterDialog(QDialog):
 
     def _on_sub_progress(self, job, stream_key: str, pct: int, status_text: str):
         if sip.isdeleted(self):
+            return
+        if job is not self.tm.get_current_job() or job.is_canceled() or job.status != JobStatus.RUNNING:
             return
         # Update Tab 3 Dual Stream bars
         if stream_key == "lichess":
@@ -1479,14 +1536,21 @@ class TaskCenterDialog(QDialog):
         if sip.isdeleted(self):
             return
         if hasattr(self, 'combo_repo') and job.repo_name == self.combo_repo.currentText():
+            canceled_or_err = message or tr_ui("task_center.indicator_canceled", "Abgebrochen")
             if job.job_type in (JobType.LICHESS, JobType.COMBINED):
                 if success:
                     self.pb_single_lich.setValue(100)
-                self.lbl_single_lich_status.setText(message if job.job_type == JobType.LICHESS else tr_ui("task_center.indicator_finished", "Fertig!"))
+                self.lbl_single_lich_status.setText(
+                    (message if job.job_type == JobType.LICHESS else tr_ui("task_center.indicator_finished", "Fertig!"))
+                    if success else canceled_or_err
+                )
             if job.job_type in (JobType.ENGINE_SCAN, JobType.COMBINED):
                 if success:
                     self.pb_single_eng.setValue(100)
-                self.lbl_single_eng_status.setText(message if job.job_type == JobType.ENGINE_SCAN else tr_ui("task_center.indicator_finished", "Fertig!"))
+                self.lbl_single_eng_status.setText(
+                    (message if job.job_type == JobType.ENGINE_SCAN else tr_ui("task_center.indicator_finished", "Fertig!"))
+                    if success else canceled_or_err
+                )
 
         if job.job_type == JobType.BATCH_MAINTENANCE:
             self.btn_run_batch.setEnabled(True)
@@ -1507,8 +1571,14 @@ class TaskCenterDialog(QDialog):
             return
         self._update_pill_badge("idle", tr_ui("task_center.status_idle", "Bereit"))
         self.lbl_curr_title.setText(tr_ui("task_center.no_active_job", "Keine aktive Aufgabe"))
-        self.lbl_curr_status.setText(tr_ui("task_center.all_tasks_completed", "Alle Aufgaben abgeschlossen."))
-        self.pb_curr.setValue(100)
+        hist = self.tm.get_history()
+        last_ok = bool(hist and hist[-1].status == JobStatus.COMPLETED)
+        if last_ok:
+            self.lbl_curr_status.setText(tr_ui("task_center.all_tasks_completed", "Alle Aufgaben abgeschlossen."))
+            self.pb_curr.setValue(100)
+        else:
+            self.lbl_curr_status.setText(tr_ui("task_center.waiting_for_start", "Warte auf Start..."))
+            self.pb_curr.setValue(0)
         self.btn_cancel_curr.setEnabled(False)
         self.parallel_streams_frame.hide()
         self._update_single_tab_for_current_job()
@@ -1519,11 +1589,14 @@ class TaskCenterDialog(QDialog):
             return
         curr = self.tm.get_current_job()
         if curr and curr.status == JobStatus.RUNNING:
+            is_canceling = curr.is_canceled()
             self._update_pill_badge("running", tr_ui("task_center.status_active", "Aktiv: {title}", title=curr.title))
             self.lbl_curr_title.setText(f"{curr.title}")
-            self.lbl_curr_status.setText(curr.status_message)
+            self.lbl_curr_status.setText(
+                tr_ui("task_center.job_canceling", "Wird abgebrochen...") if is_canceling else curr.status_message
+            )
             self.pb_curr.setValue(curr.progress)
-            self.btn_cancel_curr.setEnabled(True)
+            self.btn_cancel_curr.setEnabled(not is_canceling)
             is_parallel = curr.job_type in (JobType.COMBINED, JobType.BATCH_MAINTENANCE)
             self.parallel_streams_frame.setVisible(is_parallel)
         else:

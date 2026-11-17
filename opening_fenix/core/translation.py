@@ -20,6 +20,8 @@ class TranslationManager:
         self.current_lang = "de"  # Default is German
         self.translations = {}
         self.qt_translator = QTranslator()
+        self._loaded_json_lang = None
+        self._loaded_qt_lang = None
         self._initialized = True
         self.load_language(self.current_lang)
 
@@ -27,31 +29,37 @@ class TranslationManager:
         """Loads custom JSON translations and registers the native Qt translator."""
         self.current_lang = lang_code
         
-        # 1. Load Custom JSON Translations
-        base_path = get_base_path()
-        trans_file = os.path.join(base_path, "assets", "translations", f"{lang_code}.json")
-        
-        # Fallback for dev mode
-        if not os.path.exists(trans_file):
-            dev_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            trans_file = os.path.join(dev_path, "assets", "translations", f"{lang_code}.json")
+        # 1. Load Custom JSON Translations (skip if already loaded for this language)
+        if self._loaded_json_lang != lang_code or not self.translations:
+            base_path = get_base_path()
+            trans_file = os.path.join(base_path, "assets", "translations", f"{lang_code}.json")
+            
+            # Fallback for dev mode
+            if not os.path.exists(trans_file):
+                dev_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                trans_file = os.path.join(dev_path, "assets", "translations", f"{lang_code}.json")
 
-        if os.path.exists(trans_file):
-            try:
-                with open(trans_file, "r", encoding="utf-8") as f:
-                    self.translations = json.load(f)
-                logger.info(f"Loaded translation file: {lang_code}.json")
-            except Exception as e:
-                logger.error(f"Failed to parse translation file {trans_file}: {e}")
+            if os.path.exists(trans_file):
+                try:
+                    with open(trans_file, "r", encoding="utf-8") as f:
+                        self.translations = json.load(f)
+                    self._loaded_json_lang = lang_code
+                    logger.info(f"Loaded translation file: {lang_code}.json")
+                except Exception as e:
+                    logger.error(f"Failed to parse translation file {trans_file}: {e}")
+                    self.translations = {}
+                    self._loaded_json_lang = None
+            else:
+                logger.warning(f"Translation file not found: {trans_file}")
                 self.translations = {}
-        else:
-            logger.warning(f"Translation file not found: {trans_file}")
-            self.translations = {}
+                self._loaded_json_lang = None
 
         # 2. Load Native Qt translation for standard buttons/dialogs
         app = QApplication.instance()
         if app:
             from PyQt6 import sip
+            if self._loaded_qt_lang == lang_code and not sip.isdeleted(self.qt_translator):
+                return
             if sip.isdeleted(self.qt_translator):
                 self.qt_translator = QTranslator()
             else:
@@ -63,6 +71,7 @@ class TranslationManager:
             qt_translations_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
             if self.qt_translator.load(f"qtbase_{lang_code}", qt_translations_path):
                 app.installTranslator(self.qt_translator)
+                self._loaded_qt_lang = lang_code
                 logger.info(f"Installed native Qt translator: qtbase_{lang_code}")
 
     def translate(self, key: str, default: str = "", **kwargs) -> str:

@@ -12,6 +12,7 @@ class TreeNavigationService:
         self._move_parent_cache = None 
         self._variation_structure_cache: Dict[str, Dict[str, List[str]]] = {}
         self._variation_filter_cache: Dict[str, Any] = {}
+        self._variation_entry_fen_cache: Dict[str, Optional[str]] = {}
 
     def get_history_for_move_recursive(self, move_id: int, variation_name: Optional[str] = None) -> List[Dict[str, Any]]:
         """
@@ -275,7 +276,11 @@ class TreeNavigationService:
         """
         Finds the FEN of the earliest position (shortest path from root) tagged with this variation.
         """
-        if not self.repo_session: return None
+        if not self.repo_session or not variation_name:
+            return None
+
+        if variation_name in self._variation_entry_fen_cache:
+            return self._variation_entry_fen_cache[variation_name]
         
         # 1. Find all positions explicitly tagged
         v_like = f'%"{variation_name}"%'
@@ -286,17 +291,25 @@ class TreeNavigationService:
         ).all()
         
         if not roots:
+            self._variation_entry_fen_cache[variation_name] = None
             return None
             
         if len(roots) == 1:
+            self._variation_entry_fen_cache[variation_name] = roots[0].fen
             return roots[0].fen
 
         # 2. If multiple, find the one with shortest path from the absolute starting position
-        root_pos_ids = [r.id for r in roots]
-        
+        root_fen_by_id = {r.id: r.fen for r in roots}
+        all_edges = self.repo_session.query(Move.from_position_id, Move.to_position_id).all()
+        children_map: Dict[int, List[int]] = {}
+        to_ids: Set[int] = set()
+        for from_id, to_id in all_edges:
+            children_map.setdefault(from_id, []).append(to_id)
+            to_ids.add(to_id)
+
         # We start from known starting positions (no incoming moves)
         start_positions = self.repo_session.query(Position.id).filter(
-            ~Position.id.in_(self.repo_session.query(Move.to_position_id))
+            ~Position.id.in_(to_ids) if to_ids else True
         ).all()
         start_ids = [s.id for s in start_positions]
         if not start_ids: 
@@ -312,18 +325,20 @@ class TreeNavigationService:
             curr_id, depth = queue.popleft()
             
             # Check if this is one of our target roots
-            for r in roots:
-                if r.id == curr_id:
-                    return r.fen
+            if curr_id in root_fen_by_id:
+                res_fen = root_fen_by_id[curr_id]
+                self._variation_entry_fen_cache[variation_name] = res_fen
+                return res_fen
             
             if depth > 100: continue # Safety limit
             
-            # Find children moves
-            children = self.repo_session.query(Move.to_position_id).filter_by(from_position_id=curr_id).all()
-            for c in children:
-                if c[0] not in visited:
-                    visited.add(c[0])
-                    queue.append((c[0], depth + 1))
+            # Find children moves from pre-fetched adjacency map
+            for child_id in children_map.get(curr_id, ()):
+                if child_id not in visited:
+                    visited.add(child_id)
+                    queue.append((child_id, depth + 1))
                     
         # Fallback: just return the first one found if BFS failed
-        return roots[0].fen
+        res_fen = roots[0].fen
+        self._variation_entry_fen_cache[variation_name] = res_fen
+        return res_fen

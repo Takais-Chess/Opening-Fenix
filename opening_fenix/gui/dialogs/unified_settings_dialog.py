@@ -472,6 +472,10 @@ class RepertoireConfigCard(QFrame):
         avail_w = self.info_widget.width()
         if avail_w <= 20:
             avail_w = max(50, self.width() - scale(48) - scale(39))
+        cache_key = (avail_w, self.is_active)
+        if getattr(self, '_last_title_font_key', None) == cache_key:
+            return
+        self._last_title_font_key = cache_key
         if not self.is_active:
             avail_h = self.height() - scale(16) - scale(22) - scale(4)
             if avail_h <= 10:
@@ -608,51 +612,21 @@ class RepertoireConfigCard(QFrame):
         state = (is_selected, self.is_active)
         if getattr(self, '_current_style_state', None) == state:
             return
+        prev_active = self._current_style_state[1] if getattr(self, '_current_style_state', None) is not None else None
         self._current_style_state = state
 
-        if self.is_active:
-            bg = "#fffaf5" if is_selected else "#ffffff"
-            border = "2px solid #d35400" if is_selected else "1px solid #e2e8f0"
-            cover_bg = "white"
-            text_color = "#0f172a"
-        else:
-            bg = "#f8fafc"
-            border = "2px dashed #d35400" if is_selected else "1px solid #e2e8f0"
-            cover_bg = "transparent"
-            text_color = "#64748b"
-
-        if hasattr(self, 'lbl_cover'):
+        if prev_active != self.is_active and hasattr(self, 'lbl_cover'):
+            cover_bg = "white" if self.is_active else "transparent"
             self.lbl_cover.setStyleSheet(f"border: 1px solid #e2e8f0; border-radius: {scale(8)}px; background: {cover_bg};")
 
-        self.setStyleSheet(f"""
-            RepertoireConfigCard {{
-                background-color: {bg};
-                border: {border};
-                border-radius: {scale(10)}px;
-            }}
-            RepertoireConfigCard QWidget {{
-                background: transparent;
-            }}
-            QLabel#RepoName {{ 
-                color: {text_color};
-                font-weight: 700;
-                background: transparent;
-            }}
-            QLabel#RepoElo {{ 
-                color: #64748b;
-                font-weight: 600;
-                background: transparent;
-            }}
-            QComboBox {{
-                background-color: #f8fafc;
-                color: #0f172a;
-                border: 1px solid #cbd5e1;
-                border-radius: {scale(6)}px;
-                padding-left: {scale(10)}px;
-                padding-right: {scale(24)}px;
-                font-weight: 600;
-            }}
-        """)
+        self.setProperty("active", "true" if self.is_active else "false")
+        self.setProperty("selected", "true" if is_selected else "false")
+        if hasattr(self, 'lbl_name'):
+            self.lbl_name.setProperty("active", "true" if self.is_active else "false")
+            self.lbl_name.style().unpolish(self.lbl_name)
+            self.lbl_name.style().polish(self.lbl_name)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def mousePressEvent(self, event):
         child = self.childAt(event.position().toPoint())
@@ -1162,9 +1136,11 @@ class _SidebarCompat(QWidget):
         return self.dialog.pages.currentIndex() if hasattr(self.dialog, 'pages') else 0
 
     def setCurrentRow(self, row):
+        if getattr(self.dialog, 'main_scroll', None):
+            self.dialog.main_scroll.verticalScrollBar().setValue(0)
         if hasattr(self.dialog, 'pages') and 0 <= row < self.dialog.pages.count():
             self.dialog.pages.setCurrentIndex(row)
-        if hasattr(self.dialog, 'main_scroll') and self.dialog.main_scroll:
+        if getattr(self.dialog, 'main_scroll', None):
             self.dialog.main_scroll.verticalScrollBar().setValue(0)
 
 
@@ -1269,7 +1245,6 @@ class UnifiedSettingsDialog(QDialog):
             Qt.WindowType.WindowCloseButtonHint
         )
         self.setModal(False)
-        self.setStyleSheet(get_bw_glass_style())
         
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self.reject)
@@ -1280,8 +1255,11 @@ class UnifiedSettingsDialog(QDialog):
         self.loading_timer = None
         self.selected_trainer_repo = None
         self.selected_creator_level_order = None
+        self._loaded_creator_repo = None
+        self._creator_info_dirty = True
 
         self.init_ui()
+        self.setStyleSheet(get_bw_glass_style())
         self.navigate_initial_section(self.initial_section)
 
         # Compatibility aliases for legacy code and test suites
@@ -1357,10 +1335,12 @@ class UnifiedSettingsDialog(QDialog):
         if self.initial_section == "creator":
             repo_name = self.combo_active_repo.currentData() or (getattr(self.backend, 'active_repo_name', None) if self.backend else None)
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
+            self._creator_info_dirty = True
             self.ensure_backend_for_active_repo()
             self.refresh_creator_info()
             self.refresh_backups_list()
         else:
+            self._creator_info_dirty = True
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
             # Reload / sync trainer repertoire cards and active selection
             if hasattr(self, 'refresh_trainer_repertoire_cards'):
@@ -1908,20 +1888,27 @@ class UnifiedSettingsDialog(QDialog):
         self.creator_header_bar.hide()
         v_right.addWidget(self.creator_header_bar)
 
-        # Content Pages Stack
+        # Content Pages Stack (single-layer scroll per page, no double-nested QScrollArea)
         self.pages = SettingsStackedWidget()
         self.page_item_map = {}
 
         self.build_all_pages()
 
-        self.main_scroll = QScrollArea()
-        self.main_scroll.setWidgetResizable(True)
-        self.main_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.main_scroll.setStyleSheet("QScrollArea { border: none; background: #f8fafc; }")
-        self.main_scroll.setWidget(self.pages)
-        v_right.addWidget(self.main_scroll, 1)
+        v_right.addWidget(self.pages, 1)
 
         main_layout.addWidget(self.content_container, 1)
+
+    @property
+    def main_scroll(self) -> Optional[QScrollArea]:
+        """Returns the active page's QScrollArea (compatibility for scroll-reset callers & tests)."""
+        if not hasattr(self, 'pages') or not self.pages:
+            return None
+        w = QStackedWidget.currentWidget(self.pages)
+        if isinstance(w, QScrollArea):
+            return w
+        if w is not None:
+            return w.findChild(QScrollArea)
+        return None
 
     def filter_sidebar_tree(self, query: str):
         """Filters sidebar tree items dynamically based on search text."""
@@ -2172,6 +2159,8 @@ class UnifiedSettingsDialog(QDialog):
     def on_tree_item_clicked(self, item: QTreeWidgetItem, column: int):
         idx = item.data(0, Qt.ItemDataRole.UserRole)
         if idx is not None:
+            if self.main_scroll:
+                self.main_scroll.verticalScrollBar().setValue(0)
             self.pages.setCurrentIndex(idx)
             is_creator = item.data(0, Qt.ItemDataRole.UserRole + 1)
             is_maintenance = (idx == self.pages.indexOf(self.page_cr_maintenance))
@@ -2184,11 +2173,13 @@ class UnifiedSettingsDialog(QDialog):
                     self.maintenance_loaded = True
                     self.refresh_maintenance_table(start_stats_worker=True)
             elif is_creator and not is_maintenance:
-                self.ensure_backend_for_active_repo()
-                self.refresh_creator_info()
+                backend = self.ensure_backend_for_active_repo()
+                active_name = getattr(backend, 'active_repo_name', None) if backend else None
+                if getattr(self, '_creator_info_dirty', True) or getattr(self, '_loaded_creator_repo', None) != active_name:
+                    self.refresh_creator_info()
                 if hasattr(self, 'page_cr_backups') and idx == self.pages.indexOf(self.page_cr_backups):
                     self.refresh_backups_list()
-            if hasattr(self, 'main_scroll') and self.main_scroll:
+            if self.main_scroll:
                 self.main_scroll.verticalScrollBar().setValue(0)
         else:
             item.setExpanded(not item.isExpanded())
@@ -3070,7 +3061,51 @@ class UnifiedSettingsDialog(QDialog):
 
         self.trainer_cards_container = QWidget()
         self.trainer_cards_container.setObjectName("TrainerCardsContainer")
-        self.trainer_cards_container.setStyleSheet("#TrainerCardsContainer { background-color: #ffffff; }")
+        self.trainer_cards_container.setStyleSheet(f"""
+            #TrainerCardsContainer {{ background-color: #ffffff; }}
+            RepertoireConfigCard[active="true"] {{
+                background-color: #ffffff;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(10)}px;
+            }}
+            RepertoireConfigCard[active="true"][selected="true"] {{
+                background-color: #fffaf5;
+                border: 2px solid #d35400;
+            }}
+            RepertoireConfigCard[active="false"] {{
+                background-color: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: {scale(10)}px;
+            }}
+            RepertoireConfigCard[active="false"][selected="true"] {{
+                border: 2px dashed #d35400;
+            }}
+            RepertoireConfigCard QWidget {{
+                background: transparent;
+            }}
+            RepertoireConfigCard QLabel#RepoName {{
+                color: #0f172a;
+                font-weight: 700;
+                background: transparent;
+            }}
+            RepertoireConfigCard QLabel#RepoName[active="false"] {{
+                color: #64748b;
+            }}
+            RepertoireConfigCard QLabel#RepoElo {{
+                color: #64748b;
+                font-weight: 600;
+                background: transparent;
+            }}
+            RepertoireConfigCard QComboBox {{
+                background-color: #f8fafc;
+                color: #0f172a;
+                border: 1px solid #cbd5e1;
+                border-radius: {scale(6)}px;
+                padding-left: {scale(10)}px;
+                padding-right: {scale(24)}px;
+                font-weight: 600;
+            }}
+        """)
         self.trainer_cards_layout = QGridLayout(self.trainer_cards_container)
         self.trainer_cards_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.trainer_cards_layout.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
@@ -3234,36 +3269,31 @@ class UnifiedSettingsDialog(QDialog):
                 
         sorted_repos = sorted(active_repos) + sorted(inactive_repos)
 
-        # Check if existing cards can be reused in-place
-        existing_cards = []
+        # Check if existing cards can be reused in-place (even when order changes after toggle)
+        existing_cards_map: Dict[str, RepertoireConfigCard] = {}
+        existing_names = []
         for i in range(self.trainer_cards_layout.count()):
             it = self.trainer_cards_layout.itemAt(i)
             if it and it.widget() and isinstance(it.widget(), RepertoireConfigCard):
-                existing_cards.append(it.widget())
+                w = it.widget()
+                existing_cards_map[w.repo_name] = w
+                existing_names.append(w.repo_name)
 
-        existing_names = [c.repo_name for c in existing_cards]
         if existing_names == sorted_repos:
-            # All cards match 1:1! Update state in-place without destroying and recreating widgets
-            for card in existing_cards:
-                is_active = visibility_map.get(card.repo_name, True)
-                if card.is_active != is_active:
-                    card.is_active = is_active
-                    card.btn_toggle.blockSignals(True)
-                    card.btn_toggle.setChecked(is_active)
-                    card.btn_toggle.blockSignals(False)
-                    card.lbl_elo.setVisible(is_active)
-                    card.combo_level.setVisible(is_active)
-                    card.combo_lang.setVisible(is_active)
-                    if is_active:
-                        card.setMinimumHeight(scale(168))
-                        card.setMaximumHeight(scale(198))
-                        card.populate_levels()
-                        card.populate_comment_languages()
-                    else:
-                        card.setMinimumHeight(scale(68))
-                        card.setMaximumHeight(scale(78))
-                    card.adjust_title_font()
-                card.update_style()
+            # Exact order match! Update state in-place without layout changes
+            for card in existing_cards_map.values():
+                self._sync_trainer_card_state(card, visibility_map.get(card.repo_name, True))
+            return
+
+        if existing_cards_map and set(existing_names) == set(sorted_repos):
+            # Same set of repos, just reordered (e.g. after toggling active/inactive)
+            for card in existing_cards_map.values():
+                self.trainer_cards_layout.removeWidget(card)
+            cols = getattr(self, '_current_cols', 3)
+            for idx, r_name in enumerate(sorted_repos):
+                card = existing_cards_map[r_name]
+                self._sync_trainer_card_state(card, visibility_map.get(r_name, True))
+                self.trainer_cards_layout.addWidget(card, idx // cols, idx % cols)
             return
 
         while self.trainer_cards_layout.count():
@@ -3289,6 +3319,27 @@ class UnifiedSettingsDialog(QDialog):
             r = idx // cols
             c = idx % cols
             self.trainer_cards_layout.addWidget(card, r, c)
+
+    def _sync_trainer_card_state(self, card: RepertoireConfigCard, is_active: bool):
+        if card.is_active != is_active:
+            card.is_active = is_active
+            card.btn_toggle.blockSignals(True)
+            card.btn_toggle.setChecked(is_active)
+            card.btn_toggle.blockSignals(False)
+            card.lbl_elo.setVisible(is_active)
+            card.combo_level.setVisible(is_active)
+            card.combo_lang.setVisible(is_active)
+            if is_active:
+                card.setMinimumHeight(scale(168))
+                card.setMaximumHeight(scale(198))
+                card.populate_levels()
+                card.populate_comment_languages()
+            else:
+                card.setMinimumHeight(scale(68))
+                card.setMaximumHeight(scale(78))
+            card._last_title_font_key = None
+            card.adjust_title_font()
+        card.update_style()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.Resize:
@@ -3351,9 +3402,10 @@ class UnifiedSettingsDialog(QDialog):
 
     def _check_stop_loading_timer(self):
         trainer_running = getattr(self, 'stats_loader', None) and self.stats_loader.isRunning()
+        creator_running = getattr(self, 'creator_stats_loader', None) and self.creator_stats_loader.isRunning()
         maintenance_running = getattr(self, 'stats_worker', None) and self.stats_worker.isRunning()
         m_thread_running = getattr(self, 'm_thread', None) and self.m_thread.isRunning()
-        if not trainer_running and not maintenance_running and not m_thread_running:
+        if not trainer_running and not creator_running and not maintenance_running and not m_thread_running:
             if hasattr(self, 'loading_timer') and self.loading_timer:
                 try: self.loading_timer.stop()
                 except Exception: pass
@@ -3364,7 +3416,8 @@ class UnifiedSettingsDialog(QDialog):
         text = f"Laden{dots}"
         
         labels = [getattr(self, 'lbl_db_info', None), getattr(self, 'lbl_levels', None),
-                  getattr(self, 'lbl_cr_ana_status', None), getattr(self, 'lbl_cr_db_cov', None)]
+                  getattr(self, 'lbl_cr_ana_status', None), getattr(self, 'lbl_cr_db_cov', None),
+                  getattr(self, 'lbl_cr_comment_stats', None)]
         for lbl in labels:
             if lbl and not sip.isdeleted(lbl) and "Laden" in lbl.text():
                 lbl.setText(text)
@@ -3394,6 +3447,24 @@ class UnifiedSettingsDialog(QDialog):
                     elif not cell_c.progress_bar.isHidden():
                         cell_c.update_heartbeat(dots)
 
+    def _cancel_worker_async(self, attr_name: str):
+        """Disconnects and interrupts a background QThread without blocking the GUI thread."""
+        worker = getattr(self, attr_name, None)
+        if not worker:
+            return
+        setattr(self, attr_name, None)
+        try:
+            worker.stats_ready.disconnect()
+        except Exception:
+            pass
+        if worker.isRunning():
+            worker.requestInterruption()
+            if worker not in _detached_threads_keepalive:
+                _detached_threads_keepalive.append(worker)
+                worker.finished.connect(
+                    lambda obj=worker: _detached_threads_keepalive.remove(obj) if obj in _detached_threads_keepalive else None
+                )
+
     def on_trainer_repo_selected(self, repo_name):
         self.selected_trainer_repo = repo_name
         self.selected_repo = repo_name
@@ -3409,10 +3480,8 @@ class UnifiedSettingsDialog(QDialog):
         if hasattr(self, 'btn_reset'): self.btn_reset.setEnabled(True)
         self.update_trainer_card_selection_highlights()
 
-        # Stop existing loader if any
-        if hasattr(self, "stats_loader") and self.stats_loader and self.stats_loader.isRunning():
-            self.stats_loader.requestInterruption()
-            self.stats_loader.wait()
+        # Stop existing loader asynchronously without blocking GUI thread
+        self._cancel_worker_async("stats_loader")
 
         # Fast Load metadata via direct sqlite query without heavy DatabaseManager overhead
         meta = get_repertoire_meta_fast(repo_name)
@@ -3569,6 +3638,10 @@ class UnifiedSettingsDialog(QDialog):
                 self.main_window.training_manager.reset_repertoire_progress()
                 if original_repo and original_repo != self.selected_trainer_repo and hasattr(self.main_window, 'repertoire_manager') and hasattr(self.main_window.repertoire_manager, 'set_active_repertoire'):
                     self.main_window.repertoire_manager.set_active_repertoire(original_repo)
+                if hasattr(self.main_window, 'refresh_repertoire_buttons'):
+                    self.main_window.refresh_repertoire_buttons()
+                if hasattr(self.main_window, '_do_update_stats_display'):
+                    self.main_window._do_update_stats_display()
             QMessageBox.information(self, tr_ui("settings.reset_title", "Fortschritt zurücksetzen"), "Trainingsfortschritt erfolgreich zurückgesetzt.")
 
     # ─── PAGE 3.2: Training Behavior (Trainer) ──────────────────────────────
@@ -4117,13 +4190,8 @@ class UnifiedSettingsDialog(QDialog):
         if idx_cl >= 0: self.combo_cr_comment_lang.setCurrentIndex(idx_cl)
         self.combo_cr_comment_lang.blockSignals(False)
 
-        if getattr(backend, 'session', None):
-            raw_stats = get_repertoire_comment_stats(backend.session)
-            if not raw_stats or raw_stats in ("Keine Kommentare", "No comments"):
-                display_stats = tr_ui("repo_settings.no_comments", "Keine Kommentare")
-            else:
-                display_stats = raw_stats
-            self.lbl_cr_comment_stats.setText(display_stats)
+        if getattr(backend, 'session', None) and hasattr(self, 'lbl_cr_comment_stats'):
+            self.lbl_cr_comment_stats.setText(tr_ui("repo_settings.status_loading", "Laden..."))
 
         # Levels Table
         levels = backend.get_repertoire_levels()
@@ -4174,11 +4242,7 @@ class UnifiedSettingsDialog(QDialog):
 
         # Update extra info rows (Analyse-Status & Positionen mit Prio-Score)
         if hasattr(self, 'lbl_cr_ana_status') and hasattr(self, 'lbl_cr_db_cov') and backend.active_repo_name:
-            if hasattr(self, 'creator_stats_loader') and self.creator_stats_loader and self.creator_stats_loader.isRunning():
-                try:
-                    self.creator_stats_loader.requestInterruption()
-                    self.creator_stats_loader.wait(200)
-                except: pass
+            self._cancel_worker_async("creator_stats_loader")
 
             self.lbl_cr_ana_status.setText(tr_ui("repo_settings.status_loading", "Laden..."))
             self.lbl_cr_db_cov.setText(tr_ui("repo_settings.status_loading", "Laden..."))
@@ -4191,6 +4255,8 @@ class UnifiedSettingsDialog(QDialog):
         # Cover Preview
         self.update_creator_cover_preview(r_name)
         self._update_delete_lichess_button_text()
+        self._loaded_creator_repo = backend.active_repo_name
+        self._creator_info_dirty = False
 
     def _update_levels_table_height(self):
         if not hasattr(self, "tbl_cr_levels"): return
@@ -4208,8 +4274,17 @@ class UnifiedSettingsDialog(QDialog):
 
     def on_creator_stats_loaded(self, info):
         if sip.isdeleted(self): return
+        self._check_stop_loading_timer()
         if hasattr(self, 'lbl_cr_ana_status') and not sip.isdeleted(self.lbl_cr_ana_status):
             self.lbl_cr_ana_status.setText(info.get('depth', '-'))
+
+        if "comment_stats" in info and hasattr(self, 'lbl_cr_comment_stats') and not sip.isdeleted(self.lbl_cr_comment_stats):
+            raw_stats = info["comment_stats"]
+            if not raw_stats or raw_stats in ("Keine Kommentare", "No comments"):
+                display_stats = tr_ui("repo_settings.no_comments", "Keine Kommentare")
+            else:
+                display_stats = raw_stats
+            self.lbl_cr_comment_stats.setText(display_stats)
 
         if hasattr(self, 'lbl_cr_db_cov') and not sip.isdeleted(self.lbl_cr_db_cov):
             cov = info.get("coverage_pct", 0)
@@ -4230,7 +4305,7 @@ class UnifiedSettingsDialog(QDialog):
             from opening_fenix.creator.repo_selection_dialog import get_repertoire_cover_path
             cover_path = get_repertoire_cover_path(name)
         if cover_path and os.path.exists(cover_path):
-            pix = QPixmap(cover_path).scaled(scale(56), scale(56), Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
+            pix = get_cached_scaled_pixmap(cover_path, scale(56), scale(56))
             self.lbl_cr_cover_preview.setPixmap(pix)
             self.btn_rem_cov.setEnabled(True)
         else:
@@ -5153,6 +5228,22 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("repo_settings.lbl_import_pgn_row", "PGN-Varianten importieren"),
             tr_ui("repo_settings.lbl_import_pgn_sub", "Fügt PGN-Text aus der Zwischenablage oder einer Datei in das aktuelle Repertoire ein."),
             w_imp_pgn,
+            is_last=False
+        ))
+
+        w_imp_draw = QWidget()
+        h_imp_draw = QHBoxLayout(w_imp_draw)
+        h_imp_draw.setContentsMargins(0, 0, 0, 0)
+        h_imp_draw.setSpacing(scale(8))
+        btn_draw_paste = QPushButton(tr_widget("repo_settings.btn_paste_pgn", "📋 PGN Text einfügen"))
+        btn_draw_paste.clicked.connect(lambda: self.main_window.paste_pgn_drawings_dialog() if self.main_window and hasattr(self.main_window, 'paste_pgn_drawings_dialog') else None)
+        btn_draw_file = QPushButton(tr_widget("repo_settings.btn_select_pgn_file", "📄 PGN Datei auswählen"))
+        btn_draw_file.clicked.connect(lambda: self.main_window.import_pgn_drawings_file_dialog() if self.main_window and hasattr(self.main_window, 'import_pgn_drawings_file_dialog') else None)
+        h_imp_draw.addWidget(btn_draw_paste); h_imp_draw.addWidget(btn_draw_file)
+        v_imp.addWidget(self._make_hairline_row(
+            tr_ui("repo_settings.lbl_import_drawings_row", "Nur Zeichnungen aus PGN importieren"),
+            tr_ui("repo_settings.lbl_import_drawings_sub", "Übernimmt ausschließlich Pfeile und Feldmarkierungen für bereits vorhandene Positionen (ohne Züge oder Level)."),
+            w_imp_draw,
             is_last=False
         ))
 

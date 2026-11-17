@@ -1204,11 +1204,6 @@ def run_lichess_import_and_calculate_scores(
     if not import_success:
         # If the import was cancelled or stopped, calculate priority scores on partial data so the repertoire is ready to use
         if "abgebrochen" in import_msg.lower() or "cancel" in import_msg.lower():
-            if progress_callback:
-                try:
-                    progress_callback(96, "Berechne Prioritäten für vorhandene Lichess-Daten...")
-                except TypeError:
-                    progress_callback(96)
             calculate_priority_scores(
                 repo_name, elo_category,
                 progress_callback=None,

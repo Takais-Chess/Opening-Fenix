@@ -218,3 +218,48 @@ def test_preload_next_challenge_excludes_current_move(main_window):
     assert called_with_exclude == {42}
 
 
+def test_auto_continue_precomputes_anim_ctx_and_cancels_cleanly(main_window):
+    """Verify auto_continue precomputes animation context and cancels pending delay timer on context change."""
+    from unittest.mock import patch
+    main_window.repertoire_manager.set_active_repertoire("TestRepo")
+    main_window.training_mode = 'due'
+    main_window.training_manager.set_setting("stop_at_variation_end", False)
+    main_window.training_manager.set_setting("auto_delay", 500)
+
+    class MockMove:
+        def __init__(self, move_id):
+            self.id = move_id
+            self.to_position_id = 1
+
+    mock_src = MockMove(10)
+    mock_next = MockMove(20)
+    sample_hist = [{'san': 'e4', 'uci': 'e2e4', 'fen': 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq -'}]
+
+    main_window.current_move_obj = mock_src
+    with patch.object(main_window.training_manager, "get_next_move", side_effect=[
+        (None, []),       # continuation lookup
+        (mock_next, []),  # next variation lookup
+    ]), patch.object(main_window.repertoire_manager, "get_history_for_move", return_value=sample_hist):
+        main_window.preload_next_challenge()
+        if getattr(main_window, '_challenge_preload_thread', None):
+            main_window._challenge_preload_thread.join(timeout=2.0)
+
+    pre = main_window._preloaded_challenge
+    assert pre is not None
+    assert pre['type'] == 'auto_continue'
+    assert pre['anim_ctx'] is not None
+    assert pre['anim_ctx']['move_id'] == 20
+    assert pre['anim_ctx']['history'] == sample_hist
+
+    # Trigger auto_continue with delay > 0 -> timer becomes active; toggling auto-continue cancels it
+    main_window.load_next_challenge(last_success=True, last_move=mock_src)
+    assert main_window._auto_continue_timer.isActive() is True
+    assert main_window._pending_auto_continue is not None
+
+    main_window.btn_auto_continue.setChecked(False)
+    main_window.toggle_auto_continue_btn()
+    assert main_window._auto_continue_timer.isActive() is False
+    assert main_window._pending_auto_continue is None
+
+
+

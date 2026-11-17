@@ -94,7 +94,7 @@ def test_creator_debug_info(creator_window, qtbot, complex_backend):
     except Exception as e:
         pytest.fail(f"show_debug_position_info failed: {e}")
 
-def test_flash_widget_logic(qtbot):
+def test_flash_widget_logic(qtbot, mock_user_dir):
     """Test the flash animation styling logic directly."""
     dialog = RepertoireSelectionDialog()
     qtbot.addWidget(dialog)
@@ -107,5 +107,5 @@ def test_flash_widget_logic(qtbot):
     assert "border: 4px solid #e74c3c" in target.styleSheet()
     
     # Wait for reset
-    qtbot.wait(1000)
+    qtbot.waitUntil(lambda: "border: 4px solid #e74c3c" not in target.styleSheet(), timeout=1500)
     assert "border: 4px solid #e74c3c" not in target.styleSheet()

@@ -481,3 +481,85 @@ def test_course_import_dialog_target_mapping_updates_summary_cards(qtbot, tmp_pa
 
     assert dlg.val_mot.text() in ("2 Partien", "2 games")
     assert dlg.val_l1.text() in ("0 Partien", "0 games")
+
+
+def test_course_import_dialog_lazy_large_course(qtbot):
+    from opening_fenix.core.services.course_import_service import (
+        CourseAnalysisResult, CourseChapterInfo, CourseGameInfo, CATEGORY_LEVEL_2, CATEGORY_MOTIVES
+    )
+
+    chapters = []
+    gid = 0
+    for c in range(5):
+        games = [
+            CourseGameInfo(
+                game_id=gid + i, file_path="dummy.pgn", title=f"Line {c}-{i}",
+                chapter_name=f"Chapter {c}", eco="B90", target_type=CATEGORY_LEVEL_2
+            )
+            for i in range(40)
+        ]
+        gid += 40
+        chapters.append(CourseChapterInfo(
+            name=f"Chapter {c}", game_count=len(games), target_type=CATEGORY_LEVEL_2, games=games
+        ))
+
+    res = CourseAnalysisResult(
+        pgn_paths=["dummy.pgn"], total_games=gid, chapters=chapters,
+        suggested_repo_name="Large Course", suggested_color="w"
+    )
+
+    dlg = CourseImportDialog()
+    qtbot.addWidget(dlg)
+    dlg._apply_analysis_result(res)
+
+    ch_0 = dlg.tree_details.topLevelItem(0)
+    assert ch_0 is not None
+    # Children are not populated until expanded for large courses (>150 games)
+    assert ch_0.childCount() == 0
+    assert len(dlg.game_combos) == 0
+
+    # Expanding populates child items without eagerly creating 40 QComboBoxes
+    dlg.on_tree_item_expanded(ch_0)
+    assert ch_0.childCount() == 40
+    assert len(dlg.game_combos) == 0
+
+    # Clicking a child row creates only that row's QComboBox
+    child_0 = ch_0.child(0)
+    dlg.on_tree_item_clicked(child_0, 0)
+    assert len(dlg.game_combos) == 1
+    combo = dlg.tree_details.itemWidget(child_0, 2)
+    assert combo is not None
+    idx = combo.findData(CATEGORY_MOTIVES)
+    combo.setCurrentIndex(idx)
+    assert dlg.custom_game_targets[0] == CATEGORY_MOTIVES
+
+
+def test_chapter_lines_dialog_lazy_large_chapter(qtbot):
+    from opening_fenix.gui.dialogs.course_import_dialog import ChapterLinesDialog
+    from opening_fenix.core.services.course_import_service import (
+        CourseChapterInfo, CourseGameInfo, CATEGORY_LEVEL_2, CATEGORY_MOTIVES
+    )
+
+    big_ch = CourseChapterInfo(
+        name="Big Chapter",
+        game_count=100,
+        target_type=CATEGORY_LEVEL_2,
+        games=[
+            CourseGameInfo(game_id=i, file_path="dummy.pgn", title=f"Var {i}", chapter_name="Big Chapter")
+            for i in range(100)
+        ]
+    )
+    sub_dlg = ChapterLinesDialog(big_ch, CATEGORY_LEVEL_2, {})
+    qtbot.addWidget(sub_dlg)
+
+    # No per-row QComboBoxes created upfront for >80 rows
+    assert len(sub_dlg.table_combos) == 0
+    assert sub_dlg.table.item(0, 3) is not None
+
+    # Bulk assign updates text items and game_targets
+    sub_dlg.on_select_all()
+    idx = sub_dlg.bulk_combo.findData(CATEGORY_MOTIVES)
+    sub_dlg.bulk_combo.setCurrentIndex(idx)
+    sub_dlg.on_apply_bulk()
+    assert sub_dlg.game_targets[0] == CATEGORY_MOTIVES
+    assert sub_dlg.game_targets[99] == CATEGORY_MOTIVES

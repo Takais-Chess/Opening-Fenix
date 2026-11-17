@@ -36,7 +36,7 @@ from sqlalchemy import or_, func, desc, text
 from sqlalchemy.orm import joinedload
 
 from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
-from opening_fenix.core.db.database import commit_with_retry
+from opening_fenix.core.db.database import commit_with_retry, DatabaseCorruptedException
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
 from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations, clean_comment_parentheses, extract_eval_symbol, strip_eval_symbol, has_meaningful_comment, get_lang_display_label, EVAL_SYMBOLS, translate_chess_comment
 from opening_fenix.core.threads import AnalysisThread, LichessImportThread, IslandDetectionThread, BackgroundEnrichmentThread, PGNImportThread, MaintenanceThread, HoleFinderThread, FenIndexBuilderThread, BfsTranspositionThread, InstantMultiPVThread, PathQualityEvalThread
@@ -336,7 +336,7 @@ class CreatorBackend:
             self._update_cached_names_recursive(pos)
             self._reachable_ids_cache = {}
 
-        self.session.commit()
+        commit_with_retry(self.session)
         self.clear_cache(graph_changed=False)
 
     def mark_position_reviewed(self, fen):
@@ -4710,7 +4710,16 @@ class CreatorWindow(QMainWindow):
         from opening_fenix.gui.dialogs.repo_settings_dialog import RepoSettingsDialog
         active_repo = getattr(self, 'active_repo_name', None) or getattr(self.backend, 'active_repo_name', None)
         if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
-            self.backend.load_repertoire(active_repo, self.is_test)
+            try:
+                self.backend.load_repertoire(active_repo, self.is_test)
+            except DatabaseCorruptedException as e:
+                logger.error(f"CreatorWindow: Failed to load corrupted repertoire '{active_repo}': {e}")
+                QMessageBox.critical(
+                    self,
+                    tr_ui("main.dlg_db_defective_title", "Datenbank defekt"),
+                    f"Das Repertoire '{active_repo}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}"
+                )
+                return
 
         if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
@@ -6426,15 +6435,24 @@ class CreatorWindow(QMainWindow):
 
             full_comment = format_multilingual_comment(self.current_position_comments)
             target_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else self.active_comment_lang
-            self.backend.update_position_data(
-                self.board_widget.board.fen(), 
-                full_comment, 
-                v1_str, 
-                v2_str, 
-                v3_str, 
-                auto_review=self.overhaul_active,
-                target_lang=target_lang
-            )
+            try:
+                self.backend.update_position_data(
+                    self.board_widget.board.fen(), 
+                    full_comment, 
+                    v1_str, 
+                    v2_str, 
+                    v3_str, 
+                    auto_review=self.overhaul_active,
+                    target_lang=target_lang
+                )
+            except Exception as e:
+                logger.error(f"Failed to save position details: {e}", exc_info=True)
+                try:
+                    if getattr(self.backend, 'session', None):
+                        self.backend.session.rollback()
+                except Exception:
+                    pass
+                return
             self.update_structure_tree()
             if self.overhaul_active:
                 self.update_overhaul_progress()
@@ -6814,7 +6832,16 @@ class CreatorWindow(QMainWindow):
         from PyQt6 import sip
         active_repo = getattr(self, 'active_repo_name', None) or getattr(self.backend, 'active_repo_name', None)
         if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
-            self.backend.load_repertoire(active_repo, self.is_test)
+            try:
+                self.backend.load_repertoire(active_repo, self.is_test)
+            except DatabaseCorruptedException as e:
+                logger.error(f"CreatorWindow: Failed to load corrupted repertoire '{active_repo}': {e}")
+                QMessageBox.critical(
+                    self,
+                    tr_ui("main.dlg_db_defective_title", "Datenbank defekt"),
+                    f"Das Repertoire '{active_repo}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}"
+                )
+                return
 
         if not hasattr(self, 'repo_settings_dialog') or not self.repo_settings_dialog or sip.isdeleted(self.repo_settings_dialog):
             self.repo_settings_dialog = RepoSettingsDialog(self, self.backend)
@@ -6837,7 +6864,17 @@ class CreatorWindow(QMainWindow):
         if active_repo and getattr(self.backend, 'active_repo_name', None) != active_repo:
             db_path = get_repertoire_db_path(active_repo, self.is_test)
             if db_path and os.path.exists(db_path):
-                self.backend.load_repertoire(active_repo, self.is_test)
+                try:
+                    self.backend.load_repertoire(active_repo, self.is_test)
+                except DatabaseCorruptedException as e:
+                    logger.error(f"CreatorWindow: Failed to reload corrupted repertoire '{active_repo}': {e}")
+                    QMessageBox.critical(
+                        self,
+                        tr_ui("main.dlg_db_defective_title", "Datenbank defekt"),
+                        f"Das Repertoire '{active_repo}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}"
+                    )
+                    self.load_repertoire(None)
+                    return
             else:
                 from opening_fenix.core.services.repertoire_service import RepertoireService
                 remaining = RepertoireService().get_all_repertoires()
@@ -7037,7 +7074,7 @@ class CreatorWindow(QMainWindow):
             if dlg.imported_repo_name:
                 self.load_repertoire(dlg.imported_repo_name)
 
-    def import_pgn_file_dialog(self):
+    def import_pgn_file_dialog(self, drawings_only_default: bool = False):
         """Opens a file dialog to select and import a PGN file."""
         if not self.backend.active_repo_name: return
         path, _ = QFileDialog.getOpenFileName(
@@ -7047,9 +7084,13 @@ class CreatorWindow(QMainWindow):
             tr_ui("creator.dlg_select_pgn_file_filter", "PGN-Dateien (*.pgn)")
         )
         if not path: return
-        self._start_pgn_import(path)
+        self._start_pgn_import(path, drawings_only_default=drawings_only_default)
 
-    def paste_pgn_dialog(self):
+    def import_pgn_drawings_file_dialog(self):
+        """Opens a file dialog to import only drawings from a PGN file."""
+        self.import_pgn_file_dialog(drawings_only_default=True)
+
+    def paste_pgn_dialog(self, drawings_only_default: bool = False):
         """Opens a multi-line input dialog to paste PGN text."""
         if not self.backend.active_repo_name: return
         text, ok = QInputDialog.getMultiLineText(
@@ -7064,12 +7105,16 @@ class CreatorWindow(QMainWindow):
         if not os.path.exists(temp_dir): os.makedirs(temp_dir, exist_ok=True)
         path = os.path.join(temp_dir, "temp_import.pgn")
         with open(path, "w", encoding="utf-8") as f: f.write(text)
-        self._start_pgn_import(path)
+        self._start_pgn_import(path, drawings_only_default=drawings_only_default)
 
-    def _start_pgn_import(self, pgn_path):
+    def paste_pgn_drawings_dialog(self):
+        """Opens a multi-line input dialog to import only drawings from pasted PGN text."""
+        self.paste_pgn_dialog(drawings_only_default=True)
+
+    def _start_pgn_import(self, pgn_path, drawings_only_default: bool = False):
         """Asks for target level and comment language, then starts the import thread."""
         levels = self.backend.get_repertoire_levels()
-        if not levels:
+        if not levels and not drawings_only_default:
             QMessageBox.warning(
                 self,
                 tr_ui("creator.dlg_import_title", "Import"),
@@ -7095,7 +7140,8 @@ class CreatorWindow(QMainWindow):
         c_level = QComboBox()
         for l in levels:
             c_level.addItem(f"Lvl {l['order']}: {l['name']}", userData=l)
-        c_level.setCurrentIndex(0)
+        if levels:
+            c_level.setCurrentIndex(0)
         
         c_lang = QComboBox()
         c_lang.addItem(tr_ui("creator.comment_lang_auto", "Automatisch (Profil/DE)"), "auto")
@@ -7119,7 +7165,7 @@ class CreatorWindow(QMainWindow):
         chk_subvariations = QCheckBox(tr_ui("creator.chk_subvariations_to_comments", "Untervarianten als Text in Kommentare übernehmen"))
         chk_subvariations.setChecked(True)
         chk_subvariations.setToolTip(tr_ui("creator.chk_subvariations_to_comments_tooltip", "Verhindert, dass Nebenvarianten separate Züge im Trainingsbaum erzeugen. Stattdessen werden die Varianten und Notizen formatiert als Text in den Kommentar des Hauptzugs eingefügt."))
-        chk_subvariations.setStyleSheet(f"""
+        chk_style = f"""
             QCheckBox {{
                 font-size: {scale(12)}px;
                 color: {COLORS['brown_text']};
@@ -7128,9 +7174,31 @@ class CreatorWindow(QMainWindow):
                 padding-top: {scale(4)}px;
                 padding-bottom: {scale(4)}px;
             }}
-        """)
+        """
+        chk_subvariations.setStyleSheet(chk_style)
         v.addWidget(chk_subvariations)
         dlg.chk_subvariations = chk_subvariations
+
+        chk_drawings_only = QCheckBox(tr_ui("creator.chk_import_drawings_only", "Nur Zeichnungen (Pfeile & Markierungen) importieren"))
+        chk_drawings_only.setChecked(drawings_only_default)
+        chk_drawings_only.setToolTip(tr_ui(
+            "creator.chk_import_drawings_only_tooltip",
+            "Importiert ausschließlich Pfeile und Feldmarkierungen ([%cal]/[%csl]) für bereits vorhandene Positionen im Repertoire. Es werden keine neuen Züge, Level oder Textkommentare importiert."
+        ))
+        chk_drawings_only.setStyleSheet(chk_style)
+        v.addWidget(chk_drawings_only)
+        dlg.chk_drawings_only = chk_drawings_only
+
+        def _sync_drawings_only_ui(checked: bool):
+            c_level.setEnabled(not checked and bool(levels))
+            c_lang.setEnabled(not checked)
+            chk_subvariations.setEnabled(not checked)
+
+        chk_drawings_only.toggled.connect(_sync_drawings_only_ui)
+        _sync_drawings_only_ui(drawings_only_default)
+        if not levels:
+            chk_drawings_only.setChecked(True)
+            chk_drawings_only.setEnabled(False)
         
         h_btns = QHBoxLayout()
         h_btns.addStretch()
@@ -7149,7 +7217,8 @@ class CreatorWindow(QMainWindow):
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
             
-        target_lvl = c_level.currentData()
+        drawings_only = chk_drawings_only.isChecked()
+        target_lvl = c_level.currentData() or {"name": "", "order": 1}
         target_lang = c_lang.currentData()
         subvariations_as_comments = chk_subvariations.isChecked()
         
@@ -7169,7 +7238,8 @@ class CreatorWindow(QMainWindow):
             target_lvl['name'], 
             target_lvl['order'],
             target_lang=target_lang,
-            subvariations_as_comments=subvariations_as_comments
+            subvariations_as_comments=subvariations_as_comments,
+            drawings_only=drawings_only,
         )
         self.w_pgn.progress_signal.connect(self.p_pgn.setValue)
         self.w_pgn.finished_signal.connect(self._on_pgn_import_finished)
@@ -7267,22 +7337,34 @@ class CreatorWindow(QMainWindow):
         self.clear_search_tab()
 
         # Stop/disconnect background enrichment and index workers from previous repertoire
+        if not hasattr(self, '_retired_threads'):
+            self._retired_threads = []
         if hasattr(self, 'enrichment_queue'):
             self.enrichment_queue.clear()
         if hasattr(self, 'enrichment_threads'):
             for t in list(self.enrichment_threads):
                 try:
                     t.finished_signal.disconnect()
+                except Exception:
+                    pass
+                try:
                     if t.isRunning():
                         t.wait(50)
+                    if t.isRunning():
+                        self._retired_threads.append(t)
+                        t.finished.connect(lambda thr=t: self._retired_threads.remove(thr) if thr in self._retired_threads else None)
                 except Exception:
                     pass
             self.enrichment_threads.clear()
         if hasattr(self, '_fen_index_thread') and self._fen_index_thread and self._fen_index_thread.isRunning():
+            t_idx = self._fen_index_thread
             try:
-                self._fen_index_thread.ready.disconnect()
-                self._fen_index_thread.requestInterruption()
-                self._fen_index_thread.wait(50)
+                t_idx.ready.disconnect()
+                t_idx.requestInterruption()
+                t_idx.wait(50)
+                if t_idx.isRunning():
+                    self._retired_threads.append(t_idx)
+                    t_idx.finished.connect(lambda thr=t_idx: self._retired_threads.remove(thr) if thr in self._retired_threads else None)
             except Exception:
                 pass
             self._fen_index_thread = None
@@ -7305,7 +7387,17 @@ class CreatorWindow(QMainWindow):
         self.active_repo_name = repo_name
         self.config["last_active_repertoire"] = repo_name
         self.save_config()
-        self.backend.load_repertoire(repo_name, is_test)
+        try:
+            self.backend.load_repertoire(repo_name, is_test)
+        except DatabaseCorruptedException as e:
+            logger.error(f"CreatorWindow: Failed to load corrupted repertoire '{repo_name}': {e}")
+            QMessageBox.critical(
+                self,
+                tr_ui("main.dlg_db_defective_title", "Datenbank defekt"),
+                f"Das Repertoire '{repo_name}' ist beschädigt und kann nicht geladen werden.\n\nFehler: {e}"
+            )
+            self.load_repertoire(None)
+            return
         self._load_saved_elo_or_autoselect()
         if hasattr(self, 'btn_load_repo') and self.btn_load_repo:
             self.btn_load_repo.update_repo(repo_name)
@@ -9455,7 +9547,14 @@ class CreatorWindow(QMainWindow):
 
     def _build_fen_index(self):
         """Launch a background thread to build the FEN index — zero main-thread blocking."""
-        if not self.backend.session or not self.backend.active_repo_name or not str(self.backend.active_repo_name).strip():
+        if (
+            getattr(self, "_is_closing", False)
+            or not self.backend
+            or not self.backend.session
+            or not self.backend.active_repo_name
+            or not isinstance(self.backend.active_repo_name, str)
+            or not self.backend.active_repo_name.strip()
+        ):
             return
         db_path = get_repertoire_db_path(
             self.backend.active_repo_name, self.backend.is_test
@@ -11972,7 +12071,14 @@ class CreatorWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Clean up background resources before closing."""
+        self._is_closing = True
         from PyQt6.QtWidgets import QDialog, QApplication
+        try:
+            app = QApplication.instance()
+            if app:
+                app.removeEventFilter(self)
+        except Exception:
+            pass
         for w in list(QApplication.topLevelWidgets()):
             if isinstance(w, QDialog) and w != self:
                 try:
@@ -11995,7 +12101,7 @@ class CreatorWindow(QMainWindow):
             except Exception:
                 pass
 
-        for attr_name in ('hole_thread', 'update_checker', 'lockout_worker', 'translation_thread'):
+        for attr_name in ('hole_thread', 'update_checker', 'lockout_worker', 'translation_thread', '_fen_index_thread', '_bfs_thread', '_path_quality_thread'):
             w = getattr(self, attr_name, None)
             if w and w.isRunning():
                 try:
@@ -12004,7 +12110,7 @@ class CreatorWindow(QMainWindow):
                     if hasattr(w, 'cancel'):
                         w.cancel()
                     w.requestInterruption()
-                    w.wait(300)
+                    w.wait(2000)
                 except Exception:
                     pass
 

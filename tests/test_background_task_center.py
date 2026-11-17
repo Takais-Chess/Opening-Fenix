@@ -173,7 +173,7 @@ def test_repertoire_elo_sync(qapp, monkeypatch):
 
 def test_combined_sync_job_parallel(monkeypatch):
     import time
-    from opening_fenix.core.services import task_manager_service
+    from opening_fenix.core.services import lichess_service, analysis_service
 
     lich_started = []
     eng_started = []
@@ -195,8 +195,8 @@ def test_combined_sync_job_parallel(monkeypatch):
             time.sleep(0.04)
         return True, "Engine success"
 
-    monkeypatch.setattr(task_manager_service, "run_lichess_import_and_calculate_scores", mock_lich)
-    monkeypatch.setattr(task_manager_service, "run_db_analysis", mock_eng)
+    monkeypatch.setattr(lichess_service, "run_lichess_import_and_calculate_scores", mock_lich)
+    monkeypatch.setattr(analysis_service, "run_db_analysis", mock_eng)
 
     job = CombinedSyncJob("TestRepo", "high", depth=12, threads=2, engine_path="dummy.exe")
     progresses = []
@@ -214,7 +214,7 @@ def test_combined_sync_job_parallel(monkeypatch):
 
 
 def test_batch_maintenance_job_execution(monkeypatch):
-    from opening_fenix.core.services import task_manager_service
+    from opening_fenix.core.services import maintenance_service
 
     called_configs = []
     called_tasks = []
@@ -228,7 +228,7 @@ def test_batch_maintenance_job_execution(monkeypatch):
         repo_status_callback(repo_configs[0]["name"], "engine", 100, "Done")
         return True, "Batch finished successfully"
 
-    monkeypatch.setattr(task_manager_service, "run_group_maintenance", mock_run_group)
+    monkeypatch.setattr(maintenance_service, "run_group_maintenance", mock_run_group)
 
     tasks_dict = {
         'engine': True,
@@ -255,7 +255,7 @@ def test_batch_maintenance_job_execution(monkeypatch):
     assert len(progresses) >= 1 and progresses[-1] == 100
 
 
-def test_idea1_and_idea2_progress_widgets(qapp):
+def test_idea1_and_idea2_progress_widgets(qapp, monkeypatch):
     dlg = TaskCenterDialog(None, active_repo_name=None)
     # Idea 1: 6-column live batch table + overall batch progress bar
     assert dlg.table_batch.columnCount() == 6
@@ -273,6 +273,7 @@ def test_idea1_and_idea2_progress_widgets(qapp):
     # Simulate CombinedSyncJob sub_progress
     comb_job = CombinedSyncJob("TestSicilian", "high", depth=12, threads=2, engine_path="dummy.exe")
     comb_job.status = JobStatus.RUNNING
+    monkeypatch.setattr(dlg.tm, "get_current_job", lambda: comb_job)
     dlg.combo_repo.addItem("TestSicilian")
     dlg.set_active_repertoire("TestSicilian")
     dlg._on_sub_progress(comb_job, "lichess", 45, "45/100 positions")

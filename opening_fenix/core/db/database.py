@@ -57,6 +57,22 @@ def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: fl
                     pass
                 raise
 
+def _is_orphaned_pages_only(result: str) -> bool:
+    """Returns True if PRAGMA quick_check reported only unused/orphaned pages."""
+    lines = [line.strip() for line in result.splitlines() if line.strip()]
+    if not lines:
+        return False
+    has_page_warning = False
+    for line in lines:
+        if line.startswith("*** in database ") and line.endswith("***"):
+            continue
+        if line.startswith("Page ") and line.endswith(": never used"):
+            has_page_warning = True
+            continue
+        return False
+    return has_page_warning
+
+
 class DatabaseCorruptedException(Exception):
     """Raised when a SQLite database is physically corrupted or malformed."""
     pass
@@ -89,11 +105,12 @@ class DatabaseManager:
                 self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 60, 'check_same_thread': False}, poolclass=NullPool)
 
             if db_filename != ":memory:":
+                is_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
                 @event.listens_for(self.engine, "connect")
                 def _set_sqlite_pragmas(dbapi_connection, connection_record):
                     try:
                         dbapi_connection.execute("PRAGMA busy_timeout=60000")
-                        dbapi_connection.execute("PRAGMA synchronous=NORMAL")
+                        dbapi_connection.execute("PRAGMA synchronous=OFF" if is_pytest else "PRAGMA synchronous=NORMAL")
                         dbapi_connection.execute("PRAGMA cache_size=-64000")
                         dbapi_connection.execute("PRAGMA mmap_size=268435456")
                         dbapi_connection.execute("PRAGMA temp_store=MEMORY")
@@ -102,12 +119,12 @@ class DatabaseManager:
 
             try:
                 norm_key = (os.path.abspath(db_filename), id(base)) if db_filename != ":memory:" else None
-                if (
+                had_existing_db = (
                     norm_key is not None
                     and os.path.exists(db_filename)
                     and os.path.getsize(db_filename) > 0
-                    and norm_key in _verified_db_keys
-                ):
+                )
+                if had_existing_db and norm_key in _verified_db_keys:
                     return
                 base.metadata.create_all(self.engine)
                 if db_filename != ":memory:":
@@ -116,8 +133,9 @@ class DatabaseManager:
                             conn.exec_driver_sql("PRAGMA journal_mode=WAL")
                     except Exception:
                         pass
-                self._check_integrity()
-                self._migrate_schema(base)
+                if had_existing_db:
+                    self._check_integrity()
+                    self._migrate_schema(base)
                 if norm_key is not None:
                     _verified_db_keys.add(norm_key)
             except DatabaseError as e:
@@ -138,9 +156,25 @@ class DatabaseManager:
         try:
             with self.engine.connect() as conn:
                 # Use quick_check for startup to avoid long delays on large DBs
-                result = conn.execute(text("PRAGMA quick_check")).scalar()
+                rows = conn.execute(text("PRAGMA quick_check")).fetchall()
+                result = "\n".join(str(r[0]) for r in rows if r and r[0] is not None)
                 if result != "ok":
                     from opening_fenix.core.logger import logger
+                    if _is_orphaned_pages_only(result):
+                        logger.warning(
+                            "Database integrity check found only orphaned pages; "
+                            "attempting automatic VACUUM repair..."
+                        )
+                        try:
+                            conn.rollback()
+                            conn.execution_options(isolation_level="AUTOCOMMIT").execute(text("VACUUM"))
+                            rows = conn.execute(text("PRAGMA quick_check")).fetchall()
+                            result = "\n".join(str(r[0]) for r in rows if r and r[0] is not None)
+                            if result == "ok":
+                                logger.info("Automatic VACUUM repair succeeded.")
+                                return
+                        except Exception as vacuum_err:
+                            logger.error(f"Automatic VACUUM repair failed: {vacuum_err}")
                     logger.error(f"Database integrity check failed: {result}")
                     raise DatabaseCorruptedException(f"Integrity check failed: {result}")
         except DatabaseCorruptedException:

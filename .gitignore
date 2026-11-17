@@ -109,6 +109,7 @@ profiles/**/*.db
 profiles/**/*.json
 profiles/**/*.db-shm
 profiles/**/*.db-wal
+profiles/*.bak
 repertoires/*
 !repertoires/.gitkeep
 config.json
@@ -151,6 +152,8 @@ ImportServiceTest/
 SmallRepo/
 TestRepo/
 LangImportRepo/
+DrawingsOnlyRepo/
+NoDrawingsRepo/
 Test Course/
 Test_PGN_Subvar_Disabled/
 Test_PGN_Subvar_Enabled/
