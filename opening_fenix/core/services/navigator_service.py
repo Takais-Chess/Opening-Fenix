@@ -3,6 +3,7 @@ from typing import Set, Dict, List, Tuple, Optional
 from collections import deque
 from sqlalchemy import or_
 from opening_fenix.core.db.models import Position
+from opening_fenix.core.utils import matches_variation_name
 
 class RepertoireNavigator:
     """
@@ -27,7 +28,6 @@ class RepertoireNavigator:
         # 1. Find all positions explicitly named (V1, V2, or V3) using in-memory pos_cache when populated
         v_like = f'%"{variation_name}"%'
         if pos_cache:
-            from opening_fenix.core.utils import matches_variation_name
             root_ids = {
                 p.id for p in pos_cache.values()
                 if matches_variation_name(p.variation_1, variation_name)
@@ -69,7 +69,6 @@ class RepertoireNavigator:
             if not p: continue
             
             f = {1: None, 2: None, 3: None}
-            from opening_fenix.core.utils import matches_variation_name
             if matches_variation_name(p.variation_1, variation_name): f[1] = variation_name
             if matches_variation_name(p.variation_2, variation_name): f[2] = variation_name
             if matches_variation_name(p.variation_3, variation_name): f[3] = variation_name
@@ -87,17 +86,16 @@ class RepertoireNavigator:
             for m in children:
                 child_pos = pos_cache.get(m.to_position_id)
                 if child_pos:
-                    v = [child_pos.variation_1, child_pos.variation_2, child_pos.variation_3]
-                    cv = [child_pos.cached_v1, child_pos.cached_v2, child_pos.cached_v3]
+                    v = (child_pos.variation_1, child_pos.variation_2, child_pos.variation_3)
+                    cv = (child_pos.cached_v1, child_pos.cached_v2, child_pos.cached_v3)
                     
                     pruned = False
-                    for i in [1, 2, 3]:
+                    for i in (1, 2, 3):
                         f_name = f[i]
                         child_v = v[i-1]
                         child_cv = cv[i-1]
                         
                         if f_name:
-                            from opening_fenix.core.utils import matches_variation_name
                             if (child_v and not matches_variation_name(child_v, f_name)) or (not child_v and child_cv and not matches_variation_name(child_cv, f_name)):
                                 pruned = True; break
                         else:
@@ -119,14 +117,15 @@ class RepertoireNavigator:
 
         return variation_move_ids
 
-    def calculate_reachable_moves(self, variation_filter: Optional[str], max_lvl: int, side: str, cache_data: Dict) -> List[Tuple[str, str]]:
+    def calculate_reachable_moves(self, variation_filter: Optional[str], max_lvl: int, side: str, cache_data: Dict, valid_move_ids: Optional[Set[int]] = None) -> List[Tuple[str, str]]:
         """Calculates all reachable moves for a given configuration."""
         pos_cache = cache_data['pos_cache']
         forward_moves_cache = cache_data['forward_moves_cache']
         move_parent_cache = cache_data['move_parent_cache']
         rep_move_cache = cache_data.get('rep_move_cache') or {}
         
-        valid_move_ids = self.build_variation_move_set(variation_filter, cache_data) if variation_filter else None
+        if valid_move_ids is None and variation_filter:
+            valid_move_ids = self.build_variation_move_set(variation_filter, cache_data)
         reachable = []
         
         root_positions = [pos_id for pos_id in pos_cache if pos_id not in move_parent_cache]
@@ -135,13 +134,14 @@ class RepertoireNavigator:
 
         queue = deque(root_positions)
         visited = set(root_positions)
+        side_marker = f' {side} '
         
         while queue:
             curr_id = queue.popleft()
             pos = pos_cache.get(curr_id)
             if not pos: continue
             
-            is_player = f' {side} ' in pos.fen
+            is_player = side_marker in pos.fen
             moves = forward_moves_cache.get(curr_id, [])
             
             for m in moves:

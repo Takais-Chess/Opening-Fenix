@@ -11,6 +11,7 @@ if sys.platform == 'win32':
     _WM_CLOSE = 0x0010
     _WM_SYSCOMMAND = 0x0112
     _SC_CLOSE = 0xF060
+    import ctypes as _ctypes
 
     class _WindowsMSG(ctypes.Structure):
         _fields_ = [
@@ -22,6 +23,8 @@ if sys.platform == 'win32':
             ('pt_x', wintypes.LONG),
             ('pt_y', wintypes.LONG),
         ]
+
+    _MSG_FIELD_OFFSET = _WindowsMSG.message.offset
 
     class ModalTaskbarCloseFilter(QAbstractNativeEventFilter):
         def __init__(self, dialog: QDialog, cleanup_fn: Optional[Callable[[], None]] = None):
@@ -35,7 +38,11 @@ if sys.platform == 'win32':
                 return False, 0
             if eventType in ('windows_generic_MSG', 'windows_dispatcher_MSG'):
                 try:
-                    msg = _WindowsMSG.from_address(int(message))
+                    ptr = int(message)
+                    msg_id = _ctypes.c_uint.from_address(ptr + _MSG_FIELD_OFFSET).value
+                    if msg_id != _WM_CLOSE and msg_id != _WM_SYSCOMMAND:
+                        return False, 0
+                    msg = _WindowsMSG.from_address(ptr)
                     is_close = (msg.message == _WM_CLOSE) or (
                         msg.message == _WM_SYSCOMMAND and (msg.wParam & 0xFFF0) == _SC_CLOSE
                     )

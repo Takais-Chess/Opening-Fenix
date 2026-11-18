@@ -25,6 +25,17 @@ class _CachedPosition:
     cached_v1: Optional[str]
     cached_v2: Optional[str]
     cached_v3: Optional[str]
+    _good_moves_set: Optional[frozenset] = None
+
+
+def _norm_fen4(fen: str) -> str:
+    if not fen:
+        return ""
+    s = fen.strip()
+    if s.count(" ") >= 5:
+        return s.rsplit(" ", 2)[0]
+    parts = s.split(" ")
+    return " ".join(parts[:4])
 
 
 @dataclass(slots=True)
@@ -147,8 +158,10 @@ class TrainingManager:
         self._reachable_keys_cache = None
         self._norm_reachable_keys_cache = None # List of (fen, uci) reachable for current repo/level
         self._reachable_moves_by_key = {}
-        self._last_stats_cache = None # (new, due, dist)
+        self._last_stats_cache = None # (cache_key, (new, due, dist))
         self._user_settings_cache = None # Cached UserRepertoireSettings for active repertoire
+        self._all_user_settings_cache: Optional[Dict[str, UserRepertoireSettings]] = None
+        self._settings_dirty: bool = False
         
         self.navigator = RepertoireNavigator(repertoire_manager)
         
@@ -308,7 +321,7 @@ class TrainingManager:
         val, unit = DEFAULT_BOX_INTERVALS["standard"].get(box, (1, "days"))
         return parse_interval_delta(val, unit)
 
-    def record_new_card_trained(self) -> None:
+    def record_new_card_trained(self, defer_save: bool = False) -> None:
         today_str = datetime.date.today().isoformat()
         daily_data = self.settings.setdefault("daily_new_cards", {})
         if len(daily_data) > 14:
@@ -316,7 +329,11 @@ class TrainingManager:
             self.settings["daily_new_cards"] = {k: v for k, v in daily_data.items() if k >= cutoff}
             daily_data = self.settings["daily_new_cards"]
         daily_data[today_str] = daily_data.get(today_str, 0) + 1
-        self.save_settings()
+        if defer_save:
+            self._settings_dirty = True
+        else:
+            self.save_settings()
+            self._settings_dirty = False
 
     def get_today_new_cards_count(self) -> int:
         today_str = datetime.date.today().isoformat()
@@ -352,21 +369,57 @@ class TrainingManager:
 
         return valid_repos
 
+    def _get_all_user_settings_map(self) -> Dict[str, UserRepertoireSettings]:
+        if self._all_user_settings_cache is not None:
+            return self._all_user_settings_cache
+        if not self.user_session:
+            return {}
+        with self.user_session.no_autoflush:
+            rows = self.user_session.query(UserRepertoireSettings).all()
+        self._all_user_settings_cache = {s.repertoire_name: s for s in rows}
+        return self._all_user_settings_cache
+
+    def _get_repo_user_settings(self, repo_name: Optional[str]) -> Optional[UserRepertoireSettings]:
+        if not repo_name or not self.user_session:
+            return None
+        active = self.repertoire_manager.active_repertoire_name if self.repertoire_manager else None
+        if repo_name == active and self._user_settings_cache is not None:
+            return self._user_settings_cache
+        if self._all_user_settings_cache is not None and repo_name in self._all_user_settings_cache:
+            return self._all_user_settings_cache[repo_name]
+        with self.user_session.no_autoflush:
+            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        if self._all_user_settings_cache is not None and settings is not None:
+            self._all_user_settings_cache[repo_name] = settings
+        return settings
+
     def set_repo_visibility(self, repo_name: str, is_visible: bool) -> None:
         if not self.user_session: return
         existing = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        active = self.repertoire_manager.active_repertoire_name if self.repertoire_manager else None
         if is_visible:
-            if not existing:
-                new_setting = UserRepertoireSettings(repertoire_name=repo_name, active_level=1, comment_language="auto")
-                self.user_session.add(new_setting)
+            setting = existing
+            if not setting:
+                setting = UserRepertoireSettings(repertoire_name=repo_name, active_level=1, comment_language="auto")
+                self.user_session.add(setting)
+            if self._all_user_settings_cache is not None:
+                self._all_user_settings_cache[repo_name] = setting
+            if repo_name == active:
+                self._user_settings_cache = setting
         else:
             if existing:
                 self.user_session.delete(existing)
+                if self._all_user_settings_cache is not None:
+                    self._all_user_settings_cache.pop(repo_name, None)
+            if repo_name == active:
+                self._user_settings_cache = None
         self.user_session.commit()
 
     def is_repo_visible(self, repo_name: str) -> bool:
         if not self.user_session: return False
-        return self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).count() > 0
+        if self._all_user_settings_cache is not None:
+            return repo_name in self._all_user_settings_cache
+        return self._get_repo_user_settings(repo_name) is not None
 
     def get_active_level(self, repo_name: Optional[str] = None) -> int:
         if not self.user_session: 
@@ -377,12 +430,11 @@ class TrainingManager:
             if settings:
                 return settings.active_level
             return 999 if is_free_training_profile(self.profile_name) else 1
-            
-        with self.user_session.no_autoflush:
-            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-            if settings:
-                return settings.active_level
-            return 999 if is_free_training_profile(self.profile_name) else 1
+
+        settings = self._get_repo_user_settings(repo_name)
+        if settings:
+            return settings.active_level
+        return 999 if is_free_training_profile(self.profile_name) else 1
 
     def set_active_level(self, level_order: int, repo_name: Optional[str] = None) -> None:
         if not self.user_session: return
@@ -399,18 +451,17 @@ class TrainingManager:
             settings.stats_updated_at = None
             settings.last_dist_json = None
         self.user_session.commit()
-        # Invalidate caches
+        if self._all_user_settings_cache is not None:
+            self._all_user_settings_cache[repo_name] = settings
+        # Invalidate level-dependent caches without dropping immutable graph/move/TD caches
         if repo_name == self.repertoire_manager.active_repertoire_name:
-            self._variation_move_ids = set()
-            self._rep_move_cache = None
+            self._user_settings_cache = settings
             self._reachable_moves_cache = None
             self._reachable_keys_cache = None
             self._norm_reachable_keys_cache = None
-            self._reachable_moves_by_key = {}
             self._last_stats_cache = None
             self._user_settings_cache = settings
             self._cached_elo = None
-        self._td_cache = None
 
     def get_comment_language(self, repo_name: Optional[str] = None) -> str:
         if not self.user_session:
@@ -419,10 +470,9 @@ class TrainingManager:
             repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
         if not repo_name:
             return "auto"
-        with self.user_session.no_autoflush:
-            settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-            if settings and hasattr(settings, 'comment_language') and settings.comment_language:
-                return settings.comment_language
+        settings = self._get_repo_user_settings(repo_name)
+        if settings and hasattr(settings, 'comment_language') and settings.comment_language:
+            return settings.comment_language
         return "auto"
 
     def set_comment_language(self, comment_lang: str, repo_name: Optional[str] = None) -> None:
@@ -438,8 +488,16 @@ class TrainingManager:
         else:
             settings.comment_language = comment_lang
         self.user_session.commit()
+        if self._all_user_settings_cache is not None:
+            self._all_user_settings_cache[repo_name] = settings
+        if repo_name == getattr(self.repertoire_manager, 'active_repertoire_name', None):
+            self._user_settings_cache = settings
         
     def close(self) -> None:
+        if self._settings_dirty:
+            self.save_settings()
+            self._settings_dirty = False
+        self._all_user_settings_cache = None
         if self.user_session:
             self.user_session.close()
             self.user_session = None
@@ -447,7 +505,7 @@ class TrainingManager:
             self.user_db.close()
             self.user_db = None
 
-    def on_repertoire_changed(self):
+    def on_repertoire_changed(self, clear_persistent_stats: bool = True):
         """Called when switching repertoires to ensure no data leaks between them."""
         self._variation_move_ids = set()
         self._active_filter_name = None
@@ -468,7 +526,7 @@ class TrainingManager:
         self._reachable_moves_by_key = {}
         self._last_stats_cache = None
         self._user_settings_cache = None
-        if self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
+        if clear_persistent_stats and self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
             try:
                 settings = self.user_session.query(UserRepertoireSettings).filter_by(
                     repertoire_name=self.repertoire_manager.active_repertoire_name
@@ -481,7 +539,12 @@ class TrainingManager:
 
     def invalidate_caches(self):
         """Invalidates all internal caches when priority scores or repertoire data change."""
-        self.on_repertoire_changed()
+        if self.repertoire_manager:
+            if hasattr(self.repertoire_manager, 'invalidate_priority_cache'):
+                self.repertoire_manager.invalidate_priority_cache()
+            if getattr(self.repertoire_manager, 'explorer', None) and hasattr(self.repertoire_manager.explorer, 'invalidate_cache'):
+                self.repertoire_manager.explorer.invalidate_cache()
+        self.on_repertoire_changed(clear_persistent_stats=True)
 
     def reset_repertoire_progress(self, repo_name: Optional[str] = None) -> Tuple[bool, str]:
         target_repo = repo_name or (self.repertoire_manager.active_repertoire_name if self.repertoire_manager else None)
@@ -501,6 +564,13 @@ class TrainingManager:
             self._norm_td_cache = None
             self._cached_elo = None
             self._last_stats_cache = None
+            if self._all_user_settings_cache is not None:
+                if settings is not None:
+                    self._all_user_settings_cache[target_repo] = settings
+                else:
+                    self._all_user_settings_cache.pop(target_repo, None)
+            if self.repertoire_manager and target_repo == self.repertoire_manager.active_repertoire_name:
+                self._user_settings_cache = settings
             return True, f"{num_deleted} Fortschritts-Einträge zurückgesetzt."
         except Exception as e:
             self.user_session.rollback()
@@ -531,6 +601,11 @@ class TrainingManager:
 
             self.user_session.commit()
             self._td_cache = None
+            self._norm_td_cache = None
+            self._user_settings_cache = None
+            self._all_user_settings_cache = None
+            self._last_stats_cache = None
+            self._cached_elo = None
             return True, "User data updated."
         except Exception as e:
             self.user_session.rollback()
@@ -550,15 +625,16 @@ class TrainingManager:
             
             repo_sess = self.repertoire_manager.repo_session
             if isinstance(repo_sess, Session):
-                pos_rows = repo_sess.execute(text(
+                conn = repo_sess.connection()
+                pos_rows = conn.exec_driver_sql(
                     "SELECT id, fen, comment, good_moves, variation_1, variation_2, variation_3, cached_v1, cached_v2, cached_v3 FROM positions"
-                )).all()
+                ).fetchall()
                 pos_cache = self._pos_cache
                 for r in pos_rows:
                     pos_cache[r[0]] = _CachedPosition(*r)
-                move_rows = repo_sess.execute(text(
+                move_rows = conn.exec_driver_sql(
                     "SELECT id, from_position_id, to_position_id, uci, san, priority_score, nag FROM moves"
-                )).all()
+                ).fetchall()
                 all_moves = [
                     _CachedMove(r[0], r[1], r[2], r[3], r[4], r[5] or 0.0, r[6], pos_cache.get(r[1]))
                     for r in move_rows
@@ -600,9 +676,9 @@ class TrainingManager:
             
         if self._rep_move_cache is None or self._moves_by_level is None:
             if isinstance(self.repertoire_manager.repo_session, Session):
-                rm_rows = self.repertoire_manager.repo_session.execute(text(
+                rm_rows = self.repertoire_manager.repo_session.connection().exec_driver_sql(
                     "SELECT move_id, level, is_active FROM repertoire_moves WHERE is_active = 1"
-                )).all()
+                ).fetchall()
                 all_rep_moves = [_CachedRepMove(r[0], r[1] if r[1] is not None else 1, bool(r[2])) for r in rm_rows]
             else:
                 all_rep_moves = self.repertoire_manager.core.get_all_active_repertoire_moves()
@@ -635,7 +711,7 @@ class TrainingManager:
         for td in tds:
             self._td_cache[(td.fen, td.move_uci)] = td
             if td.fen:
-                norm_f = " ".join(td.fen.split()[:4])
+                norm_f = _norm_fen4(td.fen)
                 self._norm_td_cache[(norm_f, td.move_uci)] = td
 
     def _build_variation_move_set(self, variation_name):
@@ -677,9 +753,10 @@ class TrainingManager:
         if cache_key in by_key:
             moves_list, keys_set, norm_keys_set = by_key[cache_key]
         else:
-            moves_list = self._calculate_reachable_moves(variation_filter)
+            valid_move_ids = self._build_variation_move_set(variation_filter) if variation_filter else None
+            moves_list = self._calculate_reachable_moves(variation_filter, valid_move_ids=valid_move_ids)
             keys_set = set(moves_list)
-            norm_keys_set = {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in keys_set}
+            norm_keys_set = {(_norm_fen4(f), u) for (f, u) in keys_set}
             by_key[cache_key] = (moves_list, keys_set, norm_keys_set)
 
         self._reachable_moves_cache = moves_list
@@ -688,7 +765,7 @@ class TrainingManager:
         self._reachable_moves_cache_key = cache_key
         return self._reachable_moves_cache
 
-    def _calculate_reachable_moves(self, variation_filter, max_lvl=None):
+    def _calculate_reachable_moves(self, variation_filter, max_lvl=None, valid_move_ids=None):
         """Internal BFS to find all reachable moves for a given configuration."""
         if max_lvl is None:
             max_lvl = self.get_active_level()
@@ -702,7 +779,7 @@ class TrainingManager:
             'rep_move_cache': self._rep_move_cache
         }
         
-        return self.navigator.calculate_reachable_moves(variation_filter, max_lvl, side, cache_data)
+        return self.navigator.calculate_reachable_moves(variation_filter, max_lvl, side, cache_data, valid_move_ids=valid_move_ids)
 
     def get_box_statistics(self, max_lvl: Optional[int] = None) -> Dict[str, Any]:
         """
@@ -713,13 +790,12 @@ class TrainingManager:
         self._ensure_td_cache()
         
         target_lvl = max_lvl if max_lvl is not None else 999
-        reachable = self._calculate_reachable_moves(None, max_lvl=target_lvl)
+        if max_lvl is not None and target_lvl == self.get_active_level():
+            reachable = self._ensure_reachable_moves_cache(None)
+        else:
+            reachable = self._calculate_reachable_moves(None, max_lvl=target_lvl)
         user_map = self._td_cache or {}
-        
-        def _clean_fen(f: str) -> str:
-            return " ".join(f.split()[:4]) if f else ""
-            
-        norm_user_map = {(_clean_fen(k[0]), k[1]): v for k, v in user_map.items()}
+        norm_user_map = self._norm_td_cache if getattr(self, '_norm_td_cache', None) is not None else {(_norm_fen4(k[0]), k[1]): v for k, v in user_map.items()}
         
         lookahead = datetime.datetime.now() + datetime.timedelta(minutes=5)
         box_counts = {i: 0 for i in range(1, 8)}
@@ -728,7 +804,7 @@ class TrainingManager:
         total_learned = 0
         
         for fen, uci in reachable:
-            entry = user_map.get((fen, uci)) or norm_user_map.get((_clean_fen(fen), uci))
+            entry = user_map.get((fen, uci)) or norm_user_map.get((_norm_fen4(fen), uci))
             if entry and 1 <= entry.box <= 7:
                 box_counts[entry.box] += 1
                 total_learned += 1
@@ -821,38 +897,52 @@ class TrainingManager:
             ratings[self.repertoire_manager.active_repertoire_name] = float(self._cached_elo)
         return ratings
 
-    def get_stats(self, variation_filter=None, use_cache=True, auto_commit=True):
+    def get_stats(self, variation_filter=None, use_cache=True, auto_commit=True, allow_stale_cache=False):
         if not self.repertoire_manager.repo_session: return 0, 0, {}
-        
+        repo_name = self.repertoire_manager.active_repertoire_name
+        active_level = self.get_active_level()
+        mem_cache_key = (repo_name, active_level, variation_filter)
+
+        # 0. Check in-memory stats cache when use_cache=True
+        if use_cache and self._last_stats_cache is not None and self._last_stats_cache[0] == mem_cache_key:
+            cached_new, cached_due, cached_dist, cached_at = self._last_stats_cache[1]
+            if allow_stale_cache or (datetime.datetime.now() - cached_at).total_seconds() < 60:
+                return cached_new, cached_due, dict(cached_dist)
+
         # 1. Check persistent DB cache first if no variation filter and use_cache is True
         if not variation_filter and use_cache:
-            settings = self.user_session.query(UserRepertoireSettings).filter_by(
-                repertoire_name=self.repertoire_manager.active_repertoire_name
-            ).first()
-            
-            if settings and settings.last_dist_json and settings.stats_updated_at:
-                # Basic check: only use if updated in the last 1 minute (for due moves)
-                # This ensures "due" status is somewhat fresh.
-                if (datetime.datetime.now() - settings.stats_updated_at).total_seconds() < 60:
+            settings = self._get_repo_user_settings(repo_name)
+            if settings and settings.last_dist_json and (allow_stale_cache or settings.stats_updated_at):
+                is_fresh = allow_stale_cache or (
+                    settings.stats_updated_at is not None
+                    and (datetime.datetime.now() - settings.stats_updated_at).total_seconds() < 60
+                )
+                if is_fresh:
                     try:
                         dist = json.loads(settings.last_dist_json)
-                        # Box keys in JSON are strings, convert back to int
                         dist = {int(k): v for k, v in dist.items()}
-                        return settings.last_new_count, settings.last_due_count, dist
-                    except: pass
+                        res = (settings.last_new_count, settings.last_due_count, dist)
+                        self._last_stats_cache = (mem_cache_key, (*res, datetime.datetime.now()))
+                        return res
+                    except Exception:
+                        pass
 
         # 2. Use "Smart Incremental" local cache approach
         reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
         
         self._ensure_td_cache()
         user_map = self._td_cache
+        norm_user_map = self._norm_td_cache or {}
         new_c, due_c = 0, 0
         done_dist = {i: 0 for i in range(1, 8)} 
         lookahead = datetime.datetime.now() + datetime.timedelta(minutes=5)
+        is_free = is_free_training_profile(self.profile_name)
         
         for fen, uci in reachable_repo_moves:
             entry = user_map.get((fen, uci))
-            if is_free_training_profile(self.profile_name):
+            if entry is None and norm_user_map:
+                entry = norm_user_map.get((_norm_fen4(fen), uci))
+            if is_free:
                 if not entry: due_c += 1
                 else: done_dist[7] = done_dist.get(7, 0) + 1
             else:
@@ -860,6 +950,8 @@ class TrainingManager:
                 elif entry.next_due <= lookahead: due_c += 1
                 else: done_dist[entry.box] = done_dist.get(entry.box, 0) + 1
         
+        self._last_stats_cache = (mem_cache_key, (new_c, due_c, dict(done_dist), datetime.datetime.now()))
+
         # 3. Update persistent cache if no filter
         if not variation_filter:
             self._update_persistent_stats_cache(new_c, due_c, done_dist, auto_commit=auto_commit)
@@ -870,9 +962,7 @@ class TrainingManager:
         """Saves stats to the UserRepertoireSettings table."""
         if not self.user_session or not self.repertoire_manager.active_repertoire_name: return
         try:
-            settings = self.user_session.query(UserRepertoireSettings).filter_by(
-                repertoire_name=self.repertoire_manager.active_repertoire_name
-            ).first()
+            settings = self._get_repo_user_settings(self.repertoire_manager.active_repertoire_name)
             if settings:
                 settings.last_new_count = new_c
                 settings.last_due_count = due_c
@@ -880,6 +970,9 @@ class TrainingManager:
                 settings.stats_updated_at = datetime.datetime.now()
                 if auto_commit:
                     self.user_session.commit()
+                    self._has_pending_commit = False
+                else:
+                    self._has_pending_commit = True
         except Exception as e:
             logger.error(f"Error updating stats cache: {e}")
             if auto_commit:
@@ -887,8 +980,8 @@ class TrainingManager:
 
     def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None, exclude_move_ids=None):
         if not self.repertoire_manager.repo_session: return None, []
-        self.repertoire_manager._ensure_priority_cache()
         self._ensure_forward_cache()
+        self.repertoire_manager._ensure_priority_cache()
         self._ensure_td_cache()
         
         max_lvl = self.get_active_level()
@@ -905,42 +998,39 @@ class TrainingManager:
 
         # 2. Due Mode
         if mode == 'due':
-            due_items = list(self._td_cache.values())
-            due_items = [td for td in due_items if td.next_due <= lookahead]
-            
-            # Sort based on queue_priority_order setting
-            sort_order = self.get_setting("queue_priority_order") or "priority_first"
-            if sort_order == "priority_first":
-                due_items.sort(key=lambda x: (-(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0), x.box))
-            else:
-                due_items.sort(key=lambda x: (x.box, -(self.repertoire_manager.priority_cache.get((x.fen, x.move_uci)) or 0.0)))
-            
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
             reachable_keys = self._reachable_keys_cache if self._reachable_keys_cache is not None else set(reachable_repo_moves)
-            norm_reachable_keys = self._norm_reachable_keys_cache if self._norm_reachable_keys_cache is not None else {(f.rsplit(" ", 2)[0] if f else "", u) for (f, u) in reachable_keys}
+            norm_reachable_keys = self._norm_reachable_keys_cache if self._norm_reachable_keys_cache is not None else {(_norm_fen4(f), u) for (f, u) in reachable_keys}
 
-            for item in due_items:
-                norm_item_fen = " ".join(item.fen.split()[:4]) if item.fen else ""
-                if (item.fen, item.move_uci) not in reachable_keys and (norm_item_fen, item.move_uci) not in norm_reachable_keys:
-                    continue
-                
-                # O(1) move lookup via FEN+UCI index
-                found_move = self._move_by_fen_uci_cache.get((item.fen, item.move_uci))
-                
-                if not found_move or (valid_move_ids is not None and found_move.id not in valid_move_ids): continue
-                if exclude_move_ids and found_move.id in exclude_move_ids: continue
-                
-                rep_move = self._rep_move_cache.get(found_move.id)
-                if not rep_move or rep_move.level > max_lvl: continue
-                
-                return self._get_ancestor(found_move, check_due=True, variation_filter=variation_filter), []
+            # Filter due & reachable moves BEFORE sorting
+            due_candidates = []
+            for td in self._td_cache.values():
+                if td.next_due <= lookahead:
+                    if (td.fen, td.move_uci) in reachable_keys or (_norm_fen4(td.fen), td.move_uci) in norm_reachable_keys:
+                        found_move = self._move_by_fen_uci_cache.get((td.fen, td.move_uci))
+                        if not found_move or (valid_move_ids is not None and found_move.id not in valid_move_ids):
+                            continue
+                        if exclude_move_ids and found_move.id in exclude_move_ids:
+                            continue
+                        rep_move = self._rep_move_cache.get(found_move.id)
+                        if not rep_move or rep_move.level > max_lvl:
+                            continue
+                        due_candidates.append((td, found_move))
+
+            if due_candidates:
+                sort_order = self.get_setting("queue_priority_order") or "priority_first"
+                prio_cache = self.repertoire_manager.priority_cache
+                if sort_order == "priority_first":
+                    due_candidates.sort(key=lambda pair: (-(prio_cache.get((pair[0].fen, pair[0].move_uci)) or 0.0), pair[0].box))
+                else:
+                    due_candidates.sort(key=lambda pair: (pair[0].box, -(prio_cache.get((pair[0].fen, pair[0].move_uci)) or 0.0)))
+                return self._get_ancestor(due_candidates[0][1], check_due=True, variation_filter=variation_filter), []
 
             if is_free_training_profile(self.profile_name):
-                # In free training, we only pick moves not yet successfully trained in this session
-                learned_keys = set(self._td_cache.keys())
+                td_cache = self._td_cache
                 candidates = []
                 for fen, uci in reachable_keys:
-                    if (fen, uci) not in learned_keys:
+                    if (fen, uci) not in td_cache:
                         m = self._move_by_fen_uci_cache.get((fen, uci))
                         if m:
                             if exclude_move_ids and m.id in exclude_move_ids: continue
@@ -954,43 +1044,58 @@ class TrainingManager:
         elif mode == 'new':
             reachable_repo_moves = self._ensure_reachable_moves_cache(variation_filter)
             reachable_keys = self._reachable_keys_cache if self._reachable_keys_cache is not None else set(reachable_repo_moves)
-            
+            td_cache = self._td_cache
+            norm_td_cache = self._norm_td_cache if getattr(self, '_norm_td_cache', None) is not None else {}
+
             if variation_filter:
-                self._ensure_forward_cache()
-                learned_keys = set(self._td_cache.keys())
-                filter_info = self.repertoire_manager._prepare_variation_filter(variation_filter)
-                lead_up_pos_ids = filter_info.get('lead_up', set())
-                
+                # Compute lead_up_pos_ids in memory from _pos_cache + _move_parent_cache if available
+                from opening_fenix.core.utils import matches_variation_name
+                root_ids = {
+                    p.id for p in self._pos_cache.values()
+                    if matches_variation_name(p.variation_1, variation_filter)
+                    or matches_variation_name(p.variation_2, variation_filter)
+                    or matches_variation_name(p.variation_3, variation_filter)
+                }
+                lead_up_pos_ids = set()
+                if root_ids:
+                    q_lead = deque(root_ids)
+                    seen_lead = set(root_ids)
+                    while q_lead:
+                        cid = q_lead.popleft()
+                        for pm in self._move_parent_cache.get(cid, ()):
+                            fp = pm.from_position_id
+                            lead_up_pos_ids.add(fp)
+                            if fp not in seen_lead:
+                                seen_lead.add(fp)
+                                q_lead.append(fp)
+                    lead_up_pos_ids -= root_ids
+
                 lead_up_candidates = []
                 for pos_id in lead_up_pos_ids:
                     pos = self._pos_cache.get(pos_id)
                     if not pos: continue
-                    
-                    for m in self._forward_moves_cache.get(pos_id, []):
-                        if (pos.fen, m.uci) in reachable_keys and (pos.fen, m.uci) not in learned_keys:
+                    for m in self._forward_moves_cache.get(pos_id, ()):
+                        if (pos.fen, m.uci) in reachable_keys and (pos.fen, m.uci) not in td_cache and (_norm_fen4(pos.fen), m.uci) not in norm_td_cache:
                             if exclude_move_ids and m.id in exclude_move_ids: continue
                             lead_up_candidates.append(m)
                 
                 if lead_up_candidates:
-                    # Prioritize the earliest unlearned lead-up move (highest priority first)
                     lead_up_candidates.sort(key=lambda x: (x.priority_score or 0.0), reverse=True)
                     return self._get_ancestor(lead_up_candidates[0], check_due=False, variation_filter=None), []
 
-            learned_keys = set(self._td_cache.keys())
-            norm_learned_keys = set(self._norm_td_cache.keys()) if getattr(self, '_norm_td_cache', None) is not None else {(" ".join(f.split()[:4]), u) for (f, u) in learned_keys}
-
             candidates = []
             for fen, uci in reachable_keys:
-                norm_f = " ".join(fen.split()[:4]) if fen else ""
-                if (fen, uci) not in learned_keys and (norm_f, uci) not in norm_learned_keys:
+                if (fen, uci) not in td_cache and (_norm_fen4(fen), uci) not in norm_td_cache:
                     m = self._move_by_fen_uci_cache.get((fen, uci))
                     if m:
                         if exclude_move_ids and m.id in exclude_move_ids: continue
                         candidates.append(m)
             
             if candidates:
-                def get_candidate_sort_key(m):
-                    pos = self._pos_cache.get(m.from_position_id)
+                pos_cache = self._pos_cache
+                scored = []
+                for m in candidates:
+                    pos = pos_cache.get(m.from_position_id)
                     depth = 0
                     if pos:
                         try:
@@ -1000,11 +1105,10 @@ class TrainingManager:
                             depth = (move_num - 1) * 2 + (1 if is_black else 0)
                         except Exception:
                             depth = 0
-                    return (m.priority_score or 0.0, -depth)
+                    scored.append(((m.priority_score or 0.0, -depth), m))
 
-                candidates.sort(key=get_candidate_sort_key, reverse=True)
-                top_key = get_candidate_sort_key(candidates[0])
-                best = [m for m in candidates if get_candidate_sort_key(m) == top_key]
+                top_key = max(k for k, _ in scored)
+                best = [m for k, m in scored if k == top_key]
                 return self._get_ancestor(random.choice(best), check_due=False, variation_filter=variation_filter), []
         
         return None, []
@@ -1114,12 +1218,14 @@ class TrainingManager:
         repo_name = self.repertoire_manager.active_repertoire_name
         if not repo_name or not self.user_session:
             return None
-        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        settings = self._get_repo_user_settings(repo_name)
         if not settings:
             default_lvl = 999 if is_free_training_profile(self.profile_name) else 1
             settings = UserRepertoireSettings(repertoire_name=repo_name, rating=800.0, active_level=default_lvl, comment_language="auto", last_rating_update=datetime.datetime.now())
             self.user_session.add(settings)
             self.user_session.commit()
+            if self._all_user_settings_cache is not None:
+                self._all_user_settings_cache[repo_name] = settings
         self._user_settings_cache = settings
         return settings
 
@@ -1307,8 +1413,12 @@ class TrainingManager:
         if not pos: return
         fen = pos.fen
         
-        entry = self._td_cache.get((fen, move.uci)) if self._td_cache is not None else None
-        if entry is None:
+        entry = None
+        if self._td_cache is not None:
+            entry = self._td_cache.get((fen, move.uci))
+            if entry is None and getattr(self, '_norm_td_cache', None) is not None:
+                entry = self._norm_td_cache.get((_norm_fen4(fen), move.uci))
+        elif self.user_session:
             entry = self.user_session.query(TrainingData).filter_by(repertoire_name=self.repertoire_manager.active_repertoire_name, fen=fen, move_uci=move.uci).first()
         now = datetime.datetime.now()
         is_first_time = (entry is None or entry.box == 0)
@@ -1327,7 +1437,7 @@ class TrainingManager:
                 entry.streak += 1
                 
             if was_new or is_first_time:
-                self.record_new_card_trained()
+                self.record_new_card_trained(defer_save=defer_commit)
         else:
             entry.box = 1
             entry.streak = 0
@@ -1339,12 +1449,13 @@ class TrainingManager:
         if self._td_cache is not None:
             self._td_cache[(fen, move.uci)] = entry
             if getattr(self, '_norm_td_cache', None) is not None:
-                self._norm_td_cache[(" ".join(fen.split()[:4]), move.uci)] = entry
+                self._norm_td_cache[(_norm_fen4(fen), move.uci)] = entry
 
         # Update Rating in-memory (no standalone commit)
         self.update_rating(move_id, success, auto_commit=False)
 
-        # Update persistent stats cache in-memory (no standalone commit)
+        # Update persistent & in-memory stats cache
+        self._last_stats_cache = None
         settings = self._get_rating_settings()
         if settings:
             settings.stats_updated_at = None
@@ -1357,6 +1468,9 @@ class TrainingManager:
             self._has_pending_commit = False
 
     def flush_pending_commits(self):
+        if getattr(self, '_settings_dirty', False):
+            self.save_settings()
+            self._settings_dirty = False
         if getattr(self, '_has_pending_commit', False) and self.user_session:
             try:
                 self.user_session.commit()

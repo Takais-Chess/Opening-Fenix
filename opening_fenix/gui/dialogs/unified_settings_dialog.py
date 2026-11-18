@@ -5,6 +5,7 @@ import re
 import json
 import datetime
 import multiprocessing
+from collections import OrderedDict
 from typing import Optional, Dict, Any, Tuple
 
 from PyQt6 import sip
@@ -277,13 +278,24 @@ class DualModeCell(QWidget):
         return self.label.text()
 
 
-_scaled_pixmap_cache: Dict[Tuple[str, int, int], QPixmap] = {}
+_scaled_pixmap_cache: "OrderedDict[Tuple[str, int, int], QPixmap]" = OrderedDict()
+_MAX_PIXMAP_CACHE = 64
+
+
+def invalidate_scaled_pixmap_cache(path: Optional[str] = None) -> None:
+    if path is None:
+        _scaled_pixmap_cache.clear()
+    else:
+        for k in [k for k in _scaled_pixmap_cache if k[0] == path]:
+            _scaled_pixmap_cache.pop(k, None)
+
 
 def get_cached_scaled_pixmap(path_or_default: Optional[str], width: int, height: int) -> QPixmap:
     """Returns a cached QPixmap scaled to width x height, avoiding repeated disk reads and bilinear scaling."""
     key = (path_or_default or "__default_logo__", width, height)
     cached = _scaled_pixmap_cache.get(key)
     if cached is not None and not cached.isNull():
+        _scaled_pixmap_cache.move_to_end(key)
         return cached
 
     target_size = QSize(width, height)
@@ -326,6 +338,9 @@ def get_cached_scaled_pixmap(path_or_default: Optional[str], width: int, height:
             pix = QPixmap()
 
     _scaled_pixmap_cache[key] = pix
+    _scaled_pixmap_cache.move_to_end(key)
+    while len(_scaled_pixmap_cache) > _MAX_PIXMAP_CACHE:
+        _scaled_pixmap_cache.popitem(last=False)
     return pix
 
 
@@ -1250,6 +1265,12 @@ class UnifiedSettingsDialog(QDialog):
             QApplication.instance().aboutToQuit.connect(self.reject)
             
         self.maintenance_loaded = False
+        self._trainer_cards_dirty = False
+        self._backups_dirty = True
+        self._desc_save_timer = QTimer(self)
+        self._desc_save_timer.setSingleShot(True)
+        self._desc_save_timer.setInterval(300)
+        self._desc_save_timer.timeout.connect(self.save_creator_description)
         self.stats_loader = None
         self.loading_dots = 0
         self.loading_timer = None
@@ -1336,9 +1357,12 @@ class UnifiedSettingsDialog(QDialog):
             repo_name = self.combo_active_repo.currentData() or (getattr(self.backend, 'active_repo_name', None) if self.backend else None)
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
             self._creator_info_dirty = True
+            self._trainer_cards_dirty = True
+            self._backups_dirty = True
             self.ensure_backend_for_active_repo()
             self.refresh_creator_info()
-            self.refresh_backups_list()
+            if hasattr(self, 'page_cr_backups') and self.pages.currentWidget() == self._wrap_page_if_needed(self.page_cr_backups):
+                self.refresh_backups_list()
         else:
             self._creator_info_dirty = True
             self.setWindowTitle(tr_ui("settings.unified_window_title_trainer", "Trainer-Einstellungen – Opening Fenix ({profile})", profile=display_profile))
@@ -1990,13 +2014,16 @@ class UnifiedSettingsDialog(QDialog):
             self.combo_active_repo.addItem(repo_name, repo_name)
             idx = self.combo_active_repo.findData(repo_name)
         if idx >= 0:
+            self._flush_pending_description()
             if self.combo_active_repo.currentIndex() != idx:
                 self.combo_active_repo.blockSignals(True)
                 self.combo_active_repo.setCurrentIndex(idx)
                 self.combo_active_repo.blockSignals(False)
             self.ensure_backend_for_active_repo()
             self.refresh_creator_info()
-            self.refresh_backups_list()
+            self._backups_dirty = True
+            if hasattr(self, 'page_cr_backups') and hasattr(self, 'pages') and self.pages.currentIndex() == self.pages.indexOf(self.page_cr_backups):
+                self.refresh_backups_list()
             if self.initial_section == "creator":
                 self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
 
@@ -2033,9 +2060,12 @@ class UnifiedSettingsDialog(QDialog):
         return self.backend
 
     def on_creator_repo_switched(self):
+        self._flush_pending_description()
         self.ensure_backend_for_active_repo()
         self.refresh_creator_info()
-        self.refresh_backups_list()
+        self._backups_dirty = True
+        if hasattr(self, 'page_cr_backups') and hasattr(self, 'pages') and self.pages.currentIndex() == self.pages.indexOf(self.page_cr_backups):
+            self.refresh_backups_list()
         if self.initial_section == "creator":
             repo_name = self.combo_active_repo.currentData() or self.combo_active_repo.currentText()
             self.setWindowTitle(tr_ui("settings.unified_window_title_creator", "Creator-Einstellungen – Opening Fenix ({repo})", repo=repo_name or "Repertoire"))
@@ -2179,6 +2209,12 @@ class UnifiedSettingsDialog(QDialog):
                     self.refresh_creator_info()
                 if hasattr(self, 'page_cr_backups') and idx == self.pages.indexOf(self.page_cr_backups):
                     self.refresh_backups_list()
+            elif hasattr(self, 'page_trainer_repos') and idx == self.pages.indexOf(self.page_trainer_repos):
+                if getattr(self, '_trainer_cards_dirty', False):
+                    self._trainer_cards_dirty = False
+                    self.refresh_trainer_repertoire_cards()
+                    if hasattr(self, 'update_trainer_card_selection_highlights'):
+                        self.update_trainer_card_selection_highlights()
             if self.main_scroll:
                 self.main_scroll.verticalScrollBar().setValue(0)
         else:
@@ -3118,7 +3154,10 @@ class UnifiedSettingsDialog(QDialog):
         v_cards.addWidget(self.scroll_trainer_cards)
         layout.addWidget(g_cards)
 
-        self.refresh_trainer_repertoire_cards()
+        if self.initial_section == "trainer":
+            self.refresh_trainer_repertoire_cards()
+        else:
+            self._trainer_cards_dirty = True
 
         # Repertoire Informationen (Vollständige Anzeige mit Cover, Farbe, Elo, Kommentaren, Levels & Beschreibung)
         self.grp_trainer_details = QGroupBox(tr_widget("settings.repo_info_title", "ℹ️ Repertoire Informationen"))
@@ -4035,7 +4074,7 @@ class UnifiedSettingsDialog(QDialog):
         self.txt_cr_desc = QPlainTextEdit()
         self.txt_cr_desc.setPlaceholderText(tr_ui("repo_settings.description_placeholder", "Beschreibe dein Repertoire hier..."))
         self.txt_cr_desc.setFixedHeight(scale(130))
-        self.txt_cr_desc.textChanged.connect(self.save_creator_description)
+        self.txt_cr_desc.textChanged.connect(self._schedule_creator_description_save)
 
         from opening_fenix.gui.widgets.spell_text_edit import attach_spell_check
         self.txt_cr_desc_highlighter = attach_spell_check(
@@ -4195,43 +4234,47 @@ class UnifiedSettingsDialog(QDialog):
 
         # Levels Table
         levels = backend.get_repertoire_levels()
-        self.tbl_cr_levels.setRowCount(0)
-        
-        if hasattr(self, 'combo_prio_target'):
-            self.combo_prio_target.clear()
-            self.combo_global_level.clear()
-            self.combo_prune_target_level.clear()
-            self.combo_prune_target_level.addItem(tr_ui("repo_settings.all_levels", "Alle Level"), None)
-
-        for idx, lvl in enumerate(levels):
-            self.tbl_cr_levels.insertRow(idx)
-            it_ord = QTableWidgetItem(str(lvl['order']))
-            it_ord.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_ord.setFlags(it_ord.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            it_ord.setToolTip(tr_ui("repo_settings.click_to_select_level", "Klicken zum Auswählen (für Löschen)"))
-            self.tbl_cr_levels.setItem(idx, 0, it_ord)
-
-            it_nm = QTableWidgetItem(lvl['name'])
-            it_nm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_nm.setFlags(it_nm.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            it_nm.setToolTip(tr_ui("repo_settings.click_to_rename", "Klicken zum Umbenennen"))
-            self.tbl_cr_levels.setItem(idx, 1, it_nm)
-
-            target_elo = int(lvl.get('target_elo') or 1500)
-            it_elo = QTableWidgetItem(f"{target_elo} Elo")
-            it_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            it_elo.setFlags(it_elo.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            it_elo.setData(Qt.ItemDataRole.UserRole, target_elo)
-            it_elo.setToolTip(tr_ui("repo_settings.click_to_edit_elo", "Klicken zum Ändern der Ziel-Elo"))
-            self.tbl_cr_levels.setItem(idx, 2, it_elo)
-            self.tbl_cr_levels.setRowHeight(idx, scale(44))
+        self.tbl_cr_levels.setUpdatesEnabled(False)
+        try:
+            self.tbl_cr_levels.setRowCount(0)
 
             if hasattr(self, 'combo_prio_target'):
-                self.combo_prio_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
-                self.combo_global_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
-                self.combo_prune_target_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+                self.combo_prio_target.clear()
+                self.combo_global_level.clear()
+                self.combo_prune_target_level.clear()
+                self.combo_prune_target_level.addItem(tr_ui("repo_settings.all_levels", "Alle Level"), None)
 
-        self._update_levels_table_height()
+            for idx, lvl in enumerate(levels):
+                self.tbl_cr_levels.insertRow(idx)
+                it_ord = QTableWidgetItem(str(lvl['order']))
+                it_ord.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_ord.setFlags(it_ord.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                it_ord.setToolTip(tr_ui("repo_settings.click_to_select_level", "Klicken zum Auswählen (für Löschen)"))
+                self.tbl_cr_levels.setItem(idx, 0, it_ord)
+
+                it_nm = QTableWidgetItem(lvl['name'])
+                it_nm.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_nm.setFlags(it_nm.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                it_nm.setToolTip(tr_ui("repo_settings.click_to_rename", "Klicken zum Umbenennen"))
+                self.tbl_cr_levels.setItem(idx, 1, it_nm)
+
+                target_elo = int(lvl.get('target_elo') or 1500)
+                it_elo = QTableWidgetItem(f"{target_elo} Elo")
+                it_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_elo.setFlags(it_elo.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                it_elo.setData(Qt.ItemDataRole.UserRole, target_elo)
+                it_elo.setToolTip(tr_ui("repo_settings.click_to_edit_elo", "Klicken zum Ändern der Ziel-Elo"))
+                self.tbl_cr_levels.setItem(idx, 2, it_elo)
+                self.tbl_cr_levels.setRowHeight(idx, scale(44))
+
+                if hasattr(self, 'combo_prio_target'):
+                    self.combo_prio_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+                    self.combo_global_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+                    self.combo_prune_target_level.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
+
+            self._update_levels_table_height()
+        finally:
+            self.tbl_cr_levels.setUpdatesEnabled(True)
 
         if hasattr(self, 'selected_creator_level_order') and self.selected_creator_level_order is not None:
             for idx in range(self.tbl_cr_levels.rowCount()):
@@ -4376,7 +4419,20 @@ class UnifiedSettingsDialog(QDialog):
         backend.set_meta("comment_language", self.combo_cr_comment_lang.currentData())
         backend.session.commit()
 
+    def _schedule_creator_description_save(self):
+        if hasattr(self, "_desc_save_timer") and self._desc_save_timer:
+            self._desc_save_timer.start()
+        else:
+            self.save_creator_description()
+
+    def _flush_pending_description(self):
+        if hasattr(self, "_desc_save_timer") and self._desc_save_timer and self._desc_save_timer.isActive():
+            self._desc_save_timer.stop()
+            self.save_creator_description()
+
     def save_creator_description(self):
+        if hasattr(self, "_desc_save_timer") and self._desc_save_timer and self._desc_save_timer.isActive():
+            self._desc_save_timer.stop()
         backend = self.ensure_backend_for_active_repo()
         if not backend or not getattr(backend, 'session', None): return
         backend.set_meta("description", self.txt_cr_desc.toPlainText())
@@ -4648,7 +4704,10 @@ class UnifiedSettingsDialog(QDialog):
 
             # Also refresh trainer cards if page exists
             if hasattr(self, 'refresh_trainer_repertoire_cards'):
-                self.refresh_trainer_repertoire_cards()
+                if getattr(self, 'initial_section', 'trainer') == 'trainer':
+                    self.refresh_trainer_repertoire_cards()
+                else:
+                    self._trainer_cards_dirty = True
 
             QMessageBox.information(self, tr_ui("common.success", "Erfolg"), f"Repertoire '{name}' wurde gelöscht.")
 
@@ -5539,51 +5598,56 @@ class UnifiedSettingsDialog(QDialog):
     def refresh_backups_list(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name or not hasattr(self, 'tbl_backups'): return
+        self._backups_dirty = False
         backups = list_repertoire_backups(backend.active_repo_name)
-        self.tbl_backups.setRowCount(len(backups))
-        for row, b in enumerate(backups):
-            dt_str = b["created_at"].strftime("%d.%m.%Y %H:%M:%S")
-            size_mb = f"{b['size_bytes'] / (1024 * 1024):.2f} MB"
-            summary_txt = self.format_backup_details_text(b)
+        self.tbl_backups.setUpdatesEnabled(False)
+        try:
+            self.tbl_backups.setRowCount(len(backups))
+            for row, b in enumerate(backups):
+                dt_str = b["created_at"].strftime("%d.%m.%Y %H:%M:%S")
+                size_mb = f"{b['size_bytes'] / (1024 * 1024):.2f} MB"
+                summary_txt = self.format_backup_details_text(b)
 
-            it_date = QTableWidgetItem(dt_str)
-            it_date.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                it_date = QTableWidgetItem(dt_str)
+                it_date.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            it_details = QTableWidgetItem(summary_txt)
-            it_details.setToolTip(summary_txt)
-            it_details.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+                it_details = QTableWidgetItem(summary_txt)
+                it_details.setToolTip(summary_txt)
+                it_details.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
 
-            it_size = QTableWidgetItem(size_mb)
-            it_size.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_size = QTableWidgetItem(size_mb)
+                it_size.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            self.tbl_backups.setItem(row, 0, it_date)
-            self.tbl_backups.setItem(row, 1, it_details)
-            self.tbl_backups.setItem(row, 2, it_size)
+                self.tbl_backups.setItem(row, 0, it_date)
+                self.tbl_backups.setItem(row, 1, it_details)
+                self.tbl_backups.setItem(row, 2, it_size)
 
-            btn_restore = QPushButton(tr_ui("repo_settings.btn_restore", "⏮️ Wiederherstellen"))
-            btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_restore.setFixedHeight(scale(28))
-            btn_restore.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #ebf5ff; }}")
-            btn_restore.clicked.connect(lambda _, p=b["path"], d=dt_str: self.restore_backup(p, d))
+                btn_restore = QPushButton(tr_ui("repo_settings.btn_restore", "⏮️ Wiederherstellen"))
+                btn_restore.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_restore.setFixedHeight(scale(28))
+                btn_restore.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #2c3e50; border: 1px solid #4a90e2; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #ebf5ff; }}")
+                btn_restore.clicked.connect(lambda _, p=b["path"], d=dt_str: self.restore_backup(p, d))
 
-            btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_backup", "🗑️ Löschen"))
-            btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
-            btn_delete.setFixedHeight(scale(28))
-            btn_delete.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #fadbd8; }}")
-            btn_delete.clicked.connect(lambda _, p=b["path"], d=dt_str: self.delete_backup_selected(p, d))
+                btn_delete = QPushButton(tr_ui("repo_settings.btn_delete_backup", "🗑️ Löschen"))
+                btn_delete.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn_delete.setFixedHeight(scale(28))
+                btn_delete.setStyleSheet(f"QPushButton {{ background-color: #ffffff; color: #c93b2b; border: 1px solid #e74c3c; border-radius: {scale(4)}px; font-size: {scale(11)}px; font-weight: 600; padding: {scale(2)}px {scale(6)}px; }} QPushButton:hover {{ background-color: #fadbd8; }}")
+                btn_delete.clicked.connect(lambda _, p=b["path"], d=dt_str: self.delete_backup_selected(p, d))
 
-            cell_w = QWidget()
-            cell_l = QVBoxLayout(cell_w)
-            cell_l.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
-            cell_l.setSpacing(scale(4))
-            cell_l.addWidget(btn_restore)
-            cell_l.addWidget(btn_delete)
-            self.tbl_backups.setCellWidget(row, 3, cell_w)
+                cell_w = QWidget()
+                cell_l = QVBoxLayout(cell_w)
+                cell_l.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
+                cell_l.setSpacing(scale(4))
+                cell_l.addWidget(btn_restore)
+                cell_l.addWidget(btn_delete)
+                self.tbl_backups.setCellWidget(row, 3, cell_w)
 
-        self.tbl_backups.resizeRowsToContents()
-        for r in range(self.tbl_backups.rowCount()):
-            if self.tbl_backups.rowHeight(r) < scale(85):
-                self.tbl_backups.setRowHeight(r, scale(85))
+            self.tbl_backups.resizeRowsToContents()
+            for r in range(self.tbl_backups.rowCount()):
+                if self.tbl_backups.rowHeight(r) < scale(85):
+                    self.tbl_backups.setRowHeight(r, scale(85))
+        finally:
+            self.tbl_backups.setUpdatesEnabled(True)
 
     def create_manual_backup(self):
         backend = self.ensure_backend_for_active_repo()
@@ -6887,14 +6951,17 @@ class UnifiedSettingsDialog(QDialog):
             except Exception: pass
 
     def reject(self):
+        self._flush_pending_description()
         self.stop_all_workers()
         super().reject()
 
     def accept(self):
+        self._flush_pending_description()
         self.stop_all_workers()
         super().accept()
 
     def closeEvent(self, event):
+        self._flush_pending_description()
         self.stop_all_workers()
         if self._owned_backend:
             try: self._owned_backend.close()

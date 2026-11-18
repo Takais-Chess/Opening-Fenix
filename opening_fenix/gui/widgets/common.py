@@ -51,6 +51,8 @@ class AutoAdjustButton(QPushButton):
     def __init__(self, text="", parent=None):
         super().__init__("", parent)
         self._full_text = ""
+        self._cached_font_key = None
+        self._cached_font = None
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         if text:
             self.setText(text)
@@ -58,6 +60,7 @@ class AutoAdjustButton(QPushButton):
     def setText(self, text: str):
         text_str = str(text) if text is not None else ""
         self._full_text = text_str
+        self._cached_font_key = None
         super().setText("")  # Keep standard text empty so paintEvent paints background without single-line clipped text
         self.setToolTip(text_str)
         self.updateGeometry()
@@ -106,44 +109,50 @@ class AutoAdjustButton(QPushButton):
             return
 
         base_font = self.font()
-        font_size = base_font.pointSize()
-        is_pixel = False
-        if font_size <= 0:
-            font_size = base_font.pixelSize()
-            is_pixel = True
-
-        if font_size <= 0:
-            font_size = 11
-
-        max_size = font_size
-        min_size = 6
-
-        current_size = max_size
         text_flags = Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter
+        cache_key = (self._full_text, avail_rect.width(), avail_rect.height(), base_font.key())
 
-        while current_size >= min_size:
-            test_font = QFont(base_font)
-            if is_pixel:
-                test_font.setPixelSize(current_size)
-            else:
-                test_font.setPointSize(current_size)
-
-            fm = QFontMetrics(test_font)
-            bound_rect = fm.boundingRect(
-                0, 0, avail_rect.width(), 10000,
-                int(text_flags), self._full_text
-            )
-
-            if bound_rect.height() <= avail_rect.height() and bound_rect.width() <= avail_rect.width():
-                break
-
-            current_size -= 1
-
-        chosen_font = QFont(base_font)
-        if is_pixel:
-            chosen_font.setPixelSize(max(current_size, min_size))
+        if self._cached_font_key == cache_key and self._cached_font is not None:
+            chosen_font = self._cached_font
         else:
-            chosen_font.setPointSize(max(current_size, min_size))
+            font_size = base_font.pointSize()
+            is_pixel = False
+            if font_size <= 0:
+                font_size = base_font.pixelSize()
+                is_pixel = True
+
+            if font_size <= 0:
+                font_size = 11
+
+            max_size = font_size
+            min_size = 6
+            current_size = max_size
+
+            while current_size >= min_size:
+                test_font = QFont(base_font)
+                if is_pixel:
+                    test_font.setPixelSize(current_size)
+                else:
+                    test_font.setPointSize(current_size)
+
+                fm = QFontMetrics(test_font)
+                bound_rect = fm.boundingRect(
+                    0, 0, avail_rect.width(), 10000,
+                    int(text_flags), self._full_text
+                )
+
+                if bound_rect.height() <= avail_rect.height() and bound_rect.width() <= avail_rect.width():
+                    break
+
+                current_size -= 1
+
+            chosen_font = QFont(base_font)
+            if is_pixel:
+                chosen_font.setPixelSize(max(current_size, min_size))
+            else:
+                chosen_font.setPointSize(max(current_size, min_size))
+            self._cached_font_key = cache_key
+            self._cached_font = chosen_font
 
         painter.setFont(chosen_font)
 

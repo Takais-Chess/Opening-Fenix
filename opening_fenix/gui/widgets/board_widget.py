@@ -6,10 +6,15 @@ import ctypes
 import gc
 import chess
 
-# Force Windows Kernel scheduler to 1ms high-precision timer resolution (enables true 120Hz/144Hz/160Hz QTimer ticks)
-if sys.platform == "win32":
+def _set_winmm_timer_period(enable: bool) -> None:
+    """Acquires or releases 1ms Windows kernel timer resolution strictly around active animations."""
+    if sys.platform != "win32":
+        return
     try:
-        ctypes.windll.winmm.timeBeginPeriod(1)
+        if enable:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+        else:
+            ctypes.windll.winmm.timeEndPeriod(1)
     except Exception:
         pass
 
@@ -191,6 +196,8 @@ class ChessBoardWidget(QWidget):
         self._last_configured_anim_speed = None
         self._duration_lut = {}
         self._gc_disabled_for_anim = False
+        self._winmm_timer_active = False
+        self._snapshot_skip_sq = None
         self._coord_color = QColor("#4b4b4b")
         self._coord_font_cache = None
         self._board_snapshot = None
@@ -207,6 +214,7 @@ class ChessBoardWidget(QWidget):
     def _invalidate_snapshot(self):
         """Invalidates the cached static board snapshot."""
         self._board_snapshot = None
+        self._snapshot_skip_sq = None
         self._last_anim_dirty_rect = None
 
     def resizeEvent(self, event):
@@ -826,6 +834,8 @@ class ChessBoardWidget(QWidget):
             skip_square = self.animating_piece_data['from_square']
             if 'rook_from_square' in self.animating_piece_data:
                 skip_squares = {skip_square, self.animating_piece_data['rook_from_square']}
+        elif self.dragging_piece is not None:
+            skip_square = self.drag_start_square
 
         painter.translate(rem_dx_phys / dpr + x_offset, rem_dy_phys / dpr + y_offset)
         if self.last_move:
@@ -843,6 +853,7 @@ class ChessBoardWidget(QWidget):
         self._snapshot_flipped = self.flipped
         self._snapshot_size = self.size()
         self._snapshot_phase = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
+        self._snapshot_skip_sq = skip_square
         return snapshot
 
     def _paint_arrows(self, painter, square_size):
@@ -891,22 +902,26 @@ class ChessBoardWidget(QWidget):
         self._update_pixmap_cache(square_size)
         
         is_drag = self.dragging_piece is not None
-        is_anim = self.is_animating and self.animating_piece_data
-        
-        if is_anim:
-            # High-performance 2-draw-call pipeline:
-            # 1. Blit pre-rendered static board snapshot (squares + static pieces + annotations)
+        is_anim = bool(self.is_animating and self.animating_piece_data)
+
+        if is_anim or is_drag:
+            # High-performance 2-draw-call pipeline for both animations and piece dragging:
+            # 1. Blit pre-rendered static board snapshot (squares + stationary pieces + annotations)
             dt = painter.deviceTransform()
             dpr = dt.m11() if dt.m11() > 0 else self.devicePixelRatioF()
             dev_dx, dev_dy = dt.dx(), dt.dy()
             rem_dx_phys = dev_dx - round(dev_dx)
             rem_dy_phys = dev_dy - round(dev_dy)
             phase_key = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
+            expected_skip_sq = (
+                self.animating_piece_data['from_square'] if is_anim else self.drag_start_square
+            )
 
-            if (self._board_snapshot is None or 
+            if (self._board_snapshot is None or
                 getattr(self, '_snapshot_flipped', None) != self.flipped or
                 getattr(self, '_snapshot_size', None) != self.size() or
-                getattr(self, '_snapshot_phase', None) != phase_key):
+                getattr(self, '_snapshot_phase', None) != phase_key or
+                getattr(self, '_snapshot_skip_sq', None) != expected_skip_sq):
                 self._board_snapshot = self._build_board_snapshot(rem_dx_phys, rem_dy_phys)
 
             if self._board_snapshot is not None:
@@ -922,39 +937,40 @@ class ChessBoardWidget(QWidget):
                 if clip_rect.isEmpty() or not inner_board_rect.contains(clip_rect):
                     self._paint_coordinates(painter, square_size)
             else:
-                skip_squares = {self.animating_piece_data['from_square']}
-                if 'rook_from_square' in self.animating_piece_data:
+                skip_sq_fallback = expected_skip_sq
+                skip_squares = {skip_sq_fallback} if skip_sq_fallback is not None else None
+                if is_anim and 'rook_from_square' in self.animating_piece_data and skip_squares is not None:
                     skip_squares.add(self.animating_piece_data['rook_from_square'])
                 painter.translate(x_offset, y_offset)
                 self._paint_board_base(painter, square_size)
-                self._paint_pieces(painter, square_size, skip_square=self.animating_piece_data['from_square'], skip_squares=skip_squares)
+                self._paint_pieces(painter, square_size, skip_square=skip_sq_fallback, skip_squares=skip_squares)
                 self._paint_circles(painter, square_size)
                 self._paint_arrows(painter, square_size)
 
             # 2. Draw moving piece(s) at interpolated position
-            self._anim_frame_times.append(time.perf_counter())
-            d = self.animating_piece_data
-            p = d['progress']
-            cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
-            cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
-            lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
-            scale_factor = 1.0 + (0.15 * lift)
-            self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
+            if is_anim:
+                self._anim_frame_times.append(time.perf_counter())
+                d = self.animating_piece_data
+                p = d['progress']
+                cur_col = d['start_col'] + (d['end_col'] - d['start_col']) * p
+                cur_row = d['start_row'] + (d['end_row'] - d['start_row']) * p
+                lift = math.sin(p * math.pi) if self.enable_piece_lift else 0.0
+                scale_factor = 1.0 + (0.15 * lift)
+                self.draw_piece(painter, d['piece'], cur_col, cur_row, square_size, scale_factor=scale_factor)
 
-            if 'rook_piece' in d:
-                rp = d.get('rook_progress', 0.0)
-                r_col = d['rook_start_col'] + (d['rook_end_col'] - d['rook_start_col']) * rp
-                r_row = d['rook_start_row'] + (d['rook_end_row'] - d['rook_start_row']) * rp
-                r_lift = math.sin(rp * math.pi) if self.enable_piece_lift else 0.0
-                r_scale = 1.0 + (0.15 * r_lift)
-                self.draw_piece(painter, d['rook_piece'], r_col, r_row, square_size, scale_factor=r_scale)
+                if 'rook_piece' in d:
+                    rp = d.get('rook_progress', 0.0)
+                    r_col = d['rook_start_col'] + (d['rook_end_col'] - d['rook_start_col']) * rp
+                    r_row = d['rook_start_row'] + (d['rook_end_row'] - d['rook_start_row']) * rp
+                    r_lift = math.sin(rp * math.pi) if self.enable_piece_lift else 0.0
+                    r_scale = 1.0 + (0.15 * r_lift)
+                    self.draw_piece(painter, d['rook_piece'], r_col, r_row, square_size, scale_factor=r_scale)
 
         else:
-            skip_square = self.drag_start_square if is_drag else None
-            # Standard direct rendering when idle or dragging
+            # Standard direct rendering when idle
             painter.translate(x_offset, y_offset)
             self._paint_board_base(painter, square_size)
-            self._paint_pieces(painter, square_size, skip_square=skip_square)
+            self._paint_pieces(painter, square_size, skip_square=None)
             self._paint_circles(painter, square_size)
             self._paint_arrows(painter, square_size)
 
@@ -1210,10 +1226,13 @@ class ChessBoardWidget(QWidget):
         self.last_move = move
         self.is_animating = True
 
-        # Suspend Python cyclic GC during active piece slide to prevent 30-50ms main-thread freeze
+        # Suspend Python cyclic GC and acquire 1ms Win32 timer strictly during active piece slide
         if not getattr(self, '_gc_disabled_for_anim', False):
             gc.disable()
             self._gc_disabled_for_anim = True
+        if not getattr(self, '_winmm_timer_active', False):
+            _set_winmm_timer_period(True)
+            self._winmm_timer_active = True
 
         self._invalidate_snapshot()
         self._board_snapshot = self._build_board_snapshot()
@@ -1273,6 +1292,9 @@ class ChessBoardWidget(QWidget):
             if getattr(self, '_gc_disabled_for_anim', False):
                 gc.enable()
                 self._gc_disabled_for_anim = False
+            if getattr(self, '_winmm_timer_active', False):
+                _set_winmm_timer_period(False)
+                self._winmm_timer_active = False
             self.update()
 
     def _on_animation_frame(self, value=None):
@@ -1389,6 +1411,9 @@ class ChessBoardWidget(QWidget):
             if getattr(self, '_gc_disabled_for_anim', False):
                 gc.enable()
                 self._gc_disabled_for_anim = False
+            if getattr(self, '_winmm_timer_active', False):
+                _set_winmm_timer_period(False)
+                self._winmm_timer_active = False
             self.update()
 
     def draw_piece(self, painter, piece, col, row, size, scale_factor=1.0):

@@ -763,6 +763,13 @@ class TaskCenterDialog(QDialog):
 
     def _populate_batch_table(self):
         all_repos = RepertoireService().get_all_repertoires()
+        self.table_batch.setUpdatesEnabled(False)
+        try:
+            self._populate_batch_table_rows(all_repos)
+        finally:
+            self.table_batch.setUpdatesEnabled(True)
+
+    def _populate_batch_table_rows(self, all_repos):
         self.table_batch.setRowCount(len(all_repos))
         self._batch_name_to_row.clear()
         total_tasks = self._get_selected_batch_task_count()
@@ -1485,15 +1492,8 @@ class TaskCenterDialog(QDialog):
                         cell_c.show_text("Fehler ⚠️", "Lichess-Import fehlgeschlagen")
                     else:
                         try:
-                            from opening_fenix.core.db.database import DatabaseManager
-                            from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_info
-                            db_path = get_repertoire_db_path(name)
-                            db_m = DatabaseManager(db_path)
-                            s = db_m.get_session()
-                            info = fetch_repertoire_info(s, name, fast_only=False)
-                            s.close()
-                            db_m.close()
-                            actual_cov = info.get("coverage_pct", 0.0)
+                            from opening_fenix.core.services.repertoire_core_service import get_repertoire_coverage_fast
+                            actual_cov = get_repertoire_coverage_fast(name)
                             cell_c.show_text(f"{actual_cov:.1f}% ✓", f"Lichess-Import abgeschlossen (Coverage: {actual_cov:.1f}%)")
                         except Exception:
                             cell_c.show_text("Fertig ✓", "Lichess-Import abgeschlossen")
@@ -1611,20 +1611,24 @@ class TaskCenterDialog(QDialog):
         hist = list(reversed(self.tm.get_history()))
         combined_rows = list(q) + hist
 
-        self.table_queue.setRowCount(len(combined_rows))
-        for row, job in enumerate(combined_rows):
-            self.table_queue.setItem(row, 0, QTableWidgetItem(job.repo_name))
-            self.table_queue.setItem(row, 1, QTableWidgetItem(job.title))
-            st_label = job.status.value
-            if job.status == JobStatus.COMPLETED:
-                st_label = f"✅ {job.status_message or job.status.value}"
-            elif job.status == JobStatus.CANCELED:
-                st_label = f"⏹ {job.status_message or job.status.value}"
-            elif job.status == JobStatus.FAILED:
-                st_label = f"❌ {job.status_message or job.status.value}"
-            elif job.status == JobStatus.QUEUED:
-                st_label = f"⏳ {tr_ui('task_center.job_queued', 'In Warteschlange...')}"
-            self.table_queue.setItem(row, 2, QTableWidgetItem(st_label))
+        self.table_queue.setUpdatesEnabled(False)
+        try:
+            self.table_queue.setRowCount(len(combined_rows))
+            for row, job in enumerate(combined_rows):
+                self.table_queue.setItem(row, 0, QTableWidgetItem(job.repo_name))
+                self.table_queue.setItem(row, 1, QTableWidgetItem(job.title))
+                st_label = job.status.value
+                if job.status == JobStatus.COMPLETED:
+                    st_label = f"✅ {job.status_message or job.status.value}"
+                elif job.status == JobStatus.CANCELED:
+                    st_label = f"⏹ {job.status_message or job.status.value}"
+                elif job.status == JobStatus.FAILED:
+                    st_label = f"❌ {job.status_message or job.status.value}"
+                elif job.status == JobStatus.QUEUED:
+                    st_label = f"⏳ {tr_ui('task_center.job_queued', 'In Warteschlange...')}"
+                self.table_queue.setItem(row, 2, QTableWidgetItem(st_label))
+        finally:
+            self.table_queue.setUpdatesEnabled(True)
 
     def closeEvent(self, event):
         if self.stats_worker and self.stats_worker.isRunning():

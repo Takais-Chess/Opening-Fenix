@@ -1,9 +1,24 @@
 import os
+import re
 import json
 from PyQt6.QtCore import QObject, pyqtSignal, QTranslator, QLibraryInfo
 from PyQt6.QtWidgets import QApplication
 from opening_fenix.core.utils import get_base_path, get_user_dir
 from opening_fenix.core.logger import logger
+
+_RE_ESCAPE_MNEMONIC = re.compile(r'(?<!&)&(?!&)')
+
+
+def _flatten_dict(d: dict, prefix: str = "") -> dict:
+    flat = {}
+    for k, v in d.items():
+        full_key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            flat.update(_flatten_dict(v, full_key))
+        else:
+            flat[full_key] = v
+    return flat
+
 
 class TranslationManager:
     _instance = None
@@ -19,11 +34,11 @@ class TranslationManager:
             return
         self.current_lang = "de"  # Default is German
         self.translations = {}
+        self._flat_translations = {}
         self.qt_translator = QTranslator()
         self._loaded_json_lang = None
         self._loaded_qt_lang = None
         self._initialized = True
-        self.load_language(self.current_lang)
 
     def load_language(self, lang_code: str):
         """Loads custom JSON translations and registers the native Qt translator."""
@@ -43,15 +58,18 @@ class TranslationManager:
                 try:
                     with open(trans_file, "r", encoding="utf-8") as f:
                         self.translations = json.load(f)
+                    self._flat_translations = _flatten_dict(self.translations)
                     self._loaded_json_lang = lang_code
                     logger.info(f"Loaded translation file: {lang_code}.json")
                 except Exception as e:
                     logger.error(f"Failed to parse translation file {trans_file}: {e}")
                     self.translations = {}
+                    self._flat_translations = {}
                     self._loaded_json_lang = None
             else:
                 logger.warning(f"Translation file not found: {trans_file}")
                 self.translations = {}
+                self._flat_translations = {}
                 self._loaded_json_lang = None
 
         # 2. Load Native Qt translation for standard buttons/dialogs
@@ -76,15 +94,15 @@ class TranslationManager:
 
     def translate(self, key: str, default: str = "", **kwargs) -> str:
         """Resolves dotted key references like 'login.title'."""
-        parts = key.split('.')
-        val = self.translations
-        for part in parts:
-            if isinstance(val, dict) and part in val:
-                val = val[part]
-            else:
-                return default.format(**kwargs) if default else key
+        if self._loaded_json_lang is None:
+            self.load_language(self.current_lang)
+        val = self._flat_translations.get(key)
+        if val is None:
+            return default.format(**kwargs) if default else key
 
         if isinstance(val, str):
+            if not kwargs:
+                return val
             try:
                 return val.format(**kwargs)
             except KeyError as e:
@@ -106,8 +124,7 @@ def escape_mnemonic(text: str) -> str:
     """
     if not text or "&" not in text:
         return text
-    import re
-    return re.sub(r'(?<!&)&(?!&)', '&&', text)
+    return _RE_ESCAPE_MNEMONIC.sub('&&', text)
 
 def tr_widget(key: str, default: str = "", **kwargs) -> str:
     """Translates a string and safely escapes mnemonics for Qt widgets (QGroupBox, QPushButton, QCheckBox, etc.)."""

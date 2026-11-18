@@ -115,6 +115,109 @@ class CourseImportResult:
     original_pgns_archived: int = 0
     parsing_warnings: List[str] = field(default_factory=list)
 
+_EXIT_MARKER = object()
+
+_RE_MALFORMED_OPEN = re.compile(r'\{\s*\(\s*\}\s*\{\s*')
+_RE_MALFORMED_CLOSE = re.compile(r'\{\s*\)\s*\}\s*\{\s*')
+_RE_WHITE_NUM = re.compile(r'^\d+\.(?!\.)')
+_RE_WHITE_NUM_ONLY = re.compile(r'^\d+\.(?!\.)$')
+_RE_M_WHITE = re.compile(r'^\d+\.(?!\.)\s*([A-Za-z0-9\-+=]+)')
+_RE_M_BLACK = re.compile(r'^\d+\.\.\.\s*([A-Za-z0-9\-+=]+)')
+_RE_COVERED_PHRASE = re.compile(r'(?i)\b(is covered via|is covered in|is covered by|move order\b|will transpose\b)')
+_RE_WS = re.compile(r'\s+')
+
+_RE_VAR_OPEN_PAREN = re.compile(r"\s*\(\s*")
+_RE_VAR_CLOSE_PAREN = re.compile(r"\s*\)\s*")
+_RE_VAR_COMMA = re.compile(r"\s*,\s*")
+_RE_VAR_DOT = re.compile(r"\s*\.\s*")
+_RE_VAR_ELLIPSIS = re.compile(r"\.\s*\.\s*\.")
+
+
+def _board_fen4(board: chess.Board) -> str:
+    return " ".join(board.fen().split(" ", 4)[:4])
+
+
+def _extract_last_two_tokens_before(text: str, end_idx: int) -> Tuple[str, str]:
+    """Scans backwards from end_idx in O(1) amortized time to find the last 2 mainline tokens."""
+    j = end_idx - 1
+
+    def _skip_brace_backward(pos: int) -> int:
+        # Matches regex \{[^{}]*\} backwards
+        k = pos - 1
+        while k >= 0:
+            ch = text[k]
+            if ch == '{':
+                return k - 1
+            if ch == '}':
+                return pos
+            k -= 1
+        return pos
+
+    def _skip_ws_and_braces(pos: int) -> int:
+        while pos >= 0:
+            if text[pos].isspace():
+                pos -= 1
+            elif text[pos] == '}':
+                nxt = _skip_brace_backward(pos)
+                if nxt == pos:
+                    break
+                pos = nxt
+            else:
+                break
+        return pos
+
+    # Skip any balanced (...) groups right before end_idx
+    j = _skip_ws_and_braces(j)
+    while j >= 0 and text[j] == ')':
+        p_depth = 1
+        p_idx = j - 1
+        while p_idx >= 0 and p_depth > 0:
+            ch = text[p_idx]
+            if ch == '}':
+                nxt = _skip_brace_backward(p_idx)
+                if nxt != p_idx:
+                    p_idx = nxt
+                    continue
+            elif ch == ')':
+                p_depth += 1
+            elif ch == '(':
+                p_depth -= 1
+            p_idx -= 1
+        if p_depth != 0:
+            return "", ""
+        j = _skip_ws_and_braces(p_idx)
+
+    # Read up to 2 whitespace-delimited tokens backwards (ignoring {...} blocks)
+    tokens_rev = []
+    cur_chars = []
+    while j >= 0:
+        ch = text[j]
+        if ch == '}':
+            nxt = _skip_brace_backward(j)
+            if nxt != j:
+                j = nxt
+                continue
+        if ch.isspace():
+            if cur_chars:
+                tokens_rev.append("".join(reversed(cur_chars)))
+                cur_chars.clear()
+                if len(tokens_rev) == 2:
+                    break
+            j -= 1
+        else:
+            cur_chars.append(ch)
+            j -= 1
+
+    if cur_chars and len(tokens_rev) < 2:
+        tokens_rev.append("".join(reversed(cur_chars)))
+
+    if not tokens_rev:
+        return "", ""
+    if len(tokens_rev) == 1:
+        return "", tokens_rev[0]
+    return tokens_rev[1], tokens_rev[0]
+
+
 def sanitize_comment_variations(text: str) -> str:
     """
     Sanitizes commentary notes wrapped in parentheses that are not valid chess variations:
@@ -132,8 +235,9 @@ def sanitize_comment_variations(text: str) -> str:
         return text
 
     # Clean malformed comment artifacts from Chessable exports like {(}) or {)}
-    text = re.sub(r'\{\s*\(\s*\}\s*\{\s*', '{ ', text)
-    text = re.sub(r'\{\s*\)\s*\}\s*\{\s*', '{ ', text)
+    if '{' in text:
+        text = _RE_MALFORMED_OPEN.sub('{ ', text)
+        text = _RE_MALFORMED_CLOSE.sub('{ ', text)
 
     result = []
     i = 0
@@ -159,50 +263,36 @@ def sanitize_comment_variations(text: str) -> str:
             k = i + 1
             in_brace = False
             while k < n and depth > 0:
-                if text[k] == '{':
+                tk = text[k]
+                if tk == '{':
                     in_brace = True
-                elif text[k] == '}':
+                elif tk == '}':
                     in_brace = False
-                elif text[k] == '(' and not in_brace:
-                    depth += 1
-                elif text[k] == ')' and not in_brace:
-                    depth -= 1
+                elif not in_brace:
+                    if tk == '(':
+                        depth += 1
+                    elif tk == ')':
+                        depth -= 1
                 k += 1
 
             if depth == 0:
                 chunk = text[i+1:k-1].strip()
 
-                # Find last mainline token before any variations/comments at this level
-                prefix = text[:i].rstrip()
-                clean_p = re.sub(r'\{[^{}]*\}', '', prefix).rstrip()
-                while clean_p.endswith(')'):
-                    p_depth = 1
-                    p_idx = len(clean_p) - 2
-                    while p_idx >= 0 and p_depth > 0:
-                        if clean_p[p_idx] == ')':
-                            p_depth += 1
-                        elif clean_p[p_idx] == '(':
-                            p_depth -= 1
-                        p_idx -= 1
-                    clean_p = clean_p[:p_idx+1].rstrip()
-                    clean_p = re.sub(r'\{[^{}]*\}', '', clean_p).rstrip()
-
-                tokens = clean_p.split()
-                last_tok = tokens[-1] if tokens else ""
+                prev_tok, last_tok = _extract_last_two_tokens_before(text, i)
 
                 is_after_white_move = False
                 is_after_black_move = False
-                if tokens:
-                    if re.match(r'^\d+\.(?!\.)', last_tok):
+                if last_tok:
+                    if _RE_WHITE_NUM.match(last_tok):
                         is_after_white_move = True
-                    elif len(tokens) >= 2 and re.match(r'^\d+\.(?!\.)$', tokens[-2]):
+                    elif prev_tok and _RE_WHITE_NUM_ONLY.match(prev_tok):
                         is_after_white_move = True
                     else:
                         is_after_black_move = True
 
                 is_comment_start = chunk.startswith('{')
-                m_white = re.match(r'^\d+\.(?!\.)\s*([A-Za-z0-9\-+=]+)', chunk)
-                m_black = re.match(r'^\d+\.\.\.\s*([A-Za-z0-9\-+=]+)', chunk)
+                m_white = _RE_M_WHITE.match(chunk)
+                m_black = _RE_M_BLACK.match(chunk)
 
                 convert_to_comment = False
                 if is_comment_start:
@@ -211,12 +301,12 @@ def sanitize_comment_variations(text: str) -> str:
                     convert_to_comment = True
                 elif m_black and is_after_white_move:
                     convert_to_comment = True
-                elif re.search(r'(?i)\b(is covered via|is covered in|is covered by|move order\b|will transpose\b)', chunk):
+                elif _RE_COVERED_PHRASE.search(chunk):
                     convert_to_comment = True
 
                 if convert_to_comment:
                     clean = chunk.replace('{', ' ').replace('}', ' ')
-                    clean = re.sub(r'\s+', ' ', clean).strip()
+                    clean = _RE_WS.sub(' ', clean).strip()
                     clean = clean_outer_parentheses_from_text(clean)
                     result.append(f" {{ {clean} }} ")
                     i = k
@@ -577,7 +667,10 @@ def format_variation_tree_as_text(var_node: chess.pgn.GameNode, board: chess.Boa
             else:
                 prefix = ""
 
-        san = curr.san()
+        try:
+            san = b.san(curr.move)
+        except Exception:
+            san = curr.san()
         move_str = f"{prefix} {san}".strip()
         parts.append(move_str)
 
@@ -605,12 +698,12 @@ def format_variation_tree_as_text(var_node: chess.pgn.GameNode, board: chess.Boa
     if not has_any_comment and text:
         text = f"({text})"
 
-    text = re.sub(r"\s*\(\s*", " ( ", text)
-    text = re.sub(r"\s*\)\s*", " ) ", text)
-    text = re.sub(r"\s*,\s*", ", ", text)
-    text = re.sub(r"\s*\.\s*", ". ", text)
-    text = re.sub(r"\.\s*\.\s*\.", "...", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = _RE_VAR_OPEN_PAREN.sub(" ( ", text)
+    text = _RE_VAR_CLOSE_PAREN.sub(" ) ", text)
+    text = _RE_VAR_COMMA.sub(", ", text)
+    text = _RE_VAR_DOT.sub(". ", text)
+    text = _RE_VAR_ELLIPSIS.sub("...", text)
+    text = _RE_WS.sub(" ", text).strip()
     return text
 
 def is_game_model(game: chess.pgn.Game) -> bool:
@@ -942,14 +1035,19 @@ def execute_course_import(
         # 4. Cache positions and moves for bulk loading
         pos_cache = {p.fen: p.id for p in session.query(Position.fen, Position.id).all()}
         move_cache = {(m.from_position_id, m.uci): (m.id, m.nag) for m in session.query(Move.from_position_id, Move.uci, Move.id, Move.nag).all()}
-        rep_move_cache = {rm.move_id: rm.level for rm in session.query(RepertoireMove.move_id, RepertoireMove.level).all()}
+        existing_rm_rows = session.query(RepertoireMove.id, RepertoireMove.move_id, RepertoireMove.level).all()
+        rep_move_cache = {rm.move_id: rm.level for rm in existing_rm_rows}
+        rep_move_id_by_move_id = {rm.move_id: rm.id for rm in existing_rm_rows}
 
         max_pos_id = max(pos_cache.values()) if pos_cache else 0
         max_move_id = max(m_id for m_id, _ in move_cache.values()) if move_cache else 0
 
         new_positions_to_insert = {}
         new_moves_to_insert = []
+        new_moves_by_id = {}
         new_rep_moves_to_insert = []
+        new_rep_moves_by_move_id = {}
+        rep_moves_to_update_level = {}
         moves_to_update_nag = {}
         comments_to_append = {}
 
@@ -962,6 +1060,8 @@ def execute_course_import(
         processed_bytes = 0
         game_idx = 0
         import_parsing_warnings = []
+        last_pct = -1
+        c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
 
         if progress_callback:
             progress_callback(15, tr_ui("course_import.status_processing_games", "Verarbeite Partien, Varianten und Puzzles..."))
@@ -981,8 +1081,10 @@ def execute_course_import(
                     game_idx += 1
                     if progress_callback and total_bytes > 0 and game_idx % 20 == 0:
                         cur_tell = processed_bytes + reader.tell()
-                        pct = 15 + int((cur_tell / total_bytes) * 65)
-                        progress_callback(min(80, pct), tr_ui("course_import.status_importing_pct", "Importiere Partie {idx}...", idx=game_idx))
+                        pct = min(80, 15 + int((cur_tell / total_bytes) * 65))
+                        if pct != last_pct:
+                            last_pct = pct
+                            progress_callback(pct, tr_ui("course_import.status_importing_pct", "Importiere Partie {idx}...", idx=game_idx))
 
                     # Identify chapter & default target
                     ch_name = game.headers.get("Black", "").strip() or game.headers.get("Event", "").strip()
@@ -1036,18 +1138,36 @@ def execute_course_import(
                     level_order = 1 if target == CATEGORY_LEVEL_1 else 2
 
                     if plan.subvariations_as_comments:
-                        c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
                         board = game.board()
+                        cur_fen = _board_fen4(board)
                         for current_node in game.mainline():
                             move = current_node.move
-                            from_fen = " ".join(board.fen().split(" ")[:4])
+                            from_fen = cur_fen
+
+                            try:
+                                move_san = board.san(move)
+                            except Exception:
+                                try:
+                                    move_san = current_node.san()
+                                except Exception:
+                                    continue
+
+                            sibling_texts = []
+                            parent = current_node.parent
+                            if parent and len(parent.variations) > 1:
+                                for v in parent.variations:
+                                    if v != current_node:
+                                        sub_text = format_variation_tree_as_text(v, board)
+                                        if sub_text:
+                                            sibling_texts.append(sub_text)
 
                             try:
                                 board.push(move)
                             except Exception:
                                 continue
 
-                            to_fen = " ".join(board.fen().split(" ")[:4])
+                            to_fen = _board_fen4(board)
+                            cur_fen = to_fen
 
                             from_pos_id = pos_cache.get(from_fen)
                             if not from_pos_id:
@@ -1072,25 +1192,18 @@ def execute_course_import(
                                 combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
 
                             if combined_node_comment:
-                                if to_fen in comments_to_append:
-                                    comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=c_lang)
-                                else:
-                                    comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=c_lang)
+                                lst = comments_to_append.setdefault(to_fen, [])
+                                if combined_node_comment not in lst:
+                                    lst.append(combined_node_comment)
 
                             # 2. Sibling subvariations on parent
-                            parent = current_node.parent
-                            if parent and len(parent.variations) > 1:
-                                for v in parent.variations:
-                                    if v != current_node:
-                                        sub_text = format_variation_tree_as_text(v, parent.board())
-                                        if sub_text:
-                                            if to_fen in comments_to_append:
-                                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], sub_text, default_lang=c_lang)
-                                            else:
-                                                comments_to_append[to_fen] = combine_comments("", sub_text, default_lang=c_lang)
+                            if sibling_texts:
+                                lst = comments_to_append.setdefault(to_fen, [])
+                                for sub_text in sibling_texts:
+                                    if sub_text not in lst:
+                                        lst.append(sub_text)
 
                             incoming_nag = next(iter(current_node.nags), 0)
-                            move_san = current_node.san()
                             uci_str = normalize_castling_uci(move.uci(), move_san)
                             move_entry = move_cache.get((from_pos_id, uci_str))
 
@@ -1098,56 +1211,69 @@ def execute_course_import(
                                 max_move_id += 1
                                 move_id = max_move_id
                                 move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                                new_moves_to_insert.append(
-                                    Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                                )
+                                new_m = Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                                new_moves_to_insert.append(new_m)
+                                new_moves_by_id[move_id] = new_m
                             else:
                                 move_id, existing_nag = move_entry
                                 if incoming_nag != 0 and existing_nag != incoming_nag:
-                                    moves_to_update_nag[move_id] = incoming_nag
                                     move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                                    if move_id in new_moves_by_id:
+                                        new_moves_by_id[move_id].nag = incoming_nag
+                                    else:
+                                        moves_to_update_nag[move_id] = incoming_nag
 
                             # Level priority: Level 1 has higher priority than Level 2
                             if move_id not in rep_move_cache:
                                 rep_move_cache[move_id] = level_order
-                                new_rep_moves_to_insert.append(RepertoireMove(move_id=move_id, level=level_order))
+                                new_rm = RepertoireMove(move_id=move_id, level=level_order)
+                                new_rep_moves_to_insert.append(new_rm)
+                                new_rep_moves_by_move_id[move_id] = new_rm
                                 if level_order == 1:
                                     level_1_moves_count += 1
                                 else:
                                     level_2_moves_count += 1
                             elif level_order < rep_move_cache[move_id]:
                                 rep_move_cache[move_id] = level_order
-                                existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                                if existing_rm:
-                                    existing_rm.level = level_order
+                                if move_id in new_rep_moves_by_move_id:
+                                    new_rep_moves_by_move_id[move_id].level = level_order
+                                    level_1_moves_count += 1
+                                    if level_2_moves_count > 0:
+                                        level_2_moves_count -= 1
+                                elif move_id in rep_move_id_by_move_id:
+                                    rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                                     level_1_moves_count += 1
                                     if level_2_moves_count > 0:
                                         level_2_moves_count -= 1
                     else:
-                        # Parse game tree into moves & positions
-                        node_stack = []
-                        initial_board = game.board()
-                        for node in reversed(game.variations):
-                            node_stack.append((node, initial_board.copy()))
+                        # Parse game tree into moves & positions using zero-copy push/pop DFS
+                        board = game.board()
+                        init_fen = _board_fen4(board)
+                        init_pos_id = pos_cache.get(init_fen)
+                        if not init_pos_id:
+                            max_pos_id += 1
+                            init_pos_id = max_pos_id
+                            pos_cache[init_fen] = init_pos_id
+                            new_positions_to_insert[init_fen] = Position(id=init_pos_id, fen=init_fen)
+
+                        node_stack = [(node, init_pos_id) for node in reversed(game.variations)]
 
                         while node_stack:
-                            current_node, board = node_stack.pop()
+                            item = node_stack.pop()
+                            if item is _EXIT_MARKER:
+                                board.pop()
+                                continue
+
+                            current_node, from_pos_id = item
                             move = current_node.move
-                            from_fen = " ".join(board.fen().split(" ")[:4])
 
                             try:
+                                move_san = board.san(move)
                                 board.push(move)
                             except Exception:
                                 continue
 
-                            to_fen = " ".join(board.fen().split(" ")[:4])
-
-                            from_pos_id = pos_cache.get(from_fen)
-                            if not from_pos_id:
-                                max_pos_id += 1
-                                from_pos_id = max_pos_id
-                                pos_cache[from_fen] = from_pos_id
-                                new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+                            to_fen = _board_fen4(board)
 
                             to_pos_id = pos_cache.get(to_fen)
                             if not to_pos_id:
@@ -1157,14 +1283,11 @@ def execute_course_import(
                                 new_positions_to_insert[to_fen] = Position(id=to_pos_id, fen=to_fen)
 
                             if current_node.comment:
-                                c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
-                                if to_fen in comments_to_append:
-                                    comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], current_node.comment, default_lang=c_lang)
-                                else:
-                                    comments_to_append[to_fen] = combine_comments("", current_node.comment, default_lang=c_lang)
+                                lst = comments_to_append.setdefault(to_fen, [])
+                                if current_node.comment not in lst:
+                                    lst.append(current_node.comment)
 
                             incoming_nag = next(iter(current_node.nags), 0)
-                            move_san = current_node.san()
                             uci_str = normalize_castling_uci(move.uci(), move_san)
                             move_entry = move_cache.get((from_pos_id, uci_str))
 
@@ -1172,34 +1295,47 @@ def execute_course_import(
                                 max_move_id += 1
                                 move_id = max_move_id
                                 move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
-                                new_moves_to_insert.append(
-                                    Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
-                                )
+                                new_m = Move(id=move_id, from_position_id=from_pos_id, to_position_id=to_pos_id, uci=uci_str, san=move_san, nag=incoming_nag)
+                                new_moves_to_insert.append(new_m)
+                                new_moves_by_id[move_id] = new_m
                             else:
                                 move_id, existing_nag = move_entry
                                 if incoming_nag != 0 and existing_nag != incoming_nag:
-                                    moves_to_update_nag[move_id] = incoming_nag
                                     move_cache[(from_pos_id, uci_str)] = (move_id, incoming_nag)
+                                    if move_id in new_moves_by_id:
+                                        new_moves_by_id[move_id].nag = incoming_nag
+                                    else:
+                                        moves_to_update_nag[move_id] = incoming_nag
 
                             # Level priority: Level 1 has higher priority than Level 2
                             if move_id not in rep_move_cache:
                                 rep_move_cache[move_id] = level_order
-                                new_rep_moves_to_insert.append(RepertoireMove(move_id=move_id, level=level_order))
+                                new_rm = RepertoireMove(move_id=move_id, level=level_order)
+                                new_rep_moves_to_insert.append(new_rm)
+                                new_rep_moves_by_move_id[move_id] = new_rm
                                 if level_order == 1:
                                     level_1_moves_count += 1
                                 else:
                                     level_2_moves_count += 1
                             elif level_order < rep_move_cache[move_id]:
                                 rep_move_cache[move_id] = level_order
-                                existing_rm = session.query(RepertoireMove).filter_by(move_id=move_id).first()
-                                if existing_rm:
-                                    existing_rm.level = level_order
+                                if move_id in new_rep_moves_by_move_id:
+                                    new_rep_moves_by_move_id[move_id].level = level_order
+                                    level_1_moves_count += 1
+                                    if level_2_moves_count > 0:
+                                        level_2_moves_count -= 1
+                                elif move_id in rep_move_id_by_move_id:
+                                    rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                                     level_1_moves_count += 1
                                     if level_2_moves_count > 0:
                                         level_2_moves_count -= 1
 
-                            for var in reversed(current_node.variations):
-                                node_stack.append((var, board.copy()))
+                            if current_node.variations:
+                                node_stack.append(_EXIT_MARKER)
+                                for var in reversed(current_node.variations):
+                                    node_stack.append((var, to_pos_id))
+                            else:
+                                board.pop()
 
             processed_bytes += file_size
 
@@ -1223,6 +1359,18 @@ def execute_course_import(
             with open(intro_pgn_path, "a", encoding="utf-8") as f_intro:
                 f_intro.write(intro_buffer.getvalue())
 
+        # Pre-populate comments on brand-new positions before bulk insert
+        existing_fens_with_comments = []
+        if comments_to_append:
+            for to_fen, frags in comments_to_append.items():
+                if to_fen in new_positions_to_insert:
+                    res_comment = ""
+                    for frag in frags:
+                        res_comment = combine_comments(res_comment, frag, default_lang=c_lang)
+                    new_positions_to_insert[to_fen].comment = res_comment
+                else:
+                    existing_fens_with_comments.append(to_fen)
+
         # 7. Bulk save objects to SQLite
         if progress_callback:
             progress_callback(88, tr_ui("course_import.status_saving_db", "Speichere Varianten in die Datenbank..."))
@@ -1233,19 +1381,27 @@ def execute_course_import(
             session.bulk_save_objects(new_moves_to_insert)
         if new_rep_moves_to_insert:
             session.bulk_save_objects(new_rep_moves_to_insert)
+        if rep_moves_to_update_level:
+            session.bulk_update_mappings(
+                RepertoireMove,
+                [{"id": rm_id, "level": lvl} for rm_id, lvl in rep_moves_to_update_level.items()]
+            )
         if moves_to_update_nag:
-            for m_id, n in moves_to_update_nag.items():
-                session.query(Move).filter_by(id=m_id).update({'nag': n})
+            session.bulk_update_mappings(
+                Move,
+                [{"id": m_id, "nag": n} for m_id, n in moves_to_update_nag.items()]
+            )
 
-        # 8. Save comments
-        if comments_to_append:
-            c_lang = plan.target_lang if plan.target_lang and plan.target_lang != "auto" else "de"
-            fens = list(comments_to_append.keys())
-            for i in range(0, len(fens), 900):
-                chunk = fens[i:i + 900]
+        # 8. Save comments on previously existing positions
+        if existing_fens_with_comments:
+            for i in range(0, len(existing_fens_with_comments), 900):
+                chunk = existing_fens_with_comments[i:i + 900]
                 positions = session.query(Position).filter(Position.fen.in_(chunk)).all()
                 for pos in positions:
-                    pos.comment = combine_comments(pos.comment, comments_to_append[pos.fen], default_lang=c_lang)
+                    res_comment = pos.comment or ""
+                    for frag in comments_to_append[pos.fen]:
+                        res_comment = combine_comments(res_comment, frag, default_lang=c_lang)
+                    pos.comment = res_comment
 
         # 9. Health repair
         if progress_callback:

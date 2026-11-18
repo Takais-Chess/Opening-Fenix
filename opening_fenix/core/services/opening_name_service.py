@@ -1,10 +1,13 @@
 import os
 import json
+import threading
 from typing import Optional, List, Dict
 from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.core.logger import logger
 
 _OPENINGS_CACHE: Optional[Dict[str, dict]] = None
+_OPENINGS_LOCK = threading.Lock()
+
 
 def load_openings_database() -> Dict[str, dict]:
     """
@@ -15,28 +18,42 @@ def load_openings_database() -> Dict[str, dict]:
     if _OPENINGS_CACHE is not None:
         return _OPENINGS_CACHE
 
-    db_path = os.path.join(get_base_path(), "assets", "openings.json")
-    if not os.path.exists(db_path):
-        logger.warning(f"Openings database not found at {db_path}")
-        _OPENINGS_CACHE = {}
+    with _OPENINGS_LOCK:
+        if _OPENINGS_CACHE is not None:
+            return _OPENINGS_CACHE
+
+        db_path = os.path.join(get_base_path(), "assets", "openings.json")
+        if not os.path.exists(db_path):
+            logger.warning(f"Openings database not found at {db_path}")
+            _OPENINGS_CACHE = {}
+            return _OPENINGS_CACHE
+
+        try:
+            with open(db_path, "r", encoding="utf-8") as f:
+                _OPENINGS_CACHE = json.load(f)
+                logger.info(f"Loaded {len(_OPENINGS_CACHE)} openings from {db_path}")
+        except Exception as e:
+            logger.error(f"Failed to load openings database: {e}")
+            _OPENINGS_CACHE = {}
+
         return _OPENINGS_CACHE
 
-    try:
-        with open(db_path, "r", encoding="utf-8") as f:
-            _OPENINGS_CACHE = json.load(f)
-            logger.info(f"Loaded {len(_OPENINGS_CACHE)} openings from {db_path}")
-    except Exception as e:
-        logger.error(f"Failed to load openings database: {e}")
-        _OPENINGS_CACHE = {}
 
-    return _OPENINGS_CACHE
+def preload_openings_database_async() -> None:
+    """Warms up the openings JSON database in a daemon thread."""
+    if _OPENINGS_CACHE is not None:
+        return
+    threading.Thread(target=load_openings_database, daemon=True).start()
 
 
 def clean_fen(fen: str) -> str:
     """Normalizes a FEN to the first 4 fields: piece placement, active color, castling, en passant."""
     if not fen:
         return ""
-    return " ".join(fen.strip().split(" ")[:4])
+    s = fen.strip()
+    if s.count(" ") >= 5:
+        return s.rsplit(" ", 2)[0]
+    return " ".join(s.split(" ")[:4])
 
 
 def lookup_fen(db: dict, fen: str) -> Optional[dict]:

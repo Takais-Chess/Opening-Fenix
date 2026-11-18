@@ -19,6 +19,20 @@ from opening_fenix.core.services.repair_service import repair_repertoire_health
 from opening_fenix.core.services.course_import_service import SanitizedPGNReader, format_variation_tree_as_text
 from opening_fenix.core.translation import tr_ui
 
+_EXIT_MARKER = object()
+
+
+def _board_fen4(board: chess.Board) -> str:
+    return " ".join(board.fen().split(" ", 4)[:4])
+
+
+def _merge_comment_fragments(existing: Optional[str], fragments: list, default_lang: str) -> str:
+    res = existing or ""
+    for frag in fragments:
+        res = combine_comments(res, frag, default_lang=default_lang)
+    return res
+
+
 def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, level_order: int, progress_callback: Optional[Callable[[int], None]] = None, target_lang: str = "de", subvariations_as_comments: bool = False) -> Tuple[bool, str]:
     """Imports a PGN file into a new or existing repertoire database using bulk operations."""
     db_path = get_repertoire_db_path(repo_name)
@@ -77,6 +91,8 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         moves_to_update_nag = {}
         rep_moves_to_update_level = {}
         comments_to_append = {}
+        c_lang = target_lang if target_lang and target_lang != "auto" else "de"
+        last_pct = -1
 
         # 3. FAST STREAMING PGN PARSING
         total_file_size = os.path.getsize(pgn_path) if os.path.exists(pgn_path) else 0
@@ -90,21 +106,43 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                 # Simple progress estimation based on file pointer
                 if progress_callback and total_file_size > 0:
                     processed_bytes = f_pgn.tell()
-                    progress_callback(min(100, int((processed_bytes / total_file_size) * 100)))
+                    pct = min(100, int((processed_bytes / total_file_size) * 100))
+                    if pct != last_pct:
+                        last_pct = pct
+                        progress_callback(pct)
             
                 if subvariations_as_comments:
-                    c_lang = target_lang if target_lang and target_lang != "auto" else "de"
                     board = game.board()
+                    cur_fen = _board_fen4(board)
                     for current_node in game.mainline():
                         move = current_node.move
-                        from_fen = " ".join(board.fen().split(" ")[:4])
+                        from_fen = cur_fen
+
+                        try:
+                            move_san = board.san(move)
+                        except Exception:
+                            try:
+                                move_san = current_node.san()
+                            except Exception:
+                                continue
+
+                        # Collect sibling subvariations BEFORE pushing onto board
+                        sibling_texts = []
+                        parent = current_node.parent
+                        if parent and len(parent.variations) > 1:
+                            for v in parent.variations:
+                                if v != current_node:
+                                    sub_text = format_variation_tree_as_text(v, board)
+                                    if sub_text:
+                                        sibling_texts.append(sub_text)
 
                         try:
                             board.push(move)
                         except Exception:
                             continue
 
-                        to_fen = " ".join(board.fen().split(" ")[:4])
+                        to_fen = _board_fen4(board)
+                        cur_fen = to_fen
 
                         from_pos_id = pos_cache.get(from_fen)
                         if not from_pos_id:
@@ -129,25 +167,18 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
 
                         if combined_node_comment:
-                            if to_fen in comments_to_append:
-                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=c_lang)
-                            else:
-                                comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=c_lang)
+                            lst = comments_to_append.setdefault(to_fen, [])
+                            if combined_node_comment not in lst:
+                                lst.append(combined_node_comment)
 
                         # 2. Sibling subvariations on parent
-                        parent = current_node.parent
-                        if parent and len(parent.variations) > 1:
-                            for v in parent.variations:
-                                if v != current_node:
-                                    sub_text = format_variation_tree_as_text(v, parent.board())
-                                    if sub_text:
-                                        if to_fen in comments_to_append:
-                                            comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], sub_text, default_lang=c_lang)
-                                        else:
-                                            comments_to_append[to_fen] = combine_comments("", sub_text, default_lang=c_lang)
+                        if sibling_texts:
+                            lst = comments_to_append.setdefault(to_fen, [])
+                            for sub_text in sibling_texts:
+                                if sub_text not in lst:
+                                    lst.append(sub_text)
 
                         incoming_nag = next(iter(current_node.nags), 0)
-                        move_san = current_node.san()
                         uci_str = normalize_castling_uci(move.uci(), move_san)
                         move_entry = move_cache.get((from_pos_id, uci_str))
 
@@ -181,29 +212,33 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             elif move_id in rep_move_id_by_move_id:
                                 rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                 else:
-                    node_stack = []
-                    initial_board = game.board()
-                    for node in reversed(game.variations):
-                        node_stack.append((node, initial_board.copy()))
+                    board = game.board()
+                    init_fen = _board_fen4(board)
+                    init_pos_id = pos_cache.get(init_fen)
+                    if not init_pos_id:
+                        max_pos_id += 1
+                        init_pos_id = max_pos_id
+                        pos_cache[init_fen] = init_pos_id
+                        new_positions_to_insert[init_fen] = Position(id=init_pos_id, fen=init_fen)
+
+                    node_stack = [(node, init_pos_id) for node in reversed(game.variations)]
 
                     while node_stack:
-                        current_node, board = node_stack.pop()
-                        move = current_node.move
-                        from_fen = " ".join(board.fen().split(" ")[:4])
-
-                        try:
-                            board.push(move)
-                        except Exception as e:
+                        item = node_stack.pop()
+                        if item is _EXIT_MARKER:
+                            board.pop()
                             continue
 
-                        to_fen = " ".join(board.fen().split(" ")[:4])
-                        
-                        from_pos_id = pos_cache.get(from_fen)
-                        if not from_pos_id:
-                            max_pos_id += 1
-                            from_pos_id = max_pos_id
-                            pos_cache[from_fen] = from_pos_id
-                            new_positions_to_insert[from_fen] = Position(id=from_pos_id, fen=from_fen)
+                        current_node, from_pos_id = item
+                        move = current_node.move
+
+                        try:
+                            move_san = board.san(move)
+                            board.push(move)
+                        except Exception:
+                            continue
+
+                        to_fen = _board_fen4(board)
 
                         to_pos_id = pos_cache.get(to_fen)
                         if not to_pos_id:
@@ -220,14 +255,11 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             combined_node_comment = f"{combined_node_comment} {c}".strip() if combined_node_comment else c
 
                         if combined_node_comment:
-                            lang = target_lang if target_lang and target_lang != "auto" else "de"
-                            if to_fen in comments_to_append:
-                                comments_to_append[to_fen] = combine_comments(comments_to_append[to_fen], combined_node_comment, default_lang=lang)
-                            else:
-                                comments_to_append[to_fen] = combine_comments("", combined_node_comment, default_lang=lang)
+                            lst = comments_to_append.setdefault(to_fen, [])
+                            if combined_node_comment not in lst:
+                                lst.append(combined_node_comment)
 
                         incoming_nag = next(iter(current_node.nags), 0)
-                        move_san = current_node.san()
                         uci_str = normalize_castling_uci(move.uci(), move_san)
                         move_entry = move_cache.get((from_pos_id, uci_str))
                         
@@ -261,9 +293,22 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
                             elif move_id in rep_move_id_by_move_id:
                                 rep_moves_to_update_level[rep_move_id_by_move_id[move_id]] = level_order
                         
-                        for var in reversed(current_node.variations):
-                            node_stack.append((var, board.copy()))
+                        if current_node.variations:
+                            node_stack.append(_EXIT_MARKER)
+                            for var in reversed(current_node.variations):
+                                node_stack.append((var, to_pos_id))
+                        else:
+                            board.pop()
         
+        # Pre-populate comments on newly inserted positions before bulk insert
+        existing_fens_with_comments = []
+        if comments_to_append:
+            for to_fen, frags in comments_to_append.items():
+                if to_fen in new_positions_to_insert:
+                    new_positions_to_insert[to_fen].comment = _merge_comment_fragments(None, frags, c_lang)
+                else:
+                    existing_fens_with_comments.append(to_fen)
+
         # 4. BULK DB EXECUTION
         if new_positions_to_insert:
             session.bulk_save_objects(list(new_positions_to_insert.values()))
@@ -284,17 +329,14 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
         session.flush()
         session.expire_all()
         
-        # 6. UPDATE COMMENTS 
-        if comments_to_append:
-            lang = target_lang if target_lang and target_lang != "auto" else "de"
-            fens_with_comments = list(comments_to_append.keys())
+        # 6. UPDATE COMMENTS on previously existing positions
+        if existing_fens_with_comments:
             chunk_size = 900
-            for i in range(0, len(fens_with_comments), chunk_size):
-                chunk_fens = fens_with_comments[i:i + chunk_size]
+            for i in range(0, len(existing_fens_with_comments), chunk_size):
+                chunk_fens = existing_fens_with_comments[i:i + chunk_size]
                 positions_to_update = session.query(Position).filter(Position.fen.in_(chunk_fens)).all()
                 for pos in positions_to_update:
-                    new_c = comments_to_append[pos.fen]
-                    pos.comment = combine_comments(pos.comment, new_c, default_lang=lang)
+                    pos.comment = _merge_comment_fragments(pos.comment, comments_to_append[pos.fen], c_lang)
 
         if new_moves_count > 0 or comments_to_append or moves_to_update_nag or rep_moves_to_update_level:
             # 7. AUTOMATED HEALTH REPAIR
@@ -371,6 +413,7 @@ def import_pgn_drawings_only(
         )
 
     drawings_by_fen = {}
+    last_pct = -1
     total_file_size = os.path.getsize(pgn_path) if os.path.exists(pgn_path) else 0
     with open(pgn_path, "r", encoding="utf-8", errors="ignore") as f_pgn:
         reader = SanitizedPGNReader(f_pgn)
@@ -381,22 +424,29 @@ def import_pgn_drawings_only(
 
             if progress_callback and total_file_size > 0:
                 processed_bytes = f_pgn.tell()
-                progress_callback(min(100, int((processed_bytes / total_file_size) * 100)))
+                pct = min(100, int((processed_bytes / total_file_size) * 100))
+                if pct != last_pct:
+                    last_pct = pct
+                    progress_callback(pct)
 
-            initial_board = game.board()
-            root_fen = " ".join(initial_board.fen().split(" ")[:4])
+            board = game.board()
+            root_fen = _board_fen4(board)
             if game.comment:
                 _collect_drawings_from_text(game.comment, root_fen, drawings_by_fen)
 
-            node_stack = [(node, initial_board.copy()) for node in reversed(game.variations)]
+            node_stack = [node for node in reversed(game.variations)]
             while node_stack:
-                current_node, board = node_stack.pop()
+                item = node_stack.pop()
+                if item is _EXIT_MARKER:
+                    board.pop()
+                    continue
+                current_node = item
                 try:
                     board.push(current_node.move)
                 except Exception:
                     continue
 
-                to_fen = " ".join(board.fen().split(" ")[:4])
+                to_fen = _board_fen4(board)
                 parts = []
                 if current_node.starting_comment:
                     parts.append(current_node.starting_comment.strip())
@@ -405,8 +455,12 @@ def import_pgn_drawings_only(
                 if parts:
                     _collect_drawings_from_text(" ".join(parts), to_fen, drawings_by_fen)
 
-                for var in reversed(current_node.variations):
-                    node_stack.append((var, board.copy()))
+                if current_node.variations:
+                    node_stack.append(_EXIT_MARKER)
+                    for var in reversed(current_node.variations):
+                        node_stack.append(var)
+                else:
+                    board.pop()
 
     if not drawings_by_fen:
         return False, tr_ui(

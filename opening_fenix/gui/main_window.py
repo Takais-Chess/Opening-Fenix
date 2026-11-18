@@ -161,6 +161,7 @@ class _WinAsyncSoundEffect:
 
 class MainWindow(QMainWindow):
     switch_requested = False
+    _integrity_checked_signal = pyqtSignal(str, int)
     def __init__(self, profile_name):
         super().__init__()
         self.profile_name = profile_name
@@ -196,6 +197,8 @@ class MainWindow(QMainWindow):
         self._had_alternate_attempt = False
         self.session_review_count = 0
         self._preload_lock = threading.Lock()
+        self._checked_integrity_repos = set()
+        self._integrity_checked_signal.connect(self._on_integrity_check_result)
         self._repo_preload_gen = 0
         self._preloaded_start_challenge = None
         self._challenge_preload_gen = 0
@@ -696,7 +699,7 @@ class MainWindow(QMainWindow):
     def on_repertoire_button_clicked(self, button):
         self.change_repertoire(button.property("repo_name"), refresh_buttons=False)
 
-    def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True):
+    def change_repertoire(self, repo_name, reset_filter=True, refresh_buttons=True, clear_persistent_stats=False):
         self._cancel_auto_continue()
         self._flush_pending_stats()
         # Cancel any ongoing animations before switching
@@ -744,7 +747,7 @@ class MainWindow(QMainWindow):
                 self.refresh_repertoire_buttons()
             return
             
-        self.training_manager.on_repertoire_changed()
+        self.training_manager.on_repertoire_changed(clear_persistent_stats=clear_persistent_stats)
         
         if reset_filter:
             self.active_variation_filter = None
@@ -757,7 +760,7 @@ class MainWindow(QMainWindow):
             self.update_settings_from_manager()
         
         # Immediate update of large chart, mini charts update automatically in refresh_repertoire_buttons
-        self._do_update_stats_display() 
+        stats_res = self._do_update_stats_display(allow_stale_cache=not clear_persistent_stats)
         
         self.txt_notation.clear()
         self.set_button_state('start')
@@ -766,32 +769,38 @@ class MainWindow(QMainWindow):
         if refresh_buttons:
             self.refresh_repertoire_buttons()
         
-        self._check_for_course_intro(repo_name)
+        self._check_for_course_intro(repo_name, precomputed_stats=stats_res)
         
-        # Check for logical corruption
+        # Background preload + integrity check without blocking the UI thread
         if repo_name:
+            if clear_persistent_stats:
+                self._checked_integrity_repos.discard(repo_name)
             self._schedule_repertoire_preload()
-        if repo_name:
-            orphaned = self.repertoire_manager.core.check_logical_integrity()
-            if orphaned > 0:
-                reply = QMessageBox.warning(
-                    self, 
-                    "Inkonsistenz gefunden", 
-                    f"In diesem Repertoire wurden {orphaned} verwaiste (beschädigte) Züge gefunden.\n"
-                    "Dies geschieht meist durch Reparaturen der Datenbank. Wenn sie nicht entfernt werden, "
-                    "können Fehler beim Training auftreten.\n\nSollen die defekten Züge jetzt entfernt werden?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-                )
-                if reply == QMessageBox.StandardButton.Yes:
-                    self.repertoire_manager.core.repair_logical_integrity()
-                    self._do_update_stats_display()
-                    self.change_repertoire(repo_name, reset_filter=reset_filter, refresh_buttons=False)
 
-    def _check_for_course_intro(self, repo_name):
+    def _on_integrity_check_result(self, repo_name, orphaned):
+        if orphaned <= 0 or sip.isdeleted(self) or self.repertoire_manager.active_repertoire_name != repo_name:
+            return
+        reply = QMessageBox.warning(
+            self,
+            "Inkonsistenz gefunden",
+            f"In diesem Repertoire wurden {orphaned} verwaiste (beschädigte) Züge gefunden.\n"
+            "Dies geschieht meist durch Reparaturen der Datenbank. Wenn sie nicht entfernt werden, "
+            "können Fehler beim Training auftreten.\n\nSollen die defekten Züge jetzt entfernt werden?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self.repertoire_manager.core.repair_logical_integrity()
+            self._checked_integrity_repos.discard(repo_name)
+            self.change_repertoire(repo_name, reset_filter=False, refresh_buttons=False, clear_persistent_stats=True)
+
+    def _check_for_course_intro(self, repo_name, precomputed_stats=None):
         # Handle Course Intro and Learning Modes
         if self.repertoire_manager.repo_session:
-            new, due, done_dist = self.training_manager.get_stats()
+            if precomputed_stats is not None:
+                new, due, done_dist = precomputed_stats
+            else:
+                new, due, done_dist = self.training_manager.get_stats(allow_stale_cache=True)
             learned = sum(done_dist.values()) if isinstance(done_dist, dict) else 0
             
             # Show Course Intro Splash if no moves have been learned yet and not free training
@@ -862,7 +871,7 @@ class MainWindow(QMainWindow):
             if entry_fen:
                 self.active_variation_entry_fen = entry_fen # Cache for start_animation
                 self.board_widget.set_fen(entry_fen)
-                hist = self.repertoire_manager.get_history_for_fen(entry_fen, variation_name=var_name)
+                hist = self.repertoire_manager.get_history_for_fen(entry_fen, variation_name=var_name, training_manager=self.training_manager)
                 # Ensure the last move is highlighted in notation if we jumped to a specific FEN
                 self.update_notation_display(temp_hist=hist, reveal_move=True)
                 
@@ -958,19 +967,26 @@ class MainWindow(QMainWindow):
             return
         self._do_update_stats_display()
 
-    def _do_update_stats_display(self):
+    def _do_update_stats_display(self, allow_stale_cache=False):
         active_repo = self.repertoire_manager.active_repertoire_name
         if not active_repo:
             self.progress_bar.update_stats(0, 0, {})
             self.lbl_elo.setText("🎓 800")
-            return
-        new, due, done_dist = self.training_manager.get_stats(variation_filter=self.active_variation_filter)
+            return 0, 0, {}
+        new, due, done_dist = self.training_manager.get_stats(
+            variation_filter=self.active_variation_filter,
+            allow_stale_cache=allow_stale_cache,
+        )
         self.progress_bar.update_stats(new, due, done_dist)
         
         mini_donut = getattr(self, 'repo_mini_donuts', {}).get(active_repo)
         if mini_donut is not None and not sip.isdeleted(mini_donut):
             if self.active_variation_filter:
-                r_new, r_due, r_dist = self.training_manager.get_stats(variation_filter=None, auto_commit=False)
+                r_new, r_due, r_dist = self.training_manager.get_stats(
+                    variation_filter=None,
+                    auto_commit=False,
+                    allow_stale_cache=allow_stale_cache,
+                )
                 mini_donut.update_stats(r_new, r_due, r_dist)
             else:
                 mini_donut.update_stats(new, due, done_dist)
@@ -978,6 +994,7 @@ class MainWindow(QMainWindow):
         # Update Elo display
         elo = self.training_manager.get_current_elo()
         self.lbl_elo.setText(f"🎓 {elo}")
+        return new, due, done_dist
 
     def _on_db_commit_timer(self):
         if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
@@ -1042,33 +1059,52 @@ class MainWindow(QMainWindow):
         gen = self._repo_preload_gen
         mode = self.training_mode
         var_filter = self.active_variation_filter
+        should_check_integrity = repo_name not in self._checked_integrity_repos
+
+        def _is_stale():
+            return self._repo_preload_gen != gen or self.repertoire_manager.active_repertoire_name != repo_name
 
         def _worker():
-            with self._preload_lock:
-                if self._repo_preload_gen != gen or self.repertoire_manager.active_repertoire_name != repo_name:
+            try:
+                for step in (
+                    lambda: self.training_manager._ensure_forward_cache(),
+                    lambda: self.training_manager._ensure_td_cache(),
+                    lambda: self.training_manager._ensure_reachable_moves_cache(var_filter),
+                ):
+                    if _is_stale():
+                        return
+                    with self._preload_lock:
+                        if _is_stale():
+                            return
+                        step()
+
+                if should_check_integrity and not _is_stale():
+                    with self._preload_lock:
+                        if _is_stale():
+                            return
+                        orphaned = self.repertoire_manager.core.check_logical_integrity()
+                    if not _is_stale():
+                        self._checked_integrity_repos.add(repo_name)
+                        if orphaned > 0:
+                            self._integrity_checked_signal.emit(repo_name, orphaned)
+
+                if _is_stale():
                     return
-                try:
-                    self.training_manager._ensure_forward_cache()
-                    if self._repo_preload_gen != gen:
-                        return
-                    self.training_manager._ensure_td_cache()
-                    if self._repo_preload_gen != gen:
-                        return
-                    self.training_manager._ensure_reachable_moves_cache(var_filter)
-                    if self._repo_preload_gen != gen:
+                with self._preload_lock:
+                    if _is_stale():
                         return
                     next_move, _ = self.training_manager.get_next_move(
                         mode=mode,
                         variation_filter=var_filter,
                         exclude_move_ids=exclude_move_ids,
                     )
-                    if self._repo_preload_gen != gen:
+                    if _is_stale():
                         return
                     anim_ctx = self._precompute_move_anim_context(next_move, var_filter) if next_move else None
-                    if self._repo_preload_gen == gen:
+                    if not _is_stale():
                         self._preloaded_start_challenge = (repo_name, mode, var_filter, next_move, anim_ctx)
-                except Exception as e:
-                    logger.debug(f"Background repertoire preload skipped: {e}")
+            except Exception as e:
+                logger.debug(f"Background repertoire preload skipped: {e}")
 
         t = threading.Thread(target=_worker, daemon=True)
         self._challenge_preload_thread = t
@@ -1388,9 +1424,9 @@ class MainWindow(QMainWindow):
         if self.creator_window and not sip.isdeleted(self.creator_window):
             creator_repo = self.creator_window.backend.active_repo_name
             if creator_repo and creator_repo != self.repertoire_manager.active_repertoire_name:
-                self.change_repertoire(creator_repo)
+                self.change_repertoire(creator_repo, clear_persistent_stats=True)
             else:
-                self.change_repertoire(self.repertoire_manager.active_repertoire_name)
+                self.change_repertoire(self.repertoire_manager.active_repertoire_name, clear_persistent_stats=True)
 
 
 
@@ -1507,7 +1543,7 @@ class MainWindow(QMainWindow):
                 
                 # Defer the failure DB registration and stats update
                 def process_after_fail():
-                    self.training_manager.register_success(current_move.id, False)
+                    self.training_manager.register_success(current_move.id, False, defer_commit=True)
                     self.update_stats_display()
                     
                 QTimer.singleShot(0, process_after_fail)

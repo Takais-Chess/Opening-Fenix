@@ -1,8 +1,8 @@
 import os
 import json
-from collections import deque
+from collections import deque, defaultdict
 import chess
-from typing import Tuple, Callable, Optional
+from typing import Tuple, Callable, Optional, Dict, List, Set
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -12,88 +12,138 @@ from opening_fenix.core.db.meta_utils import get_meta
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.services.lichess_service import ELO_MAPPING
 
+_CASTLING_ALT = {
+    'e1c1': 'e1a1',
+    'e1g1': 'e1h1',
+    'e8c8': 'e8a8',
+    'e8g8': 'e8h8',
+}
+
+
+def _norm_fen4(fen: str) -> str:
+    if not fen:
+        return ""
+    s = fen.strip()
+    if s.count(" ") >= 5:
+        return s.rsplit(" ", 2)[0]
+    parts = s.split(" ")
+    return " ".join(parts[:4])
+
+
+def _compute_depths_topo(
+    roots: List[int],
+    outgoing_edges: Dict[int, List[int]],
+    allowed_ids: Optional[Set[int]] = None,
+) -> List[List[int]]:
+    """Computes longest-path depth buckets in O(V + E) via Kahn's topological sort with cycle fallback."""
+    reachable: Set[int] = set(roots)
+    bfs_q = deque(roots)
+    in_deg: Dict[int, int] = {r: 0 for r in roots}
+
+    while bfs_q:
+        pid = bfs_q.popleft()
+        for to_id in outgoing_edges.get(pid, ()):
+            if not to_id or (allowed_ids is not None and to_id not in allowed_ids):
+                continue
+            in_deg[to_id] = in_deg.get(to_id, 0) + 1
+            if to_id not in reachable:
+                reachable.add(to_id)
+                bfs_q.append(to_id)
+
+    pos_depths: Dict[int, int] = {r: 0 for r in roots}
+    topo_q = deque(r for r in roots if in_deg.get(r, 0) == 0)
+    processed: Set[int] = set()
+
+    while topo_q:
+        pid = topo_q.popleft()
+        if pid in processed:
+            continue
+        processed.add(pid)
+        curr_d = pos_depths.get(pid, 0)
+        for to_id in outgoing_edges.get(pid, ()):
+            if not to_id or to_id not in reachable:
+                continue
+            nd = curr_d + 1
+            if nd > pos_depths.get(to_id, -1):
+                pos_depths[to_id] = nd
+            in_deg[to_id] -= 1
+            if in_deg[to_id] <= 0 and to_id not in processed:
+                topo_q.append(to_id)
+
+    # Rare cycle fallback so cyclic graphs still resolve every reachable node
+    if len(processed) < len(reachable):
+        extra_d = (max(pos_depths.values()) + 1) if pos_depths else 0
+        for pid in reachable:
+            if pid not in pos_depths:
+                pos_depths[pid] = extra_d
+
+    max_d = max(pos_depths.values()) if pos_depths else 0
+    buckets: List[List[int]] = [[] for _ in range(max_d + 1)]
+    for pid, d in pos_depths.items():
+        buckets[d].append(pid)
+    return buckets
+
+
 def calculate_priority_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
 
     try:
-        session.query(Move).update({Move.priority_score: 0.0})
-        session.flush()
+        all_moves_rows = session.query(
+            Move.id, Move.from_position_id, Move.to_position_id, Move.uci, Move.san, Move.priority_score
+        ).all()
+        rep_move_ids = {
+            rm_id for (rm_id,) in session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
+        }
 
-        all_moves_db = session.query(Move).all()
-        rep_moves_db = session.query(RepertoireMove.move_id).filter_by(is_active=True).all()
-        rep_move_ids = {rm.move_id for rm in rep_moves_db}
-        
-        outgoing_moves_cache = {}
-        for move in all_moves_db:
-            if move.from_position_id not in outgoing_moves_cache:
-                outgoing_moves_cache[move.from_position_id] = []
-            outgoing_moves_cache[move.from_position_id].append(move)
+        outgoing_moves_cache: Dict[int, list] = defaultdict(list)
+        outgoing_targets: Dict[int, List[int]] = defaultdict(list)
+        incoming_pos_ids: Set[int] = set()
+        for row in all_moves_rows:
+            m_id, from_id, to_id, uci, san, old_prio = row
+            outgoing_moves_cache[from_id].append((m_id, to_id, uci, san))
+            if to_id:
+                outgoing_targets[from_id].append(to_id)
+                incoming_pos_ids.add(to_id)
 
         all_positions_info = session.query(Position.id, Position.fen).all()
-        id_to_fen = {p.id: p.fen for p in all_positions_info}
-        
-        incoming_pos_ids = set()
-        for move in all_moves_db:
-            if move.to_position_id:
-                incoming_pos_ids.add(move.to_position_id)
-        
-        start_board = chess.Board()
-        start_fen_normalized = " ".join(start_board.fen().split(" ")[:4])
-        
+        id_to_clean_fen: Dict[int, str] = {}
         start_pos_id = None
-        for pid, fen in id_to_fen.items():
-            clean_f = " ".join(fen.split(" ")[:4])
-            if clean_f == start_fen_normalized:
-                start_pos_id = pid
-                break
-        
+        start_fen_normalized = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
+        for pid, fen in all_positions_info:
+            if fen:
+                cf = _norm_fen4(fen)
+                id_to_clean_fen[pid] = cf
+                if start_pos_id is None and cf == start_fen_normalized:
+                    start_pos_id = pid
+            else:
+                id_to_clean_fen[pid] = ""
+
         if start_pos_id is not None:
             roots = [start_pos_id]
         else:
-            roots = [pid for pid in id_to_fen.keys() if pid not in incoming_pos_ids]
-            
+            roots = [pid for pid in id_to_clean_fen if pid not in incoming_pos_ids]
+
         if not roots:
-            if id_to_fen:
-                roots = [min(id_to_fen.keys())]
+            if id_to_clean_fen:
+                roots = [min(id_to_clean_fen.keys())]
             else:
-                session.close()
-                db.close()
                 return False, "Database contains no positions."
 
-        pos_depths = {root_id: 0 for root_id in roots}
-        visit_count = {root_id: 1 for root_id in roots}
-        queue = deque(roots)
+        positions_by_depth = _compute_depths_topo(roots, outgoing_targets)
 
-        while queue:
-            pos_id = queue.popleft()
-            curr_d = pos_depths[pos_id]
+        id_probabilities: Dict[int, float] = {root_id: 1.0 for root_id in roots}
+        new_scores: Dict[int, float] = {}
 
-            outgoing_moves = outgoing_moves_cache.get(pos_id, [])
-            for move in outgoing_moves:
-                to_id = move.to_position_id
-                if to_id:
-                    new_d = curr_d + 1
-                    if to_id not in pos_depths or new_d > pos_depths[to_id]:
-                        pos_depths[to_id] = new_d
-                        vc = visit_count.get(to_id, 0) + 1
-                        visit_count[to_id] = vc
-                        if vc <= 100:  # Prevent infinite loops in case of cyclic graphs
-                            queue.append(to_id)
-
-        max_d = max(pos_depths.values()) if pos_depths else 0
-        positions_by_depth = [[] for _ in range(max_d + 1)]
-        for pid, d in pos_depths.items():
-            positions_by_depth[d].append(pid)
-
-        id_probabilities = {pos_id: 0.0 for pos_id in id_to_fen.keys()}
-        for root_id in roots:
-            id_probabilities[root_id] = 1.0
-
-        lichess_data_cache = {" ".join(ld.fen.split(" ")[:4]): json.loads(ld.moves_json) for ld in session.query(LichessData).filter_by(elo_range=elo_category).all()}
+        lichess_rows = session.query(LichessData.fen, LichessData.moves_json).filter_by(elo_range=elo_category).all()
+        lichess_data_cache: Dict[str, dict] = {}
+        for ld_fen, ld_json in lichess_rows:
+            if ld_fen and ld_json:
+                lichess_data_cache[_norm_fen4(ld_fen)] = json.loads(ld_json)
 
         user_turn_char = get_meta(session, "color", "w")
+        user_turn_marker = f" {user_turn_char} "
 
         total_depths = len(positions_by_depth)
         for depth, pos_ids in enumerate(positions_by_depth):
@@ -105,106 +155,89 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
                 current_prob = id_probabilities.get(pos_id, 0.0)
                 if current_prob == 0.0:
                     continue
-                
-                position_fen = id_to_fen.get(pos_id)
-                if not position_fen: continue
-                
-                clean_pos_fen = " ".join(position_fen.split(" ")[:4])
-                is_user_turn = clean_pos_fen.split(" ")[1] == user_turn_char
-                
-                all_outgoing_moves = outgoing_moves_cache.get(pos_id, [])
-                
+
+                clean_pos_fen = id_to_clean_fen.get(pos_id)
+                if not clean_pos_fen:
+                    continue
+
+                is_user_turn = user_turn_marker in clean_pos_fen
+                all_outgoing_moves = outgoing_moves_cache.get(pos_id)
+                if not all_outgoing_moves:
+                    continue
+
                 if is_user_turn:
-                    user_repertoire_moves = [m for m in all_outgoing_moves if m.id in rep_move_ids]
-
-                    if user_repertoire_moves:
-                        for user_move in user_repertoire_moves:
-                            user_move.priority_score = current_prob
-                            if user_move.to_position_id:
-                                id_probabilities[user_move.to_position_id] = max(
-                                    id_probabilities.get(user_move.to_position_id, 0.0),
-                                    current_prob
-                                )
-
+                    for m_id, to_id, _uci, _san in all_outgoing_moves:
+                        if m_id in rep_move_ids:
+                            new_scores[m_id] = current_prob
+                            if to_id and current_prob > id_probabilities.get(to_id, 0.0):
+                                id_probabilities[to_id] = current_prob
                 else:
-                    if not all_outgoing_moves:
-                        continue
-
-                    # LICESS DATA & TOTAL GAMES LOGIC
                     lichess_move_data = lichess_data_cache.get(clean_pos_fen) or {}
-                    total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
-                    
+                    total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values()) if lichess_move_data else 0
+
                     moves_with_stats = []
                     rare_moves_with_weights = []
-                    
-                    for move in all_outgoing_moves:
-                        lichess_info = lichess_move_data.get(move.uci) or lichess_move_data.get(move.san)
+
+                    for m_id, to_id, uci, san in all_outgoing_moves:
+                        lichess_info = lichess_move_data.get(uci) or lichess_move_data.get(san)
                         if not lichess_info:
-                            alt_uci = None
-                            if move.uci == 'e1c1': alt_uci = 'e1a1'
-                            elif move.uci == 'e1g1': alt_uci = 'e1h1'
-                            elif move.uci == 'e8c8': alt_uci = 'e8a8'
-                            elif move.uci == 'e8g8': alt_uci = 'e8h8'
+                            alt_uci = _CASTLING_ALT.get(uci)
                             if alt_uci:
                                 lichess_info = lichess_move_data.get(alt_uci)
 
                         if lichess_info and lichess_info.get('total', 0) > 0:
-                            moves_with_stats.append((move, lichess_info))
+                            moves_with_stats.append((m_id, to_id, lichess_info['total']))
                         else:
-                            # BACK-PROPAGATION: Check if child position has Lichess data
                             weight = 1
-                            if move.to_position_id:
-                                child_fen = id_to_fen.get(move.to_position_id)
-                                if child_fen:
-                                    clean_child_fen = " ".join(child_fen.split(" ")[:4])
+                            if to_id:
+                                clean_child_fen = id_to_clean_fen.get(to_id)
+                                if clean_child_fen:
                                     child_data = lichess_data_cache.get(clean_child_fen)
                                     if child_data:
-                                        weight = sum(m_info.get('total', 0) for m_info in child_data.values())
-                                        if weight < 1: weight = 1
-                            rare_moves_with_weights.append((move, weight))
-                    
+                                        w_sum = sum(m_info.get('total', 0) for m_info in child_data.values())
+                                        if w_sum > 1:
+                                            weight = w_sum
+                            rare_moves_with_weights.append((m_id, to_id, weight))
+
                     if moves_with_stats:
-                        min_lichess_total = min(stats['total'] for _, stats in moves_with_stats)
-                        rare_moves_with_weights = [(m, min(w, min_lichess_total)) for m, w in rare_moves_with_weights]
-                    
-                    # TOTAL GAMES = SUM(LICHESS TOP 12) + SUM(PROPAGATED RARE WEIGHTS)
-                    total_rare_weight = sum(w for m, w in rare_moves_with_weights)
+                        min_lichess_total = min(tot for _, _, tot in moves_with_stats)
+                        rare_moves_with_weights = [(m_id, to_id, min(w, min_lichess_total)) for m_id, to_id, w in rare_moves_with_weights]
+
+                    total_rare_weight = sum(w for _, _, w in rare_moves_with_weights)
                     effective_total = total_from_lichess + total_rare_weight
-                    
+
                     if effective_total > 0:
-                        for move, stats in moves_with_stats:
-                            share = stats['total'] / effective_total
-                            next_prob = current_prob * share
-                            move.priority_score = next_prob
-                            if move.to_position_id:
-                                id_probabilities[move.to_position_id] = max(
-                                    id_probabilities.get(move.to_position_id, 0.0),
-                                    next_prob
-                                )
-                        
-                        for move, weight in rare_moves_with_weights:
-                            share = weight / effective_total
-                            next_prob = current_prob * share
-                            move.priority_score = next_prob
-                            if move.to_position_id:
-                                id_probabilities[move.to_position_id] = max(
-                                    id_probabilities.get(move.to_position_id, 0.0),
-                                    next_prob
-                                )
+                        inv_total = current_prob / effective_total
+                        for m_id, to_id, tot in moves_with_stats:
+                            next_prob = tot * inv_total
+                            new_scores[m_id] = next_prob
+                            if to_id and next_prob > id_probabilities.get(to_id, 0.0):
+                                id_probabilities[to_id] = next_prob
+
+                        for m_id, to_id, weight in rare_moves_with_weights:
+                            next_prob = weight * inv_total
+                            new_scores[m_id] = next_prob
+                            if to_id and next_prob > id_probabilities.get(to_id, 0.0):
+                                id_probabilities[to_id] = next_prob
                     else:
-                        # Fallback for no data
                         split_prob = current_prob / len(all_outgoing_moves)
-                        for move in all_outgoing_moves:
-                            move.priority_score = split_prob
-                            if move.to_position_id:
-                                id_probabilities[move.to_position_id] = max(
-                                    id_probabilities.get(move.to_position_id, 0.0),
-                                    split_prob
-                                )
+                        for m_id, to_id, _uci, _san in all_outgoing_moves:
+                            new_scores[m_id] = split_prob
+                            if to_id and split_prob > id_probabilities.get(to_id, 0.0):
+                                id_probabilities[to_id] = split_prob
 
             if progress_callback:
                 progress_callback(int((depth + 1) * 100 / total_depths))
-            
+
+        updates = []
+        for m_id, _from_id, _to_id, _uci, _san, old_prio in all_moves_rows:
+            target_prio = new_scores.get(m_id, 0.0)
+            if old_prio is None or old_prio != target_prio:
+                updates.append({'id': m_id, 'priority_score': target_prio})
+
+        if updates:
+            for i in range(0, len(updates), 2000):
+                session.bulk_update_mappings(Move, updates[i:i + 2000])
         commit_with_retry(session)
         return True, "Priority scores calculated successfully."
 
@@ -262,25 +295,38 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
             total_from_lichess = sum(m_info.get('total', 0) for m_info in lichess_move_data.values())
 
             moves_with_stats = []
-            rare_moves_with_weights = []
+            missing_rare_moves = []
             for m in start_out_moves:
                 info = lichess_move_data.get(m.uci) or lichess_move_data.get(m.san)
                 if not info:
-                    alt_uci = {'e1c1': 'e1a1', 'e1g1': 'e1h1', 'e8c8': 'e8a8', 'e8g8': 'e8h8'}.get(m.uci)
+                    alt_uci = _CASTLING_ALT.get(m.uci)
                     if alt_uci:
                         info = lichess_move_data.get(alt_uci)
                 if info and info.get('total', 0) > 0:
                     moves_with_stats.append((m, info))
                 else:
-                    weight = 1
-                    if m.to_position_id:
-                        child_pos = session.get(Position, m.to_position_id)
-                        if child_pos and child_pos.fen:
-                            clean_child_fen = " ".join(child_pos.fen.split(" ")[:4])
-                            child_ld = session.query(LichessData).filter_by(fen=clean_child_fen, elo_range=elo_category).first()
-                            if child_ld and child_ld.moves_json:
-                                child_data = json.loads(child_ld.moves_json)
-                                weight = max(1, sum(m_info.get('total', 0) for m_info in child_data.values()))
+                    missing_rare_moves.append(m)
+
+            rare_moves_with_weights = []
+            if missing_rare_moves:
+                rare_child_ids = list({m.to_position_id for m in missing_rare_moves if m.to_position_id})
+                child_clean_fens = {}
+                if rare_child_ids:
+                    for pid, p_fen in session.query(Position.id, Position.fen).filter(Position.id.in_(rare_child_ids)).all():
+                        if p_fen:
+                            child_clean_fens[pid] = _norm_fen4(p_fen)
+                child_ld_map = {}
+                unique_child_fens = list(set(child_clean_fens.values()))
+                if unique_child_fens:
+                    for ld_fen, ld_json in session.query(LichessData.fen, LichessData.moves_json).filter(
+                        LichessData.fen.in_(unique_child_fens), LichessData.elo_range == elo_category
+                    ).all():
+                        if ld_json:
+                            child_data = json.loads(ld_json)
+                            child_ld_map[_norm_fen4(ld_fen)] = max(1, sum(mi.get('total', 0) for mi in child_data.values()))
+                for m in missing_rare_moves:
+                    cf = child_clean_fens.get(m.to_position_id, "")
+                    weight = child_ld_map.get(cf, 1)
                     rare_moves_with_weights.append((m, weight))
 
             if moves_with_stats:
@@ -326,21 +372,23 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                 session.flush()
             return True, "Local priority scores updated."
 
-        from sqlalchemy import text
-        # ── 1. Use Recursive CTE from changed child roots only ──
-        seed_literals = ",".join(str(int(cid)) for cid in seed_child_ids)
-        sql_reachable = text(f"""
-            WITH RECURSIVE descendants(id) AS (
-                SELECT id FROM positions WHERE id IN ({seed_literals})
-                UNION
-                SELECT m.to_position_id
-                FROM moves m
-                INNER JOIN descendants d ON m.from_position_id = d.id
-                WHERE m.to_position_id IS NOT NULL
-            )
-            SELECT id FROM descendants
-        """)
-        reachable_ids = {row[0] for row in session.execute(sql_reachable).fetchall()}
+        # ── 1. Discover reachable descendant IDs safely using chunked BFS (avoids SQL string interpolation) ──
+        reachable_ids: Set[int] = set(seed_child_ids)
+        frontier = list(seed_child_ids)
+        chunk_size = 900
+        while frontier:
+            next_frontier = []
+            for i in range(0, len(frontier), chunk_size):
+                chunk = frontier[i:i + chunk_size]
+                for (to_id,) in session.query(Move.to_position_id).filter(
+                    Move.from_position_id.in_(chunk),
+                    Move.to_position_id.isnot(None)
+                ).all():
+                    if to_id not in reachable_ids:
+                        reachable_ids.add(to_id)
+                        next_frontier.append(to_id)
+            frontier = next_frontier
+
         if not reachable_ids:
             if any_start_move_dirty:
                 session.flush()
@@ -350,7 +398,6 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
         all_moves_in_subtree = []
         seen_move_ids = set()
         reachable_list = list(reachable_ids)
-        chunk_size = 900
         for i in range(0, len(reachable_list), chunk_size):
             chunk = reachable_list[i:i + chunk_size]
             moves_chunk = (
@@ -365,38 +412,20 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
             
         # Build memory models
         outgoing_moves_cache = {pid: [] for pid in reachable_ids}
+        outgoing_targets_local: Dict[int, List[int]] = defaultdict(list)
         incoming_moves_cache = {pid: [] for pid in reachable_ids}
         
         for m in all_moves_in_subtree:
             if m.from_position_id in outgoing_moves_cache:
                 outgoing_moves_cache[m.from_position_id].append(m)
+                if m.to_position_id:
+                    outgoing_targets_local[m.from_position_id].append(m.to_position_id)
             if m.to_position_id in incoming_moves_cache:
                 incoming_moves_cache[m.to_position_id].append(m)
 
-        # ── 3. Build queue dynamically (BFS in memory with max depth tracking) ──
-        pos_depths = {cid: 0 for cid in seed_child_ids if cid in reachable_ids}
-        visit_count = {cid: 1 for cid in pos_depths}
-        queue = deque(pos_depths.keys())
-
-        while queue:
-            pos_id = queue.popleft()
-            curr_d = pos_depths[pos_id]
-
-            for m in outgoing_moves_cache.get(pos_id, []):
-                to_id = m.to_position_id
-                if to_id and to_id in reachable_ids:
-                    new_d = curr_d + 1
-                    if to_id not in pos_depths or new_d > pos_depths[to_id]:
-                        pos_depths[to_id] = new_d
-                        vc = visit_count.get(to_id, 0) + 1
-                        visit_count[to_id] = vc
-                        if vc <= 100:
-                            queue.append(to_id)
-
-        max_d = max(pos_depths.values()) if pos_depths else 0
-        subtree_positions_by_depth = [[] for _ in range(max_d + 1)]
-        for pid, d in pos_depths.items():
-            subtree_positions_by_depth[d].append(pid)
+        # ── 3. Build topological depth buckets in O(V + E) ──
+        local_roots = [cid for cid in seed_child_ids if cid in reachable_ids]
+        subtree_positions_by_depth = _compute_depths_topo(local_roots, outgoing_targets_local, allowed_ids=reachable_ids)
         
         id_probabilities = {pid: 0.0 for pid in reachable_ids}
         for pid in reachable_ids:

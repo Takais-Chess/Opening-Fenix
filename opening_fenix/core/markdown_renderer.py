@@ -7,6 +7,25 @@ import re
 import html
 from typing import Optional
 
+_RE_INLINE_CODE = re.compile(r'`([^`\n]+)`')
+_RE_INLINE_PLACEHOLDER = re.compile(r'^(\d+@@)(.*)$', re.DOTALL)
+_RE_PLACEHOLDER_RESTORE = re.compile(r'@@INLINE_CODE_(\d+)@@')
+_RE_MD_LINK = re.compile(r'\[([^\]]+)\]\((https?://[^)\s]+)\)')
+_RE_AUTO_URL = re.compile(r'(?<!href=")(?<!">)(https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+)(?![^<]*</a>)')
+_RE_BOLD_ITALIC_STAR = re.compile(r'\*\*\*([^\*\n]+)\*\*\*')
+_RE_BOLD_ITALIC_UNDER = re.compile(r'___([^_\n]+)___')
+_RE_BOLD_STAR = re.compile(r'\*\*([^\*\n]+)\*\*')
+_RE_BOLD_UNDER = re.compile(r'__([^_\n]+)__')
+_RE_ITALIC_STAR = re.compile(r'\*([^\*\s\n][^\*\n]*?)\*')
+_RE_ITALIC_UNDER = re.compile(r'(?<!\w)_([^_\s\n][^_\n]*?)_(?!\w)')
+_RE_STRIKE = re.compile(r'~~([^~\n]+)~~')
+_RE_HR = re.compile(r'^\s*([-*_])(?:\s*\1){2,}\s*$')
+_RE_BQ_PREFIX = re.compile(r'^\s*>\s?')
+_RE_TABLE_SEP = re.compile(r'^\s*:?-+:?\s*$')
+_RE_HEADING = re.compile(r'^(#{1,6})\s+(.*)$')
+_RE_UL = re.compile(r'^(\s*)([-*+])\s+(.*)$')
+_RE_OL = re.compile(r'^(\s*)(\d+)\.\s+(.*)$')
+
 
 def markdown_to_github_html(md_text: Optional[str]) -> str:
     """
@@ -43,54 +62,66 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             return f"@@INLINE_CODE_{len(inline_codes) - 1}@@"
 
         # 1. Protect inline code first so its contents are untouched by formatting rules
-        text = re.sub(r'`([^`\n]+)`', save_inline_code, text)
+        if "`" in text:
+            text = _RE_INLINE_CODE.sub(save_inline_code, text)
 
         # 2. Escape HTML entities in non-code parts
-        parts = text.split("@@INLINE_CODE_")
-        escaped_parts = []
-        for idx, part in enumerate(parts):
-            if idx == 0:
-                escaped_parts.append(html.escape(part))
-            else:
-                m = re.match(r'^(\d+@@)(.*)$', part, re.DOTALL)
-                if m:
-                    escaped_parts.append(m.group(1) + html.escape(m.group(2)))
-                else:
+        if inline_codes:
+            parts = text.split("@@INLINE_CODE_")
+            escaped_parts = []
+            for idx, part in enumerate(parts):
+                if idx == 0:
                     escaped_parts.append(html.escape(part))
-        text = "@@INLINE_CODE_".join(escaped_parts)
+                else:
+                    m = _RE_INLINE_PLACEHOLDER.match(part)
+                    if m:
+                        escaped_parts.append(m.group(1) + html.escape(m.group(2)))
+                    else:
+                        escaped_parts.append(html.escape(part))
+            text = "@@INLINE_CODE_".join(escaped_parts)
+        else:
+            text = html.escape(text)
 
         # 3. Markdown links: [text](url)
-        text = re.sub(
-            r'\[([^\]]+)\]\((https?://[^)\s]+)\)',
-            r'<a href="\2" style="color: #0969da; text-decoration: none; font-weight: 500;">\1</a>',
-            text
-        )
+        if "[" in text and "http" in text:
+            text = _RE_MD_LINK.sub(
+                r'<a href="\2" style="color: #0969da; text-decoration: none; font-weight: 500;">\1</a>',
+                text
+            )
 
         # 4. Standalone URLs (not already inside an <a> tag)
-        text = re.sub(
-            r'(?<!href=")(?<!">)(https?://[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]+)(?![^<]*</a>)',
-            r'<a href="\1" style="color: #0969da; text-decoration: none; font-weight: 500;">\1</a>',
-            text
-        )
+        if "http" in text:
+            text = _RE_AUTO_URL.sub(
+                r'<a href="\1" style="color: #0969da; text-decoration: none; font-weight: 500;">\1</a>',
+                text
+            )
 
-        # 5. Bold & Italic combinations
-        text = re.sub(r'\*\*\*([^\*\n]+)\*\*\*', r'<strong style="font-weight: 600; color: #1f2328;"><em>\1</em></strong>', text)
-        text = re.sub(r'___([^_\n]+)___', r'<strong style="font-weight: 600; color: #1f2328;"><em>\1</em></strong>', text)
+        if "*" in text or "_" in text or "~" in text:
+            # 5. Bold & Italic combinations
+            if "***" in text:
+                text = _RE_BOLD_ITALIC_STAR.sub(r'<strong style="font-weight: 600; color: #1f2328;"><em>\1</em></strong>', text)
+            if "___" in text:
+                text = _RE_BOLD_ITALIC_UNDER.sub(r'<strong style="font-weight: 600; color: #1f2328;"><em>\1</em></strong>', text)
 
-        # 6. Bold: **text** or __text__
-        text = re.sub(r'\*\*([^\*\n]+)\*\*', r'<strong style="font-weight: 600; color: #1f2328;">\1</strong>', text)
-        text = re.sub(r'__([^_\n]+)__', r'<strong style="font-weight: 600; color: #1f2328;">\1</strong>', text)
+            # 6. Bold: **text** or __text__
+            if "**" in text:
+                text = _RE_BOLD_STAR.sub(r'<strong style="font-weight: 600; color: #1f2328;">\1</strong>', text)
+            if "__" in text:
+                text = _RE_BOLD_UNDER.sub(r'<strong style="font-weight: 600; color: #1f2328;">\1</strong>', text)
 
-        # 7. Italic: *text* or _text_
-        text = re.sub(r'\*([^\*\s\n][^\*\n]*?)\*', r'<em>\1</em>', text)
-        text = re.sub(r'(?<!\w)_([^_\s\n][^_\n]*?)_(?!\w)', r'<em>\1</em>', text)
+            # 7. Italic: *text* or _text_
+            if "*" in text:
+                text = _RE_ITALIC_STAR.sub(r'<em>\1</em>', text)
+            if "_" in text:
+                text = _RE_ITALIC_UNDER.sub(r'<em>\1</em>', text)
 
-        # 8. Strikethrough: ~~text~~
-        text = re.sub(r'~~([^~\n]+)~~', r'<del style="color: #656d76;">\1</del>', text)
+            # 8. Strikethrough: ~~text~~
+            if "~~" in text:
+                text = _RE_STRIKE.sub(r'<del style="color: #656d76;">\1</del>', text)
 
-        # 9. Restore inline code placeholders
-        for idx, code_html in enumerate(inline_codes):
-            text = text.replace(f"@@INLINE_CODE_{idx}@@", code_html)
+        # 9. Restore inline code placeholders in a single pass
+        if inline_codes:
+            text = _RE_PLACEHOLDER_RESTORE.sub(lambda m: inline_codes[int(m.group(1))], text)
 
         return text
 
@@ -172,7 +203,7 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             continue
 
         # Horizontal rules: ---, ***, ___
-        if re.match(r'^\s*([-*_])(?:\s*\1){2,}\s*$', line):
+        if _RE_HR.match(line):
             close_all_lists()
             close_blockquote()
             close_table()
@@ -185,7 +216,7 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             close_all_lists()
             close_table()
             in_blockquote = True
-            bq_text = re.sub(r'^\s*>\s?', '', line)
+            bq_text = _RE_BQ_PREFIX.sub('', line)
             blockquote_lines.append(format_inlines(bq_text))
             i += 1
             continue
@@ -196,7 +227,7 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
         if "|" in line and (line.strip().startswith("|") or line.strip().endswith("|")):
             stripped = line.strip().strip("|")
             cells = stripped.split("|")
-            if all(re.match(r'^\s*:?-+:?\s*$', c) for c in cells if c.strip()):
+            if all(_RE_TABLE_SEP.match(c) for c in cells if c.strip()):
                 i += 1
                 continue
             close_all_lists()
@@ -209,7 +240,7 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             close_table()
 
         # Headings: #, ##, ###, ####, #####, ######
-        m_heading = re.match(r'^(#{1,6})\s+(.*)$', line.strip())
+        m_heading = _RE_HEADING.match(line.strip())
         if m_heading:
             close_all_lists()
             close_blockquote()
@@ -243,8 +274,8 @@ def markdown_to_github_html(md_text: Optional[str]) -> str:
             continue
 
         # Lists (unordered -/*/+ or ordered 1.)
-        m_ul = re.match(r'^(\s*)([-*+])\s+(.*)$', line)
-        m_ol = re.match(r'^(\s*)(\d+)\.\s+(.*)$', line)
+        m_ul = _RE_UL.match(line)
+        m_ol = _RE_OL.match(line)
 
         if m_ul or m_ol:
             close_blockquote()

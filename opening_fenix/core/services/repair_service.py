@@ -8,85 +8,110 @@ def repair_repertoire_health(session, fast=False):
     Runs a set of maintenance tasks to ensure the repertoire is logically consistent.
     1. Repairs Gaps (Broken move chains)
     2. Enforces Level Consistency (Parents must be at least as basic as children)
+    3. Canonicalizes Castling UCIs
     """
     logger.info("Maintenance: Running repertoire health check...")
-    
-    # 1. Repair Gaps
-    # A gap is a move that leads to a repertoire position but isn't marked as a repertoire move.
+
+    # Load graph into memory once instead of running multi-pass full-table SQL scans per ply
+    all_moves = session.query(Move.id, Move.from_position_id, Move.to_position_id).all()
+    rep_rows = session.query(RepertoireMove.id, RepertoireMove.move_id, RepertoireMove.level).all()
+
+    move_by_id = {m_id: (from_id, to_id) for m_id, from_id, to_id in all_moves}
+    incoming_by_pos = {}
+    outgoing_by_pos = {}
+    for m_id, from_id, to_id in all_moves:
+        outgoing_by_pos.setdefault(from_id, []).append(m_id)
+        if to_id is not None:
+            incoming_by_pos.setdefault(to_id, []).append(m_id)
+
+    rep_level_by_move = {}
+    rep_id_by_move = {}
+    for rm_id, m_id, lvl in rep_rows:
+        eff_lvl = lvl if lvl is not None else 1
+        rep_level_by_move[m_id] = eff_lvl
+        rep_id_by_move[m_id] = rm_id
+
+    # 1. Repair Gaps (propagate upwards in memory)
     gaps_fixed = 0
-    while True:
-        # Find all positions that have outgoing repertoire moves
-        subq = session.query(Move.from_position_id).join(RepertoireMove, Move.id == RepertoireMove.move_id).distinct().subquery()
-        
-        # Find moves that lead to these positions but aren't repertoire moves
-        gaps = session.query(Move).outerjoin(RepertoireMove, Move.id == RepertoireMove.move_id)\
-            .filter(RepertoireMove.id == None)\
-            .filter(Move.to_position_id.in_(subq.select())).all()
-        
-        if not gaps:
-            break
-            
-        # Pre-fetch min levels for outgoing and incoming moves in bulk (eliminates N+1 query loop)
-        outgoing_min = dict(
-            session.query(Move.from_position_id, func.min(RepertoireMove.level))
-            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
-            .group_by(Move.from_position_id).all()
-        )
-        incoming_min = dict(
-            session.query(Move.to_position_id, func.min(RepertoireMove.level))
-            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
-            .group_by(Move.to_position_id).all()
-        )
+    new_rep_moves = []
+    pos_with_rep_out = set()
+    for m_id in rep_level_by_move:
+        edge = move_by_id.get(m_id)
+        if edge:
+            pos_with_rep_out.add(edge[0])
 
-        for g in gaps:
-            lvl_out = outgoing_min.get(g.to_position_id)
-            lvl_in = incoming_min.get(g.from_position_id)
-            candidates = [l for l in (lvl_out, lvl_in) if l is not None]
-            lvl = min(candidates) if candidates else 1
-            session.add(RepertoireMove(move_id=g.id, level=lvl))
-            gaps_fixed += 1
-        
+    # Queue positions that have outgoing repertoire moves and check their unassigned incoming moves
+    from collections import deque
+    queue = deque(pos_with_rep_out)
+    while queue:
+        pos_id = queue.popleft()
+        out_lvls = [rep_level_by_move[m_id] for m_id in outgoing_by_pos.get(pos_id, ()) if m_id in rep_level_by_move]
+        if not out_lvls:
+            continue
+        min_out_lvl = min(out_lvls)
+        for in_m_id in incoming_by_pos.get(pos_id, ()):
+            if in_m_id not in rep_level_by_move:
+                from_id, _ = move_by_id[in_m_id]
+                in_lvls = [rep_level_by_move[pm_id] for pm_id in incoming_by_pos.get(from_id, ()) if pm_id in rep_level_by_move]
+                lvl = min([min_out_lvl] + in_lvls) if in_lvls else min_out_lvl
+                rep_level_by_move[in_m_id] = lvl
+                new_rep_moves.append({'move_id': in_m_id, 'level': lvl, 'is_active': True})
+                gaps_fixed += 1
+                if not fast and from_id not in pos_with_rep_out:
+                    pos_with_rep_out.add(from_id)
+                    queue.append(from_id)
+
+    if new_rep_moves:
+        session.bulk_insert_mappings(RepertoireMove, new_rep_moves)
         session.flush()
-        if fast: break # Only one pass in fast mode
-
-    if gaps_fixed > 0:
         logger.info(f"Maintenance: Fixed {gaps_fixed} repertoire gaps.")
 
-    # 2. Enforce Level Consistency
-    # Rule: If a move is in Level N, its parents should also be in Level <= N (higher priority).
+    # 2. Enforce Level Consistency (propagate min child level upward in memory)
     levels_updated = 0
     try:
-        # Use a single UPDATE statement for efficiency and to avoid correlation issues
-        # We find parent repertoire moves that have at least one child with a HIGHER priority level (lower number)
-        # and update the parent to match that child's level.
-        query = text("""
-            UPDATE repertoire_moves
-            SET level = (
-                SELECT MIN(crm.level)
-                FROM moves pm
-                JOIN moves cm ON pm.to_position_id = cm.from_position_id
-                JOIN repertoire_moves crm ON cm.id = crm.move_id
-                WHERE pm.id = repertoire_moves.move_id
-            )
-            WHERE id IN (
-                SELECT prm.id
-                FROM repertoire_moves prm
-                JOIN moves pm ON prm.move_id = pm.id
-                JOIN moves cm ON pm.to_position_id = cm.from_position_id
-                JOIN repertoire_moves crm ON cm.id = crm.move_id
-                WHERE prm.level > crm.level
-            )
-        """)
-        
-        # We loop because updating a parent might create a new inconsistency with ITS parent (propagation)
-        while True:
-            res = session.execute(query)
-            if res.rowcount == 0:
-                break
-            levels_updated += res.rowcount
-            session.flush()
-            if fast: break
-            
+        # Refresh rep_id_by_move for any newly inserted gap moves if needed
+        if new_rep_moves:
+            for rm_id, m_id in session.query(RepertoireMove.id, RepertoireMove.move_id).filter(
+                RepertoireMove.move_id.in_([d['move_id'] for d in new_rep_moves])
+            ).all():
+                rep_id_by_move[m_id] = rm_id
+
+        updated_move_ids = {}
+        lvl_queue = deque([m_id for m_id in rep_level_by_move])
+        in_lvl_queue = set(lvl_queue)
+        while lvl_queue:
+            pm_id = lvl_queue.popleft()
+            in_lvl_queue.discard(pm_id)
+            edge = move_by_id.get(pm_id)
+            if not edge:
+                continue
+            from_id, to_id = edge
+            if to_id is None:
+                continue
+            child_lvls = [rep_level_by_move[cm_id] for cm_id in outgoing_by_pos.get(to_id, ()) if cm_id in rep_level_by_move]
+            if not child_lvls:
+                continue
+            min_child = min(child_lvls)
+            if rep_level_by_move[pm_id] > min_child:
+                rep_level_by_move[pm_id] = min_child
+                updated_move_ids[pm_id] = min_child
+                if not fast:
+                    for grand_pm in incoming_by_pos.get(from_id, ()):
+                        if grand_pm in rep_level_by_move and grand_pm not in in_lvl_queue:
+                            lvl_queue.append(grand_pm)
+                            in_lvl_queue.add(grand_pm)
+
+        if updated_move_ids:
+            updates = [
+                {'id': rep_id_by_move[m_id], 'level': lvl}
+                for m_id, lvl in updated_move_ids.items()
+                if m_id in rep_id_by_move
+            ]
+            if updates:
+                for i in range(0, len(updates), 1000):
+                    session.bulk_update_mappings(RepertoireMove, updates[i:i + 1000])
+                levels_updated = len(updates)
+                session.flush()
     except Exception as e:
         logger.error(f"Maintenance: Error during level consistency repair: {e}")
 
@@ -94,12 +119,12 @@ def repair_repertoire_health(session, fast=False):
         logger.info(f"Maintenance: Updated {levels_updated} levels for consistency.")
 
     # 3. Canonicalize Castling UCIs (Chess960 e1h1 -> Standard e1g1)
-    castling_fixed = repair_castling_ucis(session)
+    repair_castling_ucis(session, auto_commit=False)
 
     session.commit()
     return gaps_fixed, levels_updated
 
-def repair_castling_ucis(session) -> int:
+def repair_castling_ucis(session, auto_commit: bool = True) -> int:
     """
     Finds moves where SAN represents castling (O-O, O-O-O) but UCI was stored in
     Chess960 / FRC format (e1h1, e1a1, e8h8, e8a8), and normalizes them to standard
@@ -143,7 +168,10 @@ def repair_castling_ucis(session) -> int:
         fixed_count += 1
         
     if fixed_count > 0:
-        session.commit()
+        if auto_commit:
+            session.commit()
+        else:
+            session.flush()
         logger.info(f"Maintenance: Repaired {fixed_count} castling UCI moves to standard notation.")
         
     return fixed_count
@@ -154,44 +182,58 @@ def repair_unassigned_moves(session) -> int:
     but lack an entry in `repertoire_moves` (e.g. leaf moves of variations
     from older PGN imports), and assigns them to the parent move's repertoire level.
     """
-    from sqlalchemy import func
+    from collections import deque
     total_fixed = 0
 
-    start_pos = session.query(Position).filter_by(fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").first()
-    start_id = start_pos.id if start_pos else None
+    start_pos = session.query(Position.id).filter_by(fen="rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").first()
+    start_id = start_pos[0] if start_pos else None
 
-    while True:
-        unassigned = session.query(Move).outerjoin(
-            RepertoireMove, Move.id == RepertoireMove.move_id
-        ).filter(
-            RepertoireMove.id == None
-        ).all()
+    all_moves = session.query(Move.id, Move.from_position_id, Move.to_position_id).all()
+    rep_rows = session.query(RepertoireMove.move_id, RepertoireMove.level).all()
+    assigned_lvl = {m_id: (lvl if lvl is not None else 1) for m_id, lvl in rep_rows}
 
-        if not unassigned:
-            break
+    outgoing_unassigned = {}
+    pos_incoming_min = {}
+    for m_id, from_id, to_id in all_moves:
+        if m_id in assigned_lvl:
+            if to_id is not None:
+                lvl = assigned_lvl[m_id]
+                prev = pos_incoming_min.get(to_id)
+                if prev is None or lvl < prev:
+                    pos_incoming_min[to_id] = lvl
+        else:
+            outgoing_unassigned.setdefault(from_id, []).append((m_id, to_id))
 
-        incoming_min = dict(
-            session.query(Move.to_position_id, func.min(RepertoireMove.level))
-            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
-            .group_by(Move.to_position_id).all()
-        )
+    if not outgoing_unassigned:
+        return 0
 
-        pass_fixed = 0
-        for m in unassigned:
-            lvl = incoming_min.get(m.from_position_id)
-            if lvl is None and start_id and m.from_position_id == start_id:
-                lvl = 1
-            if lvl is not None:
-                session.add(RepertoireMove(move_id=m.id, level=lvl, is_active=True))
-                pass_fixed += 1
+    seed_positions = set(pos_incoming_min.keys())
+    if start_id is not None and start_id not in pos_incoming_min:
+        pos_incoming_min[start_id] = 1
+        seed_positions.add(start_id)
 
-        if pass_fixed == 0:
-            break
+    new_rows = []
+    queue = deque(seed_positions)
+    while queue:
+        pos_id = queue.popleft()
+        lvl = pos_incoming_min.get(pos_id)
+        if lvl is None:
+            continue
+        unassigned_list = outgoing_unassigned.pop(pos_id, None)
+        if not unassigned_list:
+            continue
+        for m_id, to_id in unassigned_list:
+            new_rows.append({'move_id': m_id, 'level': lvl, 'is_active': True})
+            total_fixed += 1
+            if to_id is not None:
+                prev = pos_incoming_min.get(to_id)
+                if prev is None or lvl < prev:
+                    pos_incoming_min[to_id] = lvl
+                    queue.append(to_id)
 
-        session.flush()
-        total_fixed += pass_fixed
-
-    if total_fixed > 0:
+    if new_rows:
+        for i in range(0, len(new_rows), 1000):
+            session.bulk_insert_mappings(RepertoireMove, new_rows[i:i + 1000])
         session.commit()
         logger.info(f"Maintenance: Repaired {total_fixed} unassigned leaf moves into repertoire levels.")
 

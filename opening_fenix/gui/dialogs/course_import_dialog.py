@@ -1885,31 +1885,35 @@ class CourseImportDialog(QDialog):
         for g in ch_obj.games:
             self.custom_game_targets.pop(g.game_id, None)
 
-        target_label_map = dict(getattr(self, "_target_options", []))
+        target_label_map = getattr(self, "_target_label_map", None) or dict(getattr(self, "_target_options", []))
 
         # Update child games in tree (combos and text)
-        for i in range(ch_item.childCount()):
-            child = ch_item.child(i)
-            g = getattr(child, "_game", None)
-            if not g and i < len(ch_obj.games):
-                g = ch_obj.games[i]
-            if g:
-                g_eff = resolve_game_target(
-                    g.game_id,
-                    new_target,
-                    self.custom_game_targets,
-                    g.is_puzzle,
-                    g.is_model,
-                    g.is_intro
-                )
-                child.setText(2, target_label_map.get(g_eff, g_eff))
-                g_combo = self.game_combos.get(g.game_id)
-                if g_combo:
-                    g_combo.blockSignals(True)
-                    idx = g_combo.findData(g_eff)
-                    if idx >= 0:
-                        g_combo.setCurrentIndex(idx)
-                    g_combo.blockSignals(False)
+        self.tree_details.setUpdatesEnabled(False)
+        try:
+            for i in range(ch_item.childCount()):
+                child = ch_item.child(i)
+                g = getattr(child, "_game", None)
+                if not g and i < len(ch_obj.games):
+                    g = ch_obj.games[i]
+                if g:
+                    g_eff = resolve_game_target(
+                        g.game_id,
+                        new_target,
+                        self.custom_game_targets,
+                        g.is_puzzle,
+                        g.is_model,
+                        g.is_intro
+                    )
+                    child.setText(2, target_label_map.get(g_eff, g_eff))
+                    g_combo = self.game_combos.get(g.game_id)
+                    if g_combo:
+                        g_combo.blockSignals(True)
+                        idx = g_combo.findData(g_eff)
+                        if idx >= 0:
+                            g_combo.setCurrentIndex(idx)
+                        g_combo.blockSignals(False)
+        finally:
+            self.tree_details.setUpdatesEnabled(True)
 
         self._update_chapter_row_info(ch_obj, ch_item)
         self.update_cards()

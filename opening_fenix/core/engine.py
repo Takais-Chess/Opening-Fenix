@@ -35,6 +35,7 @@ class EngineThread(QThread):
         
         # Thread synchronization
         self._lock = threading.Lock()
+        self._wake_cond = threading.Condition(self._lock)
         
         # Performance state
         self._target_fen = None
@@ -90,6 +91,7 @@ class EngineThread(QThread):
         with self._lock:
             self.running = False
             self.is_active = False
+            self._wake_cond.notify_all()
         self._close_engine_process()
 
     def set_position(self, fen, force_restart=False):
@@ -99,6 +101,7 @@ class EngineThread(QThread):
                 
             self._target_fen = fen
             self.board = chess.Board(fen)
+            self._wake_cond.notify_all()
 
     def toggle_analysis(self, active):
         with self._lock:
@@ -108,6 +111,7 @@ class EngineThread(QThread):
             self.is_active = active
             if active and self._target_fen:
                 self.board = chess.Board(self._target_fen)
+            self._wake_cond.notify_all()
 
     def update_config(self, threads, depth, use_depth_limit, multipv, hash_size=None):
         changed = False
@@ -121,6 +125,7 @@ class EngineThread(QThread):
             self.multipv = multipv
             if hash_size is not None:
                 self.hash_size = hash_size
+            self._wake_cond.notify_all()
         
         with self._lock:
             eng = self.engine
@@ -155,7 +160,8 @@ class EngineThread(QThread):
                     self.start_engine()
                 
                 if not self.engine: # Failed to start
-                    self.msleep(1000)
+                    with self._lock:
+                        self._wake_cond.wait(timeout=1.0)
                     continue
 
                 # Check if we need to start a new analysis
@@ -182,13 +188,15 @@ class EngineThread(QThread):
                         limit = chess.engine.Limit(depth=self.target_depth)
                     
                     if not board_snapshot:
-                        self.msleep(50)
+                        with self._lock:
+                            self._wake_cond.wait(timeout=0.05)
                         continue
 
                     legal_moves_count = board_snapshot.legal_moves.count()
                     if legal_moves_count == 0:
                         self.info_signal.emit(["Partieende / Keine legalen Züge"])
-                        self.msleep(100)
+                        with self._lock:
+                            self._wake_cond.wait(timeout=0.1)
                         continue
                         
                     actual_multipv = max(1, min(self.multipv, legal_moves_count))
@@ -239,15 +247,20 @@ class EngineThread(QThread):
                         self.start_engine()
                         
                         current_board_fen = None # Force restart on next loop
-                        self.msleep(1000)
+                        with self._lock:
+                            self._wake_cond.wait(timeout=1.0)
                 else:
-                    self.msleep(50)
+                    with self._lock:
+                        if self.running and self.is_active and self._target_fen == current_board_fen and self.multipv == current_multipv and self.target_depth == current_depth:
+                            self._wake_cond.wait(timeout=0.2)
             else:
                 current_board_fen = None 
                 # LAZY STOP: Release RAM when not analyzing
                 if self.engine:
                     self._close_engine_process()
-                self.msleep(100)
+                with self._lock:
+                    if self.running and not (self.is_active and self.board):
+                        self._wake_cond.wait(timeout=0.5)
                 
         self.stop_engine()
 
@@ -255,26 +268,24 @@ class EngineThread(QThread):
         if actual_multipv is None:
             actual_multipv = self.multipv
 
-        # Only cache the raw data quickly
-        idx = None
-        if "multipv" in info:
-            idx = info["multipv"]
-            self.lines_cache[idx] = info.copy()
-        elif "pv" in info:
+        # Only cache the raw data quickly (one shallow snapshot per info packet)
+        idx = info.get("multipv")
+        if idx is None and "pv" in info:
             idx = 1
-            self.lines_cache[1] = info.copy()
 
         if idx is not None:
-            depth = info.get("depth", 0)
+            info_snap = info.copy()
+            self.lines_cache[idx] = info_snap
+            depth = info_snap.get("depth", 0)
             if depth > self.current_iter_depth:
                 self.current_iter_depth = depth
-                self.current_iter_lines = {idx: info.copy()}
+                self.current_iter_lines = {idx: info_snap}
             elif depth == self.current_iter_depth:
-                self.current_iter_lines[idx] = info.copy()
+                self.current_iter_lines[idx] = info_snap
 
             # When all active MultiPV lines have reached the current depth iteration:
             if len(self.current_iter_lines) >= actual_multipv:
-                self.completed_lines = {k: v.copy() for k, v in self.current_iter_lines.items()}
+                self.completed_lines = dict(self.current_iter_lines)
                 if self._throttle_timer.hasExpired(self._emit_interval):
                     self.lines_cache.update(self.completed_lines)
                     self._emit_current_cache(board)

@@ -9,9 +9,13 @@ import os
 import re
 import json
 import logging
+import threading
 from typing import Optional, List, Set, Dict, Tuple
 
 logger = logging.getLogger(__name__)
+
+_RE_NUMERIC_WORD = re.compile(r'^[\d\.,\+\-%/]+$')
+_RE_WORD_SPAN = re.compile(r'[^\s\.,;:!?\(\)\[\]\{\}"\'`«»„“”\<\>\\\/]+')
 
 # Try importing pyspellchecker gracefully
 try:
@@ -88,6 +92,7 @@ class SpellCheckService:
 
     def __init__(self):
         self._checkers: Dict[str, Optional[SpellChecker]] = {}
+        self._checker_lock = threading.Lock()
         self._user_dictionary: Set[str] = set()
         self._ignored_words: Set[str] = set()
         self._listeners: Set = set()
@@ -190,8 +195,8 @@ class SpellCheckService:
         lang = lang_code.lower().strip()
         if lang in ("auto", "all"):
             try:
-                from opening_fenix.core.translation import tr
-                lang = getattr(tr, "current_lang", "de")
+                from opening_fenix.core.translation import translator
+                lang = getattr(translator, "current_lang", "de")
             except Exception:
                 lang = "de"
         # Take first 2 characters (e.g. en_US -> en)
@@ -202,18 +207,30 @@ class SpellCheckService:
         if not SPELLCHECKER_AVAILABLE:
             return None
         lang = self.normalize_lang(lang)
-        if lang not in self._checkers:
-            try:
-                checker = SpellChecker(language=lang)
-                # Load chess terminology into the checker's frequency map
-                checker.word_frequency.load_words(list(CHESS_VOCABULARY))
-                if self._user_dictionary:
-                    checker.word_frequency.load_words(list(self._user_dictionary))
-                self._checkers[lang] = checker
-            except Exception as e:
-                logger.warning(f"Failed to initialize SpellChecker for language '{lang}': {e}")
-                self._checkers[lang] = None
+        if lang in self._checkers:
+            return self._checkers[lang]
+        with self._checker_lock:
+            if lang not in self._checkers:
+                try:
+                    checker = SpellChecker(language=lang)
+                    # Load chess terminology into the checker's frequency map
+                    checker.word_frequency.load_words(CHESS_VOCABULARY)
+                    if self._user_dictionary:
+                        checker.word_frequency.load_words(self._user_dictionary)
+                    self._checkers[lang] = checker
+                except Exception as e:
+                    logger.warning(f"Failed to initialize SpellChecker for language '{lang}': {e}")
+                    self._checkers[lang] = None
         return self._checkers[lang]
+
+    def warm_up_async(self, lang: Optional[str] = None) -> None:
+        """Pre-loads the spellchecker dictionary on a daemon thread to prevent GUI thread stalls."""
+        if not self.is_enabled():
+            return
+        norm_lang = self.normalize_lang(lang or "auto")
+        if norm_lang in self._checkers:
+            return
+        threading.Thread(target=self._get_checker, args=(norm_lang,), daemon=True).start()
 
     def is_chess_token(self, token: str) -> bool:
         """Returns True if the token represents a chess move, evaluation symbol, or chess term."""
@@ -246,7 +263,7 @@ class SpellCheckService:
             return True
 
         # Check numbers, percentages, dates
-        if re.match(r'^[\d\.,\+\-%/]+$', clean):
+        if _RE_NUMERIC_WORD.match(clean):
             return True
 
         lower = clean.lower()
@@ -369,7 +386,7 @@ class SpellCheckService:
             return results
 
         # Simple word token pattern matching unicode letters, numbers and hyphens
-        for match in re.finditer(r'[^\s\.,;:!?\(\)\[\]\{\}"\'`«»„“”\<\>\\\/]+', text):
+        for match in _RE_WORD_SPAN.finditer(text):
             token = match.group()
             start = match.start()
             end = match.end()

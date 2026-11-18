@@ -432,7 +432,11 @@ class FenIndexBuilderThread(QThread):
                 if not self._is_cancelled() and root_id is not None:
                     dist = {root_id: 1}
                     pq = [(1, root_id)]
+                    pop_count = 0
                     while pq:
+                        pop_count += 1
+                        if pop_count % 2048 == 0 and self._is_cancelled():
+                            return
                         curr_lvl, u = heapq.heappop(pq)
                         if curr_lvl > dist.get(u, float('inf')):
                             continue
@@ -524,9 +528,10 @@ class BfsTranspositionThread(QThread):
             return " ".join(f.strip().split()[:4])
 
         start_norm = norm(self.start_fen)
+        repo_adj_sets = {k: set(v) for k, v in self.repo_adjacency.items()} if self.repo_adjacency else {}
 
-        # Frontier: list of (full_fen_str, path_ucis, path_sans)
-        frontier = [(self.start_fen, [], [])]
+        # Frontier: list of (full_fen_str, path_ucis, still_in_repo_path)
+        frontier = [(self.start_fen, [], True)]
         expanded = {start_norm}          # FENs already expanded — prevents BFS cycles
         all_results = []
         seen_targets = set()             # target FENs already reported
@@ -539,7 +544,7 @@ class BfsTranspositionThread(QThread):
             self.progress_update.emit(depth)
             next_frontier = []
 
-            for base_fen, path_ucis, path_sans in frontier:
+            for base_fen, path_ucis, still_in_repo in frontier:
                 if self._stop or nodes_explored > self.MAX_NODES:
                     break
                 
@@ -547,6 +552,16 @@ class BfsTranspositionThread(QThread):
                     board = chess.Board(base_fen)
                 except Exception:
                     continue
+
+                base_norm = norm(base_fen) if still_in_repo else ""
+                adj_moves = repo_adj_sets.get(base_norm, ()) if still_in_repo else ()
+
+                # Hoist previous promotion check outside legal_moves loop (~35x fewer Move.from_uci calls)
+                prev_promo_sq = None
+                if path_ucis:
+                    prev_move = chess.Move.from_uci(path_ucis[-1])
+                    if prev_move.promotion is not None:
+                        prev_promo_sq = prev_move.to_square
 
                 for move in board.legal_moves:
                     if self._stop:
@@ -558,42 +573,45 @@ class BfsTranspositionThread(QThread):
 
                     # If previous move was a promotion and this move captures on the promotion square,
                     # piece choice does not matter to the resulting position — filter out.
-                    if path_ucis:
-                        prev_move = chess.Move.from_uci(path_ucis[-1])
-                        if prev_move.promotion is not None and move.to_square == prev_move.to_square:
-                            continue
+                    if prev_promo_sq is not None and move.to_square == prev_promo_sq:
+                        continue
                     
                     nodes_explored += 1
-                    # Yield slightly every 1000 nodes to keep UI responsive
+                    # Yield GIL every 1000 nodes without incurring Windows 15.6ms sleep penalty
                     if nodes_explored % 1000 == 0:
-                        time.sleep(0.001)
+                        time.sleep(0)
                     
                     if nodes_explored > self.MAX_NODES:
                         break
 
                     uci = move.uci()
-                    try:
-                        san = board.san(move)
-                    except Exception:
-                        san = uci
-
                     board.push(move)
                     new_fen = board.fen()
                     new_norm = norm(new_fen)
                     board.pop()
 
                     new_ucis = path_ucis + [uci]
-                    new_sans = path_sans + [san]
+                    next_in_repo = still_in_repo and (uci in adj_moves)
 
                     # Report if in repertoire, not start position, not yet reported, and not an already connected path
-                    if (new_norm in self.fen_index
+                    if (not next_in_repo
+                            and new_norm in self.fen_index
                             and new_norm != start_norm
-                            and new_norm not in seen_targets
-                            and not self._is_repertoire_path(new_ucis)):
+                            and new_norm not in seen_targets):
                         seen_targets.add(new_norm)
+                        # Compute SAN sequence lazily only for matching transposition hits
+                        sans = []
+                        try:
+                            san_board = chess.Board(self.start_fen)
+                            for u in new_ucis:
+                                m_obj = chess.Move.from_uci(u)
+                                sans.append(san_board.san(m_obj))
+                                san_board.push(m_obj)
+                        except Exception:
+                            sans = list(new_ucis)
                         all_results.append({
                             "path_ucis": new_ucis,
-                            "path_sans": new_sans,
+                            "path_sans": sans,
                             "target_fen": new_norm,
                             "depth": depth,
                         })
@@ -601,7 +619,7 @@ class BfsTranspositionThread(QThread):
                     # Expand for next depth level if not yet visited
                     if new_norm not in expanded and depth < self.target_depth:
                         expanded.add(new_norm)
-                        next_frontier.append((new_fen, new_ucis, new_sans))
+                        next_frontier.append((new_fen, new_ucis, next_in_repo))
 
             frontier = next_frontier
             if nodes_explored > self.MAX_NODES:
@@ -764,7 +782,39 @@ class PathQualityEvalThread(QThread):
         engine = None
         classified = []
         MAX_EVAL_POSITIONS = 100
+        if not self.raw_paths:
+            self.finished.emit([])
+            return
         try:
+            # ── Step 1: Collect unique (full_fen, move_uci) pairs & pre-record path steps ──
+            fen_to_ucis: dict = {}
+            fen_norm_to_full: dict = {}
+            path_steps_list = []
+
+            for path in self.raw_paths:
+                if self._stop:
+                    break
+                board = chess.Board(self.start_fen)
+                steps = []
+                valid_path = True
+                for uci in path["path_ucis"]:
+                    full = board.fen()
+                    fn = norm(full)
+                    if fn not in fen_to_ucis:
+                        fen_to_ucis[fn] = set()
+                        fen_norm_to_full[fn] = full
+                    fen_to_ucis[fn].add(uci)
+                    steps.append((fn, uci))
+                    try:
+                        board.push(chess.Move.from_uci(uci))
+                    except Exception:
+                        valid_path = False
+                        break
+                path_steps_list.append((path, steps, valid_path))
+
+            if self._stop or not fen_to_ucis:
+                return
+
             creationflags = 0
             if sys.platform == "win32":
                 # CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
@@ -780,28 +830,6 @@ class PathQualityEvalThread(QThread):
                 eng_cfg["Hash"] = self.hash_size if self.hash_size is not None else get_configured_engine_hash()
             if eng_cfg:
                 engine.configure(eng_cfg)
-
-            # ── Step 1: Collect unique (full_fen, move_uci) pairs from all paths ──
-            # full_fen → set of UCIs we need to evaluate at that position
-            fen_to_ucis: dict = {}
-            # full_fen → actual chess.Board FEN (for reconstruction)
-            fen_norm_to_full: dict = {}
-
-            for path in self.raw_paths:
-                if self._stop:
-                    break
-                board = chess.Board(self.start_fen)
-                for uci in path["path_ucis"]:
-                    full = board.fen()
-                    fn = norm(full)
-                    if fn not in fen_to_ucis:
-                        fen_to_ucis[fn] = set()
-                        fen_norm_to_full[fn] = full
-                    fen_to_ucis[fn].add(uci)
-                    try:
-                        board.push(chess.Move.from_uci(uci))
-                    except Exception:
-                        break
 
             # ── Step 2: Evaluate each unique intermediate FEN once ──
             # (fen_norm, uci) → bool: True = within threshold
@@ -857,21 +885,11 @@ class PathQualityEvalThread(QThread):
                         delta = best_score - uci_scores[uci]
                         move_ok[(fn, uci)] = delta <= self.THRESHOLD_CP
 
-            # ── Step 3: Classify each path ──
-            for path in self.raw_paths:
+            # ── Step 3: Classify each path using pre-recorded steps ──
+            for path, steps, valid_path in path_steps_list:
                 if self._stop:
                     break
-                board = chess.Board(self.start_fen)
-                all_ok = True
-                for uci in path["path_ucis"]:
-                    fn = norm(board.fen())
-                    if not move_ok.get((fn, uci), True):
-                        all_ok = False
-                    try:
-                        board.push(chess.Move.from_uci(uci))
-                    except Exception:
-                        all_ok = False
-                        break
+                all_ok = valid_path and all(move_ok.get(step, True) for step in steps)
 
                 quality = "möglich" if all_ok else "fehler"
                 classified.append({

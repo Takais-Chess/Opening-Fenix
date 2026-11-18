@@ -53,9 +53,15 @@ class SpellCheckHighlighter(QSyntaxHighlighter):
 
         lang = self.current_language()
         words_with_spans = self.service.extract_words_with_spans(text)
+        valid_cache = {}
+        is_valid_fn = self.service.is_word_valid
 
         for word, start, end in words_with_spans:
-            if not self.service.is_word_valid(word, lang):
+            is_valid = valid_cache.get(word)
+            if is_valid is None:
+                is_valid = is_valid_fn(word, lang)
+                valid_cache[word] = is_valid
+            if not is_valid:
                 self.setFormat(start, end - start, self.error_format)
 
 

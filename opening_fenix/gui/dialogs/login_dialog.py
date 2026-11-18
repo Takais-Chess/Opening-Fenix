@@ -18,7 +18,12 @@ from opening_fenix.core.translation import tr_ui
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
 
+_LOGO_PIXMAP_CACHE: dict = {}
+
+
 class RepertoireButton(QPushButton):
+    _STYLE_CACHE: dict = {}
+
     def __init__(self, name, parent=None):
         super().__init__(name, parent)
         self.repo_name = name
@@ -31,8 +36,12 @@ class RepertoireButton(QPushButton):
         self.toggled.connect(self.update_style)
 
     def update_style(self):
-        if self.isChecked():
-            self.setStyleSheet(f"""
+        checked = self.isChecked()
+        key = (checked, scale(12), scale(13), scale(2), scale(8))
+        style = RepertoireButton._STYLE_CACHE.get(key)
+        if style is None:
+            if checked:
+                style = f"""
                 QPushButton {{
                     background-color: {COLORS['burnt_orange']};
                     color: white;
@@ -43,9 +52,9 @@ class RepertoireButton(QPushButton):
                     padding: {scale(2)}px {scale(8)}px;
                 }}
                 {get_tooltip_style()}
-            """)
-        else:
-            self.setStyleSheet(f"""
+            """
+            else:
+                style = f"""
                 QPushButton {{
                     background-color: rgba(255, 255, 255, 0.3);
                     color: black;
@@ -60,7 +69,9 @@ class RepertoireButton(QPushButton):
                     background-color: rgba(255, 255, 255, 0.2);
                 }}
                 {get_tooltip_style()}
-            """)
+            """
+            RepertoireButton._STYLE_CACHE[key] = style
+        self.setStyleSheet(style)
 
 class RepertoireSelectionDialog(QDialog):
     def __init__(self, parent=None):
@@ -331,9 +342,15 @@ class LoginDialog(QDialog):
 
         logo_label = QLabel()
         logo_path = os.path.join(get_base_path(), "assets", "Logo", "Logo.png")
-        if os.path.exists(logo_path):
+        logo_w = scale(80)
+        cached_logo = _LOGO_PIXMAP_CACHE.get((logo_path, logo_w))
+        if cached_logo is not None and not cached_logo.isNull():
+            logo_label.setPixmap(cached_logo)
+        elif os.path.exists(logo_path):
             pixmap = QPixmap(logo_path)
-            logo_label.setPixmap(pixmap.scaledToWidth(scale(80), Qt.TransformationMode.SmoothTransformation))
+            scaled_logo = pixmap.scaledToWidth(logo_w, Qt.TransformationMode.SmoothTransformation)
+            _LOGO_PIXMAP_CACHE[(logo_path, logo_w)] = scaled_logo
+            logo_label.setPixmap(scaled_logo)
         logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         header_layout.addWidget(logo_label)
@@ -502,74 +519,78 @@ class LoginDialog(QDialog):
         except: return None
 
     def load_profiles(self):
-        # Clear existing grid
-        while self.profile_grid.count():
-            child = self.profile_grid.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+        self.scroll_content.setUpdatesEnabled(False)
+        try:
+            # Clear existing grid
+            while self.profile_grid.count():
+                child = self.profile_grid.takeAt(0)
+                if child.widget():
+                    child.widget().deleteLater()
 
-        profiles_dir = os.path.join(get_user_dir(), "profiles")
-        
-        if not os.path.exists(profiles_dir):
-            os.makedirs(profiles_dir)
+            profiles_dir = os.path.join(get_user_dir(), "profiles")
             
-        config_path = os.path.join(get_user_dir(), "config.json")
-        last_used_map = {}
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r") as f:
-                    config = json.load(f)
-                    last_used_map = config.get("profile_last_used", {})
-            except: pass
+            if not os.path.exists(profiles_dir):
+                os.makedirs(profiles_dir)
+                
+            config_path = os.path.join(get_user_dir(), "config.json")
+            last_used_map = {}
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, "r") as f:
+                        config = json.load(f)
+                        last_used_map = config.get("profile_last_used", {})
+                except: pass
 
-        # Get all profile names
-        all_profile_names = {f.replace(".db", "") for f in os.listdir(profiles_dir) if f.endswith(".db")}
-        all_profile_names.update({f.replace(".json", "") for f in os.listdir(profiles_dir) if f.endswith(".json") and not f.endswith("_settings.json")})
-        
-        # Create profile data list for sorting
-        profile_data = []
-        for name in all_profile_names:
-            ts = last_used_map.get(name, "1970-01-01T00:00:00")
-            profile_data.append((name, ts))
-
-        # Sort by timestamp descending (most recent first)
-        profile_data.sort(key=lambda x: x[1], reverse=True)
-
-        # 1. Add special "Freies Training" button first
-        free_btn = ProfileGridButton(tr_ui("login.free_training", "Freies Training"))
-        # Special styling for the free training button
-        free_btn.setStyleSheet(f"""
-            QPushButton {{
-                background-color: {COLORS['burnt_orange']};
-                border: 2px solid #e67e22;
-                font-weight: bold;
-                color: white;
-            }}
-            QPushButton:hover {{
-                background-color: #e67e22;
-            }}
-        """)
-        free_btn.clicked.connect(lambda: self.select_profile("Freies Training"))
-        self.profile_grid.addWidget(free_btn, 0, 0)
-
-        row, col = 0, 1
-        for name, ts in profile_data:
-            btn = ProfileGridButton(name)
-            btn.clicked.connect(lambda checked, n=name: self.select_profile(n))
+            # Get all profile names
+            all_profile_names = {f.replace(".db", "") for f in os.listdir(profiles_dir) if f.endswith(".db")}
+            all_profile_names.update({f.replace(".json", "") for f in os.listdir(profiles_dir) if f.endswith(".json") and not f.endswith("_settings.json")})
             
-            # Context menu for deletion
-            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda pos, n=name: self.show_context_menu(pos, n))
+            # Create profile data list for sorting
+            profile_data = []
+            for name in all_profile_names:
+                ts = last_used_map.get(name, "1970-01-01T00:00:00")
+                profile_data.append((name, ts))
+
+            # Sort by timestamp descending (most recent first)
+            profile_data.sort(key=lambda x: x[1], reverse=True)
+
+            # 1. Add special "Freies Training" button first
+            free_btn = ProfileGridButton(tr_ui("login.free_training", "Freies Training"))
+            # Special styling for the free training button
+            free_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {COLORS['burnt_orange']};
+                    border: 2px solid #e67e22;
+                    font-weight: bold;
+                    color: white;
+                }}
+                QPushButton:hover {{
+                    background-color: #e67e22;
+                }}
+            """)
+            free_btn.clicked.connect(lambda: self.select_profile("Freies Training"))
+            self.profile_grid.addWidget(free_btn, 0, 0)
+
+            row, col = 0, 1
+            for name, ts in profile_data:
+                btn = ProfileGridButton(name)
+                btn.clicked.connect(lambda checked, n=name: self.select_profile(n))
+                
+                # Context menu for deletion
+                btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                btn.customContextMenuRequested.connect(lambda pos, n=name: self.show_context_menu(pos, n))
+                
+                self.profile_grid.addWidget(btn, row, col)
+                
+                col += 1
+                if col > 2: # 3 columns
+                    col = 0
+                    row += 1
             
-            self.profile_grid.addWidget(btn, row, col)
-            
-            col += 1
-            if col > 2: # 3 columns
-                col = 0
-                row += 1
-        
-        # Add stretch to fill rows if needed
-        self.profile_grid.setRowStretch(row + 1, 1)
+            # Add stretch to fill rows if needed
+            self.profile_grid.setRowStretch(row + 1, 1)
+        finally:
+            self.scroll_content.setUpdatesEnabled(True)
 
     def select_profile(self, name):
         if self.login_in_progress: return

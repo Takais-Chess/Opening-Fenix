@@ -156,6 +156,7 @@ class TreeNavigationService:
         structure = {} # V1 -> set(V2)
         v1_prios = {}  # V1 -> max_prio
         v2_prios = {}  # (V1, V2) -> max_prio
+        from opening_fenix.core.utils import parse_variation_name
 
         for pos_id, v1, v2, v3, cv1, cv2, prio in results:
             prio = prio if prio is not None else 0.0
@@ -173,10 +174,8 @@ class TreeNavigationService:
                 
             if not v1: v1 = "Sonstiges"
             if lang and v1 != "Sonstiges":
-                from opening_fenix.core.utils import parse_variation_name
                 v1 = parse_variation_name(v1, lang=lang)
             if lang and v2 and v2 != "Sonstiges":
-                from opening_fenix.core.utils import parse_variation_name
                 v2 = parse_variation_name(v2, lang=lang)
             
             v1_prios[v1] = max(v1_prios.get(v1, 0.0), prio)
@@ -243,24 +242,27 @@ class TreeNavigationService:
         root_ids = {r.id for r in roots}
         
         if not root_ids:
-            return {"roots": set(), "lead_up": set()}
+            empty_res = {"roots": set(), "lead_up": set()}
+            self._variation_filter_cache[variation_name] = empty_res
+            return empty_res
 
-        # 2. Find all lead-up positions via recursive CTE
-        # We find ancestors for each root until we hit the root-most position
+        # 2. Find all lead-up positions via a single in-memory reverse BFS over Move edges
+        all_edges = self.repo_session.query(Move.from_position_id, Move.to_position_id).all()
+        parents_map: Dict[int, List[int]] = {}
+        for from_id, to_id in all_edges:
+            if to_id:
+                parents_map.setdefault(to_id, []).append(from_id)
+
         lead_up_ids = set()
-        for rid in root_ids:
-            query = text("""
-                WITH RECURSIVE ancestors(from_id) AS (
-                    SELECT from_position_id FROM moves WHERE to_position_id = :root_id
-                    UNION ALL
-                    SELECT m.from_position_id FROM moves m JOIN ancestors a ON m.to_position_id = a.from_id
-                    LIMIT 100
-                )
-                SELECT from_id FROM ancestors
-            """)
-            res = self.repo_session.execute(query, {"root_id": rid}).fetchall()
-            for r in res:
-                lead_up_ids.add(r.from_id)
+        queue = deque(root_ids)
+        visited = set(root_ids)
+        while queue:
+            curr_id = queue.popleft()
+            for p_id in parents_map.get(curr_id, ()):
+                lead_up_ids.add(p_id)
+                if p_id not in visited:
+                    visited.add(p_id)
+                    queue.append(p_id)
 
         # Remove the roots themselves from lead_up if they were included
         lead_up_ids -= root_ids
@@ -302,21 +304,25 @@ class TreeNavigationService:
         root_fen_by_id = {r.id: r.fen for r in roots}
         all_edges = self.repo_session.query(Move.from_position_id, Move.to_position_id).all()
         children_map: Dict[int, List[int]] = {}
+        from_ids: Set[int] = set()
         to_ids: Set[int] = set()
         for from_id, to_id in all_edges:
             children_map.setdefault(from_id, []).append(to_id)
-            to_ids.add(to_id)
+            from_ids.add(from_id)
+            if to_id:
+                to_ids.add(to_id)
 
-        # We start from known starting positions (no incoming moves)
-        start_positions = self.repo_session.query(Position.id).filter(
-            ~Position.id.in_(to_ids) if to_ids else True
-        ).all()
-        start_ids = [s.id for s in start_positions]
-        if not start_ids: 
-             # Fallback: take the position with the lowest ID (usually initial)
-             first_pos = self.repo_session.query(Position.id).order_by(Position.id).first()
-             if first_pos: start_ids = [first_pos.id]
-             else: return None
+        # Compute starting positions (roots of DAG) in Python to avoid huge NOT IN (...) bind lists
+        start_ids = sorted(from_ids - to_ids)
+        if not start_ids:
+            all_pos_ids = {pid for (pid,) in self.repo_session.query(Position.id).all()}
+            start_ids = sorted(all_pos_ids - to_ids)
+        if not start_ids:
+            first_pos = self.repo_session.query(Position.id).order_by(Position.id).first()
+            if first_pos:
+                start_ids = [first_pos.id]
+            else:
+                return None
 
         queue = deque([(sid, 0) for sid in start_ids])
         visited = set(start_ids)

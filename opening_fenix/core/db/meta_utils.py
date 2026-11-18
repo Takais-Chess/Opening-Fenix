@@ -267,21 +267,21 @@ def rebuild_cached_names_fast(session: Session, start_pos: Optional[Position] = 
     start_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
     start_pos_id = start_pos.id if start_pos else next((pid for pid, d in pos_dict.items() if d['fen'] and d['fen'].startswith(start_fen)), None)
 
-    root_ids = [start_pos_id] if start_pos_id else []
-    for pid in pos_dict:
-        if pid not in parents and pid != start_pos_id:
-            root_ids.append(pid)
+    in_degree = {pid: len(parents[pid]) if pid in parents else 0 for pid in pos_dict}
+    queue = deque()
+    if start_pos_id and start_pos_id in in_degree and in_degree[start_pos_id] == 0:
+        queue.append(start_pos_id)
+    for pid, deg in in_degree.items():
+        if deg == 0 and pid != start_pos_id:
+            queue.append(pid)
 
-    queue = deque(root_ids)
-    visited = set()
-    updates = []
+    updates_map = {}
+    processed = set()
 
-    while queue:
-        curr_id = queue.popleft()
+    def _process_node(curr_id: int) -> None:
         curr = pos_dict.get(curr_id)
         if not curr:
-            continue
-
+            return
         new_v1, new_v2, new_v3 = curr['v1'], curr['v2'], curr['v3']
         if not (new_v1 and new_v2 and new_v3):
             p_v1, p_v2, p_v3 = None, None, None
@@ -300,22 +300,33 @@ def rebuild_cached_names_fast(session: Session, start_pos: Optional[Position] = 
 
         changed = (curr['cv1'] != new_v1) or (curr['cv2'] != new_v2) or (curr['cv3'] != new_v3)
         curr['cv1'], curr['cv2'], curr['cv3'] = new_v1, new_v2, new_v3
-
-        if not changed and curr_id in visited:
-            continue
-        visited.add(curr_id)
-
         if changed:
-            updates.append({
+            updates_map[curr_id] = {
                 'id': curr_id,
                 'cached_v1': new_v1,
                 'cached_v2': new_v2,
                 'cached_v3': new_v3
-            })
+            }
 
+    while queue:
+        curr_id = queue.popleft()
+        if curr_id in processed:
+            continue
+        processed.add(curr_id)
+        _process_node(curr_id)
         for child_id in children.get(curr_id, []):
-            queue.append(child_id)
+            if child_id in in_degree:
+                in_degree[child_id] -= 1
+                if in_degree[child_id] <= 0 and child_id not in processed:
+                    queue.append(child_id)
 
+    # Fallback pass for any nodes reachable only through rare cycles
+    if len(processed) < len(pos_dict):
+        for pid in pos_dict:
+            if pid not in processed:
+                _process_node(pid)
+
+    updates = list(updates_map.values())
     if updates:
         batch_size = 500
         for i in range(0, len(updates), batch_size):

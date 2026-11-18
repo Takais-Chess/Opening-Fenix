@@ -14,7 +14,7 @@ class Metadata(Base):
 class Position(Base):
     __tablename__ = 'positions'
     id = Column(Integer, primary_key=True)
-    fen = Column(String, unique=True, nullable=False, index=True)
+    fen = Column(String, unique=True, nullable=False)
     
     # Content
     comment = Column(String, nullable=True) 
@@ -38,12 +38,12 @@ class Position(Base):
     
     # Overhaul & Hole tracking
     last_overhaul_review = Column(DateTime, nullable=True)
-    is_hole_exempt = Column(Boolean, default=False)
+    is_hole_exempt = Column(Boolean, default=False, index=True)
 
 class Move(Base):
     __tablename__ = 'moves'
     id = Column(Integer, primary_key=True)
-    from_position_id = Column(Integer, ForeignKey('positions.id'), nullable=False, index=True)
+    from_position_id = Column(Integer, ForeignKey('positions.id'), nullable=False)
     to_position_id = Column(Integer, ForeignKey('positions.id'), nullable=False, index=True)
     uci = Column(String(10), nullable=False) 
     san = Column(String(10), nullable=False)
@@ -54,7 +54,10 @@ class Move(Base):
     from_position = relationship("Position", foreign_keys=[from_position_id], backref="outgoing_moves")
     to_position = relationship("Position", foreign_keys=[to_position_id], backref="incoming_moves")
     
-    __table_args__ = (UniqueConstraint('from_position_id', 'uci', name='_from_pos_uci_uc'),)
+    __table_args__ = (
+        UniqueConstraint('from_position_id', 'uci', name='_from_pos_uci_uc'),
+        Index('ix_moves_to_pos_prio', 'to_position_id', 'priority_score'),
+    )
 
 class RepertoireMove(Base):
     """
@@ -62,12 +65,15 @@ class RepertoireMove(Base):
     """
     __tablename__ = 'repertoire_moves'
     id = Column(Integer, primary_key=True)
-    move_id = Column(Integer, ForeignKey('moves.id'), nullable=False, index=True)
+    move_id = Column(Integer, ForeignKey('moves.id'), nullable=False)
     level = Column(Integer, default=1, index=True) 
     is_active = Column(Boolean, default=True, index=True)
     
     move = relationship("Move")
-    __table_args__ = (UniqueConstraint('move_id', name='_rep_move_uc'),)
+    __table_args__ = (
+        UniqueConstraint('move_id', name='_rep_move_uc'),
+        Index('ix_rep_moves_active_level_move', 'is_active', 'level', 'move_id'),
+    )
 
 class RepertoireLevel(Base):
     """Defines the available levels (e.g. 'Basic', 'Advanced')."""
@@ -80,8 +86,8 @@ class RepertoireLevel(Base):
 class LichessData(Base):
     __tablename__ = 'lichess_data'
     id = Column(Integer, primary_key=True)
-    fen = Column(String, nullable=False, index=True)
-    elo_range = Column(String, nullable=False)
+    fen = Column(String, nullable=False)
+    elo_range = Column(String, nullable=False, index=True)
     moves_json = Column(String, nullable=False) 
     fetched_at = Column(DateTime, nullable=True, default=datetime.datetime.now)
 
@@ -98,7 +104,7 @@ class TrainingData(UserBase):
     """
     __tablename__ = 'training_data'
     id = Column(Integer, primary_key=True)
-    repertoire_name = Column(String, index=True, nullable=False)
+    repertoire_name = Column(String, nullable=False)
     fen = Column(String, index=True, nullable=False) # The position BEFORE the move
     move_uci = Column(String, nullable=False)
     

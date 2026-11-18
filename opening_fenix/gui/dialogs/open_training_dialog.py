@@ -12,7 +12,7 @@ from opening_fenix.gui.styles import COLORS, get_chevron_icon_path
 from opening_fenix.core.translation import tr_ui
 from opening_fenix.core.utils import get_repertoire_db_path
 from opening_fenix.core.db.database import DatabaseManager
-from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels
+from opening_fenix.core.services.repertoire_core_service import fetch_repertoire_levels, get_repertoire_levels_fast
 from opening_fenix.core.services.tree_navigation_service import TreeNavigationService
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
@@ -284,7 +284,15 @@ class OpenTrainingSetupDialog(QDialog):
         self.combo_variation.addItem(tr_ui("open_training.all_variations", "Alle Variationen"), None)
 
         target_lang = self._get_target_variation_language()
-        structure = fetch_variation_structure_for_repo(repo_name, lang=target_lang)
+        active_repo = getattr(self.repertoire_manager, "active_repertoire_name", None)
+        active_sess = getattr(self.repertoire_manager, "session", None)
+        if repo_name == active_repo and active_sess is not None:
+            try:
+                structure = TreeNavigationService(active_sess).get_variation_structure(lang=target_lang)
+            except Exception:
+                structure = fetch_variation_structure_for_repo(repo_name, lang=target_lang)
+        else:
+            structure = fetch_variation_structure_for_repo(repo_name, lang=target_lang)
         for v1, v2_list in structure.items():
             self.combo_variation.addItem(v1, v1)
             if v2_list:
@@ -323,20 +331,13 @@ class OpenTrainingSetupDialog(QDialog):
         # Add "All Levels" option
         self.combo_level.addItem(tr_ui("open_training.all_levels", "Alle Level (1 - Max)"), 999)
 
-        db_path = get_repertoire_db_path(repo_name)
-        if os.path.exists(db_path):
-            db_manager = DatabaseManager(db_path)
-            session = db_manager.get_session()
-            try:
-                levels = fetch_repertoire_levels(session)
-                for lvl in levels:
-                    lbl = f"Level {lvl['order']}: {lvl['name']}" if lvl['name'] else f"Level {lvl['order']}"
-                    self.combo_level.addItem(lbl, lvl['order'])
-            except Exception:
-                pass
-            finally:
-                session.close()
-                db_manager.close()
+        try:
+            levels = get_repertoire_levels_fast(repo_name)
+            for lvl in levels:
+                lbl = f"Level {lvl['order']}: {lvl['name']}" if lvl['name'] else f"Level {lvl['order']}"
+                self.combo_level.addItem(lbl, lvl['order'])
+        except Exception:
+            pass
 
         # Pre-select currently active level if possible
         curr_lvl = self.training_manager.get_active_level(repo_name)

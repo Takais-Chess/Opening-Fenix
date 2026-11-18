@@ -130,9 +130,11 @@ class TaskProgressIndicator(QFrame):
         self.progress_bar.setValue(pct)
         # Shorten repo and status for chip display
         short_title = job.title.split(":")[0] if ":" in job.title else job.title
-        self.lbl_text.setText(f"{job.repo_name} • {short_title} ({pct}%)")
-        self.adjustSize()
-        self._update_position()
+        new_label = f"{job.repo_name} • {short_title} ({pct}%)"
+        if new_label != self.lbl_text.text():
+            self.lbl_text.setText(new_label)
+            self.adjustSize()
+            self._update_position()
         if not self.isVisible():
             self.show()
             self.raise_()

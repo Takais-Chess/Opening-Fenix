@@ -34,6 +34,10 @@ def cleanup_temp_db_files():
                 if not f.endswith(".db"):
                     continue
                 db_path = os.path.join(root, f)
+                wal_path = db_path + "-wal"
+                shm_path = db_path + "-shm"
+                if not (os.path.exists(wal_path) or os.path.exists(shm_path)):
+                    continue
                 checkpoint_ok = False
                 conn = None
                 try:
@@ -49,8 +53,7 @@ def cleanup_temp_db_files():
                         except Exception:
                             pass
                 if checkpoint_ok:
-                    for suffix in ("-wal", "-shm"):
-                        sidecar = db_path + suffix
+                    for sidecar in (wal_path, shm_path):
                         if os.path.exists(sidecar):
                             try:
                                 os.remove(sidecar)
@@ -61,12 +64,13 @@ def ensure_default_engine_path():
     """
     Checks if an engine path is set in config.json. If not valid, and if a Stockfish
     executable is found in any bundled 'engines' folder, sets it as default.
+    Returns the loaded/updated config dictionary to avoid duplicate config reads at startup.
     """
     config_path = os.path.join(get_user_dir(), "config.json")
     config = {}
     if os.path.exists(config_path):
         try:
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 config = json.load(f)
         except Exception as e:
             logger.warning(f"Error loading config.json: {e}")
@@ -95,11 +99,12 @@ def ensure_default_engine_path():
         if found_engine:
             config["engine_path"] = found_engine
             try:
-                with open(config_path, "w") as f_out:
-                    json.dump(config, f_out, indent=4)
+                with open(config_path, "w", encoding="utf-8") as f_out:
+                    json.dump(config, f_out, indent=4, ensure_ascii=False)
                 logger.info(f"Set default engine path to {found_engine}")
             except Exception as e:
                 logger.error(f"Could not save config with default engine path: {e}")
+    return config
 
 if __name__ == "__main__":
     # Strip Windows Program Compatibility Assistant shim variables inherited from Setup installer
@@ -155,19 +160,10 @@ if __name__ == "__main__":
             from opening_fenix.core.migration import migrate_legacy_profiles
             migrate_legacy_profiles()
             
-        ensure_default_engine_path()
-
         config_path = os.path.join(get_user_dir(), "config.json")
-        config = {}
-        auto_login_profile = None
+        config = ensure_default_engine_path() or {}
+        auto_login_profile = config.get("auto_login_profile")
         ui_lang = "de"
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    auto_login_profile = config.get("auto_login_profile")
-            except Exception as e:
-                logger.warning(f"Error reading config: {e}")
 
         # Persistent language determination:
         # If already configured in config.json, strictly use saved preference (never touch system language).

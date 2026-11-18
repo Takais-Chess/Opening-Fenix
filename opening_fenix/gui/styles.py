@@ -528,7 +528,7 @@ def get_creator_window_style():
         background: rgba(255, 255, 255, 0.3);
     }}
 
-    *[class="SymbolButton"] {{
+    QPushButton[class="SymbolButton"] {{
         background-color: {COLORS['glass_bg']};
         border: 1px solid {COLORS['glass_border']};
         border-radius: {scale(4)}px;
@@ -536,7 +536,7 @@ def get_creator_window_style():
         font-size: {scale(16)}px;
         padding: 0px;
     }}
-    *[class="SymbolButton"]:hover {{
+    QPushButton[class="SymbolButton"]:hover {{
         background-color: rgba(255, 255, 255, 0.7);
     }}
 
@@ -566,12 +566,12 @@ def get_creator_window_style():
         padding-right: {scale(26)}px;
         min-height: {scale(32)}px;
     }}
-    *[class="SmallCombo"] {{
+    QComboBox[class="SmallCombo"] {{
         border-radius: {scale(10)}px;
         padding-right: {scale(2)}px;
         padding-left: {scale(2)}px;
     }}
-    *[class="SmallCombo"] QLineEdit {{
+    QComboBox[class="SmallCombo"] QLineEdit {{
         background: transparent;
         border: none;
         padding: 0px;
@@ -583,7 +583,7 @@ def get_creator_window_style():
         subcontrol-origin: padding;
         subcontrol-position: center right;
     }}
-    *[class="SmallCombo"]::drop-down {{
+    QComboBox[class="SmallCombo"]::drop-down {{
         width: 0px;
     }}
     QComboBox::down-arrow {{
@@ -591,7 +591,7 @@ def get_creator_window_style():
         width: {scale(11)}px;
         height: {scale(11)}px;
     }}
-    *[class="SmallCombo"]::down-arrow {{
+    QComboBox[class="SmallCombo"]::down-arrow {{
         image: none;
     }}
     QComboBox QAbstractItemView {{

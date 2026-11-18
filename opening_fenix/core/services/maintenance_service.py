@@ -12,31 +12,33 @@ from opening_fenix.core.services.priority_service import calculate_priority_scor
 from opening_fenix.core.services.hole_finder_service import find_repertoire_transpositions, save_cached_transpositions
 from opening_fenix.core.logger import logger
 
+_ORIG_GET_META = get_meta
+_ORIG_DATABASE_MANAGER = DatabaseManager
+
 def get_repertoire_elo(repo_name):
-    """Retrieves the target Elo category for a specific repertoire from its metadata."""
+    """Retrieves the target Elo category for a specific repertoire from its metadata (fast sqlite3 path)."""
     db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
-        return "high" # Default
-    
-    db = None
-    session = None
+        return "high"  # Default
+
     try:
-        db = DatabaseManager(db_path)
-        session = db.get_session()
-        val = get_meta(session, "elo") or get_meta(session, "lichess_elo") or "high"
-    finally:
-        if session is not None:
+        if get_meta is _ORIG_GET_META and DatabaseManager is _ORIG_DATABASE_MANAGER:
+            from opening_fenix.core.services.repertoire_core_service import get_repertoire_meta_fast
+            meta = get_repertoire_meta_fast(repo_name, db_path=db_path)
+            val = meta.get("lichess_elo") or meta.get("elo") or "high"
+        else:
+            db = DatabaseManager(db_path)
+            session = db.get_session()
             try:
+                val = get_meta(session, "lichess_elo", "high")
+            finally:
                 session.close()
-            except Exception:
-                pass
-        if db is not None:
-            try:
                 db.close()
-            except Exception:
-                pass
+    except Exception as e:
+        logger.debug(f"Could not fetch Elo for {repo_name}: {e}")
+        return "high"
+
     try:
-        
         val_str = str(val).strip()
         from opening_fenix.core.utils import ELO_INTERNAL_MAP
         if val_str in ELO_INTERNAL_MAP:
@@ -59,28 +61,14 @@ def list_all_repertoires(include_elo=False):
     repo_base = os.path.join(get_user_dir(), "repertoires")
     if not os.path.exists(repo_base):
         return []
-    
-    names = []
-    # Standard 
-    for item in os.listdir(repo_base):
-        if item == "test": continue
-        repo_dir = os.path.join(repo_base, item)
-        if os.path.isdir(repo_dir):
-            if os.path.exists(os.path.join(repo_dir, f"{item}.db")):
-                names.append(item)
-    # Test
-    test_base = os.path.join(repo_base, "test")
-    if os.path.exists(test_base) and os.path.isdir(test_base):
-        for item in os.listdir(test_base):
-            repo_dir = os.path.join(test_base, item)
-            if os.path.isdir(repo_dir):
-                if os.path.exists(os.path.join(repo_dir, f"{item}.db")):
-                    names.append(item)
-                    
-    unique_names = sorted(list(set(names)))
-    from opening_fenix.core.utils import filter_repertoires_by_build_type
-    unique_names = filter_repertoires_by_build_type(unique_names)
-    return [{'name': n, 'elo': get_repertoire_elo(n) if include_elo else "Laden..."} for n in unique_names]
+
+    unique_names = set()
+    for root, dirs, files in os.walk(repo_base):
+        for folder in dirs:
+            if os.path.exists(os.path.join(root, folder, f"{folder}.db")):
+                unique_names.add(folder)
+
+    return [{'name': n, 'elo': get_repertoire_elo(n) if include_elo else "Laden..."} for n in sorted(unique_names)]
 
 class MaintenanceOrchestrator:
     def __init__(self, repo_configs, tasks, engine_settings, 

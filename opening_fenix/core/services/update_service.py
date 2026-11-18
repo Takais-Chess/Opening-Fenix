@@ -1,7 +1,9 @@
 import os
 import sys
 import json
+import copy
 import re
+import threading
 import urllib.request
 import urllib.error
 import datetime
@@ -36,8 +38,12 @@ def is_newer_version(remote_tag: str, current_version: str = APP_VERSION) -> boo
     current_parsed = parse_version(current_version)
     return remote_parsed > current_parsed
 
+_CONFIG_CACHE_LOCK = threading.Lock()
+_CONFIG_CACHE: Dict[str, Any] = {"key": None, "data": None}
+
+
 def _clean_mojibake(text: str) -> str:
-    if not isinstance(text, str):
+    if not isinstance(text, str) or text.isascii():
         return text
     for _ in range(3):
         try:
@@ -59,18 +65,30 @@ def _clean_mojibake(text: str) -> str:
 
 def get_config_dict() -> Dict[str, Any]:
     config_path = os.path.join(get_user_dir(), "config.json")
-    if os.path.exists(config_path):
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    if "theme" in data and isinstance(data["theme"], str):
-                        data["theme"] = _clean_mojibake(data["theme"])
-                    if "highlight_color" in data and isinstance(data["highlight_color"], str):
-                        data["highlight_color"] = _clean_mojibake(data["highlight_color"])
+    try:
+        st = os.stat(config_path)
+        cache_key = (config_path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return {}
+
+    with _CONFIG_CACHE_LOCK:
+        if _CONFIG_CACHE["key"] == cache_key and _CONFIG_CACHE["data"] is not None:
+            return copy.deepcopy(_CONFIG_CACHE["data"])
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                if "theme" in data and isinstance(data["theme"], str):
+                    data["theme"] = _clean_mojibake(data["theme"])
+                if "highlight_color" in data and isinstance(data["highlight_color"], str):
+                    data["highlight_color"] = _clean_mojibake(data["highlight_color"])
+                with _CONFIG_CACHE_LOCK:
+                    _CONFIG_CACHE["key"] = cache_key
+                    _CONFIG_CACHE["data"] = copy.deepcopy(data)
                 return data
-        except Exception as e:
-            logger.warning(f"Could not load config.json: {e}")
+    except Exception as e:
+        logger.warning(f"Could not load config.json: {e}")
     return {}
 
 def save_config_dict(cfg: Dict[str, Any]) -> None:
@@ -80,6 +98,14 @@ def save_config_dict(cfg: Dict[str, Any]) -> None:
     try:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=4, ensure_ascii=False)
+        with _CONFIG_CACHE_LOCK:
+            try:
+                st = os.stat(config_path)
+                _CONFIG_CACHE["key"] = (config_path, st.st_mtime_ns, st.st_size)
+                _CONFIG_CACHE["data"] = copy.deepcopy(cfg)
+            except OSError:
+                _CONFIG_CACHE["key"] = None
+                _CONFIG_CACHE["data"] = None
     except Exception as e:
         logger.error(f"Could not write config.json: {e}")
 

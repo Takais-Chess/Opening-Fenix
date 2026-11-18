@@ -71,20 +71,26 @@ class LichessJob(BackgroundJob):
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
         from opening_fenix.core.services.lichess_service import run_lichess_import_and_calculate_scores
         tm = get_task_manager()
+        last_emit = [0.0]
+
         def on_prog(pct, *args):
             if self.is_canceled():
                 return
             p = max(0, min(100, int(pct)))
             self.lichess_pct = p
-            progress_cb(p)
             if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
                 st = tr_ui("task_center.job_positions_fmt", "{cur}/{tot} Stellungen", cur=args[0], tot=args[1])
                 self.lichess_status = st
-                status_cb(st)
             elif len(args) == 1 and isinstance(args[0], str):
                 self.lichess_status = args[0]
-                status_cb(args[0])
-            tm.sub_progress.emit(self, "lichess", self.lichess_pct, self.lichess_status)
+
+            now = time.monotonic()
+            if p >= 100 or p == 0 or (now - last_emit[0]) >= 0.15:
+                last_emit[0] = now
+                progress_cb(p)
+                if args:
+                    status_cb(self.lichess_status)
+                tm.sub_progress.emit(self, "lichess", self.lichess_pct, self.lichess_status)
 
         return run_lichess_import_and_calculate_scores(
             repo_name=self.repo_name,
@@ -114,27 +120,35 @@ class EngineScanJob(BackgroundJob):
     def execute(self, progress_cb: Callable[[int], None], status_cb: Callable[[str], None]) -> Tuple[bool, str]:
         from opening_fenix.core.services.analysis_service import run_db_analysis
         tm = get_task_manager()
+        last_emit = [0.0]
+
         def on_prog(pct, *args):
             if self.is_canceled():
                 return
             p = max(0, min(100, int(pct)))
             self.engine_pct = p
-            progress_cb(p)
             if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
-                st = tr_ui("task_center.job_positions_fmt", "{cur}/{tot} Stellungen", cur=args[0], tot=args[1])
-                self.engine_status = st
-                status_cb(st)
+                self.engine_status = tr_ui("task_center.job_positions_fmt", "{cur}/{tot} Stellungen", cur=args[0], tot=args[1])
             elif len(args) == 1 and isinstance(args[0], str):
                 self.engine_status = args[0]
-                status_cb(args[0])
-            tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
+
+            now = time.monotonic()
+            if p >= 100 or p == 0 or (now - last_emit[0]) >= 0.15:
+                last_emit[0] = now
+                progress_cb(p)
+                if args:
+                    status_cb(self.engine_status)
+                tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
 
         def on_st(st: str):
             if self.is_canceled():
                 return
             self.engine_status = str(st)
-            status_cb(self.engine_status)
-            tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
+            now = time.monotonic()
+            if (now - last_emit[0]) >= 0.15:
+                last_emit[0] = now
+                status_cb(self.engine_status)
+                tm.sub_progress.emit(self, "engine", self.engine_pct, self.engine_status)
 
         return run_db_analysis(
             repo_name=self.repo_name,
@@ -184,8 +198,9 @@ class CombinedSyncJob(BackgroundJob):
         eng_status = [tr_ui("task_center.job_started", "Gestartet...")]
         results = {}
         lock = threading.Lock()
+        last_emit = {"lichess": 0.0, "engine": 0.0, None: 0.0}
 
-        def update_combined(stream_key: Optional[str] = None):
+        def update_combined(stream_key: Optional[str] = None, force: bool = False):
             with lock:
                 self.lichess_pct = lich_prog[0]
                 self.lichess_status = lich_status[0]
@@ -194,6 +209,10 @@ class CombinedSyncJob(BackgroundJob):
                 avg_pct = int((lich_prog[0] + eng_prog[0]) / 2)
                 l_pct, l_st = lich_prog[0], lich_status[0]
                 e_pct, e_st = eng_prog[0], eng_status[0]
+                now = time.monotonic()
+                if not force and stream_key is not None and (now - last_emit.get(stream_key, 0.0)) < 0.15:
+                    return
+                last_emit[stream_key] = now
             progress_cb(avg_pct)
             status_cb(f"🌐 Lichess {l_pct}% ({l_st})  |  🤖 Engine {e_pct}% ({e_st})")
             if stream_key in ("lichess", None):
@@ -206,13 +225,14 @@ class CombinedSyncJob(BackgroundJob):
                 if self.is_canceled():
                     return
                 with lock:
-                    lich_prog[0] = max(0, min(100, pct))
+                    p = max(0, min(100, pct))
+                    lich_prog[0] = p
                     if args and isinstance(args[0], (str, int)):
                         if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
                             lich_status[0] = tr_ui("task_center.job_positions_fmt", "{cur}/{tot} Stellungen", cur=args[0], tot=args[1])
                         else:
                             lich_status[0] = str(args[0])
-                update_combined("lichess")
+                update_combined("lichess", force=(p >= 100 or p == 0))
 
             try:
                 succ, msg = run_lichess_import_and_calculate_scores(
@@ -231,20 +251,21 @@ class CombinedSyncJob(BackgroundJob):
                 if succ:
                     lich_prog[0] = 100
                     lich_status[0] = tr_ui("task_center.indicator_finished", "Fertig!")
-            update_combined("lichess")
+            update_combined("lichess", force=True)
 
         def run_eng():
             def on_eng_prog(pct, *args):
                 if self.is_canceled():
                     return
                 with lock:
-                    eng_prog[0] = max(0, min(100, pct))
+                    p = max(0, min(100, pct))
+                    eng_prog[0] = p
                     if args and isinstance(args[0], (str, int)):
                         if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
                             eng_status[0] = tr_ui("task_center.job_positions_fmt", "{cur}/{tot} Stellungen", cur=args[0], tot=args[1])
                         else:
                             eng_status[0] = str(args[0])
-                update_combined("engine")
+                update_combined("engine", force=(p >= 100 or p == 0))
 
             def on_eng_st(st):
                 if self.is_canceled():
@@ -272,7 +293,7 @@ class CombinedSyncJob(BackgroundJob):
                 if succ:
                     eng_prog[0] = 100
                     eng_status[0] = tr_ui("task_center.indicator_finished", "Fertig!")
-            update_combined("engine")
+            update_combined("engine", force=True)
 
         update_combined()
         t_lich = threading.Thread(target=run_lich, name=f"Parallel-Lichess-{self.repo_name}", daemon=True)
@@ -363,8 +384,11 @@ class BatchMaintenanceJob(BackgroundJob):
             status_cb(f"Gesamtfortschritt ({cur}/{tot}): {last_name} ✓")
             tm.batch_overall_progress.emit(self, cur, tot, last_name)
 
+        last_repo_emit: Dict[Tuple[str, str], float] = {}
+
         def on_repo_status(name, t_type, p, st):
             p_clamped = max(0, min(100, int(p)))
+            should_emit = False
             with lock:
                 if name in self.repo_task_status:
                     self.repo_task_status[name][t_type] = (p_clamped, str(st))
@@ -378,6 +402,13 @@ class BatchMaintenanceJob(BackgroundJob):
                 elif t_type in ("engine", "transpositions"):
                     self.engine_pct = p_clamped
                     self.engine_status = f"{name}: {st}"
+                now = time.monotonic()
+                t_key = (name, t_type)
+                if p_clamped >= 100 or p_clamped == 0 or (now - last_repo_emit.get(t_key, 0.0)) >= 0.15:
+                    last_repo_emit[t_key] = now
+                    should_emit = True
+            if not should_emit:
+                return
             progress_cb(overall_pct)
             status_cb(f"[{name}] {t_type} ({p_clamped}%): {st}")
             tm.batch_repo_status.emit(self, name, t_type, p_clamped, str(st))
@@ -510,35 +541,47 @@ class BackgroundTaskManager(QObject):
         with self._lock:
             self._queue.append(job)
             logger.info(f"[TaskManager] Enqueued job: {job.title} (ID: {job.job_id})")
-            self.task_enqueued.emit(job)
-            self.queue_updated.emit()
             self._ensure_worker_running()
+        self.task_enqueued.emit(job)
+        self.queue_updated.emit()
 
     def cancel_current(self) -> None:
         """Requests cancellation of the currently executing job."""
+        job_to_emit = None
         with self._lock:
             if self._current_job and self._current_job.status == JobStatus.RUNNING:
                 if not self._current_job.is_canceled():
                     logger.info(f"[TaskManager] Canceling current job: {self._current_job.title}")
                     self._current_job.cancel()
-                    self.task_canceling.emit(self._current_job)
+                    job_to_emit = self._current_job
+        if job_to_emit is not None:
+            self.task_canceling.emit(job_to_emit)
 
     def cancel_task(self, job_id: str) -> None:
         """Cancels a specific job by ID (either current or in queue)."""
+        should_emit = False
+        cancel_current = False
         with self._lock:
             if self._current_job and self._current_job.job_id == job_id:
-                self.cancel_current()
-                return
-            # Remove from queue if pending
-            new_queue = collections.deque()
-            for j in self._queue:
-                if j.job_id == job_id:
-                    j.status = JobStatus.CANCELED
-                    j.status_message = "Aus Warteschlange entfernt."
-                    self._history.append(j)
-                else:
-                    new_queue.append(j)
-            self._queue = new_queue
+                cancel_current = True
+            else:
+                # Remove from queue if pending
+                new_queue = collections.deque()
+                for j in self._queue:
+                    if j.job_id == job_id:
+                        j.status = JobStatus.CANCELED
+                        j.status_message = "Aus Warteschlange entfernt."
+                        self._history.append(j)
+                    else:
+                        new_queue.append(j)
+                if len(self._history) > 100:
+                    del self._history[:-100]
+                self._queue = new_queue
+                should_emit = True
+        if cancel_current:
+            self.cancel_current()
+            return
+        if should_emit:
             self.queue_updated.emit()
 
     def clear_queue(self) -> None:
@@ -548,8 +591,10 @@ class BackgroundTaskManager(QObject):
                 j.status = JobStatus.CANCELED
                 j.status_message = "Aus Warteschlange entfernt."
                 self._history.append(j)
+            if len(self._history) > 100:
+                del self._history[:-100]
             self._queue.clear()
-            self.queue_updated.emit()
+        self.queue_updated.emit()
 
     def is_running(self) -> bool:
         with self._lock:
@@ -576,13 +621,16 @@ class BackgroundTaskManager(QObject):
             self._worker.start(QThread.Priority.LowPriority)
 
     def _get_next_job_or_finish(self) -> Optional[BackgroundJob]:
+        emit_all_completed = False
         with self._lock:
             if self._queue:
                 return self._queue.popleft()
             self._worker = None
             if self._current_job is None:
-                self.all_completed.emit()
-            return None
+                emit_all_completed = True
+        if emit_all_completed:
+            self.all_completed.emit()
+        return None
 
     def _get_next_job(self) -> Optional[BackgroundJob]:
         with self._lock:
@@ -593,15 +641,17 @@ class BackgroundTaskManager(QObject):
     def _set_current_job(self, job: Optional[BackgroundJob]):
         with self._lock:
             self._current_job = job
-            self.queue_updated.emit()
+        self.queue_updated.emit()
 
     def _finish_current_job(self, job: BackgroundJob, success: bool, message: str):
         with self._lock:
             self._history.append(job)
+            if len(self._history) > 100:
+                del self._history[:-100]
             self._current_job = None
             logger.info(f"[TaskManager] Finished job: {job.title} | Success: {success} | Msg: {message}")
-            self.task_finished.emit(job, success, message)
-            self.queue_updated.emit()
+        self.task_finished.emit(job, success, message)
+        self.queue_updated.emit()
 
 
 def get_task_manager() -> BackgroundTaskManager:

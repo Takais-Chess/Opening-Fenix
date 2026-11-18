@@ -21,7 +21,10 @@ def normalize_fen(fen: str) -> str:
     """Returns the board, turn, castling rights, and en-passant square (first 4 FEN components)."""
     if not fen:
         return ""
-    return " ".join(fen.strip().split()[:4])
+    s = fen.strip()
+    if s.count(" ") >= 5:
+        return s.rsplit(" ", 2)[0]
+    return " ".join(s.split()[:4])
 
 
 def sync_analysis_data_from_other_repertoires(
@@ -40,11 +43,14 @@ def sync_analysis_data_from_other_repertoires(
     
     Returns the number of positions successfully updated from other courses.
     """
-    turn_filter = Position.fen.like(f'% {player_color} %')
-    positions_needing_analysis = target_session.query(Position).filter(
-        turn_filter,
+    # Filter by indexed analysis_depth in SQL, then match turn in Python (avoids leading-% LIKE full scan)
+    turn_marker = f" {player_color} "
+    candidate_positions = target_session.query(Position).filter(
         (Position.analysis_depth == None) | (Position.analysis_depth < target_depth)
     ).all()
+    positions_needing_analysis = [
+        p for p in candidate_positions if p.fen and turn_marker in p.fen
+    ]
 
     if not positions_needing_analysis:
         return 0
@@ -140,6 +146,20 @@ def sync_analysis_data_from_other_repertoires(
     if not best_match:
         return 0
 
+    # Pre-fetch repertoire move UCIs for all needing positions in one query (eliminates N+1)
+    needing_ids = [pos.id for plist in fen_to_positions.values() for pos in plist]
+    rep_uci_by_pos: Dict[int, str] = {}
+    for i in range(0, len(needing_ids), 900):
+        chunk = needing_ids[i:i + 900]
+        for from_pid, uci in (
+            target_session.query(Move.from_position_id, Move.uci)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(Move.from_position_id.in_(chunk))
+            .all()
+        ):
+            if from_pid not in rep_uci_by_pos:
+                rep_uci_by_pos[from_pid] = uci
+
     copied_count = 0
     for norm_fen, (best_depth, best_gm_json, best_eval) in best_match.items():
         if check_cancel and check_cancel():
@@ -151,14 +171,7 @@ def sync_analysis_data_from_other_repertoires(
             continue
 
         for pos in fen_to_positions.get(norm_fen, []):
-            # Check current course's repertoire move to preserve it
-            rep_move = (
-                target_session.query(Move)
-                .join(RepertoireMove, Move.id == RepertoireMove.move_id)
-                .filter(Move.from_position_id == pos.id)
-                .first()
-            )
-            rep_uci = rep_move.uci if rep_move else None
+            rep_uci = rep_uci_by_pos.get(pos.id)
 
             merged_moves = list(cand_moves)
             if rep_uci and rep_uci not in merged_moves:

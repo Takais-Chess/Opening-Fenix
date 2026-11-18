@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import subprocess
 import chess
@@ -346,6 +347,7 @@ def run_db_analysis(
     session = db.get_session()
 
     engine = None
+    cache_service = None
     try:
         player_color = get_meta(session, "color", "w")
         turn_filter = Position.fen.like(f'% {player_color} %')
@@ -390,15 +392,39 @@ def run_db_analysis(
         # Order positions in BFS / topological order to maximize Stockfish hash hits
         positions_to_analyze = order_positions_topologically(session, positions_to_analyze)
 
+        # Pre-fetch repertoire moves and cached alternate moves BEFORE launching Stockfish
+        rep_moves_map: Dict[int, str] = {}
+        for from_pid, m_uci in session.query(Move.from_position_id, Move.uci).join(RepertoireMove).all():
+            if from_pid is not None and from_pid not in rep_moves_map:
+                rep_moves_map[from_pid] = m_uci
+
+        cache_service = EngineCacheService()
+        cached_alt_map = cache_service.get_alternate_moves_batch(
+            (p.fen for p in positions_to_analyze if p.fen),
+            min_depth=depth,
+            require_exhaustive=True,
+        )
+
         creationflags = 0
         if sys.platform == "win32":
             # CREATE_NO_WINDOW (0x08000000) | BELOW_NORMAL_PRIORITY_CLASS (0x00004000)
             creationflags = 0x08000000 | 0x00004000
 
-        engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
-        engine.configure({"Threads": threads, "Hash": hash_size})
+        max_mpv_engine = 500
+
+        def _ensure_engine_started():
+            nonlocal engine, max_mpv_engine
+            if engine is not None:
+                return
+            engine = chess.engine.SimpleEngine.popen_uci(engine_path, creationflags=creationflags)
+            engine.configure({"Threads": threads, "Hash": hash_size})
+            if hasattr(engine, "options") and isinstance(engine.options, dict) and "MultiPV" in engine.options:
+                opt = engine.options["MultiPV"]
+                if hasattr(opt, "max") and opt.max is not None:
+                    max_mpv_engine = opt.max
 
         def analyse_with_cancel(board_to_analyse, limit, multipv=1):
+            _ensure_engine_started()
             if isinstance(engine, chess.engine.SimpleEngine):
                 results = {}
                 try:
@@ -415,13 +441,7 @@ def run_db_analysis(
                     raise
             return engine.analyse(board_to_analyse, limit, multipv=multipv)
 
-        cache_service = EngineCacheService()
-        max_mpv_engine = 500
-        if hasattr(engine, "options") and isinstance(engine.options, dict) and "MultiPV" in engine.options:
-            opt = engine.options["MultiPV"]
-            if hasattr(opt, "max") and opt.max is not None:
-                max_mpv_engine = opt.max
-
+        last_ui_ts = 0.0
         for i, pos in enumerate(positions_to_analyze):
             if check_cancel and check_cancel():
                 try:
@@ -435,17 +455,23 @@ def run_db_analysis(
             if current_pos is None:
                 if progress_callback:
                     pct = int((i + 1) * 100 / total_positions)
-                    try:
-                        progress_callback(pct, i + 1, total_positions)
-                    except TypeError:
-                        progress_callback(pct)
+                    now = time.monotonic()
+                    if i == 0 or (i + 1) == total_positions or (now - last_ui_ts) >= 0.15:
+                        last_ui_ts = now
+                        try:
+                            progress_callback(pct, i + 1, total_positions)
+                        except TypeError:
+                            progress_callback(pct)
                 continue
 
-            repertoire_move = session.query(Move).join(RepertoireMove).filter(Move.from_position_id == current_pos.id).first()
-            repertoire_uci = repertoire_move.uci if repertoire_move else None
+            repertoire_uci = rep_moves_map.get(current_pos.id)
 
             # 1. Check global engine cache first for exhaustive alternate moves
-            cached_alt = cache_service.get_alternate_moves(current_pos.fen, min_depth=depth, require_exhaustive=True)
+            parts = current_pos.fen.strip().split(" ")
+            clean_key = " ".join(parts[:4])
+            cached_alt = cached_alt_map.get(clean_key)
+            if cached_alt is None and not cached_alt_map:
+                cached_alt = cache_service.get_alternate_moves(current_pos.fen, min_depth=depth, require_exhaustive=True)
             if cached_alt:
                 c_moves = list(cached_alt["good_moves"])
                 if repertoire_uci and repertoire_uci not in c_moves:
@@ -453,7 +479,8 @@ def run_db_analysis(
                 current_pos.good_moves = json.dumps(list(dict.fromkeys(c_moves)))
                 current_pos.analysis_depth = cached_alt["depth"]
             else:
-                # 2. Run adaptive uncapped MultiPV analysis
+                # 2. Start engine outside per-position exception handler so startup failures propagate cleanly
+                _ensure_engine_started()
                 try:
                     board = chess.Board(current_pos.fen)
                     good_moves, is_exhaustive, best_uci, best_score_cp = evaluate_position_alternate_moves(
@@ -489,17 +516,20 @@ def run_db_analysis(
                     # Preserve existing good_moves on error without blanking out
 
             pct = int((i + 1) * 100 / total_positions)
-            if progress_callback:
-                try:
-                    progress_callback(pct, i + 1, total_positions)
-                except TypeError:
-                    progress_callback(pct)
+            now = time.monotonic()
+            if i == 0 or (i + 1) == total_positions or (now - last_ui_ts) >= 0.15:
+                last_ui_ts = now
+                if progress_callback:
+                    try:
+                        progress_callback(pct, i + 1, total_positions)
+                    except TypeError:
+                        progress_callback(pct)
 
-            if status_callback:
-                if reused_count > 0:
-                    status_callback(f"{reused_count} übernommen. Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
-                else:
-                    status_callback(f"Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
+                if status_callback:
+                    if reused_count > 0:
+                        status_callback(f"{reused_count} übernommen. Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
+                    else:
+                        status_callback(f"Engine-Analyse: {i + 1}/{total_positions} ({pct}%)")
             
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
                 try:
@@ -514,7 +544,6 @@ def run_db_analysis(
                     except Exception:
                         pass
                     session = db.get_session()
-                    from opening_fenix.core.logger import logger
                     logger.warning(f"Batch commit warning during analysis: {commit_err}")
         
         # Invalidate cache after successful analysis
@@ -530,6 +559,11 @@ def run_db_analysis(
         session.rollback()
         return False, f"Fehler bei der Analyse: {e}"
     finally:
+        if cache_service:
+            try:
+                cache_service.close()
+            except Exception:
+                pass
         if engine:
             try:
                 engine.quit()
@@ -651,6 +685,7 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
     logger.info(f"enrich_position: Using DB at {db_path}")
     db = DatabaseManager(db_path)
     session = db.get_session()
+    cache_service = None
 
     try:
         # ── Phase 1: Quick read-only inspection (release session before slow I/O) ──
@@ -673,13 +708,18 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
 
         user_color = get_meta(session, "color", "w")
 
-        missing_lichess_fens: List[str] = []
-        for p_obj in positions_to_check:
-            p_clean = " ".join(p_obj.fen.split(" ")[:4])
-            if p_clean not in missing_lichess_fens:
-                existing_lichess = session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first()
-                if not existing_lichess:
-                    missing_lichess_fens.append(p_clean)
+        candidate_clean_fens = list(dict.fromkeys(
+            " ".join(p_obj.fen.split(" ")[:4]) for p_obj in positions_to_check if p_obj.fen
+        ))
+        existing_clean_fens = set()
+        if candidate_clean_fens:
+            existing_clean_fens = {
+                row[0]
+                for row in session.query(LichessData.fen)
+                .filter(LichessData.elo_range == elo_category, LichessData.fen.in_(candidate_clean_fens))
+                .all()
+            }
+        missing_lichess_fens: List[str] = [f for f in candidate_clean_fens if f not in existing_clean_fens]
 
         rep_moves_ucis = [
             rm.uci for rm in session.query(Move).join(RepertoireMove).filter(Move.from_position_id == pos_id).all()
@@ -794,17 +834,26 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
         if not pos:
             return False, "Position not found in DB."
 
-        for p_clean, moves_json_str in fetched_lichess:
-            if not session.query(LichessData).filter_by(fen=p_clean, elo_range=elo_category).first():
-                session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=moves_json_str))
-                try:
-                    session.flush()
-                except Exception:
-                    session.rollback()
-                    pos = session.get(Position, pos_id)
-                    if not pos:
-                        return False, "Position not found in DB."
-                    logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
+        if fetched_lichess:
+            fetched_clean_keys = [p_clean for p_clean, _ in fetched_lichess]
+            already_present = {
+                row[0]
+                for row in session.query(LichessData.fen)
+                .filter(LichessData.elo_range == elo_category, LichessData.fen.in_(fetched_clean_keys))
+                .all()
+            }
+            for p_clean, moves_json_str in fetched_lichess:
+                if p_clean not in already_present:
+                    already_present.add(p_clean)
+                    session.add(LichessData(fen=p_clean, elo_range=elo_category, moves_json=moves_json_str))
+                    try:
+                        session.flush()
+                    except Exception:
+                        session.rollback()
+                        pos = session.get(Position, pos_id)
+                        if not pos:
+                            return False, "Position not found in DB."
+                        logger.debug(f"Ignored Lichess data insert collision for {p_clean}")
 
         if pos.analysis_depth is None or pos.analysis_depth < depth:
             if cached_alt:
@@ -855,6 +904,11 @@ def enrich_position(repo_name: str, fen: str, elo_category: str, engine_path: st
         print(f"Enrichment error: {e}")
         return False, str(e)
     finally:
+        if cache_service:
+            try:
+                cache_service.close()
+            except Exception:
+                pass
         if session:
             session.close()
         db.close()
@@ -917,12 +971,19 @@ def reset_all_repertoires_engine_analysis(clear_global_cache: bool = True) -> Tu
         total += cnt
 
     if clear_global_cache:
+        cache = None
         try:
             cache = EngineCacheService()
             cache.clear_alternate_moves()
             logger.info("Cleared alternate moves data from global engine cache.")
         except Exception as e:
             logger.warning(f"Failed to clear alternate moves from global cache: {e}")
+        finally:
+            if cache:
+                try:
+                    cache.close()
+                except Exception:
+                    pass
 
     return total, results
 

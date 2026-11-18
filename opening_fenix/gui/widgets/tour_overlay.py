@@ -1,5 +1,5 @@
 from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QGraphicsDropShadowEffect, QSizePolicy
-from PyQt6.QtCore import Qt, QPoint, QRect, pyqtSignal, QPropertyAnimation, QEasingCurve
+from PyQt6.QtCore import Qt, QPoint, QRect, QRectF, pyqtSignal, QPropertyAnimation, QEasingCurve
 from PyQt6.QtGui import QPainter, QColor, QBrush, QPen, QRegion, QFont, QPainterPath
 
 from opening_fenix.gui.scaling import scale
@@ -26,6 +26,9 @@ class GuidedTourOverlay(QWidget):
         self.steps = []
         self.current_step = 0
         self.target_rect = None
+        self._path_cache_key = None
+        self._cached_bg_path = None
+        self._cached_hole_rect = None
         
         self.init_ui()
         self.hide()
@@ -121,6 +124,12 @@ class GuidedTourOverlay(QWidget):
     def start_tour(self):
         if not self.steps: 
             return
+        if self.parent():
+            try:
+                self.parent().removeEventFilter(self)
+                self.parent().installEventFilter(self)
+            except Exception:
+                pass
         self.current_step = 0
         self.show()
         self.update_step()
@@ -188,10 +197,18 @@ class GuidedTourOverlay(QWidget):
             
         self.desc_card.move(round(new_x), round(new_y))
 
+    def _detach_event_filter(self):
+        if self.parent():
+            try:
+                self.parent().removeEventFilter(self)
+            except Exception:
+                pass
+
     def advance(self):
         self.current_step += 1
         if self.current_step >= len(self.steps):
             self.hide()
+            self._detach_event_filter()
             self.finished.emit()
             return
         self.update_step()
@@ -199,35 +216,35 @@ class GuidedTourOverlay(QWidget):
     def skip(self):
         """Immediately finishes the tour without viewing remaining steps."""
         self.hide()
+        self._detach_event_filter()
         self.finished.emit()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         
-        # Create a path for the whole overlay
-        full_path = QPainterPath()
-        full_path.addRect(QRectF(self.rect()))
-        
-        # If we have a target, subtract it from the full path to create a hole
-        if self.target_rect:
-            padding = scale(5)
-            hole_rect = QRectF(self.target_rect).adjusted(-padding, -padding, padding, padding)
-            hole_path = QPainterPath()
-            hole_path.addRoundedRect(hole_rect, scale(12), scale(12))
-            
-            # Combine paths: full overlay minus the hole
-            final_path = full_path.subtracted(hole_path)
-            
-            # 1. Draw the dimmed overlay (the area with the hole)
-            painter.fillPath(final_path, QBrush(QColor(0, 0, 0, 160)))
-            
-            # 2. Draw a highlight border around the hole
+        rect = self.rect()
+        target_key = (self.target_rect.x(), self.target_rect.y(), self.target_rect.width(), self.target_rect.height()) if self.target_rect else None
+        cache_key = (rect.width(), rect.height(), target_key)
+        if self._path_cache_key != cache_key or self._cached_bg_path is None:
+            full_path = QPainterPath()
+            full_path.addRect(QRectF(rect))
+            if self.target_rect:
+                padding = scale(5)
+                hole_rect = QRectF(self.target_rect).adjusted(-padding, -padding, padding, padding)
+                hole_path = QPainterPath()
+                hole_path.addRoundedRect(hole_rect, scale(12), scale(12))
+                self._cached_bg_path = full_path.subtracted(hole_path)
+                self._cached_hole_rect = hole_rect
+            else:
+                self._cached_bg_path = full_path
+                self._cached_hole_rect = None
+            self._path_cache_key = cache_key
+
+        painter.fillPath(self._cached_bg_path, QBrush(QColor(0, 0, 0, 160)))
+        if self._cached_hole_rect is not None:
             painter.setPen(QPen(QColor(COLORS['burnt_orange']), scale(3)))
-            painter.drawRoundedRect(hole_rect, scale(12), scale(12))
-        else:
-            # No target, just dim everything
-            painter.fillPath(full_path, QBrush(QColor(0, 0, 0, 160)))
+            painter.drawRoundedRect(self._cached_hole_rect, scale(12), scale(12))
 
     def eventFilter(self, obj, event):
         from PyQt6.QtCore import QEvent
@@ -236,5 +253,3 @@ class GuidedTourOverlay(QWidget):
             self.setGeometry(self.parent().rect())
             self.update_step()
         return super().eventFilter(obj, event)
-
-from PyQt6.QtCore import QRectF

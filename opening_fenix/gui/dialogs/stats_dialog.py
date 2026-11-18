@@ -170,6 +170,7 @@ class RepertoireStatisticsDialog(QDialog):
         self.selected_profile = profile_name or get_last_active_profile_name()
         self.worker: Optional[StatisticsWorker] = None
         self.profile_worker: Optional[ProfileBoxWorker] = None
+        self._stats_req_id: int = 0
         self._profile_req_id: int = 0
         self.box_tile_widgets: Dict[int, Tuple[QFrame, QLabel, QLabel, QLabel]] = {}
 
@@ -777,14 +778,32 @@ class RepertoireStatisticsDialog(QDialog):
         active_prof = self.combo_profile.currentText() if hasattr(self, 'combo_profile') else self.selected_profile
         self.load_profile_box_statistics(active_prof, level_filter=lvl)
 
+    def _detach_worker(self, w, wait_ms: int = 0) -> None:
+        """Non-blocking cleanup helper for in-flight stats workers."""
+        if w is None or not w.isRunning():
+            return
+        if not hasattr(RepertoireStatisticsDialog, '_detached_workers'):
+            RepertoireStatisticsDialog._detached_workers = []
+        try:
+            w.disconnect()
+        except Exception:
+            pass
+        w.requestInterruption()
+        if wait_ms > 0 and w.wait(wait_ms):
+            return
+        RepertoireStatisticsDialog._detached_workers.append(w)
+        w.finished.connect(
+            lambda obj=w: RepertoireStatisticsDialog._detached_workers.remove(obj)
+            if obj in RepertoireStatisticsDialog._detached_workers else None
+        )
+
     def load_profile_box_statistics(self, profile_name: str, level_filter: Optional[int] = None):
         if not profile_name or not self.repo_name:
             return
         self._profile_req_id += 1
         req_id = self._profile_req_id
 
-        if self.profile_worker and self.profile_worker.isRunning():
-            self.profile_worker.wait(1000)
+        self._detach_worker(self.profile_worker)
 
         self.profile_worker = ProfileBoxWorker(
             req_id, self.repo_name, profile_name, self.is_test, selected_level=level_filter
@@ -882,34 +901,26 @@ class RepertoireStatisticsDialog(QDialog):
         self.btn_refresh.setEnabled(False)
         self.lbl_scope.setText(tr_ui("stats.calculating", "⏳ Statistiken werden berechnet..."))
 
-        if self.worker and self.worker.isRunning():
-            self.worker.wait(1000)
+        self._stats_req_id += 1
+        req_id = self._stats_req_id
+        self._detach_worker(self.worker)
 
         active_prof = self.combo_profile.currentText() if hasattr(self, 'combo_profile') else self.selected_profile
         lvl = self.combo_level.currentData() if hasattr(self, 'combo_level') and self.combo_level.count() > 0 else None
         self.worker = StatisticsWorker(
             self.repo_name, self.is_test, profile_name=active_prof, selected_level=lvl
         )
-        self.worker.stats_ready.connect(self.on_statistics_ready)
+        self.worker.stats_ready.connect(lambda data, rid=req_id: self._on_stats_worker_done(rid, data))
         self.worker.start()
 
+    def _on_stats_worker_done(self, req_id: int, data: Dict[str, Any]):
+        if req_id < self._stats_req_id:
+            return
+        self.on_statistics_ready(data)
+
     def _cleanup_workers(self):
-        if not hasattr(RepertoireStatisticsDialog, '_detached_workers'):
-            RepertoireStatisticsDialog._detached_workers = []
         for attr_name in ('worker', 'profile_worker'):
-            w = getattr(self, attr_name, None)
-            if w and w.isRunning():
-                try:
-                    w.disconnect()
-                except Exception:
-                    pass
-                w.requestInterruption()
-                if not w.wait(200):
-                    RepertoireStatisticsDialog._detached_workers.append(w)
-                    w.finished.connect(
-                        lambda obj=w: RepertoireStatisticsDialog._detached_workers.remove(obj)
-                        if obj in RepertoireStatisticsDialog._detached_workers else None
-                    )
+            self._detach_worker(getattr(self, attr_name, None), wait_ms=200)
 
     def closeEvent(self, event):
         self._cleanup_workers()

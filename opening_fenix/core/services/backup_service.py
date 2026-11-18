@@ -81,7 +81,7 @@ def compute_repertoire_checksum(repo_name: str) -> str:
                         LEFT JOIN repertoire_moves rm ON rm.move_id = m.id
                         ORDER BY p.id, m.id
                     """)
-                    for row in c.fetchall():
+                    for row in c:
                         hasher.update(str(row).encode("utf-8"))
             finally:
                 if conn is not None:
@@ -141,8 +141,8 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
                         import tempfile
                         fd, temp_db_path = tempfile.mkstemp(suffix=".db")
                         os.close(fd)
-                        with open(temp_db_path, "wb") as f_out:
-                            f_out.write(zf.read(db_members[0]))
+                        with open(temp_db_path, "wb") as f_out, zf.open(db_members[0]) as z_in:
+                            shutil.copyfileobj(z_in, f_out, 1024 * 1024)
                         target_db = temp_db_path
 
                     # Collect PGN file names from zip
@@ -297,7 +297,7 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
     manifest_data = {
         "repertoire_name": repo_name,
         "created_at": now.isoformat(),
-        "checksum": compute_repertoire_checksum(repo_name),
+        "checksum": current_checksum,
         "trigger_type": trigger_type,
         "en_comments": details["en_comments"],
         "de_comments": details["de_comments"],
@@ -360,8 +360,14 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             
         logger.info(f"Successfully created repertoire backup: {zip_path} (trigger: {trigger_type})")
         
-        # Run retention pruning after backup creation
-        prune_repertoire_backups(repo_name)
+        # Run retention pruning after backup creation (reuse existing list + new entry to avoid re-reading all zips)
+        new_entry = {
+            "filename": zip_name,
+            "path": zip_path,
+            "created_at": now,
+            "trigger_type": trigger_type,
+        }
+        prune_repertoire_backups(repo_name, preloaded_backups=[new_entry] + (existing_backups or []))
         return zip_path
 
     except Exception as e:
@@ -452,7 +458,7 @@ def list_repertoire_backups(repo_name: str) -> list[dict]:
     return items
 
 
-def prune_repertoire_backups(repo_name: str):
+def prune_repertoire_backups(repo_name: str, preloaded_backups=None):
     """
     Applies the multi-tiered retention pruning schedule:
     - 1 Day ago: Keep exact daily snapshots for the last 7 days.
@@ -462,7 +468,7 @@ def prune_repertoire_backups(repo_name: str):
     - Yearly: Keep 1 snapshot for each year thereafter.
     Unmatched intermediate daily backups older than 7 days are safely deleted.
     """
-    backups = list_repertoire_backups(repo_name)
+    backups = preloaded_backups if preloaded_backups is not None else list_repertoire_backups(repo_name)
     if len(backups) <= 7:
         return  # Keep all if 7 or fewer
 
@@ -561,8 +567,8 @@ def restore_repertoire_from_backup(repo_name: str, backup_zip_path: str) -> bool
 
                 if member.endswith(".db") and "/" not in member and chr(92) not in member:
                     target_db = db_path
-                    with open(target_db, "wb") as f_out:
-                        f_out.write(zf.read(member))
+                    with open(target_db, "wb") as f_out, zf.open(member) as z_in:
+                        shutil.copyfileobj(z_in, f_out, 1024 * 1024)
                 else:
                     base_real = os.path.realpath(repo_dir)
                     out_path = os.path.realpath(os.path.join(base_real, member))
@@ -571,8 +577,15 @@ def restore_repertoire_from_backup(repo_name: str, backup_zip_path: str) -> bool
                     norm_member = member.replace(chr(92), "/")
                     if not norm_member.endswith("/"):
                         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                        with open(out_path, "wb") as f_out:
-                            f_out.write(zf.read(member))
+                        with open(out_path, "wb") as f_out, zf.open(member) as z_in:
+                            shutil.copyfileobj(z_in, f_out, 1024 * 1024)
+
+        try:
+            from opening_fenix.core.services.repertoire_core_service import invalidate_repertoire_levels_cache, invalidate_repertoire_meta_cache
+            invalidate_repertoire_levels_cache(repo_name)
+            invalidate_repertoire_meta_cache(repo_name)
+        except Exception:
+            pass
 
         logger.info(f"Successfully restored repertoire '{repo_name}' from {backup_zip_path}")
         return True

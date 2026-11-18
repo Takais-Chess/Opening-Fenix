@@ -304,7 +304,7 @@ class CreatorBackend:
         return data
 
     def update_position_data(self, fen, comment, var1, var2, var3, append=False, auto_review=False, target_lang="de"):
-        if not self.session: return
+        if not self.session: return False
         # Robust FEN Cleaning for query consistency
         clean_fen = " ".join(fen.strip().split(" ")[:4])
         pos = self._get_pos_by_fen(clean_fen)
@@ -338,6 +338,7 @@ class CreatorBackend:
 
         commit_with_retry(self.session)
         self.clear_cache(graph_changed=False)
+        return names_changed
 
     def mark_position_reviewed(self, fen):
         if not self.session: return
@@ -627,48 +628,55 @@ class CreatorBackend:
         if not self.session: return None
         if level is None: level = 99
         
-        clean_curr = " ".join(current_fen.split(" ")[:4])
-        start_pos = self.session.query(Position).filter_by(fen=clean_curr).first()
+        start_pos = self._get_pos_by_fen(current_fen)
         if not start_pos: 
-            start_pos = self.session.query(Position).filter_by(fen=chess.STARTING_FEN).first()
+            start_pos = self._get_pos_by_fen(chess.STARTING_FEN)
             if not start_pos: return None
+
+        # Scope the search to the reachable set for THIS variation/level
+        reachable_ids = self._get_reachable_position_ids(level, variation_filter)
+        if not reachable_ids:
+            return None
+
+        # Bulk-load unreviewed position IDs and bidirectional edges once instead of 2 SQL queries per BFS step
+        if session_start:
+            unreviewed_rows = self.session.query(Position.id).filter(
+                (Position.last_overhaul_review.is_(None)) | (Position.last_overhaul_review < session_start)
+            ).all()
+        else:
+            unreviewed_rows = self.session.query(Position.id).filter(
+                Position.last_overhaul_review.is_(None)
+            ).all()
+        unreviewed_target_ids = {r[0] for r in unreviewed_rows} & reachable_ids
+        if not unreviewed_target_ids:
+            return None
+
+        children_map = collections.defaultdict(list)
+        parents_map = collections.defaultdict(list)
+        for f_id, t_id in self.session.query(Move.from_position_id, Move.to_position_id).all():
+            children_map[f_id].append(t_id)
+            parents_map[t_id].append(f_id)
 
         queue = collections.deque([start_pos.id])
         visited = {start_pos.id}
-        
-        # Scope the search to the reachable set for THIS variation/level
-        reachable_ids = self._get_reachable_position_ids(level, variation_filter)
-        
+
         while queue:
             curr_id = queue.popleft()
-            
-            if curr_id in reachable_ids:
-                pos = self.session.get(Position, curr_id)
-                is_unreviewed = False
-                if session_start:
-                    if pos.last_overhaul_review is None or pos.last_overhaul_review < session_start:
-                        is_unreviewed = True
-                else:
-                    if pos.last_overhaul_review is None:
-                        is_unreviewed = True
-                
-                if is_unreviewed:
-                    return pos.fen
 
-            # Add neighbors (children moves)
-            children = self.session.query(Move.to_position_id).filter_by(from_position_id=curr_id).all()
-            for (c_id,) in children:
+            if curr_id in unreviewed_target_ids:
+                pos = self.session.get(Position, curr_id)
+                return pos.fen if pos else None
+
+            for c_id in children_map.get(curr_id, ()):
                 if c_id not in visited:
                     visited.add(c_id)
                     queue.append(c_id)
-                    
-            # Add neighbors (parents)
-            parents = self.session.query(Move.from_position_id).filter_by(to_position_id=curr_id).all()
-            for (p_id,) in parents:
+
+            for p_id in parents_map.get(curr_id, ()):
                 if p_id not in visited:
                     visited.add(p_id)
                     queue.append(p_id)
-                    
+
         return None
 
 
@@ -1410,10 +1418,10 @@ class CreatorBackend:
         dm = set()
         dp = set()
         
-        # BFS using queries. Can be optimized further but usually < 50ms.
-        queue = [move]
+        # BFS using deque + queries.
+        queue = collections.deque([move])
         while queue:
-            curr_move = queue.pop(0)
+            curr_move = queue.popleft()
             if curr_move.id in dm: continue
             dm.add(curr_move.id)
             
@@ -2181,8 +2189,8 @@ class CreatorBackend:
 
         results = []
         seen_move_ids = set()
+        incoming_moves = []
         for pos in positions:
-            # All RepertoireMoves that lead INTO this position
             incoming = (
                 self.session.query(Move)
                 .join(RepertoireMove, RepertoireMove.move_id == Move.id)
@@ -2190,28 +2198,36 @@ class CreatorBackend:
                 .all()
             )
             for m in incoming:
-                if m.id in seen_move_ids:
-                    continue
-                seen_move_ids.add(m.id)
+                if m.id not in seen_move_ids:
+                    seen_move_ids.add(m.id)
+                    incoming_moves.append((pos, m))
 
-                # Get the parent position's variation name for context
-                parent_pos = self.session.query(Position).filter(
-                    Position.id == m.from_position_id
-                ).first()
+        if incoming_moves:
+            parent_ids = list({m.from_position_id for _, m in incoming_moves if m.from_position_id is not None})
+            parent_pos_map = {}
+            depth_count_map = {}
+            for i in range(0, len(parent_ids), 900):
+                chunk = parent_ids[i:i + 900]
+                for p in self.session.query(Position).filter(Position.id.in_(chunk)).all():
+                    parent_pos_map[p.id] = p
+                for to_id, cnt in (
+                    self.session.query(Move.to_position_id, func.count(RepertoireMove.id))
+                    .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                    .filter(Move.to_position_id.in_(chunk))
+                    .group_by(Move.to_position_id)
+                    .all()
+                ):
+                    depth_count_map[to_id] = cnt
+
+            for pos, m in incoming_moves:
+                parent_pos = parent_pos_map.get(m.from_position_id)
                 parent_vname = ""
                 if parent_pos:
                     parent_vname = (parent_pos.variation_1 or parent_pos.cached_v1 or
                                     parent_pos.variation_2 or parent_pos.cached_v2 or "")
 
-                # The target variation name
                 target_vname = (pos.variation_1 or pos.cached_v1 or
                                 pos.variation_2 or pos.cached_v2 or tr_ui("creator.variant_default", "Variante"))
-
-                # Count how many moves in the repertoire lead to this position's parent
-                # as a rough proxy for path depth
-                depth = self.session.query(RepertoireMove).join(Move).filter(
-                    Move.to_position_id == m.from_position_id
-                ).count()
 
                 results.append({
                     "variation_name": target_vname,
@@ -2220,7 +2236,7 @@ class CreatorBackend:
                     "arriving_move_uci": m.uci,
                     "from_position_id": m.from_position_id,
                     "priority": m.priority_score or 0,
-                    "depth": depth,
+                    "depth": depth_count_map.get(m.from_position_id, 0),
                 })
 
         # Sort by priority descending so most-played paths come first
@@ -2320,8 +2336,8 @@ class CreatorBackend:
         # USE PRE-FETCHED CACHE
         moves = self.export_moves_cache.get(pid, [])
         board = node.board()
+        repo_c = self.get_repertoire_color()
         for m_db in moves:
-            repo_c = self.get_repertoire_color()
             is_p = (board.turn == chess.WHITE and repo_c == 'w') or (board.turn == chess.BLACK and repo_c == 'b')
             inc = True
             if max_l is not None:
@@ -3525,6 +3541,13 @@ class AutoShrinkPillButton(QPushButton):
         self._raw_text = text or ""
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         self.setMinimumHeight(scale(28))
+        self.setStyleSheet(f"""
+            QPushButton {{
+                padding: {scale(3)}px {scale(4)}px;
+                font-weight: 600;
+            }}
+            {get_tooltip_style()}
+        """)
         self._apply_style(self._base_size)
 
     def setText(self, text):
@@ -3538,14 +3561,10 @@ class AutoShrinkPillButton(QPushButton):
 
     def _apply_style(self, sz):
         self._current_size = sz
-        self.setStyleSheet(f"""
-            QPushButton {{
-                padding: {scale(3)}px {scale(4)}px;
-                font-size: {sz}px;
-                font-weight: 600;
-            }}
-            {get_tooltip_style()}
-        """)
+        f = QFont(self.font())
+        f.setPixelSize(sz)
+        f.setWeight(QFont.Weight.DemiBold)
+        self.setFont(f)
 
     def minimumSizeHint(self):
         f = QFont(self.font())
@@ -3573,11 +3592,10 @@ class AutoShrinkPillButton(QPushButton):
             return
         avail = max(10, self.width() - scale(14))
         best_sz = self._min_size
+        f = QFont(self.font())
         for sz in range(self._base_size, self._min_size - 1, -1):
-            f = QFont(self.font())
             f.setPixelSize(sz)
-            fm = QFontMetrics(f)
-            if fm.horizontalAdvance(txt) <= avail:
+            if QFontMetrics(f).horizontalAdvance(txt) <= avail:
                 best_sz = sz
                 break
         if best_sz != self._current_size:
@@ -3739,16 +3757,29 @@ class CreatorWindow(QMainWindow):
         
         self.init_icons()
         self.init_ui()
-        self.init_engine()
+        # Engine is spawned lazily when analysis is toggled on
 
-        # Lazy load sounds to improve startup time
+        # Lazy load sounds and pre-warm openings + spellcheck in background threads
         QTimer.singleShot(200, self.init_sounds)
+        QTimer.singleShot(250, self._warmup_creator_services)
 
         st = self.get_setting("theme")
         if st: self.board_widget.set_theme(st)
         shl = self.get_setting("highlight_color")
         if shl: self.board_widget.set_highlight_color(shl)
-        QApplication.instance().installEventFilter(self)
+
+        # Install eventFilter selectively on Creator widgets instead of global QApplication
+        self.installEventFilter(self)
+        for _w in (
+            getattr(self, 'board_widget', None),
+            getattr(self, 'tree_widget', None),
+            getattr(self, 'table_engine', None),
+            getattr(self, 'tabs', None),
+            getattr(self, 'table_holes', None),
+            getattr(self, 'table_transpositions', None),
+        ):
+            if _w is not None:
+                _w.installEventFilter(self)
 
         rtl = repertoire_name or self.config.get("last_active_repertoire")
         self.is_test = is_test
@@ -3803,6 +3834,20 @@ class CreatorWindow(QMainWindow):
         self.update_checker = UpdateCheckWorker(manual=False, parent=self)
         self.update_checker.update_found.connect(self.on_update_found)
         QTimer.singleShot(3000, self._start_background_workers)
+
+    def _warmup_creator_services(self):
+        if sip.isdeleted(self) or getattr(self, "_is_closing", False):
+            return
+        try:
+            from opening_fenix.core.services.opening_name_service import preload_openings_database_async
+            preload_openings_database_async()
+        except Exception:
+            pass
+        try:
+            from opening_fenix.core.spellcheck_service import get_spellcheck_service
+            get_spellcheck_service().warm_up_async()
+        except Exception:
+            pass
 
     def _start_background_workers(self):
         try:
@@ -4646,12 +4691,6 @@ class CreatorWindow(QMainWindow):
             self.main_splitter.setStretchFactor(0, 0)
             self.main_splitter.setStretchFactor(1, 1)
 
-        self.init_management_slots()
-
-        header_font = QFont()
-        header_font.setPixelSize(scale(16))
-        self.tree_widget.header().setFont(header_font)
-
     def _on_tab_changed(self, index):
         if not self._is_ui_valid(): return
         widget = self.tabs.widget(index)
@@ -5322,8 +5361,12 @@ class CreatorWindow(QMainWindow):
 
     def update_comment_lang_button_style(self):
         if not hasattr(self, 'btn_lang_comment'): return
-        
+
         if self.active_comment_lang == "all":
+            state_key = ("all", False, ())
+            if getattr(self, '_last_lang_btn_state', None) == state_key:
+                return
+            self._last_lang_btn_state = state_key
             all_btn_text = tr_ui("creator.lang_all_btn", "ALLE")
             self.btn_lang_comment.setText(f"🌐 {all_btn_text}")
             self.btn_lang_comment.setStyleSheet(f"""
@@ -5344,12 +5387,17 @@ class CreatorWindow(QMainWindow):
             return
 
         code_str = self.active_comment_lang.upper()
-        self.btn_lang_comment.setText(f"🌐 {code_str}")
-        
         curr_text = self.current_position_comments.get(self.active_comment_lang, "").strip()
-        other_langs = [k.upper() for k, v in self.current_position_comments.items() if k != self.active_comment_lang and v and v.strip()]
-        
-        if not curr_text and other_langs:
+        other_langs = tuple(k.upper() for k, v in self.current_position_comments.items() if k != self.active_comment_lang and v and v.strip())
+        highlight = bool(not curr_text and other_langs)
+        state_key = (code_str, highlight, other_langs if highlight else ())
+        if getattr(self, '_last_lang_btn_state', None) == state_key:
+            return
+        self._last_lang_btn_state = state_key
+
+        self.btn_lang_comment.setText(f"🌐 {code_str}")
+
+        if highlight:
             # Highlight state: BRIGHTER color when current lang is empty but comments exist in another lang!
             self.btn_lang_comment.setStyleSheet(f"""
                 QPushButton {{
@@ -5686,7 +5734,7 @@ class CreatorWindow(QMainWindow):
         is_cap = 'x' in s
         
         self.board_widget.board.push(move)
-        self.board_widget.repaint()
+        self.board_widget.update()
         self.play_sound("capture" if is_cap else "move")
         
         self.backend.add_move(from_fen, move.uci(), s)
@@ -5746,7 +5794,10 @@ class CreatorWindow(QMainWindow):
 
         # Ensure only 1 worker thread runs at a time
         if self.enrichment_threads:
-            running = [t for t in self.enrichment_threads if t.isRunning()]
+            running = [
+                t for t in self.enrichment_threads
+                if (not isinstance(t, sip.simplewrapper) or not sip.isdeleted(t)) and t.isRunning()
+            ]
             self.enrichment_threads = running
             if running:
                 return
@@ -5758,7 +5809,10 @@ class CreatorWindow(QMainWindow):
             self.enrichment_queue.clear()
             return
 
-        fen = self.enrichment_queue.pop(0)
+        if isinstance(self.enrichment_queue, collections.deque):
+            fen = self.enrichment_queue.popleft()
+        else:
+            fen = self.enrichment_queue.pop(0)
         ep = self.config.get("engine_path")
         cat = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") else "high"
 
@@ -5782,6 +5836,8 @@ class CreatorWindow(QMainWindow):
             QTimer.singleShot(50, self._process_next_enrichment)
 
         t.finished_signal.connect(on_finished)
+        if hasattr(t, "finished") and hasattr(t, "deleteLater"):
+            t.finished.connect(t.deleteLater)
         self.enrichment_threads.append(t)
         t.start(QThread.Priority.LowPriority)
 
@@ -6264,6 +6320,10 @@ class CreatorWindow(QMainWindow):
     def update_symbol_buttons_style(self, active_symbol=None):
         if not hasattr(self, 'symbol_buttons'):
             return
+        prev_sym = getattr(self, '_last_active_symbol_styled', _UNSET_SENTINEL := object())
+        if prev_sym == active_symbol:
+            return
+        self._last_active_symbol_styled = active_symbol
         for s, btn in self.symbol_buttons.items():
             if active_symbol and s == active_symbol:
                 btn.setStyleSheet(f"""
@@ -6280,7 +6340,7 @@ class CreatorWindow(QMainWindow):
                         background-color: #d35400;
                     }}
                 """)
-            else:
+            elif prev_sym is _UNSET_SENTINEL or s == prev_sym:
                 btn.setStyleSheet("")
 
     def toggle_symbol(self, s: str):
@@ -6436,7 +6496,7 @@ class CreatorWindow(QMainWindow):
             full_comment = format_multilingual_comment(self.current_position_comments)
             target_lang = self.dual_target_lang if getattr(self, "dual_comment_mode", False) else self.active_comment_lang
             try:
-                self.backend.update_position_data(
+                names_changed = self.backend.update_position_data(
                     self.board_widget.board.fen(), 
                     full_comment, 
                     v1_str, 
@@ -6453,7 +6513,8 @@ class CreatorWindow(QMainWindow):
                 except Exception:
                     pass
                 return
-            self.update_structure_tree()
+            if names_changed:
+                self.update_structure_tree()
             if self.overhaul_active:
                 self.update_overhaul_progress()
             # If we are in the Kontrolle tab, we might want to refresh the variation dropdown too
@@ -6715,7 +6776,7 @@ class CreatorWindow(QMainWindow):
             )
 
     def toggle_engine(self, active):
-        if self.engine_thread and not self.engine_thread.isRunning():
+        if active and (not self.engine_thread or not self.engine_thread.isRunning()):
             self.init_engine()
             
         if self.engine_thread:
@@ -7259,25 +7320,30 @@ class CreatorWindow(QMainWindow):
             QMessageBox.warning(self, tr_ui("creator.dlg_import_error_title", "Import Fehler"), message)
 
     def update_structure_tree(self):
+        self.combo_structure.setUpdatesEnabled(False)
         self.combo_structure.blockSignals(True)
-        self.combo_structure.clear()
-        tree_icon_path = os.path.join(get_base_path(), "assets", "Icons", "decision_tree.svg")
-        if os.path.exists(tree_icon_path):
-            self.combo_structure.addItem(QIcon(tree_icon_path), tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
-        else:
-            self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
-        if not self.backend.active_repo_name:
+        try:
+            self.combo_structure.clear()
+            if not hasattr(self, "_tree_structure_icon"):
+                tree_icon_path = os.path.join(get_base_path(), "assets", "Icons", "decision_tree.svg")
+                self._tree_structure_icon = QIcon(tree_icon_path) if os.path.exists(tree_icon_path) else QIcon()
+            if not self._tree_structure_icon.isNull():
+                self.combo_structure.addItem(self._tree_structure_icon, tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
+            else:
+                self.combo_structure.addItem(tr_ui("creator.toolbar_structure", "Variantenbaum"), userData=None)
+            if not self.backend.active_repo_name:
+                return
+            structure = self.backend.get_repertoire_structure(lang=getattr(self, 'active_comment_lang', 'de'))
+            self.combo_structure.addItem("Start Position", userData=chess.STARTING_FEN)
+            for v1 in structure:
+                self.combo_structure.addItem(f"📂 {v1['name']}", userData=v1['fen'])
+                for v2 in v1['children']:
+                    self.combo_structure.addItem(f"   ↳ {v2['name']}", userData=v2['fen'])
+                    for v3 in v2['children']:
+                        self.combo_structure.addItem(f"      ↳ {v3['name']}", userData=v3['fen'])
+        finally:
             self.combo_structure.blockSignals(False)
-            return
-        structure = self.backend.get_repertoire_structure(lang=getattr(self, 'active_comment_lang', 'de'))
-        self.combo_structure.addItem("Start Position", userData=chess.STARTING_FEN)
-        for v1 in structure:
-            self.combo_structure.addItem(f"📂 {v1['name']}", userData=v1['fen'])
-            for v2 in v1['children']:
-                self.combo_structure.addItem(f"   ↳ {v2['name']}", userData=v2['fen'])
-                for v3 in v2['children']:
-                    self.combo_structure.addItem(f"      ↳ {v3['name']}", userData=v3['fen'])
-        self.combo_structure.blockSignals(False)
+            self.combo_structure.setUpdatesEnabled(True)
 
     def open_lichess_analysis(self):
         if not self.backend.active_repo_name: return
@@ -7506,8 +7572,6 @@ class CreatorWindow(QMainWindow):
                     self.windowHandle().screenChanged.connect(self._on_screen_changed)
                 except Exception:
                     pass
-            # Pre-warm creator settings dialog during idle time for instant opening
-            QTimer.singleShot(1500, self._prewarm_repo_settings_dialog)
 
     def _on_screen_changed(self, screen):
         self._auto_size_board = True
@@ -7557,10 +7621,19 @@ class CreatorWindow(QMainWindow):
             self.board_widget.update()
 
     def eventFilter(self, obj, event):
-        if hasattr(self, 'main_splitter') and self.main_splitter:
+        etype = event.type()
+        if etype not in (
+            QEvent.Type.KeyPress,
+            QEvent.Type.Resize,
+            QEvent.Type.MouseButtonDblClick,
+            QEvent.Type.MouseButtonRelease,
+        ):
+            return False
+
+        if etype == QEvent.Type.MouseButtonDblClick and hasattr(self, 'main_splitter') and self.main_splitter:
             try:
                 handle = self.main_splitter.handle(1)
-                if obj == handle and event.type() == QEvent.Type.MouseButtonDblClick:
+                if obj == handle:
                     self._auto_size_board = True
                     self.main_splitter.setStretchFactor(0, 1)
                     self.main_splitter.setStretchFactor(1, 1)
@@ -7569,16 +7642,17 @@ class CreatorWindow(QMainWindow):
             except Exception:
                 pass
 
-        if obj == getattr(self, 'table_common_moves', None) and event.type() == QEvent.Type.Resize:
-            self.resize_common_moves_columns()
-        if obj == getattr(self, 'table_engine', None) and event.type() == QEvent.Type.Resize:
-            self.adjust_engine_columns()
+        if etype == QEvent.Type.Resize:
+            if obj == getattr(self, 'table_common_moves', None):
+                self.resize_common_moves_columns()
+            if obj == getattr(self, 'table_engine', None):
+                self.adjust_engine_columns()
 
         from PyQt6.QtWidgets import QLineEdit
         if hasattr(self, '_processing_event') and self._processing_event:
             return False
             
-        if event.type() == QEvent.Type.KeyPress:
+        if etype == QEvent.Type.KeyPress:
             if event.key() in [Qt.Key.Key_Up, Qt.Key.Key_Down]:
                 focus_w = self.focusWidget()
                 if focus_w not in [self.i_v1, self.i_v2, self.i_v3, self.txt_c]:
@@ -9536,10 +9610,12 @@ class CreatorWindow(QMainWindow):
                     has_deep = True
                 self._add_single_global_transpos_row(h)
 
+        # Also trigger initial column fit only on initial separator creation
             if has_deep:
                 self.table_transpositions.setColumnHidden(3, False)
 
-            self._adjust_transposition_table_columns()
+            if sep_row == -1:
+                self._adjust_transposition_table_columns()
         finally:
             self.table_transpositions.setUpdatesEnabled(True)
 
@@ -10889,6 +10965,7 @@ class CreatorWindow(QMainWindow):
             f"font-weight: bold; font-size: {scale(12)}px; padding: {scale(3)}px {scale(10)}px; border-radius: {scale(10)}px; border: 1px solid rgba(46, 125, 50, 0.25);"
         )
 
+        self._adjust_transposition_table_columns()
         self._save_cached_transpositions(self._global_transpos_results, merge=True)
         btn_unadded = getattr(self, "btn_show_unadded", None) or getattr(self, "btn_recheck_unadded", None)
         if btn_unadded:
@@ -11428,8 +11505,6 @@ class CreatorWindow(QMainWindow):
 
                         for idx, h in enumerate(holes):
                             self._add_hole_row(h, mode, cached_levels=cached_levels, cached_rules=cached_rules, row=idx)
-                            if (idx + 1) % 100 == 0:
-                                QApplication.processEvents()
                     finally:
                         self.table_holes.setUpdatesEnabled(True)
                         self.table_holes.viewport().update()

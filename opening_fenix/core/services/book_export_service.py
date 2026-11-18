@@ -24,6 +24,7 @@ import shutil
 import tempfile
 import uuid
 import pathlib
+import functools
 from typing import Optional, Callable, Dict, List, Tuple, Any
 
 import chess
@@ -225,6 +226,7 @@ def extract_variation_name(
     return " · ".join(names) if names else None
 
 
+@functools.lru_cache(maxsize=4096)
 def format_san(san: str, language: str = "de") -> str:
     """Formats SAN for German notation if requested."""
     if not san:
@@ -238,6 +240,9 @@ def format_san(san: str, language: str = "de") -> str:
 
 
 # ─── SHARED SVG DEFINITIONS (90% Size & Memory Reduction for Large Books) ───
+
+_SHARED_SVG_DEFS_CACHE: Optional[str] = None
+
 
 def _build_shared_svg_defs() -> str:
     all_pieces_board = chess.Board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -")
@@ -267,7 +272,34 @@ def _build_shared_svg_defs() -> str:
     )
 
 
-SHARED_SVG_DEFS = _build_shared_svg_defs()
+def get_shared_svg_defs() -> str:
+    """Lazily builds and caches shared SVG defs on first diagram/book export."""
+    global _SHARED_SVG_DEFS_CACHE
+    if _SHARED_SVG_DEFS_CACHE is None:
+        _SHARED_SVG_DEFS_CACHE = _build_shared_svg_defs()
+    return _SHARED_SVG_DEFS_CACHE
+
+
+def __getattr__(name: str):
+    if name == "SHARED_SVG_DEFS":
+        return get_shared_svg_defs()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+_FEN_PIECE_ID_MAP = {
+    "P": "white-pawn",
+    "N": "white-knight",
+    "B": "white-bishop",
+    "R": "white-rook",
+    "Q": "white-queen",
+    "K": "white-king",
+    "p": "black-pawn",
+    "n": "black-knight",
+    "b": "black-bishop",
+    "r": "black-rook",
+    "q": "black-queen",
+    "k": "black-king",
+}
 
 PIECE_ID_MAP = {
     (chess.PAWN, chess.WHITE): "white-pawn",
@@ -285,6 +317,41 @@ PIECE_ID_MAP = {
 }
 
 
+def _iter_fen_pieces(fen: str):
+    """Yields (file_idx, rank_idx, svg_piece_id) directly from a FEN placement string."""
+    placement = (fen or "").split(" ", 1)[0]
+    ranks = placement.split("/")
+    if len(ranks) == 8:
+        parsed = []
+        valid = True
+        for r_offset, rank_str in enumerate(ranks):
+            rank_idx = 7 - r_offset
+            file_idx = 0
+            for ch in rank_str:
+                if "1" <= ch <= "8":
+                    file_idx += ord(ch) - 48
+                else:
+                    pid = _FEN_PIECE_ID_MAP.get(ch)
+                    if pid is None or file_idx > 7:
+                        valid = False
+                        break
+                    parsed.append((file_idx, rank_idx, pid))
+                    file_idx += 1
+            if not valid:
+                break
+        if valid:
+            return parsed
+
+    try:
+        board = chess.Board(fen)
+    except Exception:
+        board = chess.Board()
+    return [
+        (chess.square_file(sq), chess.square_rank(sq), PIECE_ID_MAP[(piece.piece_type, piece.color)])
+        for sq, piece in board.piece_map().items()
+    ]
+
+
 def render_board_svg(
     fen: str,
     parsed_annotations: dict,
@@ -293,11 +360,6 @@ def render_board_svg(
     size: int = 195
 ) -> str:
     """Renders a compact, ink-saver vector SVG board diagram referencing SHARED_SVG_DEFS."""
-    try:
-        board = chess.Board(fen)
-    except Exception:
-        board = chess.Board()
-
     orientation = chess.BLACK if color.lower() == 'b' else chess.WHITE
     bg_id = "fenix-board-w" if orientation == chess.WHITE else "fenix-board-b"
 
@@ -320,12 +382,9 @@ def render_board_svg(
         parts.append(f'<rect x="{x}" y="{y}" width="45" height="45" fill="{col_hex}" stroke="none" />')
 
     # Pieces
-    for sq, piece in board.piece_map().items():
-        file_idx = chess.square_file(sq)
-        rank_idx = chess.square_rank(sq)
+    for file_idx, rank_idx, pid in _iter_fen_pieces(fen):
         x = 15 + (file_idx if orientation == chess.WHITE else 7 - file_idx) * 45
         y = 15 + (7 - rank_idx if orientation == chess.WHITE else rank_idx) * 45
-        pid = PIECE_ID_MAP[(piece.piece_type, piece.color)]
         parts.append(f'<use href="#{pid}" xlink:href="#{pid}" transform="translate({x}, {y})" />')
 
     # Arrows & Circles
@@ -383,19 +442,8 @@ def render_board_svg(
     """
 
 
-def extract_clean_comment(raw: Optional[str], language: str = "de") -> Tuple[str, dict]:
-    """
-    Extracts text in target language and returns (clean_text, parsed_annotations).
-    Strictly adheres to language choice (de, en, or all) without cross-language fallback:
-    - 'de': only German comments
-    - 'en': only English comments
-    - 'all': all available languages ([DE] ... [EN] ...)
-    """
-    if not raw or not raw.strip():
-        return "", {"arrows": [], "highlights": []}
-
-    raw = raw.strip()
-    # Uses Opening-Fenix's central parse_comment which respects exact language
+@functools.lru_cache(maxsize=8192)
+def _extract_clean_comment_cached(raw: str, language: str) -> Tuple[str, Tuple[Any, ...], Tuple[Any, ...]]:
     target_text = parse_comment(raw, lang=language, default_lang="de" if language == "de" else "en")
 
     parsed_all = parse_chessbase_annotations(raw)
@@ -404,8 +452,25 @@ def extract_clean_comment(raw: Optional[str], language: str = "de") -> Tuple[str
     clean_text = parsed_target.get("clean_text") or ""
     arrows = parsed_target.get("arrows") or parsed_all.get("arrows", [])
     highlights = parsed_target.get("highlights") or parsed_all.get("highlights", [])
+    return clean_text, tuple(arrows), tuple(highlights)
 
-    return clean_text, {"arrows": arrows, "highlights": highlights}
+
+def extract_clean_comment(raw: Optional[str], language: str = "de") -> Tuple[str, dict]:
+    """
+    Extracts text in target language and returns (clean_text, parsed_annotations).
+    Strictly adheres to language choice (de, en, or all) without cross-language fallback:
+    - 'de': only German comments
+    - 'en': only English comments
+    - 'all': all available languages ([DE] ... [EN] ...)
+    """
+    if not raw:
+        return "", {"arrows": [], "highlights": []}
+    raw_stripped = raw.strip()
+    if not raw_stripped:
+        return "", {"arrows": [], "highlights": []}
+
+    clean_text, arrows, highlights = _extract_clean_comment_cached(raw_stripped, language)
+    return clean_text, {"arrows": list(arrows), "highlights": list(highlights)}
 
 
 def append_move_to_path(path: str, m_num: int, white_turn: bool, loc_san: str) -> str:
@@ -415,11 +480,37 @@ def append_move_to_path(path: str, m_num: int, white_turn: bool, loc_san: str) -
     if white_turn:
         return f"{path} {m_num}.{loc_san}".strip()
     else:
-        last_tokens = path.split()
-        if last_tokens and any(t.startswith(f"{m_num}.") for t in last_tokens[-2:]):
+        last_tokens = path.rsplit(" ", 2)[-2:]
+        prefix_m = f"{m_num}."
+        if last_tokens and any(t.startswith(prefix_m) for t in last_tokens):
             return f"{path} {loc_san}".strip()
         else:
             return f"{path} {m_num}...{loc_san}".strip()
+
+
+def _load_book_graph(conn: sqlite3.Connection, level: Optional[int] = None) -> Dict[int, list]:
+    """Loads all active book edges once sorted by priority_score DESC for O(1) tree lookups."""
+    cur = conn.cursor()
+    lvl_filter = "AND rm.level <= ?" if level is not None else ""
+    pos_cols = {r[1] for r in cur.execute("PRAGMA table_info(positions)").fetchall()}
+    v1_expr = "p.variation_1" if "variation_1" in pos_cols else "NULL"
+    v2_expr = "p.variation_2" if "variation_2" in pos_cols else "NULL"
+    v3_expr = "p.variation_3" if "variation_3" in pos_cols else "NULL"
+    params = (level,) if level is not None else ()
+
+    cur.execute(f"""
+        SELECT m.id, m.san, m.from_position_id, m.to_position_id, p.fen, p.comment, {v1_expr}, {v2_expr}, {v3_expr}, m.priority_score
+        FROM repertoire_moves rm
+        JOIN moves m ON rm.move_id = m.id
+        JOIN positions p ON m.to_position_id = p.id
+        WHERE rm.is_active = 1 {lvl_filter}
+        ORDER BY m.priority_score DESC
+    """, params)
+
+    children: Dict[int, list] = {}
+    for m_id, san, from_pos, to_pos, fen, raw_c, v1, v2, v3, prio in cur.fetchall():
+        children.setdefault(from_pos, []).append((m_id, san, to_pos, fen, raw_c, v1, v2, v3, prio))
+    return children
 
 
 def get_course_icon_data_uri(db_path: Optional[str] = None, repo_name: str = "") -> Optional[str]:
@@ -460,7 +551,8 @@ def build_book_html(
     language: str = "de",
     variation_index_html: str = "",
     variation_count: int = 0,
-    page_map: Optional[Dict[Any, int]] = None
+    page_map: Optional[Dict[Any, int]] = None,
+    emit_page_placeholders: bool = False
 ) -> str:
     """Generates the full HTML markup for the Quality Chess style repertoire textbook."""
     repo_name = metadata.get("name", "Repertoire")
@@ -494,6 +586,8 @@ def build_book_html(
             p_label = f"S. {page_map[idx]}" if language == "de" else f"p. {page_map[idx]}"
             dots_html = '<span class="toc-dots"></span>'
             p_info = f'<span class="toc-page">{p_label}</span>'
+        elif page_map is None and emit_page_placeholders:
+            dots_html = f"<!--FENIX_TOC_PAGE:{idx}-->"
 
         subvar_html = ""
         if chap.get("subvars"):
@@ -523,6 +617,8 @@ def build_book_html(
             p_label = f"S. {page_map['index']}" if language == "de" else f"p. {page_map['index']}"
             idx_dots = '<span class="toc-dots"></span>'
             idx_p_info = f'<span class="toc-page">{p_label}</span>'
+        elif page_map is None and emit_page_placeholders:
+            idx_dots = "<!--FENIX_TOC_PAGE:index-->"
 
         toc_items_html.append(f"""
         <div class="toc-row toc-index-row">
@@ -1082,7 +1178,7 @@ def build_book_html(
     </style>
 </head>
 <body>
-{SHARED_SVG_DEFS}
+{get_shared_svg_defs()}
 
 <div class="book-wrapper">
 
@@ -1128,7 +1224,10 @@ def flatten_subtree(
     chap_prefix: str = "",
     page_map: Optional[Dict[Any, int]] = None,
     chap_entry_map: Optional[Dict[int, int]] = None,
-    chapters: Optional[List[dict]] = None
+    chapters: Optional[List[dict]] = None,
+    preloaded_children: Optional[Dict[int, list]] = None,
+    start_pos_row: Optional[Tuple[str, Optional[str]]] = None,
+    emit_page_placeholders: bool = False
 ) -> str:
     """
     Recursively flattens a subtree into Quality Chess style HTML paragraphs,
@@ -1136,34 +1235,24 @@ def flatten_subtree(
     flow together in a single continuous line (e.g. 12.Lxf6 Sxf6 13.Dh4 Ke7).
     Detects transpositions and replaces duplicated subtrees with informative cross-references.
     """
-    cur = conn.cursor()
-    lvl_filter = "AND rm.level <= ?" if level is not None else ""
     if visited_positions is None:
         visited_positions = {}
 
-    pos_cols = {r[1] for r in cur.execute("PRAGMA table_info(positions)").fetchall()}
-    v1_expr = "p.variation_1" if "variation_1" in pos_cols else "NULL"
-    v2_expr = "p.variation_2" if "variation_2" in pos_cols else "NULL"
-    v3_expr = "p.variation_3" if "variation_3" in pos_cols else "NULL"
+    if preloaded_children is None:
+        preloaded_children = _load_book_graph(conn, level=level)
 
     def get_children(p_id):
-        params = (p_id, level) if level is not None else (p_id,)
-        cur.execute(f"""
-            SELECT m.id, m.san, m.to_position_id, p.fen, p.comment, {v1_expr}, {v2_expr}, {v3_expr}
-            FROM repertoire_moves rm
-            JOIN moves m ON rm.move_id = m.id
-            JOIN positions p ON m.to_position_id = p.id
-            WHERE m.from_position_id = ? AND rm.is_active = 1 {lvl_filter}
-            ORDER BY m.priority_score DESC
-        """, params)
-        return cur.fetchall()
+        return preloaded_children.get(p_id, ())
 
     html_blocks = []
-    diag_tracker = {"plies_since_diagram": 0}
 
     # 1. Kapitel-Startstellung (Tabia des Kapitels)
-    cur.execute("SELECT fen, comment FROM positions WHERE id = ?", (start_pos_id,))
-    start_row = cur.fetchone()
+    if start_pos_row is not None:
+        start_row = start_pos_row
+    else:
+        cur = conn.cursor()
+        cur.execute("SELECT fen, comment FROM positions WHERE id = ?", (start_pos_id,))
+        start_row = cur.fetchone()
     if start_row and start_row[0]:
         start_fen, start_raw_c = start_row
         st_clean, st_anno = extract_clean_comment(start_raw_c, language)
@@ -1188,7 +1277,7 @@ def flatten_subtree(
             c_moves = get_children(p_id)
             if not c_moves:
                 return False
-            c_m_id, c_san, c_to_pos, c_fen, c_raw_c, c_v1, c_v2, c_v3 = c_moves[0]
+            c_m_id, c_san, c_to_pos, c_fen, c_raw_c, c_v1, c_v2, c_v3, _ = c_moves[0]
             c_clean, c_anno = extract_clean_comment(c_raw_c, language)
             c_has_drawings = bool(c_anno.get("arrows") or c_anno.get("highlights"))
             if c_has_drawings:
@@ -1200,7 +1289,7 @@ def flatten_subtree(
             # Check if next move is a White move that merges with Black reply
             if not c_clean and not c_has_drawings and len(c_sub_moves) >= 1:
                 r_m = c_sub_moves[0]
-                _, _, r_to, _, r_raw, _, _, _ = r_m
+                _, _, r_to, _, r_raw, _, _, _, _ = r_m
                 r_clean, r_anno = extract_clean_comment(r_raw, language)
                 if bool(r_anno.get("arrows") or r_anno.get("highlights")):
                     return True
@@ -1225,7 +1314,7 @@ def flatten_subtree(
             t_title = orig.get("chap_title", "")
             if t_chap == chap_idx:
                 orig_path = orig.get("san_path", "")
-                last_moves = " ".join(orig_path.split()[-2:]) if orig_path else ""
+                last_moves = " ".join(orig_path.rsplit(" ", 2)[-2:]) if orig_path else ""
                 if last_moves:
                     hint = f"↳ siehe {last_moves}" if language == "de" else f"↳ see {last_moves}"
                 else:
@@ -1235,6 +1324,8 @@ def flatten_subtree(
                 p_str = ""
                 if page_map and t_chap in page_map:
                     p_str = f", S. {page_map[t_chap]}" if language == "de" else f", p. {page_map[t_chap]}"
+                elif page_map is None and emit_page_placeholders:
+                    p_str = f"<!--FENIX_TRANS_PAGE:{t_chap}-->"
                 if language == "de":
                     note = f"↳ Zugumstellung auf <a href='#chapter-{t_chap}' title='{t_title}'>Kapitel {t_chap}</a>{p_str}"
                 else:
@@ -1251,6 +1342,8 @@ def flatten_subtree(
                 p_str = ""
                 if page_map and t_chap in page_map:
                     p_str = f", S. {page_map[t_chap]}" if language == "de" else f", p. {page_map[t_chap]}"
+                elif page_map is None and emit_page_placeholders:
+                    p_str = f"<!--FENIX_TRANS_PAGE:{t_chap}-->"
                 if language == "de":
                     note = f"↳ Zugumstellung auf <a href='#chapter-{t_chap}' title='{t_title}'>Kapitel {t_chap}</a>{p_str}"
                 else:
@@ -1275,7 +1368,7 @@ def flatten_subtree(
         sidelines = moves[1:]
 
         # Process Main Move
-        m_id, san, to_pos, fen, raw_c, v1, v2, v3 = main_move
+        m_id, san, to_pos, fen, raw_c, v1, v2, v3, _ = main_move
         loc_san = format_san(san, language)
         new_path = append_move_to_path(path_str, m_num, white_turn, loc_san)
         
@@ -1372,7 +1465,7 @@ def flatten_subtree(
 
         # Render Sidelines
         for s_idx, s_move in enumerate(sidelines):
-            s_m_id, s_san, s_to_pos, s_fen, s_raw_c, s_v1, s_v2, s_v3 = s_move
+            s_m_id, s_san, s_to_pos, s_fen, s_raw_c, s_v1, s_v2, s_v3, _ = s_move
             s_loc_san = format_san(s_san, language)
             s_new_path = append_move_to_path(path_str, m_num, white_turn, s_loc_san)
             s_tag_letter = chr(65 + (s_idx % 26))
@@ -1400,7 +1493,7 @@ def flatten_subtree(
                 merged_reply = s_child_moves[0]
 
             if merged_reply:
-                r_m_id, r_san, r_to_pos, r_fen, r_raw_c, r_v1, r_v2, r_v3 = merged_reply
+                r_m_id, r_san, r_to_pos, r_fen, r_raw_c, r_v1, r_v2, r_v3, _ = merged_reply
                 r_loc_san = format_san(r_san, language)
                 r_new_path = append_move_to_path(s_new_path, m_num, False, r_loc_san)
                 visited_positions[s_to_pos] = {
@@ -1532,62 +1625,33 @@ def discover_chapters(
     conn: sqlite3.Connection,
     color: str = 'b',
     level: Optional[int] = None,
-    language: str = "de"
+    language: str = "de",
+    preloaded_children: Optional[Dict[int, list]] = None
 ) -> List[dict]:
     """Identifies opening chapters from repertoire tree without translation."""
-    cur = conn.cursor()
-    lvl_filter = f"AND rm.level <= {level}" if level is not None else ""
+    children = preloaded_children if preloaded_children is not None else _load_book_graph(conn, level=level)
 
-    pos_cols = {r[1] for r in cur.execute("PRAGMA table_info(positions)").fetchall()}
-    v1_expr = "p.variation_1" if "variation_1" in pos_cols else "NULL"
-    v2_expr = "p.variation_2" if "variation_2" in pos_cols else "NULL"
-    v3_expr = "p.variation_3" if "variation_3" in pos_cols else "NULL"
-
-    cur.execute(f"""
-        SELECT m.id, m.san, m.from_position_id, m.to_position_id, p.fen, {v1_expr}, {v2_expr}, {v3_expr}, m.priority_score
-        FROM repertoire_moves rm
-        JOIN moves m ON rm.move_id = m.id
-        JOIN positions p ON m.to_position_id = p.id
-        WHERE rm.is_active = 1 {lvl_filter}
-    """)
-    all_moves = cur.fetchall()
-
-    children = {}
-    for m_id, san, from_pos, to_pos, fen, v1, v2, v3, prio in all_moves:
-        children.setdefault(from_pos, []).append((m_id, san, to_pos, fen, v1, v2, v3, prio))
-
-    def count_subtree(pos_id, visited=None):
-        if visited is None:
-            visited = set()
-        if pos_id in visited:
-            return 0
-        visited.add(pos_id)
-        cnt = len(children.get(pos_id, []))
-        for _, _, to_p, _, _, _, _, _ in children.get(pos_id, []):
-            cnt += count_subtree(to_p, visited)
+    def count_subtree(pos_id):
+        visited = set()
+        stack = [pos_id]
+        cnt = 0
+        while stack:
+            p = stack.pop()
+            if p in visited:
+                continue
+            visited.add(p)
+            edges = children.get(p, ())
+            cnt += len(edges)
+            for edge in edges:
+                to_p = edge[2]
+                if to_p not in visited:
+                    stack.append(to_p)
         return cnt
 
     def resolve_name(raw: Optional[str]) -> str:
         if not raw or not str(raw).strip():
             return ""
         return parse_variation_name(str(raw).strip(), lang=language, default_lang="de" if language == "de" else "en")
-
-    def get_subvars(pos_id, visited=None):
-        if visited is None:
-            visited = set()
-        if pos_id in visited:
-            return []
-        visited.add(pos_id)
-        subvars = []
-        for _, _, to_p, _, v1, v2, v3, _ in children.get(pos_id, []):
-            raw_v = (v2 or v3 or "").strip()
-            v = resolve_name(raw_v)
-            if v and v not in subvars:
-                subvars.append(v)
-            for sub in get_subvars(to_p, visited):
-                if sub not in subvars:
-                    subvars.append(sub)
-        return subvars
 
     chapters = []
 
@@ -1598,18 +1662,18 @@ def discover_chapters(
             # Fallback to root children if not standard 1.e4 e5
             branch_roots = children.get(1, [])
 
-        for m_id, san, to_pos, fen, v1, v2, v3, prio in branch_roots:
+        for m_id, san, to_pos, fen, _, v1, v2, v3, prio in branch_roots:
             loc_san = format_san(san, language)
             if san == "Nf3":
-                for m2_id, san2, to_pos2, fen2, v1_2, v2_2, v3_2, prio2 in children.get(to_pos, []):
+                for m2_id, san2, to_pos2, fen2, _, v1_2, v2_2, v3_2, prio2 in children.get(to_pos, []):
                     loc_san2 = format_san(san2, language)
-                    for m3_id, san3, to_pos3, fen3, v1_3, v2_3, v3_3, prio3 in children.get(to_pos2, []):
+                    for m3_id, san3, to_pos3, fen3, _, v1_3, v2_3, v3_3, prio3 in children.get(to_pos2, []):
                         loc_san3 = format_san(san3, language)
                         cnt = count_subtree(to_pos3) + 1
                         title = resolve_name(v1_3 or v2_3 or v3_3)
                         if not title:
                             # Check if immediate reply has a variation name
-                            for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos3, []):
+                            for _, _, child_pos, _, _, cv1, cv2, cv3, _ in children.get(to_pos3, []):
                                 c_title = resolve_name(cv1 or cv2 or cv3)
                                 if c_title:
                                     title = c_title
@@ -1617,7 +1681,6 @@ def discover_chapters(
                         if not title:
                             title = f"3.{loc_san3}"
 
-                        subvars = get_subvars(to_pos3)
                         chapters.append({
                             "title": title,
                             "san_prefix": f"1.e4 e5 2.{loc_san} {loc_san2} 3.{loc_san3}",
@@ -1626,14 +1689,14 @@ def discover_chapters(
                             "is_white_turn": False,
                             "move_count": cnt,
                             "priority_score": prio3,
-                            "subvars": subvars
+                            "subvars": []
                         })
             else:
                 cnt = count_subtree(to_pos) + 1
                 title = resolve_name(v1 or v2 or v3)
                 if not title:
                     # Check if immediate reply has a variation name
-                    for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos, []):
+                    for _, _, child_pos, _, _, cv1, cv2, cv3, _ in children.get(to_pos, []):
                         c_title = resolve_name(cv1 or cv2 or cv3)
                         if c_title:
                             title = c_title
@@ -1641,7 +1704,6 @@ def discover_chapters(
                 if not title:
                     title = f"2.{loc_san}"
 
-                subvars = get_subvars(to_pos)
                 chapters.append({
                     "title": title,
                     "san_prefix": f"1.e4 e5 2.{loc_san}",
@@ -1650,18 +1712,18 @@ def discover_chapters(
                     "is_white_turn": False,
                     "move_count": cnt,
                     "priority_score": prio,
-                    "subvars": subvars
+                    "subvars": []
                 })
     else:
         # Repertoire for White
-        for m_id, san, to_pos, fen, v1, v2, v3, prio in children.get(1, []):
+        for m_id, san, to_pos, fen, _, v1, v2, v3, prio in children.get(1, []):
             loc_san = format_san(san, language)
-            for m2_id, san2, to_pos2, fen2, v1_2, v2_2, v3_2, prio2 in children.get(to_pos, []):
+            for m2_id, san2, to_pos2, fen2, _, v1_2, v2_2, v3_2, prio2 in children.get(to_pos, []):
                 loc_san2 = format_san(san2, language)
                 cnt = count_subtree(to_pos2) + 1
                 title = resolve_name(v1_2 or v2_2 or v3_2)
                 if not title:
-                    for _, _, child_pos, _, cv1, cv2, cv3, _ in children.get(to_pos2, []):
+                    for _, _, child_pos, _, _, cv1, cv2, cv3, _ in children.get(to_pos2, []):
                         c_title = resolve_name(cv1 or cv2 or cv3)
                         if c_title:
                             title = c_title
@@ -1669,7 +1731,6 @@ def discover_chapters(
                 if not title:
                     title = f"1.{loc_san} {loc_san2}"
 
-                subvars = get_subvars(to_pos2)
                 chapters.append({
                     "title": title,
                     "san_prefix": f"1.{loc_san} {loc_san2}",
@@ -1678,7 +1739,7 @@ def discover_chapters(
                     "is_white_turn": True,
                     "move_count": cnt,
                     "priority_score": prio2,
-                    "subvars": subvars
+                    "subvars": []
                 })
 
     # Sort chapters strictly by priority_score descending (with move_count tiebreaker)
@@ -1689,42 +1750,52 @@ def discover_chapters(
     for idx, c in enumerate(chapters, start=1):
         s_pos = c["start_pos_id"]
         chap_entry_map[s_pos] = idx
-        for _, _, to_p, _, _, _, _, _ in children.get(s_pos, []):
-            chap_entry_map[to_p] = idx
+        for edge in children.get(s_pos, []):
+            chap_entry_map[edge[2]] = idx
 
-    def count_chapter_moves(pos_id, this_idx, visited=None):
-        if visited is None:
-            visited = set()
-        if pos_id in visited:
-            return 0
-        visited.add(pos_id)
+    def count_chapter_moves(pos_id, this_idx):
+        visited = set()
+        stack = [pos_id]
         cnt = 0
-        for _, _, to_p, _, _, _, _, _ in children.get(pos_id, []):
-            cnt += 1
-            target_chap = chap_entry_map.get(to_p)
-            if target_chap is not None and target_chap != this_idx:
+        while stack:
+            p = stack.pop()
+            if p in visited:
                 continue
-            cnt += count_chapter_moves(to_p, this_idx, visited)
+            visited.add(p)
+            for edge in children.get(p, ()):
+                cnt += 1
+                to_p = edge[2]
+                target_chap = chap_entry_map.get(to_p)
+                if target_chap is not None and target_chap != this_idx:
+                    continue
+                if to_p not in visited:
+                    stack.append(to_p)
         return cnt
 
-    def get_scoped_subvars(pos_id, this_idx, visited=None):
-        if visited is None:
-            visited = set()
-        if pos_id in visited:
-            return []
-        visited.add(pos_id)
+    def get_scoped_subvars(pos_id, this_idx):
+        visited = set()
         subvars = []
-        for _, _, to_p, _, v1, v2, v3, _ in children.get(pos_id, []):
-            target_chap = chap_entry_map.get(to_p)
-            if target_chap is not None and target_chap != this_idx:
-                continue
-            raw_v = (v2 or v3 or "").strip()
-            v = resolve_name(raw_v)
-            if v and v not in subvars:
-                subvars.append(v)
-            for sub in get_scoped_subvars(to_p, this_idx, visited):
-                if sub not in subvars:
-                    subvars.append(sub)
+        seen_subvars = set()
+
+        def _dfs(p):
+            if p in visited:
+                return
+            visited.add(p)
+            for edge in children.get(p, ()):
+                to_p = edge[2]
+                v2, v3 = edge[6], edge[7]
+                target_chap = chap_entry_map.get(to_p)
+                if target_chap is not None and target_chap != this_idx:
+                    continue
+                raw_v = (v2 or v3 or "").strip()
+                if raw_v:
+                    v = resolve_name(raw_v)
+                    if v and v not in seen_subvars:
+                        seen_subvars.add(v)
+                        subvars.append(v)
+                _dfs(to_p)
+
+        _dfs(pos_id)
         return subvars
 
     for idx, c in enumerate(chapters, start=1):
@@ -1752,7 +1823,9 @@ def generate_variation_index(
     color: str = 'b',
     level: Optional[int] = None,
     language: str = "de",
-    page_map: Optional[Dict[Any, int]] = None
+    page_map: Optional[Dict[Any, int]] = None,
+    preloaded_children: Optional[Dict[int, list]] = None,
+    emit_page_placeholders: bool = False
 ) -> Tuple[str, int]:
     """
     Builds a dense, hierarchical Varianten-Index (Index of Variations)
@@ -1760,29 +1833,16 @@ def generate_variation_index(
     explicit transposition hints (pointing to the exact move sequence),
     and clickable links/page numbers to corresponding chapters.
     """
-    cur = conn.cursor()
-    lvl_filter = f"AND rm.level <= {level}" if level is not None else ""
+    if preloaded_children is None:
+        preloaded_children = _load_book_graph(conn, level=level)
 
     # Map chapter start positions
     pos_to_chap = {}
     for idx, c in enumerate(chapters, start=1):
         pos_to_chap[c["start_pos_id"]] = idx
 
-    pos_cols = {r[1] for r in cur.execute("PRAGMA table_info(positions)").fetchall()}
-    v1_expr = "p.variation_1" if "variation_1" in pos_cols else "NULL"
-    v2_expr = "p.variation_2" if "variation_2" in pos_cols else "NULL"
-    v3_expr = "p.variation_3" if "variation_3" in pos_cols else "NULL"
-
     def get_moves_for_pos(p_id):
-        cur.execute(f"""
-            SELECT m.id, m.san, m.to_position_id, {v1_expr}, {v2_expr}, {v3_expr}
-            FROM repertoire_moves rm
-            JOIN moves m ON rm.move_id = m.id
-            JOIN positions p ON m.to_position_id = p.id
-            WHERE m.from_position_id = ? AND rm.is_active = 1 {lvl_filter}
-            ORDER BY m.priority_score DESC
-        """, (p_id,))
-        return cur.fetchall()
+        return preloaded_children.get(p_id, ())
 
     def format_single_move(san, m_num, is_white, prev_was_white=False):
         loc = format_san(san, language)
@@ -1803,7 +1863,7 @@ def generate_variation_index(
         node.chapter_idx = active_chap
 
         moves = get_moves_for_pos(pos_id)
-        for m_id, san, to_p, v1, v2, v3 in moves:
+        for m_id, san, to_p, _, _, v1, v2, v3, _ in moves:
             child_is_white = not is_white
             child_m_num = m_num if is_white else m_num + 1
             child_chap = pos_to_chap.get(to_p, active_chap)
@@ -1813,18 +1873,20 @@ def generate_variation_index(
 
             loc = format_san(san, language)
             move_label = f"{m_num}.{loc}" if is_white else f"{m_num}...{loc}"
-            curr_path = path_moves + [move_label]
+            path_moves.append(move_label)
 
             if to_p in visited:
                 orig = visited[to_p]
                 orig_chap = orig.get("chap_idx")
-                orig_path = orig.get("path_moves", [])
+                orig_path = orig.get("path_moves", ())
 
                 # Find first divergence move
                 i = 0
-                while i < len(orig_path) and i < len(curr_path) and orig_path[i] == curr_path[i]:
+                orig_len = len(orig_path)
+                curr_len = len(path_moves)
+                while i < orig_len and i < curr_len and orig_path[i] == path_moves[i]:
                     i += 1
-                diverged_move = orig_path[i] if i < len(orig_path) else ""
+                diverged_move = orig_path[i] if i < orig_len else ""
 
                 if orig_chap == child_chap or orig_chap is None:
                     hint = f"↳ siehe {diverged_move}" if diverged_move else "↳ siehe Hauptvariante"
@@ -1840,11 +1902,13 @@ def generate_variation_index(
                 child_node.chapter_idx = orig_chap or child_chap
                 node.children.append(child_node)
             else:
-                visited[to_p] = {"chap_idx": child_chap, "pos_id": to_p, "path_moves": curr_path}
-                sub_tree = build_tree(to_p, child_m_num, child_is_white, visited, child_chap, curr_path)
+                visited[to_p] = {"chap_idx": child_chap, "pos_id": to_p, "path_moves": tuple(path_moves)}
+                sub_tree = build_tree(to_p, child_m_num, child_is_white, visited, child_chap, path_moves)
                 child_node.children = sub_tree.children
                 child_node.chapter_idx = sub_tree.chapter_idx or child_chap
                 node.children.append(child_node)
+
+            path_moves.pop()
 
         return node
 
@@ -1899,6 +1963,8 @@ def generate_variation_index(
                 page_span = ""
                 if page_map and chap_idx in page_map:
                     page_span = f" <span class='index-page'>(S. {page_map[chap_idx]})</span>" if language == "de" else f" <span class='index-page'>(p. {page_map[chap_idx]})</span>"
+                elif page_map is None and emit_page_placeholders and chap_idx:
+                    page_span = f"<!--FENIX_IDX_PAGE:{chap_idx}-->"
                 rows.append(f"""
                 <div class="index-row">
                     <span class="index-branch"><span class="index-prefix">{prefix}{branch_char}</span>{moves_html}</span>
@@ -1945,6 +2011,44 @@ def generate_variation_index(
     """
 
     return index_html, var_count
+
+
+_RE_TRANS_PAGE = re.compile(r"<!--FENIX_TRANS_PAGE:(\d+)-->")
+_RE_IDX_PAGE = re.compile(r"<!--FENIX_IDX_PAGE:(\d+)-->")
+_RE_TOC_PAGE = re.compile(r"<!--FENIX_TOC_PAGE:(index|\d+)-->")
+
+
+def _apply_page_map_placeholders(html: str, page_map: Dict[Any, int], language: str) -> str:
+    """Replaces invisible Pass 1 page placeholders with resolved PDF page numbers in a single pass."""
+    is_de = (language == "de")
+
+    def _sub_trans(m: re.Match) -> str:
+        chap_i = int(m.group(1))
+        pg = page_map.get(chap_i)
+        if pg is None:
+            return ""
+        return f", S. {pg}" if is_de else f", p. {pg}"
+
+    def _sub_idx(m: re.Match) -> str:
+        chap_i = int(m.group(1))
+        pg = page_map.get(chap_i)
+        if pg is None:
+            return ""
+        return f" <span class='index-page'>(S. {pg})</span>" if is_de else f" <span class='index-page'>(p. {pg})</span>"
+
+    def _sub_toc(m: re.Match) -> str:
+        raw_k = m.group(1)
+        key: Any = "index" if raw_k == "index" else int(raw_k)
+        pg = page_map.get(key)
+        if pg is None:
+            return ""
+        p_label = f"S. {pg}" if is_de else f"p. {pg}"
+        return f'<span class="toc-dots"></span>\n            <span class="toc-page">{p_label}</span>'
+
+    html = _RE_TRANS_PAGE.sub(_sub_trans, html)
+    html = _RE_IDX_PAGE.sub(_sub_idx, html)
+    html = _RE_TOC_PAGE.sub(_sub_toc, html)
+    return html
 
 
 def export_repertoire_book(
@@ -2000,7 +2104,14 @@ def export_repertoire_book(
         if progress_callback:
             progress_callback(15, 100, "Erkenne Eröffnungskapitel...")
 
-        chapters = discover_chapters(conn, color=color, level=level, language=language)
+        preloaded_children = _load_book_graph(conn, level=level)
+        chapters = discover_chapters(
+            conn,
+            color=color,
+            level=level,
+            language=language,
+            preloaded_children=preloaded_children,
+        )
         if not chapters:
             # Fallback chapter from root
             chapters = [{
@@ -2015,16 +2126,25 @@ def export_repertoire_book(
         visited_positions = {}
         total_chapters = len(chapters)
         chap_entry_map = {}
+        start_pos_ids = set()
         for idx, chap in enumerate(chapters, start=1):
             s_pos = chap["start_pos_id"]
+            start_pos_ids.add(s_pos)
             chap_entry_map[s_pos] = idx
-            cur.execute("""
-                SELECT m.to_position_id FROM repertoire_moves rm
-                JOIN moves m ON rm.move_id = m.id
-                WHERE m.from_position_id = ? AND rm.is_active = 1
-            """, (s_pos,))
-            for (to_p,) in cur.fetchall():
-                chap_entry_map[to_p] = idx
+            for edge in preloaded_children.get(s_pos, ()):
+                chap_entry_map[edge[2]] = idx
+
+        start_pos_map = {}
+        if start_pos_ids:
+            id_list = sorted(start_pos_ids)
+            for i in range(0, len(id_list), 900):
+                chunk = id_list[i:i + 900]
+                placeholders = ",".join("?" * len(chunk))
+                cur.execute(f"SELECT id, fen, comment FROM positions WHERE id IN ({placeholders})", chunk)
+                for p_id, fen, c_raw in cur.fetchall():
+                    start_pos_map[p_id] = (fen, c_raw)
+
+        is_pdf = (output_format.lower() == "pdf")
 
         for idx, chap in enumerate(chapters, start=1):
             if progress_callback:
@@ -2047,7 +2167,10 @@ def export_repertoire_book(
                 chap_title=chap["title"],
                 chap_prefix=chap["san_prefix"],
                 chap_entry_map=chap_entry_map,
-                chapters=chapters
+                chapters=chapters,
+                preloaded_children=preloaded_children,
+                start_pos_row=start_pos_map.get(chap["start_pos_id"]),
+                emit_page_placeholders=is_pdf
             )
             chap["content_html"] = content_html
 
@@ -2059,7 +2182,9 @@ def export_repertoire_book(
             chapters=chapters,
             color=color,
             level=level,
-            language=language
+            language=language,
+            preloaded_children=preloaded_children,
+            emit_page_placeholders=is_pdf
         )
 
         if progress_callback:
@@ -2070,7 +2195,8 @@ def export_repertoire_book(
             chapters,
             language=language,
             variation_index_html=var_index_html,
-            variation_count=var_count
+            variation_count=var_count,
+            emit_page_placeholders=is_pdf
         )
 
         # Determine HTML file path
@@ -2129,48 +2255,13 @@ def export_repertoire_book(
                 except Exception:
                     pass
 
-                # If page numbers were successfully identified, do second pass to embed exact page numbers
+                # If page numbers were successfully identified, embed exact page numbers without regenerating tree/SVGs
                 if page_map:
                     if progress_callback:
                         if progress_callback(95, 100, "Betten exakte Seitenzahlen in PDF ein...") is True:
                             return ""
 
-                    # Pass 2: Re-flatten chapters with exact page numbers for in-text transpositions
-                    visited_positions_pass2 = {}
-                    for idx, chap in enumerate(chapters, start=1):
-                        chap["content_html"] = flatten_subtree(
-                            conn=conn,
-                            start_pos_id=chap["start_pos_id"],
-                            start_move_num=chap["start_move_num"],
-                            is_white_turn=chap["is_white_turn"],
-                            color=color,
-                            level=level,
-                            language=language,
-                            visited_positions=visited_positions_pass2,
-                            chap_idx=idx,
-                            chap_title=chap["title"],
-                            chap_prefix=chap["san_prefix"],
-                            page_map=page_map,
-                            chap_entry_map=chap_entry_map,
-                            chapters=chapters
-                        )
-
-                    var_index_html_final, _ = generate_variation_index(
-                        conn=conn,
-                        chapters=chapters,
-                        color=color,
-                        level=level,
-                        language=language,
-                        page_map=page_map
-                    )
-                    full_html_final = build_book_html(
-                        metadata,
-                        chapters,
-                        language=language,
-                        variation_index_html=var_index_html_final,
-                        variation_count=var_count,
-                        page_map=page_map
-                    )
+                    full_html_final = _apply_page_map_placeholders(full_html, page_map, language)
                     with open(html_temp_path, "w", encoding="utf-8") as f:
                         f.write(full_html_final)
                     res = _run_chromium_pdf(browser_path, html_temp_path, abs_output_path)

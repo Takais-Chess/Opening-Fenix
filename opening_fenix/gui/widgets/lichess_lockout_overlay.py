@@ -25,6 +25,8 @@ class HoldProgressButton(QPushButton):
         self.hold_duration = hold_duration_sec
         self.press_start_time = None
         self.progress = 0.0  # 0.0 to 1.0
+        self._last_countdown_label = None
+        self._progress_brush = QBrush(QColor(230, 126, 34, 140))
 
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(30)  # ~33 fps
@@ -66,6 +68,7 @@ class HoldProgressButton(QPushButton):
         self.update_timer.stop()
         self.press_start_time = None
         self.progress = 0.0
+        self._last_countdown_label = None
         self.setText(self.base_text)
         self.update()
 
@@ -78,18 +81,22 @@ class HoldProgressButton(QPushButton):
         remaining = max(0.0, self.hold_duration - elapsed)
         self.progress = min(1.0, elapsed / self.hold_duration)
 
-        countdown_text = tr_ui(
-            "lockout.hold_countdown", 
-            "Gedrückt halten... ({seconds:.1f}s)", 
-            seconds=remaining
-        )
-        self.setText(countdown_text)
+        countdown_key = f"{remaining:.1f}"
+        if countdown_key != self._last_countdown_label:
+            self._last_countdown_label = countdown_key
+            countdown_text = tr_ui(
+                "lockout.hold_countdown", 
+                "Gedrückt halten... ({seconds:.1f}s)", 
+                seconds=remaining
+            )
+            self.setText(countdown_text)
         self.update()
 
         if self.progress >= 1.0:
             self.update_timer.stop()
             self.press_start_time = None
             self.progress = 0.0
+            self._last_countdown_label = None
             self.setText(self.base_text)
             self.update()
             self.hold_completed.emit()
@@ -109,8 +116,7 @@ class HoldProgressButton(QPushButton):
             path.addRoundedRect(fill_rect, radius, radius)
 
             # Warm amber/orange progress overlay
-            brush = QBrush(QColor(230, 126, 34, 140))
-            painter.fillPath(path, brush)
+            painter.fillPath(path, self._progress_brush)
 
             # Re-draw the centered text on top of the fill
             painter.setPen(QColor(255, 255, 255))

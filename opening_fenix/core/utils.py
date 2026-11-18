@@ -3,8 +3,39 @@ import sys
 import json
 import re
 import difflib
+import threading
+import functools
 import chess
 from typing import Any, Optional, Dict, List
+
+# --- PRECOMPILED REGEXES & CACHES ---
+_RE_NAT_DIGITS = re.compile(r'(\d+)')
+_RE_LEADING_MOVENUM = re.compile(r'^\d+\.')
+_RE_PGN_TAGGED_COMMENT = re.compile(r'\[:?([a-zA-Z]{2})\]\s*([^\[]+)')
+_RE_CSL_TAG = re.compile(r'\[%(?:csl|CSL)\s+([^\]]+)\]')
+_RE_CAL_TAG = re.compile(r'\[%(?:cal|CAL)\s+([^\]]+)\]')
+_RE_CB_TAG_ALL = re.compile(r'\[%[^\]]+\]')
+_RE_HORIZ_WS = re.compile(r'[ \t]+')
+_RE_MULTI_NL = re.compile(r'\n{3,}')
+_RE_LEAD_CB_TAGS = re.compile(r'^((?:\[%\w+\s+[^\]]+\]\s*)+)')
+_RE_TRAIL_CB_TAGS = re.compile(r'((?:\s*\[%\w+\s+[^\]]+\])+)$')
+_RE_PARA_SPLIT = re.compile(r"(\n\s*\n+)")
+_RE_BLANK_PARA = re.compile(r"^\n\s*\n+$")
+_RE_CLEAN_PUNCT_NL = re.compile(r"\s*\n\s*([,.;:!?])")
+_RE_CLEAN_PAREN_OPEN_NL = re.compile(r"\(\s*\n\s*")
+_RE_CLEAN_PAREN_CLOSE_NL = re.compile(r"\s*\n\s*\)")
+_RE_CLEAN_PARA_SPLIT = re.compile(r"\n\s*\n+")
+_RE_MOVE_TOKEN = re.compile(r"^(\d+\.+)?\s*([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[\+#]?|[O-O0-]+)$", re.IGNORECASE)
+_RE_LIST_ITEM = re.compile(r"^([-*•]|\d+[\.)])\s+")
+_RE_JOIN_PUNCT = re.compile(r"\s+([,.;:!?])")
+_RE_JOIN_PAREN_OPEN = re.compile(r"\(\s+")
+_RE_JOIN_PAREN_CLOSE = re.compile(r"\s+\)")
+_RE_MULTI_SPACE = re.compile(r" +")
+
+_FROZEN_DEFAULT_DIR_CACHE: Dict[str, str] = {}
+_CUSTOM_DATA_DIR_CACHE: Dict[str, Any] = {"key": None, "value": None}
+_SSL_CONTEXT_LOCK = threading.Lock()
+_SSL_CONTEXT_CACHE: Dict[bool, Any] = {}
 
 ELO_DISPLAY_MAP = {
     "low": "Hobby Spieler",
@@ -50,7 +81,7 @@ def natural_sort_key(s: Any) -> list:
         return []
     return [
         (0, int(text)) if text.isdigit() else (1, text.lower())
-        for text in re.split(r'(\d+)', str(s))
+        for text in _RE_NAT_DIGITS.split(str(s))
         if text
     ]
 
@@ -97,12 +128,10 @@ def format_move_notation(fen_or_board, move_str: str, ply_depth: int = None) -> 
     if not move_str or move_str.strip() in ("", "—", "-"):
         return move_str or ""
 
-    import re
     # If already formatted with move number prefix (e.g. '3.d4', '1...c5'), return as-is
-    if re.match(r'^\d+\.', move_str.strip()):
+    if _RE_LEADING_MOVENUM.match(move_str.strip()):
         return move_str
 
-    import chess
     is_white = True
     fullmove = 1
 
@@ -251,7 +280,10 @@ def get_last_active_profile_name() -> str:
 def get_base_path():
     """Gibt den Basispfad der Anwendung zurück, um Probleme mit dem Arbeitsverzeichnis zu vermeiden."""
     if getattr(sys, 'frozen', False):
-        return sys._MEIPASS
+        meipass = getattr(sys, '_MEIPASS', None)
+        if meipass:
+            return meipass
+        return os.path.dirname(os.path.abspath(sys.executable))
     current_dir = os.path.dirname(os.path.abspath(__file__))
     parent_dir = os.path.dirname(current_dir)
     return os.path.dirname(parent_dir)
@@ -260,6 +292,9 @@ def get_default_user_dir():
     """Returns the default local directory where user data (profiles, config, repertoires) is stored."""
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
+        cached = _FROZEN_DEFAULT_DIR_CACHE.get(exe_dir)
+        if cached is not None:
+            return cached
         # Never store user data inside Program Files even if elevated/writable!
         is_program_files = False
         try:
@@ -278,6 +313,7 @@ def get_default_user_dir():
                 with open(test_file, "w") as f:
                     f.write("1")
                 os.remove(test_file)
+                _FROZEN_DEFAULT_DIR_CACHE[exe_dir] = exe_dir
                 return exe_dir
             except Exception:
                 pass
@@ -285,6 +321,7 @@ def get_default_user_dir():
         appdata = os.getenv("APPDATA") or os.path.expanduser("~")
         user_dir = os.path.join(appdata, "Opening Fenix")
         os.makedirs(user_dir, exist_ok=True)
+        _FROZEN_DEFAULT_DIR_CACHE[exe_dir] = user_dir
         return user_dir
 
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -295,18 +332,33 @@ def get_custom_data_dir():
     """Returns the configured custom data directory if set and existing, otherwise None."""
     default_dir = get_default_user_dir()
     master_cfg_path = os.path.join(default_dir, "config.json")
-    if os.path.exists(master_cfg_path):
-        try:
-            with open(master_cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            custom_dir = cfg.get("custom_data_dir")
-            if custom_dir and isinstance(custom_dir, str) and custom_dir.strip():
-                custom_dir = os.path.abspath(custom_dir.strip())
-                if os.path.exists(custom_dir):
-                    return custom_dir
-        except Exception:
-            pass
-    return None
+    try:
+        st = os.stat(master_cfg_path)
+        cache_key = (default_dir, st.st_mtime_ns, st.st_size)
+    except OSError:
+        _CUSTOM_DATA_DIR_CACHE["key"] = (default_dir, None, None)
+        _CUSTOM_DATA_DIR_CACHE["value"] = None
+        return None
+
+    if _CUSTOM_DATA_DIR_CACHE["key"] == cache_key:
+        cached_val = _CUSTOM_DATA_DIR_CACHE["value"]
+        if cached_val is None or os.path.exists(cached_val):
+            return cached_val
+
+    result = None
+    try:
+        with open(master_cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        custom_dir = cfg.get("custom_data_dir")
+        if custom_dir and isinstance(custom_dir, str) and custom_dir.strip():
+            custom_dir = os.path.abspath(custom_dir.strip())
+            if os.path.exists(custom_dir):
+                result = custom_dir
+    except Exception:
+        pass
+    _CUSTOM_DATA_DIR_CACHE["key"] = cache_key
+    _CUSTOM_DATA_DIR_CACHE["value"] = result
+    return result
 
 def set_custom_data_dir(target_dir):
     """Updates or clears the custom_data_dir in the master config.json."""
@@ -334,6 +386,8 @@ def set_custom_data_dir(target_dir):
 
     with open(master_cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
+    _CUSTOM_DATA_DIR_CACHE["key"] = None
+    _CUSTOM_DATA_DIR_CACHE["value"] = None
 
 def get_user_dir():
     """Returns the active user data directory (custom cloud dir if configured, else default)."""
@@ -434,18 +488,21 @@ def ensure_user_data_seeded():
                 except Exception as e:
                     print(f"Warning: Could not copy config.json from {src_config}: {e}")
 
-    # Ensure build mode (is_public) is persistently recorded in user config if missing
-    if os.path.exists(user_config):
+    cfg = {}
+    cfg_dirty = False
+    has_user_config = os.path.exists(user_config)
+    if has_user_config:
         try:
             with open(user_config, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            if "is_public" not in cfg:
-                base_pub = os.path.exists(os.path.join(get_base_path(), "PUBLIC_VERSION")) or os.path.exists(os.path.join(get_base_path(), "public.flag"))
-                cfg["is_public"] = True if base_pub else False
-                with open(user_config, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"Warning: Could not save build type to user config: {e}")
+            print(f"Warning: Could not read user config: {e}")
+
+    # Ensure build mode (is_public) is persistently recorded in user config if missing
+    if has_user_config and "is_public" not in cfg:
+        base_pub = os.path.exists(os.path.join(get_base_path(), "PUBLIC_VERSION")) or os.path.exists(os.path.join(get_base_path(), "public.flag"))
+        cfg["is_public"] = bool(base_pub)
+        cfg_dirty = True
 
     # 2. Ensure profiles directory exists (profiles are user-created only, never bundled)
     dest_profiles = os.path.join(user_dir, "profiles")
@@ -453,41 +510,24 @@ def ensure_user_data_seeded():
 
     # 3. Seed repertoires
     is_pub = is_public_version()
-
-    repertoires_seeded = False
-    if os.path.exists(user_config):
-        try:
-            with open(user_config, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            repertoires_seeded = cfg.get("repertoires_seeded", False)
-        except Exception:
-            pass
+    repertoires_seeded = cfg.get("repertoires_seeded", False) if has_user_config else False
 
     # If repertoires_seeded is not yet recorded, check if repertoires already exist in user_dir
-    dest_repertoires = os.path.join(user_dir, "repertoires")
-    if not repertoires_seeded and os.path.exists(dest_repertoires) and os.listdir(dest_repertoires):
-        repertoires_seeded = True
-        if os.path.exists(user_config):
-            try:
-                with open(user_config, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                cfg["repertoires_seeded"] = True
-                with open(user_config, "w", encoding="utf-8") as f:
-                    json.dump(cfg, f, indent=4, ensure_ascii=False)
-            except Exception:
-                pass
-
-    # Repertoire seeding: Any missing bundled repertoire in user_dir will be copied,
-    # but existing repertoires are NEVER overwritten (checked via `if not os.path.exists(d_path)`).
-    # This also applies when a custom data directory is active, ensuring that deleted or new
-    # bundled repertoires can be re-installed/seeded without affecting existing user repertoires.
     dest_folder = os.path.join(user_dir, "repertoires")
     if not os.path.exists(dest_folder):
         os.makedirs(dest_folder, exist_ok=True)
-        
+    elif not repertoires_seeded and os.listdir(dest_folder):
+        repertoires_seeded = True
+        if has_user_config:
+            cfg["repertoires_seeded"] = True
+            cfg_dirty = True
+
+    dest_folder_abs = os.path.abspath(dest_folder)
     for src in sources:
         src_folder = os.path.join(src, "repertoires")
         if os.path.exists(src_folder) and os.path.isdir(src_folder):
+            if os.path.abspath(src_folder) == dest_folder_abs:
+                continue
             for item in os.listdir(src_folder):
                 s_path = os.path.join(src_folder, item)
                 d_path = os.path.join(dest_folder, item)
@@ -508,15 +548,16 @@ def ensure_user_data_seeded():
                         print(f"Warning: Could not seed {item} into {dest_folder}: {e}")
 
     # Mark repertoires as seeded in config.json after seeding
-    if not repertoires_seeded and os.path.exists(user_config):
+    if not repertoires_seeded and has_user_config:
+        cfg["repertoires_seeded"] = True
+        cfg_dirty = True
+
+    if cfg_dirty and has_user_config:
         try:
-            with open(user_config, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            cfg["repertoires_seeded"] = True
             with open(user_config, "w", encoding="utf-8") as f:
                 json.dump(cfg, f, indent=4, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Warning: Could not save user config: {e}")
 
 def _update_lichess_delay_config(delay_value):
     """Safely reads, updates, and writes the lichess_delay to the config file."""
@@ -903,10 +944,9 @@ def parse_pgn_tagged_comment(comment_text: str) -> dict:
     or '[de] Deutscher Text [en] English text'.
     Returns a dictionary mapping language codes to comment strings.
     """
-    if not comment_text or not comment_text.strip():
+    if not comment_text or "[" not in comment_text:
         return {}
-    import re
-    matches = re.findall(r'\[:?([a-zA-Z]{2})\]\s*([^\[]+)', comment_text)
+    matches = _RE_PGN_TAGGED_COMMENT.findall(comment_text)
     if matches:
         res = {}
         for lang, text in matches:
@@ -939,6 +979,7 @@ def get_multilingual_variation_dict(raw_name: str, default_lang: str = "de") -> 
     return {target: raw}
 
 
+@functools.lru_cache(maxsize=4096)
 def parse_variation_name(raw_name: str, lang: str = "de", default_lang: Optional[str] = None) -> str:
     """
     Resolves a variation name for a target language code (e.g. 'de', 'en') or 'all'.
@@ -1016,7 +1057,7 @@ COLOR_TO_CHESSBASE_CODE = {
 }
 
 
-def parse_chessbase_annotations(text: str) -> dict:
+def parse_chessbase_annotations(text: str, clean: bool = True) -> dict:
     """
     Parses ChessBase / PGN standard colored square ([%csl ...]) and colored arrow ([%cal ...]) tags.
     Example: "[%csl Re5,Gd4] [%cal Ge2e4] Good move!"
@@ -1033,43 +1074,41 @@ def parse_chessbase_annotations(text: str) -> dict:
     highlights = []
     arrows = []
 
-    # 1. Parse [%csl ...] tags (Colored Squares List)
-    csl_matches = re.findall(r'\[%(?:csl|CSL)\s+([^\]]+)\]', text)
-    for block in csl_matches:
-        for item in block.split(','):
-            item = item.strip()
-            if len(item) >= 3:
-                color_char = item[0].upper()
-                sq_str = item[1:].strip().lower()
-                color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
-                try:
-                    sq = chess.parse_square(sq_str)
-                    highlights.append((sq, color_name))
-                except (ValueError, IndexError):
-                    pass
+    if "[%" in text:
+        # 1. Parse [%csl ...] tags (Colored Squares List)
+        for block in _RE_CSL_TAG.findall(text):
+            for item in block.split(','):
+                item = item.strip()
+                if len(item) >= 3:
+                    color_char = item[0].upper()
+                    sq_str = item[1:].strip().lower()
+                    color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
+                    try:
+                        sq = chess.parse_square(sq_str)
+                        highlights.append((sq, color_name))
+                    except (ValueError, IndexError):
+                        pass
 
-    # 2. Parse [%cal ...] tags (Colored Arrows List)
-    cal_matches = re.findall(r'\[%(?:cal|CAL)\s+([^\]]+)\]', text)
-    for block in cal_matches:
-        for item in block.split(','):
-            item = item.strip()
-            if len(item) >= 5:
-                color_char = item[0].upper()
-                from_str = item[1:3].strip().lower()
-                to_str = item[3:5].strip().lower()
-                color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
-                try:
-                    from_sq = chess.parse_square(from_str)
-                    to_sq = chess.parse_square(to_str)
-                    arrows.append((from_sq, to_sq, color_name))
-                except (ValueError, IndexError):
-                    pass
+        # 2. Parse [%cal ...] tags (Colored Arrows List)
+        for block in _RE_CAL_TAG.findall(text):
+            for item in block.split(','):
+                item = item.strip()
+                if len(item) >= 5:
+                    color_char = item[0].upper()
+                    from_str = item[1:3].strip().lower()
+                    to_str = item[3:5].strip().lower()
+                    color_name = CHESSBASE_COLOR_MAP.get(color_char, "green")
+                    try:
+                        from_sq = chess.parse_square(from_str)
+                        to_sq = chess.parse_square(to_str)
+                        arrows.append((from_sq, to_sq, color_name))
+                    except (ValueError, IndexError):
+                        pass
 
-    # 3. Clean text of all [%csl ...] and [%cal ...] tags
-    clean = clean_chessbase_annotations(text)
+    clean_res = clean_chessbase_annotations(text) if clean else ""
 
     return {
-        "clean_text": clean,
+        "clean_text": clean_res,
         "highlights": highlights,
         "arrows": arrows,
     }
@@ -1079,11 +1118,11 @@ def clean_chessbase_annotations(text: str) -> str:
     """Removes [%csl ...], [%cal ...], and other [%...] annotation tags from comment text for clean UI presentation."""
     if not text or not isinstance(text, str):
         return ""
-    cleaned = re.sub(r'\[%[^\]]+\]', '', text)
-    lines = [re.sub(r'[ \t]+', ' ', line).strip() for line in cleaned.split('\n')]
+    cleaned = _RE_CB_TAG_ALL.sub('', text) if "[%" in text else text
+    lines = [_RE_HORIZ_WS.sub(' ', line).strip() for line in cleaned.split('\n')]
     # Remove empty lines at beginning and end, collapse 3+ newlines to 2
     res = '\n'.join(lines).strip()
-    return re.sub(r'\n{3,}', '\n\n', res)
+    return _RE_MULTI_NL.sub('\n\n', res) if '\n\n\n' in res else res
 
 
 def _resolve_chessbase_color_code(col) -> str:
@@ -1385,9 +1424,12 @@ def strip_outer_parentheses_single(s: str) -> str:
         return s
     orig = s
     trimmed = s.strip()
+    if "(" not in trimmed or ")" not in trimmed:
+        return orig
 
     # Extract leading [%...] tags
-    m_lead = re.match(r'^((?:\[%\w+\s+[^\]]+\]\s*)+)', trimmed)
+    has_tag = "[%" in trimmed
+    m_lead = _RE_LEAD_CB_TAGS.match(trimmed) if has_tag else None
     tag_prefix = ''
     body = trimmed
     if m_lead:
@@ -1395,7 +1437,7 @@ def strip_outer_parentheses_single(s: str) -> str:
         body = trimmed[m_lead.end():].strip()
 
     # Extract trailing [%...] tags
-    m_trail = re.search(r'((?:\s*\[%\w+\s+[^\]]+\])+)$', body)
+    m_trail = _RE_TRAIL_CB_TAGS.search(body) if has_tag else None
     tag_suffix = ''
     if m_trail:
         tag_suffix = m_trail.group(0)
@@ -1440,6 +1482,8 @@ def clean_outer_parentheses_from_text(text: str) -> str:
     """
     if not text or not isinstance(text, str):
         return ""
+    if "(" not in text or ")" not in text:
+        return text
     # Split by ' | ' for combined comments across lines/chapters
     parts = text.split(" | ")
     cleaned_parts = []
@@ -1447,11 +1491,13 @@ def clean_outer_parentheses_from_text(text: str) -> str:
         p_clean = strip_outer_parentheses_single(part)
         if p_clean != part:
             cleaned_parts.append(p_clean)
-        else:
+        elif "\n" in part:
             # Check paragraph by paragraph if the entire part was not wrapped
-            paras = re.split(r"(\n\s*\n+)", part)
-            cleaned_paras = [strip_outer_parentheses_single(p) if not re.match(r"^\n\s*\n+$", p) else p for p in paras]
+            paras = _RE_PARA_SPLIT.split(part)
+            cleaned_paras = [strip_outer_parentheses_single(p) if not _RE_BLANK_PARA.match(p) else p for p in paras]
             cleaned_parts.append(''.join(cleaned_paras))
+        else:
+            cleaned_parts.append(part)
     return " | ".join(cleaned_parts)
 
 
@@ -1499,45 +1545,42 @@ def clean_comment_text(text: str) -> str:
     if not text:
         return ""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    
+
+    if "\n" not in text:
+        return clean_outer_parentheses_from_text(text.strip())
+
     # Fix isolated punctuation after newline: e.g. \n,\n -> ,\n
-    text = re.sub(r"\s*\n\s*([,.;:!?])", r"\1", text)
+    text = _RE_CLEAN_PUNCT_NL.sub(r"\1", text)
     # Fix isolated parentheses
-    text = re.sub(r"\(\s*\n\s*", r"(", text)
-    text = re.sub(r"\s*\n\s*\)", r")", text)
+    text = _RE_CLEAN_PAREN_OPEN_NL.sub(r"(", text)
+    text = _RE_CLEAN_PAREN_CLOSE_NL.sub(r")", text)
     
-    paragraphs = re.split(r"\n\s*\n+", text.strip())
+    paragraphs = _RE_CLEAN_PARA_SPLIT.split(text.strip())
     cleaned_paras = []
-    
-    move_pattern = re.compile(r"^(\d+\.+)?\s*([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[\+#]?|[O-O0-]+)$", re.IGNORECASE)
     
     for p in paragraphs:
         lines = [line.strip() for line in p.split("\n") if line.strip()]
         if not lines:
             continue
         # Preserve lists where every line starts with a bullet or number
-        is_list = all(re.match(r"^([-*•]|\d+[\.)])\s+", l) for l in lines) and len(lines) > 1
+        is_list = len(lines) > 1 and all(_RE_LIST_ITEM.match(l) for l in lines)
         if is_list:
             cleaned_paras.append("\n".join(lines))
             continue
             
-        # Check if the paragraph has hard-wrapping indicators:
-        # 1. Any line is an isolated move token (e.g. "3.Nc3", "Bf5")
-        # 2. Any line ends mid-sentence and the next line continues in lowercase or move token
-        # 3. Any line has typical PGN line wrap length (~60-80 chars) and doesn't end with sentence punctuation
-        has_isolated_moves = any(move_pattern.match(l) for l in lines)
+        has_isolated_moves = any(_RE_MOVE_TOKEN.match(l) for l in lines)
         has_mid_sentence = any(
-            not lines[i].endswith(('.', '!', '?', ':', ';')) and (i + 1 < len(lines) and (lines[i+1][0].islower() or move_pattern.match(lines[i+1])))
+            not lines[i].endswith(('.', '!', '?', ':', ';')) and (i + 1 < len(lines) and (lines[i+1][0].islower() or _RE_MOVE_TOKEN.match(lines[i+1])))
             for i in range(len(lines) - 1)
         )
         has_pgn_wrap = any(len(l) >= 60 for l in lines) and any(not l.endswith(('.', '!', '?')) for l in lines[:-1])
         
         if has_isolated_moves or has_mid_sentence or has_pgn_wrap:
             joined = " ".join(lines)
-            joined = re.sub(r"\s+([,.;:!?])", r"\1", joined)
-            joined = re.sub(r"\(\s+", "(", joined)
-            joined = re.sub(r"\s+\)", ")", joined)
-            joined = re.sub(r" +", " ", joined)
+            joined = _RE_JOIN_PUNCT.sub(r"\1", joined)
+            joined = _RE_JOIN_PAREN_OPEN.sub("(", joined)
+            joined = _RE_JOIN_PAREN_CLOSE.sub(")", joined)
+            joined = _RE_MULTI_SPACE.sub(" ", joined)
             cleaned_paras.append(joined.strip())
         else:
             cleaned_paras.append("\n".join(lines))
@@ -1556,16 +1599,20 @@ def combine_comments(existing_comment: str, new_comment: str, default_lang: str 
         return existing_comment or ""
     
     target = default_lang.lower() if default_lang else "de"
-    # 1. Clean incoming comment text
-    cleaned_incoming = clean_comment_text(new_comment)
+    raw_new = new_comment.strip()
+    is_json_incoming = raw_new.startswith("{") and raw_new.endswith("}")
 
-    # 2. Parse incoming comment (check for PGN tags, JSON, or plain text)
-    tagged = parse_pgn_tagged_comment(cleaned_incoming)
-    if tagged:
-        inc_dict = tagged
+    if is_json_incoming:
+        inc_dict = get_multilingual_comment_dict(raw_new, default_lang=target)
+        inc_dict = {k: clean_comment_text(v) for k, v in inc_dict.items()}
     else:
-        inc_dict = get_multilingual_comment_dict(cleaned_incoming, default_lang=target)
-        
+        cleaned_incoming = clean_comment_text(new_comment)
+        tagged = parse_pgn_tagged_comment(cleaned_incoming)
+        if tagged:
+            inc_dict = {k: clean_comment_text(v) for k, v in tagged.items()}
+        else:
+            inc_dict = {target: cleaned_incoming} if cleaned_incoming else {}
+
     if not existing_comment or not existing_comment.strip():
         return format_multilingual_comment(inc_dict)
         
@@ -1575,7 +1622,8 @@ def combine_comments(existing_comment: str, new_comment: str, default_lang: str 
     # Merge dictionaries key by key
     merged = dict(ext_dict)
     for lang, val in inc_dict.items():
-        val = clean_comment_text(val)
+        if not val:
+            continue
         if lang in merged and merged[lang]:
             existing_val = merged[lang]
             # Exact or substring containment
@@ -1806,23 +1854,28 @@ def release_repertoire_locks(repo_name: str, checkpoint_wal: bool = False) -> No
                 except Exception as e:
                     logger.debug(f"WAL checkpoint for {repo_name} (is_test={is_t}): {e}")
 
-    # 4. Strip read-only attributes on directory and all files (regular and test)
+    # 4. Strip read-only attributes on directory and files only if needed (regular and test)
     for is_t in (False, True):
         repo_dir = get_repertoire_dir(repo_name, is_test=is_t)
         if repo_dir and os.path.exists(repo_dir):
-            try:
-                os.chmod(repo_dir, stat.S_IWRITE)
-            except Exception:
-                pass
+            if not os.access(repo_dir, os.W_OK):
+                try:
+                    os.chmod(repo_dir, stat.S_IWRITE)
+                except Exception:
+                    pass
             for root, dirs, files in os.walk(repo_dir):
                 for d in dirs:
-                    try: os.chmod(os.path.join(root, d), stat.S_IWRITE)
-                    except Exception: pass
+                    dp = os.path.join(root, d)
+                    if not os.access(dp, os.W_OK):
+                        try: os.chmod(dp, stat.S_IWRITE)
+                        except Exception: pass
                 for f in files:
-                    try: os.chmod(os.path.join(root, f), stat.S_IWRITE)
-                    except Exception: pass
+                    fp = os.path.join(root, f)
+                    if not os.access(fp, os.W_OK):
+                        try: os.chmod(fp, stat.S_IWRITE)
+                        except Exception: pass
 
-    # 5. Trigger garbage collection to release file descriptors held by Python objects
+    # 5. Trigger garbage collection once to release any uncollected file descriptors
     gc.collect()
     try:
         from PyQt6.QtWidgets import QApplication
@@ -1830,51 +1883,63 @@ def release_repertoire_locks(repo_name: str, checkpoint_wal: bool = False) -> No
             QApplication.processEvents()
     except Exception:
         pass
-    gc.collect()
-    time.sleep(0.15)
 
 
 def get_ssl_context(verify: bool = True):
     """
-    Creates a robust SSLContext for HTTPS requests.
+    Creates (and caches per verify flag) a robust SSLContext for HTTPS requests.
     - If verify=False, returns an unverified context.
     - If verify=True, loads certifi CA bundle and merges all Windows Root and CA store certificates.
     """
-    import ssl
-    if not verify and hasattr(ssl, "_create_unverified_context"):
-        ctx = ssl._create_unverified_context()
-        try:
-            ctx.set_alpn_protocols(['http/1.1'])
-        except Exception:
-            pass
-        if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
-            ctx.post_handshake_auth = True
-        return ctx
+    verify_key = bool(verify)
+    cached = _SSL_CONTEXT_CACHE.get(verify_key)
+    if cached is not None:
+        return cached
 
-    try:
+    with _SSL_CONTEXT_LOCK:
+        cached = _SSL_CONTEXT_CACHE.get(verify_key)
+        if cached is not None:
+            return cached
+
+        import ssl
+        if not verify_key and hasattr(ssl, "_create_unverified_context"):
+            ctx = ssl._create_unverified_context()
+            try:
+                ctx.set_alpn_protocols(['http/1.1'])
+            except Exception:
+                pass
+            if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
+                ctx.post_handshake_auth = True
+            _SSL_CONTEXT_CACHE[verify_key] = ctx
+            return ctx
+
         try:
-            import certifi
-            ctx = ssl.create_default_context(cafile=certifi.where())
+            try:
+                import certifi
+                ctx = ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                ctx = ssl.create_default_context()
+
+            if sys.platform == "win32" and hasattr(ssl, "enum_certificates"):
+                for store_name in ("ROOT", "CA"):
+                    try:
+                        for cert, encoding, trust in ssl.enum_certificates(store_name):
+                            if encoding == "x509_asn":
+                                ctx.load_verify_locations(cadata=cert)
+                    except Exception:
+                        pass
+            try:
+                ctx.set_alpn_protocols(['http/1.1'])
+            except Exception:
+                pass
+            if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
+                ctx.post_handshake_auth = True
+            _SSL_CONTEXT_CACHE[verify_key] = ctx
+            return ctx
         except Exception:
             ctx = ssl.create_default_context()
-
-        if sys.platform == "win32" and hasattr(ssl, "enum_certificates"):
-            for store_name in ("ROOT", "CA"):
-                try:
-                    for cert, encoding, trust in ssl.enum_certificates(store_name):
-                        if encoding == "x509_asn":
-                            ctx.load_verify_locations(cadata=cert)
-                except Exception:
-                    pass
-        try:
-            ctx.set_alpn_protocols(['http/1.1'])
-        except Exception:
-            pass
-        if hasattr(ctx, 'post_handshake_auth') and ctx.post_handshake_auth is not None:
-            ctx.post_handshake_auth = True
-        return ctx
-    except Exception:
-        return ssl.create_default_context()
+            _SSL_CONTEXT_CACHE[verify_key] = ctx
+            return ctx
 
 
 def safe_urlopen(req, timeout: int = 15, allow_unverified_fallback: bool = False):

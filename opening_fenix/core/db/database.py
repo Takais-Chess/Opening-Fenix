@@ -2,16 +2,19 @@ import os
 import threading
 import time
 import sqlite3
+import weakref
 from typing import Type
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.decl_api import DeclarativeMeta
-from sqlalchemy.pool import NullPool, StaticPool
+from sqlalchemy.pool import QueuePool, StaticPool
 from sqlalchemy.exc import DatabaseError, OperationalError
 from opening_fenix.core.db.models import Base, UserBase
 
 _db_init_lock = threading.RLock()
 _verified_db_keys: set[tuple[str, int]] = set()
+_REPO_SCHEMA_VERSION = 2
+_USER_SCHEMA_VERSION = 2
 
 def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: float = 0.1) -> None:
     """
@@ -85,7 +88,7 @@ class DatabaseManager:
     SQLite PRAGMAS for optimal performance (e.g., WAL mode, 60s busy_timeout),
     and applies schema migrations automatically on startup.
     """
-    _instances = set()
+    _instances: weakref.WeakSet = weakref.WeakSet()
 
     def __init__(self, db_filename: str, base: Type = Base) -> None:
         """
@@ -102,7 +105,15 @@ class DatabaseManager:
                 self.engine = create_engine('sqlite://', echo=False, connect_args={'check_same_thread': False}, poolclass=StaticPool)
             else:
                 os.makedirs(os.path.dirname(db_filename) if os.path.dirname(db_filename) else ".", exist_ok=True)
-                self.engine = create_engine(f'sqlite:///{db_filename}', echo=False, connect_args={'timeout': 60, 'check_same_thread': False}, poolclass=NullPool)
+                self.engine = create_engine(
+                    f'sqlite:///{db_filename}',
+                    echo=False,
+                    connect_args={'timeout': 60, 'check_same_thread': False},
+                    poolclass=QueuePool,
+                    pool_size=2,
+                    max_overflow=4,
+                )
+            self._session_factory = sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)
 
             if db_filename != ":memory:":
                 is_pytest = bool(os.environ.get("PYTEST_CURRENT_TEST"))
@@ -136,11 +147,19 @@ class DatabaseManager:
                 if had_existing_db:
                     self._check_integrity()
                     self._migrate_schema(base)
+                elif db_filename != ":memory:":
+                    try:
+                        ver = _REPO_SCHEMA_VERSION if base is Base else _USER_SCHEMA_VERSION
+                        with self.engine.begin() as conn:
+                            conn.exec_driver_sql(f"PRAGMA user_version = {ver}")
+                    except Exception:
+                        pass
                 if norm_key is not None:
                     _verified_db_keys.add(norm_key)
             except DatabaseError as e:
                 from opening_fenix.core.logger import logger
                 logger.error(f"Database error during initialization: {e}")
+                self.close()
                 raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
             except Exception as e:
                 # Check if it's the raw sqlite3 DatabaseError which sometimes escapes SQLAlchemy
@@ -148,8 +167,25 @@ class DatabaseManager:
                 if isinstance(e, sqlite3.DatabaseError):
                     from opening_fenix.core.logger import logger
                     logger.error(f"SQLite error during initialization: {e}")
+                    self.close()
                     raise DatabaseCorruptedException(f"Database is corrupted or malformed: {e}")
                 raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    @classmethod
+    def invalidate_verified_key(cls, db_filename: str) -> None:
+        if not db_filename or db_filename == ":memory:":
+            return
+        abs_p = os.path.abspath(db_filename)
+        with _db_init_lock:
+            for k in list(_verified_db_keys):
+                if k[0] == abs_p:
+                    _verified_db_keys.discard(k)
 
     def _check_integrity(self) -> None:
         """Verifies the physical integrity of the database file."""
@@ -196,13 +232,18 @@ class DatabaseManager:
         """
         try:
             with self.engine.connect() as conn:
+                target_ver = _REPO_SCHEMA_VERSION if base is Base else _USER_SCHEMA_VERSION
+                cur_ver_row = conn.execute(text("PRAGMA user_version")).fetchone()
+                cur_ver = cur_ver_row[0] if cur_ver_row else 0
+                if cur_ver >= target_ver:
+                    return
+
                 if base is Base:
                     result = conn.execute(text("PRAGMA table_info(moves)"))
                     columns = [row[1] for row in result.fetchall()]
                     
                     if columns and 'nag' not in columns:
                         conn.execute(text("ALTER TABLE moves ADD COLUMN nag INTEGER DEFAULT 0"))
-                        conn.commit()
                     
                     # Check for new Position columns
                     result = conn.execute(text("PRAGMA table_info(positions)"))
@@ -216,32 +257,34 @@ class DatabaseManager:
                             }
                             type_str = type_map.get(col, "VARCHAR")
                             conn.execute(text(f"ALTER TABLE positions ADD COLUMN {col} {type_str}"))
-                            conn.commit()
 
-                    # Ensure index on Position.analysis_depth for existing databases
+                    # Ensure indexes on Position, Move, RepertoireMove, LichessData for existing databases
                     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_analysis_depth ON positions (analysis_depth)"))
-                    conn.commit()
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_is_hole_exempt ON positions (is_hole_exempt)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_moves_to_pos_prio ON moves (to_position_id, priority_score)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_rep_moves_active_level_move ON repertoire_moves (is_active, level, move_id)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_lichess_data_elo_range ON lichess_data (elo_range)"))
 
                     # Check for new RepertoireLevel columns
                     result = conn.execute(text("PRAGMA table_info(repertoire_levels)"))
                     rl_columns = [row[1] for row in result.fetchall()]
                     if rl_columns and 'target_elo' not in rl_columns:
                         conn.execute(text("ALTER TABLE repertoire_levels ADD COLUMN target_elo INTEGER DEFAULT 1500"))
-                        conn.commit()
 
                     # Check for new RepertoireMove columns
                     result = conn.execute(text("PRAGMA table_info(repertoire_moves)"))
                     rm_columns = [row[1] for row in result.fetchall()]
                     if rm_columns and 'is_active' not in rm_columns:
                         conn.execute(text("ALTER TABLE repertoire_moves ADD COLUMN is_active BOOLEAN DEFAULT 1"))
-                        conn.commit()
 
                     # Check for new LichessData columns
                     result = conn.execute(text("PRAGMA table_info(lichess_data)"))
                     ld_columns = [row[1] for row in result.fetchall()]
                     if ld_columns and 'fetched_at' not in ld_columns:
                         conn.execute(text("ALTER TABLE lichess_data ADD COLUMN fetched_at DATETIME"))
-                        conn.commit()
+
+                    conn.execute(text(f"PRAGMA user_version = {_REPO_SCHEMA_VERSION}"))
+                    conn.commit()
                 
                 elif base is UserBase:
                     result = conn.execute(text("PRAGMA table_info(user_repertoire_settings)"))
@@ -261,10 +304,10 @@ class DatabaseManager:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN last_dist_json VARCHAR"))
                         if 'stats_updated_at' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN stats_updated_at DATETIME"))
-                        conn.commit()
 
                     # Ensure composite index on TrainingData(repertoire_name, next_due) for existing user databases
                     conn.execute(text("CREATE INDEX IF NOT EXISTS ix_training_data_repo_due ON training_data (repertoire_name, next_due)"))
+                    conn.execute(text(f"PRAGMA user_version = {_USER_SCHEMA_VERSION}"))
                     conn.commit()
 
         except Exception as e:
@@ -278,7 +321,7 @@ class DatabaseManager:
         Returns:
             A new SQLAlchemy Session instance.
         """
-        return sessionmaker(bind=self.engine, autoflush=False, expire_on_commit=False)()
+        return self._session_factory()
 
     def close(self) -> None:
         """Disposes the underlying SQLAlchemy engine and connection pool."""
@@ -295,6 +338,7 @@ class DatabaseManager:
         if not db_filename:
             return
         try:
+            cls.invalidate_verified_key(db_filename)
             target_abs = os.path.abspath(db_filename).lower()
             for inst in list(cls._instances):
                 try:
@@ -320,6 +364,7 @@ class DatabaseManager:
                     if inst.db_filename and inst.db_filename != ":memory:":
                         inst_abs = os.path.abspath(inst.db_filename).lower()
                         if inst_abs == dir_abs or inst_abs.startswith(prefix):
+                            cls.invalidate_verified_key(inst.db_filename)
                             inst.close()
                 except Exception:
                     pass

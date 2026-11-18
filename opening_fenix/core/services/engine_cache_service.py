@@ -7,10 +7,29 @@ import json
 import os
 import sqlite3
 import threading
-from typing import Optional, Dict, Iterable
+import weakref
+from collections import OrderedDict
+from typing import Optional, Dict, Iterable, Any
 from opening_fenix.core.utils import get_user_dir
 
 _lock = threading.Lock()
+_initialized_db_paths: set = set()
+_MAX_CACHE_ENTRIES = 25000
+
+
+def _clean_fen(fen: str) -> str:
+    s = fen.strip()
+    if s.count(" ") >= 5:
+        return s.rsplit(" ", 2)[0]
+    parts = s.split(" ")
+    return " ".join(parts[:4])
+
+
+def _lru_set(cache: OrderedDict, key: str, value: Any) -> None:
+    cache[key] = value
+    cache.move_to_end(key)
+    if len(cache) > _MAX_CACHE_ENTRIES:
+        cache.popitem(last=False)
 
 
 def get_engine_cache_db_path(custom_dir: Optional[str] = None) -> str:
@@ -24,41 +43,47 @@ def get_engine_cache_db_path(custom_dir: Optional[str] = None) -> str:
 class EngineCacheService:
     """
     Thread-safe service to store and query engine evaluations (depth, best move, and MultiPV scores).
-    Uses a local SQLite database in the user cache directory with an in-memory L1 cache
+    Uses a local SQLite database in the user cache directory with a bounded in-memory L1 LRU cache
     and persistent thread-local SQLite connections.
     """
-    _instances: set = set()
+    _instances: weakref.WeakSet = weakref.WeakSet()
 
     def __init__(self, db_path: Optional[str] = None):
         self.db_path = db_path or get_engine_cache_db_path()
-        self._local_cache: Dict[str, tuple] = {}
-        self._alt_cache: Dict[str, tuple] = {}
+        self._local_cache: OrderedDict[str, tuple] = OrderedDict()
+        self._alt_cache: OrderedDict[str, tuple] = OrderedDict()
         self._tls = threading.local()
         self._open_connections: list = []
+        self._gen = 0
         with _lock:
             EngineCacheService._instances.add(self)
         self._init_db()
 
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     def _get_connection(self) -> sqlite3.Connection:
         conn = getattr(self._tls, "conn", None)
         conn_path = getattr(self._tls, "db_path", None)
-        if conn is not None and conn_path == self.db_path:
+        conn_gen = getattr(self._tls, "gen", -1)
+        if conn is not None and conn_path == self.db_path and conn_gen == self._gen:
+            return conn
+        if conn is not None:
             try:
-                conn.execute("SELECT 1")
-                return conn
+                conn.close()
             except Exception:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
-                self._tls.conn = None
+                pass
+            self._tls.conn = None
 
         conn = sqlite3.connect(self.db_path, timeout=15.0, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
         conn.execute("PRAGMA cache_size=-8000;")
         self._tls.conn = conn
         self._tls.db_path = self.db_path
+        self._tls.gen = self._gen
         with _lock:
             self._open_connections.append(conn)
         return conn
@@ -68,6 +93,7 @@ class EngineCacheService:
         self._tls.conn = None
         self._tls.db_path = None
         with _lock:
+            self._gen += 1
             conns = list(self._open_connections)
             self._open_connections.clear()
             EngineCacheService._instances.discard(self)
@@ -89,7 +115,10 @@ class EngineCacheService:
                 pass
 
     def _init_db(self):
+        abs_path = os.path.abspath(self.db_path)
         with _lock:
+            if abs_path in _initialized_db_paths and os.path.exists(self.db_path):
+                return
             try:
                 conn = sqlite3.connect(self.db_path, timeout=15.0)
                 conn.execute("PRAGMA journal_mode=WAL;")
@@ -112,23 +141,17 @@ class EngineCacheService:
                         conn.execute("CREATE INDEX IF NOT EXISTS idx_engine_evals_alt_depth ON engine_evals (alternates_depth);")
                     except Exception:
                         pass
-                    try:
+                    cols = {r[1] for r in conn.execute("PRAGMA table_info(engine_evals)").fetchall()}
+                    if "eval_json" not in cols:
                         conn.execute("ALTER TABLE engine_evals ADD COLUMN eval_json TEXT;")
-                    except Exception:
-                        pass
-                    try:
+                    if "alternate_moves_json" not in cols:
                         conn.execute("ALTER TABLE engine_evals ADD COLUMN alternate_moves_json TEXT;")
-                    except Exception:
-                        pass
-                    try:
+                    if "alternates_depth" not in cols:
                         conn.execute("ALTER TABLE engine_evals ADD COLUMN alternates_depth INTEGER;")
-                    except Exception:
-                        pass
-                    try:
+                    if "alternates_exhaustive" not in cols:
                         conn.execute("ALTER TABLE engine_evals ADD COLUMN alternates_exhaustive INTEGER DEFAULT 0;")
-                    except Exception:
-                        pass
                 conn.close()
+                _initialized_db_paths.add(abs_path)
             except Exception:
                 pass
 
@@ -139,7 +162,7 @@ class EngineCacheService:
         """
         if not fen:
             return None
-        clean = " ".join(fen.strip().split()[:4])
+        clean = _clean_fen(fen)
 
         # 1. Fast in-memory check
         with _lock:
@@ -168,7 +191,7 @@ class EngineCacheService:
                     except Exception:
                         pass
                 with _lock:
-                    self._local_cache[clean] = (best_uci, depth, eval_data)
+                    _lru_set(self._local_cache, clean, (best_uci, depth, eval_data))
                 return best_uci
         except Exception:
             pass
@@ -181,7 +204,7 @@ class EngineCacheService:
         """
         if not fen:
             return None
-        clean = " ".join(fen.strip().split()[:4])
+        clean = _clean_fen(fen)
 
         with _lock:
             if clean in self._local_cache:
@@ -216,7 +239,7 @@ class EngineCacheService:
                     except Exception:
                         eval_data = None
                 with _lock:
-                    self._local_cache[clean] = (best_uci, depth, eval_data)
+                    _lru_set(self._local_cache, clean, (best_uci, depth, eval_data))
 
                 if eval_data and isinstance(eval_data, dict):
                     return {**eval_data, "best_uci": best_uci, "depth": depth}
@@ -237,7 +260,7 @@ class EngineCacheService:
         """
         result = {}
         missing = []
-        cleaned = [" ".join(f.strip().split()[:4]) for f in fens if f]
+        cleaned = list(dict.fromkeys(_clean_fen(f) for f in fens if f))
         with _lock:
             for c in cleaned:
                 if c in self._local_cache:
@@ -256,16 +279,134 @@ class EngineCacheService:
         try:
             conn = self._get_connection()
             cur = conn.cursor()
+            fetched_entries = []
             for i in range(0, len(missing), 500):
                 chunk = missing[i:i + 500]
                 placeholders = ",".join("?" for _ in chunk)
-                query = f"SELECT fen, best_uci, depth FROM engine_evals WHERE fen IN ({placeholders}) AND depth >= ?"
+                query = f"SELECT fen, best_uci, depth, eval_json FROM engine_evals WHERE fen IN ({placeholders}) AND depth >= ?"
                 cur.execute(query, (*chunk, min_depth))
-                for r_fen, r_uci, r_depth in cur.fetchall():
+                for r_fen, r_uci, r_depth, r_eval_json in cur.fetchall():
                     result[r_fen] = r_uci
-                    with _lock:
-                        self._local_cache[r_fen] = (r_uci, r_depth)
+                    eval_data = None
+                    if r_eval_json:
+                        try:
+                            eval_data = json.loads(r_eval_json)
+                        except Exception:
+                            pass
+                    fetched_entries.append((r_fen, (r_uci, r_depth, eval_data)))
             cur.close()
+            if fetched_entries:
+                with _lock:
+                    for r_fen, entry in fetched_entries:
+                        _lru_set(self._local_cache, r_fen, entry)
+        except Exception:
+            pass
+        return result
+
+    def get_eval_data_batch(self, fens: Iterable[str], min_depth: int = 25) -> Dict[str, dict]:
+        """Batch-retrieves full eval_data dicts for multiple FENs."""
+        result: Dict[str, dict] = {}
+        missing = []
+        cleaned = list(dict.fromkeys(_clean_fen(f) for f in fens if f))
+        with _lock:
+            for c in cleaned:
+                if c in self._local_cache:
+                    entry = self._local_cache[c]
+                    c_uci, c_depth = entry[0], entry[1]
+                    c_eval = entry[2] if len(entry) > 2 else None
+                    if c_depth >= min_depth:
+                        if c_eval and isinstance(c_eval, dict):
+                            result[c] = {**c_eval, "best_uci": c_uci, "depth": c_depth}
+                        else:
+                            result[c] = {"best_uci": c_uci, "best_score": None, "moves": {c_uci: 0}, "depth": c_depth}
+                        continue
+                missing.append(c)
+
+        if not missing:
+            return result
+
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            fetched_entries = []
+            for i in range(0, len(missing), 500):
+                chunk = missing[i:i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                query = f"SELECT fen, best_uci, depth, eval_json FROM engine_evals WHERE fen IN ({placeholders}) AND depth >= ?"
+                cur.execute(query, (*chunk, min_depth))
+                for r_fen, r_uci, r_depth, r_eval_json in cur.fetchall():
+                    eval_data = None
+                    if r_eval_json:
+                        try:
+                            eval_data = json.loads(r_eval_json)
+                        except Exception:
+                            pass
+                    fetched_entries.append((r_fen, (r_uci, r_depth, eval_data)))
+                    if eval_data and isinstance(eval_data, dict):
+                        result[r_fen] = {**eval_data, "best_uci": r_uci, "depth": r_depth}
+                    else:
+                        result[r_fen] = {"best_uci": r_uci, "best_score": None, "moves": {r_uci: 0}, "depth": r_depth}
+            cur.close()
+            if fetched_entries:
+                with _lock:
+                    for r_fen, entry in fetched_entries:
+                        _lru_set(self._local_cache, r_fen, entry)
+        except Exception:
+            pass
+        return result
+
+    def get_alternate_moves_batch(self, fens: Iterable[str], min_depth: int = 18, require_exhaustive: bool = True) -> Dict[str, dict]:
+        """Batch-retrieves cached alternate moves for multiple FENs."""
+        result: Dict[str, dict] = {}
+        missing = []
+        cleaned = list(dict.fromkeys(_clean_fen(f) for f in fens if f))
+        with _lock:
+            for c in cleaned:
+                if c in self._alt_cache:
+                    gm, d, exh, b_uci = self._alt_cache[c]
+                    if d >= min_depth and (exh or not require_exhaustive):
+                        result[c] = {"good_moves": list(gm), "depth": d, "is_exhaustive": exh, "best_uci": b_uci}
+                        continue
+                missing.append(c)
+
+        if not missing:
+            return result
+
+        try:
+            conn = self._get_connection()
+            cur = conn.cursor()
+            fetched = []
+            for i in range(0, len(missing), 500):
+                chunk = missing[i:i + 500]
+                placeholders = ",".join("?" for _ in chunk)
+                query = (
+                    f"SELECT fen, alternate_moves_json, alternates_depth, alternates_exhaustive, best_uci "
+                    f"FROM engine_evals WHERE fen IN ({placeholders}) AND alternates_depth >= ?"
+                )
+                cur.execute(query, (*chunk, min_depth))
+                for r_fen, alt_json, depth, is_exh_raw, best_uci in cur.fetchall():
+                    if not alt_json:
+                        continue
+                    is_exh = bool(is_exh_raw)
+                    if require_exhaustive and not is_exh:
+                        continue
+                    try:
+                        moves = json.loads(alt_json)
+                        if isinstance(moves, list):
+                            fetched.append((r_fen, (moves, depth, is_exh, best_uci)))
+                            result[r_fen] = {
+                                "good_moves": list(moves),
+                                "depth": depth,
+                                "is_exhaustive": is_exh,
+                                "best_uci": best_uci,
+                            }
+                    except Exception:
+                        pass
+            cur.close()
+            if fetched:
+                with _lock:
+                    for r_fen, entry in fetched:
+                        _lru_set(self._alt_cache, r_fen, entry)
         except Exception:
             pass
         return result
@@ -284,7 +425,7 @@ class EngineCacheService:
         """
         if not fen or not best_uci:
             return
-        clean = " ".join(fen.strip().split()[:4])
+        clean = _clean_fen(fen)
         eval_json_str = None
         if eval_data and isinstance(eval_data, dict):
             try:
@@ -293,7 +434,7 @@ class EngineCacheService:
                 eval_json_str = None
 
         with _lock:
-            self._local_cache[clean] = (best_uci, depth, eval_data)
+            _lru_set(self._local_cache, clean, (best_uci, depth, eval_data))
 
         try:
             conn = self._get_connection()
@@ -319,7 +460,7 @@ class EngineCacheService:
         """
         if not fen:
             return None
-        clean = " ".join(fen.strip().split()[:4])
+        clean = _clean_fen(fen)
 
         with _lock:
             if clean in self._alt_cache:
@@ -345,7 +486,7 @@ class EngineCacheService:
                     moves = json.loads(alt_json)
                     if isinstance(moves, list):
                         with _lock:
-                            self._alt_cache[clean] = (moves, depth, is_exh, best_uci)
+                            _lru_set(self._alt_cache, clean, (moves, depth, is_exh, best_uci))
                         return {
                             "good_moves": list(moves),
                             "depth": depth,
@@ -377,7 +518,7 @@ class EngineCacheService:
         """
         if not fen or good_moves is None:
             return
-        clean = " ".join(fen.strip().split()[:4])
+        clean = _clean_fen(fen)
         cleaned_moves = list(dict.fromkeys(good_moves))
         alt_json_str = json.dumps(cleaned_moves)
         is_exh_int = 1 if is_exhaustive else 0
@@ -433,7 +574,7 @@ class EngineCacheService:
                         """, (alt_json_str, new_depth, 1 if new_exh else 0, eff_best, clean))
 
                     with _lock:
-                        self._alt_cache[clean] = (merged_moves, new_depth, new_exh, eff_best)
+                        _lru_set(self._alt_cache, clean, (merged_moves, new_depth, new_exh, eff_best))
                 else:
                     eff_best = best_uci or (cleaned_moves[0] if cleaned_moves else "")
                     cur.execute("""
@@ -441,7 +582,7 @@ class EngineCacheService:
                         VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """, (clean, depth, eff_best, alt_json_str, depth, is_exh_int))
                     with _lock:
-                        self._alt_cache[clean] = (cleaned_moves, depth, is_exhaustive, eff_best)
+                        _lru_set(self._alt_cache, clean, (cleaned_moves, depth, is_exhaustive, eff_best))
                 cur.close()
         except Exception:
             pass

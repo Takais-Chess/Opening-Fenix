@@ -1,11 +1,12 @@
 import os
+from collections import OrderedDict
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QScrollArea, QWidget, QGridLayout, 
     QPushButton, QHBoxLayout, QApplication, QFormLayout, QLineEdit, QComboBox,
     QMessageBox
 )
 from PyQt6.QtCore import Qt, QSize
-from PyQt6.QtGui import QPixmap, QFont
+from PyQt6.QtGui import QPixmap, QFont, QImageReader
 
 from opening_fenix.core.services.repertoire_core_service import RepertoireService
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_tooltip_style
@@ -195,31 +196,44 @@ class NewRepertoireDialog(QDialog):
         super().closeEvent(event)
 
 
+_REPO_THUMB_CACHE: "OrderedDict[tuple, QPixmap]" = OrderedDict()
+_MAX_REPO_THUMB_CACHE = 64
+
+
+def _load_repo_thumb_pixmap(path: str, width: int, height: int) -> QPixmap:
+    key = (path, width, height)
+    cached = _REPO_THUMB_CACHE.get(key)
+    if cached is not None and not cached.isNull():
+        _REPO_THUMB_CACHE.move_to_end(key)
+        return cached
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    orig_size = reader.size()
+    if orig_size.isValid() and not orig_size.isEmpty():
+        reader.setScaledSize(orig_size.scaled(QSize(width, height), Qt.AspectRatioMode.KeepAspectRatioByExpanding))
+        img = reader.read()
+        pix = QPixmap.fromImage(img) if not img.isNull() else QPixmap(path).scaled(
+            width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+        )
+    else:
+        pix = QPixmap(path).scaled(
+            width, height, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation
+        )
+    _REPO_THUMB_CACHE[key] = pix
+    _REPO_THUMB_CACHE.move_to_end(key)
+    while len(_REPO_THUMB_CACHE) > _MAX_REPO_THUMB_CACHE:
+        _REPO_THUMB_CACHE.popitem(last=False)
+    return pix
+
+
 class RepoSelectionButton(QPushButton):
     def __init__(self, name, parent=None):
         super().__init__("", parent)
         self.repo_name = name
+        self.setObjectName("RepoSelectionCard")
         self.setFixedSize(scale(160), scale(196))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(name)
-        self.setStyleSheet(f"""
-            QPushButton {{
-                background-color: rgba(255, 255, 255, 0.4);
-                border: 1px solid {COLORS['glass_border']};
-                border-radius: {scale(12)}px;
-            }}
-
-            QPushButton:hover {{
-                background-color: rgba(255, 255, 255, 0.8);
-                border: 2px solid {COLORS['burnt_orange']};
-            }}
-            
-            QPushButton:pressed {{
-                background-color: rgba(211, 84, 0, 0.1);
-                border: 2px solid {COLORS['burnt_orange']};
-            }}
-            {get_tooltip_style()}
-        """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(scale(10), scale(8), scale(10), scale(8))
@@ -232,21 +246,11 @@ class RepoSelectionButton(QPushButton):
         
         cover_path = get_repertoire_cover_path(name)
         if cover_path:
-            pix = QPixmap(cover_path)
-            self.lbl_image.setPixmap(pix.scaled(
-                self.lbl_image.size(),
-                Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                Qt.TransformationMode.SmoothTransformation
-            ))
-            self.lbl_image.setStyleSheet(f"border-radius: {scale(8)}px; border: none;")
+            pix = _load_repo_thumb_pixmap(cover_path, scale(140), scale(140))
+            self.lbl_image.setPixmap(pix)
+            self.lbl_image.setObjectName("RepoThumbImage")
         else:
-            self.lbl_image.setStyleSheet(f"""
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
-                    stop:0 rgba(211, 84, 0, 0.3), 
-                    stop:1 rgba(211, 84, 0, 0.05));
-                border-radius: {scale(8)}px;
-                border: 1px dashed rgba(211, 84, 0, 0.3);
-            """)
+            self.lbl_image.setObjectName("RepoThumbPlaceholder")
             self.lbl_image.setText("♟")
             self.lbl_image.setFont(QFont("Segoe UI", scale(36)))
             
@@ -256,11 +260,15 @@ class RepoSelectionButton(QPushButton):
         font_size = self._calculate_font_size(name, max_width=scale(140), max_height=scale(36))
 
         self.lbl_title = QLabel(name)
+        self.lbl_title.setObjectName("RepoSelectionTitle")
         self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_title.setWordWrap(True)
         self.lbl_title.setToolTip(name)
         self.lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        self.lbl_title.setStyleSheet(f"font-size: {font_size}px; font-weight: bold; color: {COLORS['brown_text']}; border: none; background: transparent;")
+        title_font = QFont("Segoe UI")
+        title_font.setPixelSize(font_size)
+        title_font.setBold(True)
+        self.lbl_title.setFont(title_font)
         layout.addWidget(self.lbl_title)
 
     def _calculate_font_size(self, text: str, max_width: int, max_height: int) -> int:
@@ -336,7 +344,39 @@ class RepoSelectionDialog(QDialog):
         
         self.scroll_content = QWidget()
         self.scroll_content.setObjectName("RepoSelectScrollContent")
-        self.scroll_content.setStyleSheet("#RepoSelectScrollContent { background: transparent; }")
+        self.scroll_content.setStyleSheet(f"""
+            #RepoSelectScrollContent {{ background: transparent; }}
+            QPushButton#RepoSelectionCard {{
+                background-color: rgba(255, 255, 255, 0.4);
+                border: 1px solid {COLORS['glass_border']};
+                border-radius: {scale(12)}px;
+            }}
+            QPushButton#RepoSelectionCard:hover {{
+                background-color: rgba(255, 255, 255, 0.8);
+                border: 2px solid {COLORS['burnt_orange']};
+            }}
+            QPushButton#RepoSelectionCard:pressed {{
+                background-color: rgba(211, 84, 0, 0.1);
+                border: 2px solid {COLORS['burnt_orange']};
+            }}
+            QLabel#RepoThumbImage {{
+                border-radius: {scale(8)}px;
+                border: none;
+            }}
+            QLabel#RepoThumbPlaceholder {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(211, 84, 0, 0.3),
+                    stop:1 rgba(211, 84, 0, 0.05));
+                border-radius: {scale(8)}px;
+                border: 1px dashed rgba(211, 84, 0, 0.3);
+            }}
+            QLabel#RepoSelectionTitle {{
+                color: {COLORS['brown_text']};
+                border: none;
+                background: transparent;
+            }}
+            {get_tooltip_style()}
+        """)
         self.grid_layout = QGridLayout(self.scroll_content)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.grid_layout.setSpacing(scale(15))
@@ -486,15 +526,19 @@ class RepoSelectionDialog(QDialog):
 
         self._current_cols = cols
 
-        while self.grid_layout.count():
-            self.grid_layout.takeAt(0)
+        self.scroll_content.setUpdatesEnabled(False)
+        try:
+            while self.grid_layout.count():
+                self.grid_layout.takeAt(0)
 
-        for idx, btn in enumerate(self.repo_buttons):
-            row = idx // cols
-            col = idx % cols
-            self.grid_layout.addWidget(btn, row, col)
+            for idx, btn in enumerate(self.repo_buttons):
+                row = idx // cols
+                col = idx % cols
+                self.grid_layout.addWidget(btn, row, col)
 
-        self.scroll_content.adjustSize()
+            self.scroll_content.adjustSize()
+        finally:
+            self.scroll_content.setUpdatesEnabled(True)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -502,7 +546,7 @@ class RepoSelectionDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        self._reflow_grid(force=True)
+        self._reflow_grid(force=False)
 
     def on_repo_selected(self, name):
         self.selected_repo = name

@@ -21,9 +21,24 @@ def fetch_repertoire_levels(session: Session) -> List[Dict[str, Any]]:
     lvls = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
     return [{"id": l.id, "name": l.name, "order": l.order, "target_elo": l.target_elo} for l in lvls]
 
-_levels_cache: Dict[str, List[Dict[str, Any]]] = {}
+_levels_cache: Dict[Tuple[str, str], Tuple[Tuple[int, int, int, int], List[Dict[str, Any]]]] = {}
+_meta_fast_cache: Dict[Tuple[str, str], Tuple[Tuple[int, int, int, int], Dict[str, str]]] = {}
 _cached_all_repos: Optional[List[str]] = None
-_cached_all_repos_mtime: Optional[float] = None
+_cached_all_repos_mtime: Optional[tuple] = None
+
+def _get_db_file_sig(abs_db_path: str) -> Tuple[int, int, int, int]:
+    """Returns (db_mtime_ns, db_size, wal_mtime_ns, wal_size) so cached DB metadata self-invalidates on external writes."""
+    try:
+        st = os.stat(abs_db_path)
+        db_mtime, db_size = st.st_mtime_ns, st.st_size
+    except OSError:
+        return (0, 0, 0, 0)
+    try:
+        wst = os.stat(abs_db_path + "-wal")
+        wal_mtime, wal_size = wst.st_mtime_ns, wst.st_size
+    except OSError:
+        wal_mtime, wal_size = 0, 0
+    return (db_mtime, db_size, wal_mtime, wal_size)
 
 def invalidate_all_repertoires_cache() -> None:
     """Invalidates the in-memory cache of all valid repertoire names."""
@@ -31,22 +46,35 @@ def invalidate_all_repertoires_cache() -> None:
     _cached_all_repos = None
     _cached_all_repos_mtime = None
 
-_comment_languages_cache: Dict[str, List[str]] = {}
+_comment_languages_cache: Dict[Tuple[str, str], Tuple[Tuple[int, int, int, int], List[str]]] = {}
 
 def invalidate_repertoire_comment_languages_cache(repo_name: Optional[str] = None) -> None:
     """Clears cached comment languages for a specific repertoire or all repertoires."""
     if repo_name:
-        _comment_languages_cache.pop(repo_name, None)
+        for k in [k for k in _comment_languages_cache if (k[0] == repo_name if isinstance(k, tuple) else k == repo_name)]:
+            _comment_languages_cache.pop(k, None)
     else:
         _comment_languages_cache.clear()
 
-def invalidate_repertoire_levels_cache(repo_name: Optional[str] = None) -> None:
+def invalidate_repertoire_meta_cache(repo_name: Optional[str] = None) -> None:
+    """Clears cached fast metadata for a specific repertoire or all repertoires."""
+    if repo_name:
+        for k in [k for k in _meta_fast_cache if (k[0] == repo_name if isinstance(k, tuple) else k == repo_name)]:
+            _meta_fast_cache.pop(k, None)
+    else:
+        _meta_fast_cache.clear()
+
+def invalidate_repertoire_levels_cache(repo_name: Optional[str] = None, clear_comment_languages: bool = False) -> None:
     """Clears cached levels for a specific repertoire or all repertoires."""
     if repo_name:
-        _levels_cache.pop(repo_name, None)
+        for k in [k for k in _levels_cache if (k[0] == repo_name if isinstance(k, tuple) else k == repo_name)]:
+            _levels_cache.pop(k, None)
+        invalidate_repertoire_meta_cache(repo_name)
     else:
         _levels_cache.clear()
-    invalidate_repertoire_comment_languages_cache(repo_name)
+        _meta_fast_cache.clear()
+    if clear_comment_languages:
+        invalidate_repertoire_comment_languages_cache(repo_name)
 
 def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
     """
@@ -57,12 +85,16 @@ def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
     if not repo_name:
         return []
 
-    if repo_name in _comment_languages_cache:
-        return _comment_languages_cache[repo_name]
-
     db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return []
+
+    abs_db_path = os.path.abspath(db_path)
+    cache_key = (repo_name, abs_db_path)
+    sig = _get_db_file_sig(abs_db_path)
+    cached_entry = _comment_languages_cache.get(cache_key)
+    if cached_entry is not None and cached_entry[0] == sig:
+        return list(cached_entry[1])
 
     from opening_fenix.core.utils import get_multilingual_comment_dict, has_meaningful_comment
 
@@ -111,55 +143,81 @@ def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
 
     langs = None
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        conn = sqlite3.connect(abs_db_path, timeout=5)
+        try:
             langs = _query(conn)
+        finally:
+            conn.close()
     except Exception:
         try:
             import pathlib
-            uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
-            with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+            uri = f"{pathlib.Path(abs_db_path).as_uri()}?immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
                 langs = _query(conn)
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning(f"Fast comment languages fetch failed for {repo_name}: {e}")
             return []
 
     if langs is not None:
-        _comment_languages_cache[repo_name] = langs
+        _comment_languages_cache[cache_key] = (_get_db_file_sig(abs_db_path), langs)
         return langs
     return []
 
-def get_repertoire_meta_fast(repo_name: str) -> Dict[str, str]:
+def get_repertoire_meta_fast(repo_name: str, db_path: Optional[str] = None) -> Dict[str, str]:
     """
     Fast, lightweight fetch of repertoire metadata (name, color, description, etc.).
-    Uses a direct sqlite3 query without the overhead of full SQLAlchemy engine initialization.
+    Uses an in-memory cache and direct sqlite3 query without full SQLAlchemy engine initialization.
     Supports read-only fallback if the database file is in a non-writable location.
     """
     if not repo_name:
         return {}
 
-    db_path = get_repertoire_db_path(repo_name)
-    if not os.path.exists(db_path):
+    target_db_path = db_path or get_repertoire_db_path(repo_name)
+    if not target_db_path or not os.path.exists(target_db_path):
         return {}
+
+    abs_db_path = os.path.abspath(target_db_path)
+    cache_key = (repo_name, abs_db_path)
+    sig = _get_db_file_sig(abs_db_path)
+    cached_entry = _meta_fast_cache.get(cache_key)
+    if cached_entry is not None and cached_entry[0] == sig:
+        return dict(cached_entry[1])
 
     def _query(conn):
         c = conn.cursor()
-        c.execute("SELECT key, value FROM metadata WHERE key IN ('name', 'color', 'description', 'lichess_elo')")
+        c.execute("SELECT key, value FROM metadata WHERE key IN ('name', 'color', 'description', 'lichess_elo', 'elo')")
         return dict(c.fetchall())
 
+    res = None
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
-            return _query(conn)
+        conn = sqlite3.connect(abs_db_path, timeout=5)
+        try:
+            res = _query(conn)
+        finally:
+            conn.close()
     except Exception:
         pass
 
-    try:
-        import pathlib
-        uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
-        with sqlite3.connect(uri, uri=True, timeout=5) as conn:
-            return _query(conn)
-    except Exception as e:
-        logger.warning(f"Fast meta fetch failed for {repo_name}: {e}")
-        return {}
+    if res is None:
+        try:
+            import pathlib
+            uri = f"{pathlib.Path(abs_db_path).as_uri()}?immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                res = _query(conn)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning(f"Fast meta fetch failed for {repo_name}: {e}")
+            return {}
+
+    if res is not None:
+        _meta_fast_cache[cache_key] = (_get_db_file_sig(abs_db_path), res)
+        return dict(res)
+    return {}
 
 def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
     """
@@ -169,12 +227,17 @@ def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
     """
     if not repo_name:
         return []
-    if repo_name in _levels_cache:
-        return _levels_cache[repo_name]
 
     db_path = get_repertoire_db_path(repo_name)
     if not os.path.exists(db_path):
         return []
+
+    abs_db_path = os.path.abspath(db_path)
+    cache_key = (repo_name, abs_db_path)
+    sig = _get_db_file_sig(abs_db_path)
+    cached_entry = _levels_cache.get(cache_key)
+    if cached_entry is not None and cached_entry[0] == sig:
+        return cached_entry[1]
 
     def _query(conn):
         c = conn.cursor()
@@ -183,22 +246,87 @@ def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
 
     rows = None
     try:
-        with sqlite3.connect(db_path, timeout=5) as conn:
+        conn = sqlite3.connect(abs_db_path, timeout=5)
+        try:
             rows = _query(conn)
+        finally:
+            conn.close()
     except Exception:
         try:
             import pathlib
-            uri = f"{pathlib.Path(os.path.abspath(db_path)).as_uri()}?immutable=1"
-            with sqlite3.connect(uri, uri=True, timeout=5) as conn:
+            uri = f"{pathlib.Path(abs_db_path).as_uri()}?immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
                 rows = _query(conn)
+            finally:
+                conn.close()
         except Exception as e:
             logger.warning(f"Fast level fetch failed for {repo_name}: {e}")
             return []
 
     if rows is not None:
-        _levels_cache[repo_name] = rows
+        _levels_cache[cache_key] = (_get_db_file_sig(abs_db_path), rows)
         return rows
     return []
+
+
+def get_repertoire_coverage_fast(repo_name: str) -> float:
+    """Computes Lichess coverage percentage via lightweight sqlite3 without SQLAlchemy engine init."""
+    if not repo_name:
+        return 0.0
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return 0.0
+    conn = None
+    try:
+        conn = sqlite3.connect(os.path.abspath(db_path), timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM metadata WHERE key IN ('lichess_elo', 'cov_cache_count', 'cov_cache_ld', 'cov_cache_pct', 'cov_cache_elo')")
+        meta = dict(cur.fetchall())
+        elo_cat = meta.get("lichess_elo", "N/A")
+        total_pos = cur.execute("SELECT COUNT(id) FROM positions").fetchone()[0] or 0
+        if total_pos == 0:
+            return 0.0
+        total_ld = cur.execute("SELECT COUNT(id) FROM lichess_data WHERE elo_range = ?", (elo_cat,)).fetchone()[0] or 0
+        if (
+            str(total_pos) == str(meta.get("cov_cache_count", "-1"))
+            and str(total_ld) == str(meta.get("cov_cache_ld", "-1"))
+            and meta.get("cov_cache_elo", "") == elo_cat
+            and meta.get("cov_cache_pct")
+        ):
+            try:
+                return min(100.0, float(meta["cov_cache_pct"]))
+            except (ValueError, TypeError):
+                pass
+        covered_pos = cur.execute(
+            "SELECT COUNT(DISTINCT p.id) FROM positions p "
+            "INNER JOIN lichess_data ld ON p.fen = ld.fen WHERE ld.elo_range = ?",
+            (elo_cat,),
+        ).fetchone()[0] or 0
+        pct = min(100.0, (covered_pos / total_pos * 100.0))
+        try:
+            cur.executemany(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                [
+                    ("cov_cache_count", str(total_pos)),
+                    ("cov_cache_ld", str(total_ld)),
+                    ("cov_cache_pct", str(pct)),
+                    ("cov_cache_elo", str(elo_cat)),
+                    ("cov_cache_covered", str(covered_pos)),
+                ],
+            )
+            conn.commit()
+        except Exception:
+            pass
+        return pct
+    except Exception:
+        return 0.0
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = False) -> Dict[str, Any]:
@@ -298,6 +426,8 @@ class RepertoireService:
         self.is_active_test = False
         self.repo_db = None
         self.repo_session = None
+        self._cached_color: Optional[str] = None
+        self._cached_start_move: Optional[int] = None
 
     def get_all_repertoires(self) -> List[str]:
         global _cached_all_repos, _cached_all_repos_mtime
@@ -305,12 +435,18 @@ class RepertoireService:
         if not os.path.exists(repo_base):
             return []
 
+        test_base = os.path.join(repo_base, "test")
         try:
-            current_mtime = os.path.getmtime(repo_base)
+            repo_mtime = os.path.getmtime(repo_base)
         except OSError:
-            current_mtime = 0
+            repo_mtime = 0
+        try:
+            test_mtime = os.path.getmtime(test_base) if os.path.exists(test_base) else 0
+        except OSError:
+            test_mtime = 0
+        current_mtime_key = (repo_base, repo_mtime, test_mtime)
 
-        if _cached_all_repos is not None and _cached_all_repos_mtime == current_mtime:
+        if _cached_all_repos is not None and _cached_all_repos_mtime == current_mtime_key:
             return list(_cached_all_repos)
 
         files = []
@@ -325,7 +461,6 @@ class RepertoireService:
             pass
 
         # Scan test layer
-        test_base = os.path.join(repo_base, "test")
         if os.path.exists(test_base):
             try:
                 with os.scandir(test_base) as it:
@@ -354,13 +489,15 @@ class RepertoireService:
         from opening_fenix.core.utils import filter_repertoires_by_build_type
         filtered = filter_repertoires_by_build_type(valid_repos)
         _cached_all_repos = filtered
-        _cached_all_repos_mtime = current_mtime
+        _cached_all_repos_mtime = current_mtime_key
         return list(filtered)
 
     def set_active_repertoire(self, repo_name: Optional[str], is_test: Optional[bool] = False, create_if_missing: bool = True) -> None:
         self.close()
         self.active_repertoire_name = repo_name
         self.is_active_test = (is_test is True)
+        self._cached_color = None
+        self._cached_start_move = None
         
         if not repo_name: 
             return
@@ -375,6 +512,8 @@ class RepertoireService:
         self.repo_session = self.repo_db.get_session()
 
     def close(self) -> None:
+        self._cached_color = None
+        self._cached_start_move = None
         if self.repo_session:
             try:
                 self.repo_session.close()
@@ -392,11 +531,9 @@ class RepertoireService:
         if self.active_repertoire_name == repo_name:
             self.set_active_repertoire(None)
         
-        gc.collect()
-        time.sleep(0.5) 
         success, _ = delete_repertoire_db(repo_name)
         invalidate_all_repertoires_cache()
-        invalidate_repertoire_comment_languages_cache(repo_name)
+        invalidate_repertoire_levels_cache(repo_name, clear_comment_languages=True)
         return success
 
     def rename_repertoire(self, old_name: str, new_name: str) -> Tuple[bool, str]:
@@ -522,6 +659,10 @@ class RepertoireService:
                         pass
             
             # 8. Re-load if it was active
+            invalidate_all_repertoires_cache()
+            invalidate_repertoire_levels_cache(old_name, clear_comment_languages=True)
+            invalidate_repertoire_levels_cache(new_name, clear_comment_languages=True)
+
             if active_was_old:
                 self.set_active_repertoire(new_name)
 
@@ -532,6 +673,10 @@ class RepertoireService:
             return False, f"Fehler beim Umbenennen: {str(e)}"
 
     def get_repertoire_levels(self) -> List[Dict[str, Any]]:
+        if self.active_repertoire_name:
+            cached = get_repertoire_levels_fast(self.active_repertoire_name)
+            if cached or not self.repo_session:
+                return list(cached)
         return fetch_repertoire_levels(self.repo_session)
 
     def get_level_info(self, level_order: int) -> Optional[RepertoireLevel]:
@@ -553,18 +698,24 @@ class RepertoireService:
         if not self.repo_session: return
         set_meta(self.repo_session, "description", description)
         self.repo_session.commit()
+        invalidate_repertoire_meta_cache(self.active_repertoire_name)
 
     def get_repertoire_color(self) -> str:
         if not self.repo_session: return 'w'
-        return get_meta(self.repo_session, "color", "w")
+        if self._cached_color is None:
+            self._cached_color = get_meta(self.repo_session, "color", "w")
+        return self._cached_color
 
     def get_start_move(self) -> int:
         if not self.repo_session: return 1
+        if self._cached_start_move is not None:
+            return self._cached_start_move
         try:
             val = get_meta(self.repo_session, "start_move", 1)
-            return int(val) if val is not None else 1
+            self._cached_start_move = int(val) if val is not None else 1
         except (ValueError, TypeError):
-            return 1
+            self._cached_start_move = 1
+        return self._cached_start_move
 
     def get_all_moves(self) -> List[Move]:
         if not self.repo_session: return []
@@ -642,8 +793,9 @@ class RepertoireService:
             from sqlalchemy import text
             with self.repo_session.bind.connect() as conn:
                 result = conn.execute(text(
-                    "SELECT COUNT(*) FROM moves WHERE from_position_id NOT IN (SELECT id FROM positions) "
-                    "OR to_position_id NOT IN (SELECT id FROM positions)"
+                    "SELECT COUNT(*) FROM moves m "
+                    "WHERE NOT EXISTS (SELECT 1 FROM positions p WHERE p.id = m.from_position_id) "
+                    "OR NOT EXISTS (SELECT 1 FROM positions p WHERE p.id = m.to_position_id)"
                 )).scalar()
                 return int(result or 0)
         except Exception as e:

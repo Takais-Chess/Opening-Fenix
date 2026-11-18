@@ -109,7 +109,7 @@ def delete_repertoire_from_profiles_globally(repo_name: str) -> int:
         from PyQt6.QtWidgets import QApplication
         app = QApplication.instance()
         if app:
-            for w in app.allWidgets():
+            for w in app.topLevelWidgets():
                 # Check MainWindow training_manager
                 tm = getattr(w, "training_manager", None)
                 if tm:

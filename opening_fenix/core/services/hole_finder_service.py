@@ -282,7 +282,8 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
 
     # Engine loss evaluation & live streaming
     if (engine or (engine_path and os.path.exists(engine_path))) and holes:
-        if cache_service is None:
+        own_cache = cache_service is None
+        if own_cache:
             cache_service = EngineCacheService()
         active_engine = engine
         creationflags = 0
@@ -294,14 +295,23 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
             if h.get("move_uci"):
                 fen_to_holes[h["fen"]].append(h)
 
+        eval_cache_map = {}
+        if cache_service is not None and fen_to_holes and hasattr(cache_service, "get_eval_data_batch"):
+            try:
+                eval_cache_map = cache_service.get_eval_data_batch(fen_to_holes.keys(), min_depth=depth)
+            except Exception:
+                eval_cache_map = {}
+
         try:
             for fen, f_holes in fen_to_holes.items():
                 if cancel_check and cancel_check():
                     break
                 clean_fen = " ".join(fen.split(" ")[:4])
 
-                # Check Engine Cache first
-                cached_eval = cache_service.get_eval_data(clean_fen, min_depth=depth)
+                # Check Engine Cache first (batch pre-loaded above)
+                cached_eval = eval_cache_map.get(clean_fen)
+                if cached_eval is None and cache_service is not None and not eval_cache_map:
+                    cached_eval = cache_service.get_eval_data(clean_fen, min_depth=depth)
                 all_cached = False
                 if cached_eval and "moves" in cached_eval and cached_eval.get("best_score") is not None:
                     all_cached = all(h.get("move_uci") in cached_eval["moves"] for h in f_holes)
@@ -421,6 +431,11 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
             if active_engine and active_engine is not engine:
                 try:
                     active_engine.quit()
+                except Exception:
+                    pass
+            if own_cache and cache_service is not None:
+                try:
+                    cache_service.close()
                 except Exception:
                     pass
     elif item_callback:
@@ -1244,7 +1259,6 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                         results.append(res_item)
                         if item_callback:
                             item_callback(res_item)
-                            time.sleep(0.001)
 
     if only_1move:
         return results
@@ -1274,10 +1288,12 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             except Exception:
                 active_engine = None
 
-        if cache_service is None and engine is None:
+        own_cache = cache_service is None and engine is None
+        if own_cache:
             from opening_fenix.core.services.engine_cache_service import EngineCacheService
             cache_service = EngineCacheService()
         engine_eval_cache = {}
+        last_prog_ts = 0.0
 
         try:
             for idx2, f_orig in enumerate(opponent_reachable_fens):
@@ -1287,7 +1303,10 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                     break
 
                 if progress_callback:
-                    progress_callback(idx2 + 1, total_opp, f"Pass 2: {idx2 + 1}/{total_opp}")
+                    now = time.monotonic()
+                    if idx2 == 0 or (idx2 + 1) == total_opp or (now - last_prog_ts) >= 0.15:
+                        last_prog_ts = now
+                        progress_callback(idx2 + 1, total_opp, f"Pass 2: {idx2 + 1}/{total_opp}")
 
                 p_orig = fen_to_pos.get(f_orig)
                 if not p_orig:
@@ -1409,7 +1428,7 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                                 best_s is not None
                                                 and worst_s is not None
                                                 and (best_s - worst_s) <= 10
-                                                and len(moves_dict) < min(10, p_inter.legal_moves.count())
+                                                and len(moves_dict) < min(10, board_1.legal_moves.count())
                                             ):
                                                 need_engine_eval = True
 
@@ -1562,7 +1581,6 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
                                         results.append(res_item)
                                         if item_callback:
                                             item_callback(res_item)
-                                            time.sleep(0.001)
                     except Exception:
                         pass
 
@@ -1571,6 +1589,11 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
             if own_engine and active_engine:
                 try:
                     active_engine.quit()
+                except Exception:
+                    pass
+            if own_cache and cache_service is not None:
+                try:
+                    cache_service.close()
                 except Exception:
                     pass
 
@@ -1582,7 +1605,36 @@ def find_repertoire_transpositions(session: Session, elo_range: str = "high",
     return sorted(results, key=sort_key)
 
 
-def is_transposition_path_in_repertoire(session: Session, item: dict) -> bool:
+def _build_active_edge_index(session: Session) -> Dict[str, set]:
+    """Builds an in-memory map {clean_fen: set[normalized_uci]} of all active repertoire moves in 1 SQL query."""
+    edges: Dict[str, set] = collections.defaultdict(set)
+    rows = (
+        session.query(Position.fen, Move.uci, Move.san)
+        .join(Move, Move.from_position_id == Position.id)
+        .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+        .filter(RepertoireMove.is_active == True)
+        .all()
+    )
+    for pos_fen, m_uci, m_san in rows:
+        if not pos_fen or not m_uci:
+            continue
+        clean_f = " ".join(pos_fen.strip().split()[:4])
+        norm_u = m_uci.strip().lower()
+        edge_set = edges[clean_f]
+        edge_set.add(norm_u)
+        edge_set.add(m_uci.strip())
+        if m_san in CASTLING_SANS:
+            alt = CASTLING_ALT.get(norm_u)
+            if alt:
+                edge_set.add(alt)
+    return edges
+
+
+def is_transposition_path_in_repertoire(
+    session: Session,
+    item: dict,
+    active_edges: Optional[Dict[str, set]] = None,
+) -> bool:
     """Returns True if all moves along the transposition path are already active in the repertoire."""
     if not item or not isinstance(item, dict):
         return False
@@ -1598,26 +1650,34 @@ def is_transposition_path_in_repertoire(session: Session, item: dict) -> bool:
                 return False
             curr_fen = board.fen()
             clean_fen = " ".join(curr_fen.strip().split()[:4])
-            db_pos = session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
-            if not db_pos:
-                return False
             norm_uci = uci.strip().lower()
             alt_uci = CASTLING_ALT.get(norm_uci)
-            check_ucis = [norm_uci, uci]
-            if alt_uci:
-                check_ucis.append(alt_uci)
-            rep = (
-                session.query(RepertoireMove)
-                .join(Move, RepertoireMove.move_id == Move.id)
-                .filter(
-                    Move.from_position_id == db_pos.id,
-                    Move.uci.in_(check_ucis),
-                    RepertoireMove.is_active == True
+
+            if active_edges is not None:
+                edge_set = active_edges.get(clean_fen)
+                if not edge_set:
+                    return False
+                if norm_uci not in edge_set and uci not in edge_set and (not alt_uci or alt_uci not in edge_set):
+                    return False
+            else:
+                db_pos = session.query(Position).filter(Position.fen.op('GLOB')(clean_fen + "*")).first()
+                if not db_pos:
+                    return False
+                check_ucis = [norm_uci, uci]
+                if alt_uci:
+                    check_ucis.append(alt_uci)
+                rep = (
+                    session.query(RepertoireMove)
+                    .join(Move, RepertoireMove.move_id == Move.id)
+                    .filter(
+                        Move.from_position_id == db_pos.id,
+                        Move.uci.in_(check_ucis),
+                        RepertoireMove.is_active == True
+                    )
+                    .first()
                 )
-                .first()
-            )
-            if not rep:
-                return False
+                if not rep:
+                    return False
             m = chess.Move.from_uci(uci)
             if m not in board.legal_moves:
                 return False
@@ -1647,11 +1707,12 @@ def save_cached_transpositions(session: Session, items: list, merge: bool = True
         if items:
             candidate_items.extend(items)
 
+        active_edges = _build_active_edge_index(session) if candidate_items else {}
         dedup = {}
         for h in candidate_items:
             if not isinstance(h, dict):
                 continue
-            if is_transposition_path_in_repertoire(session, h):
+            if is_transposition_path_in_repertoire(session, h, active_edges=active_edges):
                 continue
             f = " ".join((h.get("fen") or h.get("search_fen") or "").strip().split()[:4])
             ucis = tuple(h.get("path_ucis") or ([h.get("move_uci")] if h.get("move_uci") else []))
@@ -1678,11 +1739,12 @@ def load_cached_transpositions(session: Session) -> list:
         if not isinstance(items, list):
             return []
 
+        active_edges = _build_active_edge_index(session) if items else {}
         valid_items = []
         pruned_count = 0
         for h in items:
             if isinstance(h, dict):
-                if is_transposition_path_in_repertoire(session, h):
+                if is_transposition_path_in_repertoire(session, h, active_edges=active_edges):
                     pruned_count += 1
                 else:
                     valid_items.append(h)

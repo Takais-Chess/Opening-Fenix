@@ -68,24 +68,50 @@ def audit_repertoire_mistakes(
     mistakes: List[Dict[str, Any]] = []
 
     try:
-        player_color = get_meta(session, "color", "w")
-        turn_filter = Position.fen.like(f'% {player_color} %')
+        player_color = (get_meta(session, "color", "w") or "w").strip().lower()
 
-        # Find all positions where player moves exist in active repertoire
-        positions_query = session.query(Position).join(
-            Move, Position.id == Move.from_position_id
-        ).join(
-            RepertoireMove, Move.id == RepertoireMove.move_id
-        ).filter(
-            turn_filter,
-            RepertoireMove.is_active == True
-        ).distinct()
+        # Pre-fetch all (Position, active Move) pairs in 1 query and filter player turn in Python
+        all_rows = (
+            session.query(Position, Move)
+            .join(Move, Position.id == Move.from_position_id)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(RepertoireMove.is_active == True)
+            .all()
+        )
+        pos_rep_pairs: List[Tuple[Position, Move]] = []
+        seen_pos_ids = set()
+        for pos_obj, mv_obj in all_rows:
+            if pos_obj.id in seen_pos_ids or not pos_obj.fen:
+                continue
+            parts = pos_obj.fen.strip().split()
+            if len(parts) > 1 and parts[1].lower() == player_color:
+                seen_pos_ids.add(pos_obj.id)
+                pos_rep_pairs.append((pos_obj, mv_obj))
 
-        positions = positions_query.all()
-        total_positions = len(positions)
+        total_positions = len(pos_rep_pairs)
         if total_positions == 0:
             return True, "Keine aktiven Repertoire-Züge für die Spielerfarbe gefunden.", []
 
+        # Pre-validate board & legal moves before starting engine
+        valid_entries: List[Tuple[Position, Move, chess.Board, chess.Move]] = []
+        for pos_obj, rep_move in pos_rep_pairs:
+            try:
+                board = chess.Board(pos_obj.fen)
+            except Exception as e:
+                logger.warning(f"Skipping invalid FEN {pos_obj.fen}: {e}")
+                continue
+            try:
+                rep_chess_move = chess.Move.from_uci(rep_move.uci)
+            except Exception:
+                continue
+            if rep_chess_move not in board.legal_moves:
+                continue
+            valid_entries.append((pos_obj, rep_move, board, rep_chess_move))
+
+        if not valid_entries:
+            return True, "Keine aktiven Repertoire-Züge für die Spielerfarbe gefunden.", []
+
+        total_positions = len(valid_entries)
         # Start Engine
         creationflags = 0
         if sys.platform == "win32":
@@ -102,43 +128,18 @@ def audit_repertoire_mistakes(
 
         cache_service = EngineCacheService()
         threshold_cp = int(threshold_pawns * 100)
+        multipv_count = 5
+        if "MultiPV" in engine.options:
+            opt = engine.options["MultiPV"]
+            max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
+            multipv_count = min(5, max_allowed)
 
-        for i, pos in enumerate(positions):
+        import time as _time
+        last_prog_ts = 0.0
+        for i, (pos, rep_move, board, rep_chess_move) in enumerate(valid_entries):
             if check_cancel and check_cancel():
                 commit_with_retry(session)
                 return False, "Scan abgebrochen. Bisheriger Fortschritt wurde gespeichert.", mistakes
-
-            # Fetch primary repertoire move from this position
-            rep_move = session.query(Move).join(
-                RepertoireMove, Move.id == RepertoireMove.move_id
-            ).filter(
-                Move.from_position_id == pos.id,
-                RepertoireMove.is_active == True
-            ).first()
-
-            if not rep_move:
-                continue
-
-            try:
-                board = chess.Board(pos.fen)
-            except Exception as e:
-                logger.warning(f"Skipping invalid FEN {pos.fen}: {e}")
-                continue
-
-            try:
-                rep_chess_move = chess.Move.from_uci(rep_move.uci)
-            except Exception:
-                continue
-
-            if rep_chess_move not in board.legal_moves:
-                continue
-
-            # MultiPV scan (up to 5) to find best moves and alternative good moves
-            multipv_count = 5
-            if "MultiPV" in engine.options:
-                opt = engine.options["MultiPV"]
-                max_allowed = opt.max if (hasattr(opt, 'max') and opt.max is not None) else 5
-                multipv_count = min(5, max_allowed)
 
             try:
                 analysis_results = engine.analyse(
@@ -297,10 +298,13 @@ def audit_repertoire_mistakes(
                     except Exception:
                         pass
 
-            # Progress notification
+            # Progress notification (throttled to ~6-7 Hz while preserving first & final updates)
             if progress_callback:
-                pct = int(((i + 1) / total_positions) * 100)
-                progress_callback(i + 1, total_positions, pct)
+                now = _time.monotonic()
+                if i == 0 or (i + 1) == total_positions or (now - last_prog_ts) >= 0.15:
+                    last_prog_ts = now
+                    pct = int(((i + 1) / total_positions) * 100)
+                    progress_callback(i + 1, total_positions, pct)
 
             if (i + 1) % 10 == 0 or (i + 1) == total_positions:
                 commit_with_retry(session)

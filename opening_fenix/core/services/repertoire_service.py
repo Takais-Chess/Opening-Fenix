@@ -113,6 +113,8 @@ class RepertoireManager:
         if not self.repo_session: return
         set_meta(self.repo_session, "start_move", str(start_move))
         self.repo_session.commit()
+        if self.core:
+            self.core._cached_start_move = int(start_move) if start_move is not None else 1
 
     def get_variation_structure(self, lang: Optional[str] = None):
         if not self.nav: return {}
@@ -182,10 +184,38 @@ class RepertoireManager:
         if not self.nav: return []
         return self.nav.get_history_for_move_recursive(move_obj.id, variation_name=variation_name)
 
-    def get_history_for_fen(self, fen, variation_name: Optional[str] = None):
+    def get_history_for_fen(self, fen, variation_name: Optional[str] = None, training_manager=None):
         if not self.repo_session: return []
-        board = chess.Board(fen)
-        clean_fen = " ".join(board.fen().split(" ")[:4])
+        s = fen.strip()
+        clean_fen = s.rsplit(" ", 2)[0] if s.count(" ") >= 5 else " ".join(s.split(" ")[:4])
+
+        if training_manager is not None:
+            pos_cache = getattr(training_manager, '_pos_cache', None)
+            parent_cache = getattr(training_manager, '_move_parent_cache', None)
+            if pos_cache is not None and parent_cache is not None:
+                pos_id = None
+                for pid, p_obj in pos_cache.items():
+                    if p_obj.fen == clean_fen:
+                        pos_id = pid
+                        break
+                if pos_id is not None:
+                    parents = parent_cache.get(pos_id)
+                    if parents:
+                        chosen = parents[0]
+                        if variation_name and len(parents) > 1:
+                            from opening_fenix.core.utils import matches_variation_name
+                            for cand in parents:
+                                fp = pos_cache.get(cand.from_position_id)
+                                if fp and (
+                                    matches_variation_name(fp.variation_1, variation_name)
+                                    or matches_variation_name(fp.variation_2, variation_name)
+                                    or matches_variation_name(fp.variation_3, variation_name)
+                                ):
+                                    chosen = cand
+                                    break
+                        return self.get_history_for_move(chosen, variation_name=variation_name, training_manager=training_manager)
+                    return []
+
         pos = self.repo_session.query(Position).filter_by(fen=clean_fen).first()
         if not pos: return []
         
@@ -227,31 +257,62 @@ class RepertoireManager:
         self.explorer.training_manager = training_manager
         return self.explorer.get_explorer_data_for_fen(fen, self.get_repertoire_color())
 
-    def get_repertoire_moves_for_fen(self, fen):
+    def get_repertoire_moves_for_fen(self, fen, training_manager=None):
         if not self.repo_session: return []
-        board = chess.Board(fen)
-        clean_fen = " ".join(board.fen().split(" ")[:4])
-        pos = self.repo_session.query(Position).filter_by(fen=clean_fen).first()
-
-        all_ucis = set()
+        s = fen.strip()
+        parts = s.split(" ")
+        clean_fen = s.rsplit(" ", 2)[0] if len(parts) >= 6 else " ".join(parts[:4])
+        turn_char = parts[1] if len(parts) > 1 else 'w'
         repertoire_color = self.get_repertoire_color()
-        is_player_turn = (board.turn == chess.WHITE and repertoire_color == 'w') or \
-                         (board.turn == chess.BLACK and repertoire_color == 'b')
+        is_player_turn = (turn_char == repertoire_color)
 
+        tm = training_manager or (getattr(self.explorer, 'training_manager', None) if self.explorer else None)
+        if tm is not None:
+            pos_cache = getattr(tm, '_pos_cache', None)
+            fwd_cache = getattr(tm, '_forward_moves_cache', None)
+            rep_cache = getattr(tm, '_rep_move_cache', None)
+            if pos_cache is not None and fwd_cache is not None and rep_cache is not None:
+                pos_id = None
+                for pid, p_obj in pos_cache.items():
+                    if p_obj.fen == clean_fen:
+                        pos_id = pid
+                        break
+                if pos_id is None:
+                    return []
+                out_moves = fwd_cache.get(pos_id, ())
+                if is_player_turn:
+                    return [m.uci for m in out_moves if m.id in rep_cache and getattr(rep_cache[m.id], 'is_active', True)]
+                res = []
+                for m in out_moves:
+                    for nxt in fwd_cache.get(m.to_position_id, ()):
+                        rm = rep_cache.get(nxt.id)
+                        if rm and getattr(rm, 'is_active', True):
+                            res.append(m.uci)
+                            break
+                return res
+
+        pos = self.repo_session.query(Position).filter_by(fen=clean_fen).first()
         if not pos: return []
 
+        all_ucis = set()
         if is_player_turn:
             player_moves = self.repo_session.query(Move.uci)\
                 .join(RepertoireMove, Move.id == RepertoireMove.move_id)\
                 .filter(Move.from_position_id == pos.id, RepertoireMove.is_active == True).all()
             for move in player_moves: all_ucis.add(move[0])
         else:
-            opponent_moves = self.repo_session.query(Move).filter(Move.from_position_id == pos.id).all()
-            for move in opponent_moves:
-                our_next = self.repo_session.query(RepertoireMove)\
-                    .join(Move, RepertoireMove.move_id == Move.id)\
-                    .filter(Move.from_position_id == move.to_position_id, RepertoireMove.is_active == True).first()
-                if our_next: all_ucis.add(move.uci)
+            opponent_moves = self.repo_session.query(Move.uci, Move.to_position_id).filter(Move.from_position_id == pos.id).all()
+            to_ids = [to_id for _, to_id in opponent_moves if to_id]
+            if to_ids:
+                covered_to_ids = {
+                    from_pid for (from_pid,) in self.repo_session.query(Move.from_position_id)
+                    .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                    .filter(Move.from_position_id.in_(to_ids), RepertoireMove.is_active == True)
+                    .distinct().all()
+                }
+                for uci, to_id in opponent_moves:
+                    if to_id in covered_to_ids:
+                        all_ucis.add(uci)
 
         return list(all_ucis)
 
@@ -292,8 +353,14 @@ class RepertoireManager:
                 if pos is not None:
                     if pos.good_moves:
                         try:
-                            good_list = json.loads(pos.good_moves)
-                            if played_uci in good_list:
+                            good_set = getattr(pos, '_good_moves_set', None)
+                            if good_set is None:
+                                good_set = frozenset(json.loads(pos.good_moves))
+                                try:
+                                    pos._good_moves_set = good_set
+                                except Exception:
+                                    pass
+                            if played_uci in good_set:
                                 return 'good'
                         except Exception as e:
                             logger.debug(f"Error parsing good_moves in get_alternative_move_type: {e}")

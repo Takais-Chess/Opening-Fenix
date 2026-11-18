@@ -79,17 +79,17 @@ def check_players_in_game(
         req = urllib.request.Request(url, headers=headers)
         with safe_urlopen(req, timeout=6) as response:
             data = json.loads(response.read().decode("utf-8"))
-            
+
             playing_users: List[str] = []
             game_ids: Dict[str, str] = {}
-            
+
             for item in data:
                 if item.get("playing") is True:
                     uname = item.get("name") or item.get("id")
                     playing_users.append(uname)
                     if "playingId" in item:
                         game_ids[uname] = item["playingId"]
-            
+
             is_any_playing = len(playing_users) > 0
             return is_any_playing, playing_users, game_ids
 

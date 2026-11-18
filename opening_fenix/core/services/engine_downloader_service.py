@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import json
 import shutil
 import zipfile
@@ -132,6 +133,8 @@ class StockfishDownloaderWorker(QThread):
             with safe_urlopen(req, timeout=30) as resp:
                 total_size = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
+                last_emitted_downloaded = 0
+                last_emit_ts = 0.0
                 chunk_size = 1024 * 64
 
                 self.status.emit("Downloading Stockfish...")
@@ -144,10 +147,16 @@ class StockfishDownloaderWorker(QThread):
                             return
                         chunk = resp.read(chunk_size)
                         if not chunk:
+                            if downloaded > last_emitted_downloaded:
+                                self.progress.emit(downloaded, total_size)
                             break
                         f_out.write(chunk)
                         downloaded += len(chunk)
-                        self.progress.emit(downloaded, total_size)
+                        now = time.monotonic()
+                        if last_emit_ts == 0.0 or (total_size > 0 and downloaded >= total_size) or (now - last_emit_ts) >= 0.05:
+                            last_emit_ts = now
+                            last_emitted_downloaded = downloaded
+                            self.progress.emit(downloaded, total_size)
 
             if self._is_cancelled:
                 if os.path.exists(temp_zip_path):
