@@ -1,3 +1,4 @@
+import json
 import os
 from collections import OrderedDict
 from PyQt6.QtWidgets import (
@@ -5,7 +6,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QApplication, QFormLayout, QLineEdit, QComboBox,
     QMessageBox
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QPixmap, QFont, QImageReader
 
 from opening_fenix.core.services.repertoire_core_service import RepertoireService
@@ -226,10 +227,60 @@ def _load_repo_thumb_pixmap(path: str, width: int, height: int) -> QPixmap:
     return pix
 
 
+def _get_config_path() -> str:
+    from opening_fenix.core.data_tools import get_user_dir
+    return os.path.join(get_user_dir(), "config.json")
+
+
+def _load_favorite_repertoires(parent=None) -> set:
+    if parent is not None and isinstance(getattr(parent, "config", None), dict):
+        favs = parent.config.get("creator_favorite_repertoires", [])
+        return set(favs) if isinstance(favs, list) else set()
+    cfg_path = _get_config_path()
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            favs = cfg.get("creator_favorite_repertoires", [])
+            return set(favs) if isinstance(favs, list) else set()
+        except Exception:
+            pass
+    return set()
+
+
+def _save_favorite_repertoires(favorites: set, parent=None) -> None:
+    sorted_favs = sorted(favorites, key=str.lower)
+    if parent is not None and isinstance(getattr(parent, "config", None), dict):
+        parent.config["creator_favorite_repertoires"] = sorted_favs
+        if hasattr(parent, "save_config"):
+            parent.save_config()
+            return
+    cfg_path = _get_config_path()
+    cfg = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                cfg = loaded
+        except Exception:
+            pass
+    cfg["creator_favorite_repertoires"] = sorted_favs
+    try:
+        os.makedirs(os.path.dirname(cfg_path), exist_ok=True)
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=4, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 class RepoSelectionButton(QPushButton):
-    def __init__(self, name, parent=None):
+    favorite_toggled = pyqtSignal(str, bool)
+
+    def __init__(self, name, parent=None, is_favorite=False):
         super().__init__("", parent)
         self.repo_name = name
+        self.is_favorite = bool(is_favorite)
         self.setObjectName("RepoSelectionCard")
         self.setFixedSize(scale(160), scale(196))
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -256,34 +307,123 @@ class RepoSelectionButton(QPushButton):
             
         layout.addWidget(self.lbl_image)
         
-        # Dynamic Auto-Shrink Font Size (supports 1 to 3 lines cleanly without wasted vertical space)
-        font_size = self._calculate_font_size(name, max_width=scale(140), max_height=scale(36))
+        # Dynamic Auto-Shrink Font Size (down to 50% / 6px) + ellipsis fallback
+        font_size, display_text = self._fit_title_text(name, max_width=scale(136), max_height=scale(34))
 
-        self.lbl_title = QLabel(name)
+        self.lbl_title = QLabel(display_text)
         self.lbl_title.setObjectName("RepoSelectionTitle")
         self.lbl_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.lbl_title.setWordWrap(True)
+        self.lbl_title.setFixedHeight(scale(36))
         self.lbl_title.setToolTip(name)
         self.lbl_title.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         title_font = QFont("Segoe UI")
         title_font.setPixelSize(font_size)
         title_font.setBold(True)
         self.lbl_title.setFont(title_font)
+        self.lbl_title.setStyleSheet(f"font-family: 'Segoe UI'; font-size: {font_size}px; font-weight: bold;")
         layout.addWidget(self.lbl_title)
 
-    def _calculate_font_size(self, text: str, max_width: int, max_height: int) -> int:
-        from PyQt6.QtCore import QRect
-        from PyQt6.QtGui import QFontMetrics
-        for size in [12, 11, 10, 9]:
-            scaled_sz = scale(size)
+        star_sz = scale(26)
+        self.btn_favorite = QPushButton(self)
+        self.btn_favorite.setObjectName("RepoFavoriteStar")
+        self.btn_favorite.setFixedSize(star_sz, star_sz)
+        self.btn_favorite.move(scale(10) + scale(140) - star_sz - scale(4), scale(8) + scale(4))
+        self.btn_favorite.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_favorite.clicked.connect(self._on_favorite_clicked)
+        self.btn_favorite.raise_()
+        self._update_favorite_ui()
+
+    def _on_favorite_clicked(self):
+        self.set_favorite(not self.is_favorite)
+        self.favorite_toggled.emit(self.repo_name, self.is_favorite)
+
+    def set_favorite(self, is_fav: bool):
+        self.is_favorite = bool(is_fav)
+        self._update_favorite_ui()
+
+    def _update_favorite_ui(self):
+        radius = scale(13)
+        font_px = scale(15)
+        if self.is_favorite:
+            self.btn_favorite.setText("\u2605")
+            self.btn_favorite.setToolTip(tr_ui("repo_selection.favorite_remove", "Aus Favoriten entfernen"))
+            self.btn_favorite.setStyleSheet(f"""
+                QPushButton#RepoFavoriteStar {{
+                    background-color: rgba(255, 255, 255, 0.88);
+                    color: #f39c12;
+                    border: 1px solid rgba(243, 156, 18, 0.55);
+                    border-radius: {radius}px;
+                    font-family: "Segoe UI Symbol", "Segoe UI";
+                    font-size: {font_px}px;
+                    padding: 0px;
+                }}
+                QPushButton#RepoFavoriteStar:hover {{
+                    background-color: rgba(255, 255, 255, 1.0);
+                    border-color: #e67e22;
+                }}
+            """)
+        else:
+            self.btn_favorite.setText("\u2606")
+            self.btn_favorite.setToolTip(tr_ui("repo_selection.favorite_add", "Als Favorit markieren"))
+            self.btn_favorite.setStyleSheet(f"""
+                QPushButton#RepoFavoriteStar {{
+                    background-color: rgba(255, 255, 255, 0.72);
+                    color: rgba(93, 64, 55, 0.75);
+                    border: 1px solid rgba(0, 0, 0, 0.12);
+                    border-radius: {radius}px;
+                    font-family: "Segoe UI Symbol", "Segoe UI";
+                    font-size: {font_px}px;
+                    padding: 0px;
+                }}
+                QPushButton#RepoFavoriteStar:hover {{
+                    background-color: rgba(255, 255, 255, 0.95);
+                    color: #f39c12;
+                    border-color: rgba(243, 156, 18, 0.55);
+                }}
+            """)
+
+    _FONT_METRICS_CACHE = {}
+
+    @classmethod
+    def _get_font_metrics(cls, scaled_sz: int):
+        fm = cls._FONT_METRICS_CACHE.get(scaled_sz)
+        if fm is None:
+            from PyQt6.QtGui import QFontMetrics
             font = QFont("Segoe UI")
             font.setPixelSize(scaled_sz)
             font.setBold(True)
             fm = QFontMetrics(font)
-            rect = fm.boundingRect(QRect(0, 0, max_width, 1000), int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter), text)
-            if rect.height() <= max_height:
-                return scaled_sz
-        return scale(9)
+            cls._FONT_METRICS_CACHE[scaled_sz] = fm
+        return fm
+
+    def _fit_title_text(self, text: str, max_width: int, max_height: int) -> tuple[int, str]:
+        from PyQt6.QtCore import QRect
+        flags = int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignCenter)
+        bounds = QRect(0, 0, max_width, 1000)
+        for size in (12, 11, 10, 9, 8, 7, 6):
+            scaled_sz = scale(size)
+            fm = self._get_font_metrics(scaled_sz)
+            rect = fm.boundingRect(bounds, flags, text)
+            if rect.height() <= max_height and rect.width() <= max_width:
+                return scaled_sz, text
+
+        min_sz = scale(6)
+        fm = self._get_font_metrics(min_sz)
+        lo, hi, best = 0, len(text), 0
+        while lo <= hi:
+            mid = (lo + hi) // 2
+            candidate = text[:mid].rstrip() + "..."
+            rect = fm.boundingRect(bounds, flags, candidate)
+            if rect.height() <= max_height and rect.width() <= max_width:
+                best = mid
+                lo = mid + 1
+            else:
+                hi = mid - 1
+        return min_sz, text[:best].rstrip() + "..."
+
+    def _calculate_font_size(self, text: str, max_width: int, max_height: int) -> int:
+        return self._fit_title_text(text, max_width, max_height)[0]
 
 class RepoSelectionDialog(QDialog):
     def __init__(self, parent=None):
@@ -382,8 +522,11 @@ class RepoSelectionDialog(QDialog):
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
 
+        self.scroll_area.setWidget(self.scroll_content)
+
         self.repo_buttons = []
         self._current_cols = None
+        self._favorites = _load_favorite_repertoires(parent)
 
         repo_names = RepertoireService().get_all_repertoires()
         if not repo_names:
@@ -392,13 +535,13 @@ class RepoSelectionDialog(QDialog):
             lbl_empty.setStyleSheet("font-style: italic; color: #666;")
             self.grid_layout.addWidget(lbl_empty, 0, 0)
         else:
-            for name in sorted(repo_names):
-                btn = RepoSelectionButton(name)
+            sorted_names = sorted(repo_names, key=lambda n: (0 if n in self._favorites else 1, n.lower()))
+            for name in sorted_names:
+                btn = RepoSelectionButton(name, parent=self.scroll_content, is_favorite=(name in self._favorites))
                 btn.clicked.connect(lambda checked, n=name: self.on_repo_selected(n))
+                btn.favorite_toggled.connect(self.on_favorite_toggled)
                 self.repo_buttons.append(btn)
             self._reflow_grid(force=True)
-
-        self.scroll_area.setWidget(self.scroll_content)
         container_layout.addWidget(self.scroll_area)
         layout.addWidget(self.grid_container, 1)
         
@@ -535,8 +678,6 @@ class RepoSelectionDialog(QDialog):
                 row = idx // cols
                 col = idx % cols
                 self.grid_layout.addWidget(btn, row, col)
-
-            self.scroll_content.adjustSize()
         finally:
             self.scroll_content.setUpdatesEnabled(True)
 
@@ -547,6 +688,15 @@ class RepoSelectionDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._reflow_grid(force=False)
+
+    def on_favorite_toggled(self, name, is_fav):
+        if is_fav:
+            self._favorites.add(name)
+        else:
+            self._favorites.discard(name)
+        _save_favorite_repertoires(self._favorites, self.parent())
+        self.repo_buttons.sort(key=lambda b: (0 if b.is_favorite else 1, b.repo_name.lower()))
+        self._reflow_grid(force=True)
 
     def on_repo_selected(self, name):
         self.selected_repo = name

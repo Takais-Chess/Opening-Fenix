@@ -40,6 +40,7 @@ class EngineThread(QThread):
         # Performance state
         self._target_fen = None
         self._is_analyzing = False
+        self._active_analysis = None
         
         # Throttling
         self._throttle_timer = QElapsedTimer()
@@ -87,11 +88,21 @@ class EngineThread(QThread):
                 except Exception:
                     pass
 
+    def _interrupt_active_analysis(self):
+        with self._lock:
+            analysis = self._active_analysis
+        if analysis is not None:
+            try:
+                analysis.stop()
+            except Exception:
+                pass
+
     def stop_engine(self):
         with self._lock:
             self.running = False
             self.is_active = False
             self._wake_cond.notify_all()
+        self._interrupt_active_analysis()
         self._close_engine_process()
 
     def set_position(self, fen, force_restart=False):
@@ -102,8 +113,10 @@ class EngineThread(QThread):
             self._target_fen = fen
             self.board = chess.Board(fen)
             self._wake_cond.notify_all()
+        self._interrupt_active_analysis()
 
     def toggle_analysis(self, active):
+        should_interrupt = False
         with self._lock:
             if self.is_active == active:
                 return
@@ -111,7 +124,11 @@ class EngineThread(QThread):
             self.is_active = active
             if active and self._target_fen:
                 self.board = chess.Board(self._target_fen)
+            elif not active:
+                should_interrupt = True
             self._wake_cond.notify_all()
+        if should_interrupt:
+            self._interrupt_active_analysis()
 
     def update_config(self, threads, depth, use_depth_limit, multipv, hash_size=None):
         changed = False
@@ -204,6 +221,19 @@ class EngineThread(QThread):
                     try:
                         self._is_analyzing = True
                         with self.engine.analysis(board_snapshot, limit, multipv=actual_multipv) as analysis:
+                            with self._lock:
+                                self._active_analysis = analysis
+                                if (
+                                    not self.running
+                                    or not self.is_active
+                                    or self._target_fen != current_board_fen
+                                    or self.multipv != current_multipv
+                                    or self.target_depth != current_depth
+                                ):
+                                    try:
+                                        analysis.stop()
+                                    except Exception:
+                                        pass
                             for info in analysis:
                                 # FAST ABORT CHECKS
                                 if not self.running or not self.is_active:
@@ -249,6 +279,9 @@ class EngineThread(QThread):
                         current_board_fen = None # Force restart on next loop
                         with self._lock:
                             self._wake_cond.wait(timeout=1.0)
+                    finally:
+                        with self._lock:
+                            self._active_analysis = None
                 else:
                     with self._lock:
                         if self.running and self.is_active and self._target_fen == current_board_fen and self.multipv == current_multipv and self.target_depth == current_depth:

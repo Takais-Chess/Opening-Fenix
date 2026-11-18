@@ -2,6 +2,16 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.13] - 2026-11-18
+
+### Added & Improved
+- **Favorite Repertoires in Load Repertoire Dialog**: Added a star toggle button (`★`/`☆`) on each repertoire card in `RepoSelectionDialog` that sorts favorites to the top and persists across sessions.
+- **Load Repertoire Startup & Title Layout**: Eliminated redundant QSS/layout passes in `RepoSelectionDialog`, cached `QFontMetrics`, and added title auto-shrinking (down to 50%) with ellipsis fallback so long course names never overlap card images.
+
+### Fixed
+- **Analysis Tab Engine Stop**: Fixed `EngineThread` leaving the UCI engine process running in the background after stopping analysis in the Creator Analysis tab by immediately interrupting the active `analysis` search.
+- **Test Teardown Reliability**: Fixed `MainWindow` fixture teardown ordering in `test_stats_update.py`.
+
 ## [1.3.12] - 2026-11-17
 
 ### Added & Improved

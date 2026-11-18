@@ -228,3 +228,22 @@ def test_extract_line_data_first_uci(mock_engine_thread):
     extracted = mock_engine_thread._extract_line_data(info, board)
     assert extracted["first_uci"] == "e2e4"
     assert extracted["depth"] == 15
+
+def test_toggle_analysis_false_stops_active_analysis(mock_engine_thread):
+    mock_analysis = MagicMock()
+    mock_engine_thread.is_active = True
+    mock_engine_thread._active_analysis = mock_analysis
+
+    mock_engine_thread.toggle_analysis(False)
+
+    assert mock_engine_thread.is_active is False
+    mock_analysis.stop.assert_called_once()
+
+
+def test_set_position_interrupts_active_analysis(mock_engine_thread):
+    mock_analysis = MagicMock()
+    mock_engine_thread._active_analysis = mock_analysis
+
+    mock_engine_thread.set_position("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1")
+
+    mock_analysis.stop.assert_called_once()

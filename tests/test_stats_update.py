@@ -20,7 +20,9 @@ def window(test_app, mock_user_dir, sample_repertoire):
     """Creates a MainWindow connected to our sample repertoire."""
     win = MainWindow(profile_name="TestUser")
     win.change_repertoire(sample_repertoire)
-    return win
+    yield win
+    win.close()
+    QApplication.processEvents()
 
 def test_stats_update_on_repertoire_switch(window, sample_repertoire):
     """Test that the big donut chart updates when switching repertoires."""

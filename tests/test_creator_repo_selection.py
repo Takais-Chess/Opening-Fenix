@@ -242,3 +242,59 @@ def test_repo_selection_auto_adjusts_columns_on_resize(qtbot):
         dialog.resize(scale(800), scale(640))
         dialog._reflow_grid()
         assert dialog._current_cols == 4
+
+
+def test_repo_selection_favorite_star_toggles_and_sorts_top(qtbot, mock_user_dir):
+    with patch("opening_fenix.creator.repo_selection_dialog.RepertoireService") as mock_service_class:
+        mock_service = MagicMock()
+        mock_service_class.return_value = mock_service
+        mock_service.get_all_repertoires.return_value = ["Alpha", "Beta", "Zeta"]
+
+        dialog = RepoSelectionDialog()
+        qtbot.addWidget(dialog)
+
+        assert [b.repo_name for b in dialog.repo_buttons] == ["Alpha", "Beta", "Zeta"]
+        zeta_btn = dialog.repo_buttons[2]
+
+        # Star button sits at the top of the image area
+        assert zeta_btn.btn_favorite.y() < zeta_btn.lbl_image.y() + zeta_btn.lbl_image.height() // 2
+        assert zeta_btn.is_favorite is False
+        assert zeta_btn.btn_favorite.text() == "\u2606"
+
+        # Clicking the star toggles favorite and sorts Zeta to the top without selecting/closing
+        zeta_btn.btn_favorite.click()
+        assert dialog.selected_repo is None
+        assert zeta_btn.is_favorite is True
+        assert zeta_btn.btn_favorite.text() == "\u2605"
+        assert [b.repo_name for b in dialog.repo_buttons] == ["Zeta", "Alpha", "Beta"]
+        assert dialog.grid_layout.itemAtPosition(0, 0).widget() is zeta_btn
+
+        # Re-opening the dialog preserves favorites sorted at the top
+        dialog2 = RepoSelectionDialog()
+        qtbot.addWidget(dialog2)
+        assert [b.repo_name for b in dialog2.repo_buttons] == ["Zeta", "Alpha", "Beta"]
+        assert dialog2.repo_buttons[0].is_favorite is True
+
+        # Unfavoriting restores alphabetical order
+        dialog2.repo_buttons[0].btn_favorite.click()
+        assert [b.repo_name for b in dialog2.repo_buttons] == ["Alpha", "Beta", "Zeta"]
+
+
+def test_repo_selection_long_title_shrinks_and_elides_without_overlap(qtbot):
+    from opening_fenix.gui.scaling import scale
+    long_title = "Lifetime Repertoires Peter Svidler's Grunfeld"
+    btn_long = RepoSelectionButton(long_title)
+    qtbot.addWidget(btn_long)
+    btn_long.show()
+    assert btn_long.lbl_title.font().pixelSize() <= scale(12)
+    assert btn_long.lbl_title.font().pixelSize() >= scale(6)
+    assert btn_long.lbl_title.y() >= btn_long.lbl_image.y() + btn_long.lbl_image.height()
+
+    extreme_title = "Lifetime Repertoires Super Ultra Detailed Masterclass Volume 12 Extended Edition For Club Players And Grandmasters Studying Deep Theoretical Variations Every Single Day Without Exception"
+    btn_extreme = RepoSelectionButton(extreme_title)
+    qtbot.addWidget(btn_extreme)
+    btn_extreme.show()
+    assert btn_extreme.lbl_title.font().pixelSize() == scale(6)
+    assert btn_extreme.lbl_title.text().endswith("...")
+    assert btn_extreme.lbl_title.toolTip() == extreme_title
+    assert btn_extreme.lbl_title.y() >= btn_extreme.lbl_image.y() + btn_extreme.lbl_image.height()

@@ -1257,7 +1257,9 @@
     "empty": "No repertoires found.",
     "btn_new": "➕ New Repertoire",
     "btn_cancel": "Cancel",
-    "btn_import_course": "⚡ Course Import (PGN)"
+    "btn_import_course": "⚡ Course Import (PGN)",
+    "favorite_add": "Add to favorites",
+    "favorite_remove": "Remove from favorites"
   },
   "export": {
     "window_title": "Export",
