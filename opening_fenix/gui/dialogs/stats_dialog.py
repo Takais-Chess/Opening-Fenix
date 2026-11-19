@@ -460,21 +460,24 @@ class RepertoireStatisticsDialog(QDialog):
         self.combo_level.currentIndexChanged.connect(self._on_level_selected)
         ctrl_row.addWidget(self.combo_level)
 
-        ctrl_row.addSpacing(scale(4))
+        ctrl_row.addStretch()
+        layout_boxes.addLayout(ctrl_row)
 
-        # KPI Badges: Elo, Learned, Due, Unlearned
+        # KPI Badges Row: Elo, Learned, Due, Unlearned
+        kpi_row = QHBoxLayout()
+        kpi_row.setSpacing(scale(8))
         self.lbl_stat_elo = self._create_kpi_badge("🎓", tr_ui("stats.stat_elo", "Elo:"), "--")
         self.lbl_stat_learned = self._create_kpi_badge("🎯", tr_ui("stats.stat_learned", "Gelernt:"), "--")
         self.lbl_stat_due = self._create_kpi_badge("⏳", tr_ui("stats.stat_due", "Fällig:"), "--")
         self.lbl_stat_unlearned = self._create_kpi_badge("⚪", tr_ui("stats.stat_unlearned", "Ungelernt:"), "--")
 
-        ctrl_row.addWidget(self.lbl_stat_elo)
-        ctrl_row.addWidget(self.lbl_stat_learned)
-        ctrl_row.addWidget(self.lbl_stat_due)
-        ctrl_row.addWidget(self.lbl_stat_unlearned)
-        ctrl_row.addStretch()
+        kpi_row.addWidget(self.lbl_stat_elo)
+        kpi_row.addWidget(self.lbl_stat_learned)
+        kpi_row.addWidget(self.lbl_stat_due)
+        kpi_row.addWidget(self.lbl_stat_unlearned)
+        kpi_row.addStretch()
 
-        layout_boxes.addLayout(ctrl_row)
+        layout_boxes.addLayout(kpi_row)
 
         # Leitner Box 1..7 Cards Row
         self.boxes_row = QHBoxLayout()
@@ -669,6 +672,7 @@ class RepertoireStatisticsDialog(QDialog):
         """Creates a clean sub-tile for a level without charts."""
         tile = QFrame()
         tile.setObjectName("LevelTile")
+        tile.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tile.setMinimumHeight(scale(56))
         tile.setStyleSheet(f"""
             QFrame#LevelTile {{
@@ -686,6 +690,7 @@ class RepertoireStatisticsDialog(QDialog):
         layout.setSpacing(scale(2))
 
         lbl_title = QLabel(level_name)
+        lbl_title.setWordWrap(True)
         lbl_title.setStyleSheet(f"font-size: {scale(11)}px; font-weight: 600; color: #64748b;")
         layout.addWidget(lbl_title)
 
@@ -1000,4 +1005,4 @@ class RepertoireStatisticsDialog(QDialog):
 
         # 4. Profile Box Stats (if included and not superseded by a newer selection)
         if self._profile_req_id == 0 and "profile_stats" in data and data["profile_stats"]:
-            self.update_profile_box_ui(data["profile_stats"])
+            self.update_profile_box_ui(data["profile_stats"])

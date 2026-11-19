@@ -4,9 +4,9 @@ from PyQt6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QLabel, QListWidget, QListWidgetItem,
     QPushButton, QGroupBox, QFrame, QLineEdit, QMessageBox,
     QHBoxLayout, QCheckBox, QScrollArea, QWidget, QGridLayout, QMenu,
-    QGraphicsDropShadowEffect, QButtonGroup
+    QGraphicsDropShadowEffect, QButtonGroup, QSizePolicy
 )
-from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon
+from PyQt6.QtGui import QPixmap, QColor, QAction, QFont, QIcon, QFontMetrics
 from PyQt6.QtCore import Qt, QSize, QPropertyAnimation, QEasingCurve, QTimer, pyqtSignal
 from PyQt6.QtWidgets import QGraphicsOpacityEffect
 
@@ -31,9 +31,17 @@ class RepertoireButton(QPushButton):
         self.setCheckable(True)
         self.setChecked(False)
         self.setFixedHeight(scale(50))
+        self.setMinimumWidth(scale(180))
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
         self.update_style()
 
         self.toggled.connect(self.update_style)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        fm = QFontMetrics(self.font())
+        avail = max(scale(40), self.width() - scale(20))
+        self.setText(fm.elidedText(self.repo_name, Qt.TextElideMode.ElideRight, avail))
 
     def update_style(self):
         checked = self.isChecked()
@@ -126,6 +134,8 @@ class RepertoireSelectionDialog(QDialog):
         scroll_widget.setStyleSheet("#RepoScrollWidget { background: transparent; }")
         self.grid_layout = QGridLayout(scroll_widget)
         self.grid_layout.setSpacing(scale(15))
+        self.grid_layout.setColumnStretch(0, 1)
+        self.grid_layout.setColumnStretch(1, 1)
 
         
         from opening_fenix.core.services.repertoire_core_service import RepertoireService

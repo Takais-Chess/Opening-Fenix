@@ -38,7 +38,7 @@ from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
 CreatorWindow = None
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon
+from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon, get_settings_gear_icon
 
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
@@ -162,6 +162,7 @@ class _WinAsyncSoundEffect:
 class MainWindow(QMainWindow):
     switch_requested = False
     _integrity_checked_signal = pyqtSignal(str, int)
+    _preload_stats_ready_signal = pyqtSignal(str, int)
     def __init__(self, profile_name):
         super().__init__()
         self.profile_name = profile_name
@@ -199,6 +200,7 @@ class MainWindow(QMainWindow):
         self._preload_lock = threading.Lock()
         self._checked_integrity_repos = set()
         self._integrity_checked_signal.connect(self._on_integrity_check_result)
+        self._preload_stats_ready_signal.connect(self._on_preload_stats_ready)
         self._repo_preload_gen = 0
         self._preloaded_start_challenge = None
         self._challenge_preload_gen = 0
@@ -455,6 +457,7 @@ class MainWindow(QMainWindow):
         
         self.repo_tabs_widget = QWidget()
         self.repo_tabs_widget.setStyleSheet("background: transparent;")
+        self.repo_tabs_widget.setFixedHeight(scale(40))
         self.repo_tabs_layout = QHBoxLayout(self.repo_tabs_widget)
         self.repo_tabs_layout.setContentsMargins(0, 0, 0, 0)
         self.repo_tabs_layout.setSpacing(15)
@@ -479,10 +482,11 @@ class MainWindow(QMainWindow):
 
         top_right_container = QWidget()
         top_right_layout = QHBoxLayout(top_right_container)
-        top_right_layout.setSpacing(15)
-        top_right_layout.setContentsMargins(15, 0, 15, 0)
+        top_right_layout.setSpacing(scale(15))
+        top_right_layout.setContentsMargins(scale(15), 0, scale(15), 0)
 
         self.btn_filter = QPushButton(tr_ui("main_window.filter_label", "Filter ▾"))
+        self.btn_filter.setFixedHeight(scale(40))
         self.btn_filter.setFlat(True)
         # Added subtle hover styling for the top bar flat buttons
         self.btn_filter.setStyleSheet(f"""
@@ -497,6 +501,7 @@ class MainWindow(QMainWindow):
 
         display_profile_name = tr_ui("login.free_training", "Freies Training") if is_free_training_profile(self.profile_name) else self.profile_name
         self.btn_switch_profile = QPushButton(display_profile_name)
+        self.btn_switch_profile.setFixedHeight(scale(40))
         self.btn_switch_profile.setFlat(True)
         self.btn_switch_profile.setStyleSheet(f"""
             QPushButton {{ font-weight: bold; color: {COLORS['brown_text']}; font-size: {scale(14)}px; border-radius: {scale(18)}px; }}
@@ -504,7 +509,9 @@ class MainWindow(QMainWindow):
         """)
 
         self.btn_switch_profile.clicked.connect(self.handle_profile_button_click)
-        self.btn_settings = QPushButton("⚙")
+        self.btn_settings = QPushButton()
+        self.btn_settings.setIcon(get_settings_gear_icon(22))
+        self.btn_settings.setIconSize(QSize(scale(22), scale(22)))
         self.btn_settings.setFixedSize(scale(40), scale(40))
         self.btn_settings.setStyleSheet(f"""
             QPushButton {{ font-size: {scale(24)}px; border: none; background: transparent; border-radius: {scale(20)}px; }}
@@ -539,9 +546,11 @@ class MainWindow(QMainWindow):
         
         top_layout.addWidget(self.res_pill)
         
-        # Apply GlassPill classes to the top elements
+        # Apply GlassPill classes to the top elements and unify their height
+        pill_height = scale(52)
         for pill in [self.repo_scroll, top_right_container, self.res_pill]:
             pill.setProperty("class", "GlassPill")
+            pill.setFixedHeight(pill_height)
             self.repolish(pill)
         
         # Inject merged top bar into the custom title bar before the stretch and window controls
@@ -1078,6 +1087,9 @@ class MainWindow(QMainWindow):
                             return
                         step()
 
+                if not _is_stale():
+                    self._preload_stats_ready_signal.emit(repo_name, gen)
+
                 if should_check_integrity and not _is_stale():
                     with self._preload_lock:
                         if _is_stale():
@@ -1109,6 +1121,18 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_worker, daemon=True)
         self._challenge_preload_thread = t
         t.start()
+
+    def _on_preload_stats_ready(self, repo_name, gen):
+        """Syncs stale persistent stats on the main thread once preload caches are warm."""
+        if (
+            sip.isdeleted(self)
+            or self._repo_preload_gen != gen
+            or self.repertoire_manager.active_repertoire_name != repo_name
+        ):
+            return
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            return
+        self._do_update_stats_display(allow_stale_cache=False)
 
     def preload_next_challenge(self):
         """Preloads the next challenge/move sequence in a background thread while the user is thinking."""
@@ -1185,7 +1209,6 @@ class MainWindow(QMainWindow):
         t = threading.Thread(target=_worker, daemon=True)
         self._challenge_preload_thread = t
         t.start()
-
     def _is_training_limit_reached(self) -> bool:
         if is_free_training_profile(self.profile_name):
             return False
@@ -2022,6 +2045,9 @@ class MainWindow(QMainWindow):
         if h > 100 and total_w > h:
             desired_board_w = h
             desired_side_w = max(scale(280), total_w - desired_board_w)
+            cur = self.main_splitter.sizes()
+            if len(cur) == 2 and abs(cur[0] - desired_board_w) <= 1 and abs(cur[1] - desired_side_w) <= 1:
+                return
             self.main_splitter.setSizes([desired_board_w, desired_side_w])
 
     def resizeEvent(self, event):

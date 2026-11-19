@@ -271,7 +271,8 @@
     "leadup_style_sub": "Whether to jump directly to the variation or fast-forward the lead-up moves.",
     "btn_restart_now": "Restart Now",
     "btn_restart_later": "Later",
-    "btn_restart_app": "🔄 Restart Application"
+    "btn_restart_app": "🔄 Restart Application",
+    "about_notice": "<b>Opening Fenix is free, open-source software available for free at <a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #d35400;'>github.com/Takais-Chess/Opening-Fenix</a></b><br><span style='color: #64748b; font-size: {size}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
   },
   "themes": {
     "Dunkel (Modern)": "Dark (Modern)",
@@ -1203,7 +1204,17 @@
     "translate_error_title": "Translation Error",
     "translate_error_msg": "Translation failed. Please check your internet connection.",
     "tooltip_suggest_var": "💡 Suggestion: '{name}' (Click to apply)",
-    "tooltip_no_suggest_var": "No opening name known for variation {idx}"
+    "tooltip_no_suggest_var": "No opening name known for variation {idx}",
+    "hole_rec_dialog_subtitle": "Customize the criteria used to recommend unanalyzed moves for specific repertoire levels.",
+    "hole_rec_group_pop": "Minimum Popularity per Repertoire Level",
+    "hole_rec_group_loss": "Engine Evaluation Loss Rule",
+    "hole_rec_loss_enable": "Automatically assign moves with high engine loss to the highest level",
+    "hole_rec_loss_thresh": "Loss threshold:",
+    "hole_rec_loss_suffix": " pawns",
+    "hole_rec_loss_info": "💡 Moves with large evaluation loss (e.g. ≥ 2.00 pawns) are tactical mistakes or weak sidelines. They are automatically recommended for the highest level to keep your core levels compact.",
+    "hole_rec_btn_defaults": "Defaults",
+    "hole_rec_btn_cancel": "Cancel",
+    "hole_rec_btn_save": "Save"
   },
   "main_window": {
     "window_title": "Opening Fenix - {profile}",
@@ -1237,7 +1248,7 @@
     "lbl_level": "Level:",
     "lbl_variation": "Variation:",
     "lbl_comment_lang": "Comment Language:",
-    "comment_lang_auto": "Automatic (Program Language)",
+    "comment_lang_auto": "Auto (App Language)",
     "comment_lang_all": "All",
     "comment_lang_en": "English (EN)",
     "comment_lang_de": "German (DE)",
@@ -1300,7 +1311,8 @@
     "book_limit_checkbox": "Only up to level:",
     "book_limit_hint": "💡 Tip: For large courses, limiting by level is recommended to produce a compact, readable textbook.",
     "confirm_huge_book_title": "Export complete repertoire as PDF?",
-    "confirm_huge_book_text": "You are about to export the entire repertoire without a level limit as PDF.\n\nFor very large courses (several thousand positions), PDF rendering can exceed system memory.\n\nRecommendation: Limit the export to Level 1 or 2, or choose HTML as output format.\n\nDo you want to proceed anyway?"
+    "confirm_huge_book_text": "You are about to export the entire repertoire without a level limit as PDF.\n\nFor very large courses (several thousand positions), PDF rendering can exceed system memory.\n\nRecommendation: Limit the export to Level 1 or 2, or choose HTML as output format.\n\nDo you want to proceed anyway?",
+    "format_book": "Repertoire Textbook (.html / .pdf Print Format)"
   },
   "faq": {
     "window_title": "Frequently Asked Questions (FAQ)",
@@ -1411,7 +1423,8 @@
     "btn_edit_card": "✏️ Edit",
     "btn_test_card": "🧪 Test",
     "err_401_prompt_title": "Lichess API Error (401)",
-    "err_401_prompt_body": "The configured Lichess API token is invalid or expired (Error 401). Access was denied by Lichess.\n\nWould you like to edit your token now?"
+    "err_401_prompt_body": "The configured Lichess API token is invalid or expired (Error 401). Access was denied by Lichess.\n\nWould you like to edit your token now?",
+    "btn_save": "💾 Save & Apply"
   },
   "course_import": {
     "window_title": "Course Import Assistant (Chessable PGN)",
@@ -1498,7 +1511,8 @@
     "pgn_warnings_found": "Warning: Notation errors or ambiguous PGN moves were detected in {count} game(s). Invalid moves/variations were skipped and mainlines were imported up to the error.",
     "pgn_warnings_note": "Note: Notation errors or ambiguous moves were detected in {count} game(s) (invalid variations were skipped).",
     "more_warnings": "more",
-    "dlg_warning_title": "Import with Warnings"
+    "dlg_warning_title": "Import with Warnings",
+    "file_placeholder": "e.g. Part 1.pgn, Part 2.pgn..."
   },
   "stats": {
     "window_title": "Repertoire Statistics & Insights",

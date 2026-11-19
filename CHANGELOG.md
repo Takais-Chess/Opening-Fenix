@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.14] - 2026-11-19
+
+### Added & Improved
+- **Visual QA & HiDPI Layout Polish**: Improved responsive multi-display visual test capture for `CreatorWindow` and `UnifiedSettingsDialog`, and shortened the repertoire card comment-language label (`Auto (App Language)` / `Auto (Programmsprache)`) to prevent mid-word dropdown truncation.
+
+### Fixed
+- **Localization & Dialog Clipping**: Completed missing DE/EN translations and fixed text wrapping/spinbox sizing in `HoleRecommendationSettingsDialog`, `LichessTokenDialog`, `ExportDialog`, `CourseImportDialog`, and Settings (`About` notice and escaped `&` in `Warteschlange & Verlauf`).
+- **Statistics & Repertoire Selection Overflow**: Split `RepertoireStatisticsDialog` profile/level selectors and KPI badges into two rows with word-wrapping level tiles so `Level 3`, `Unlearned`, and `Box 7` no longer clip; added equal column stretches and text elision to `RepertoireSelectionDialog` so long repertoire names do not push right-column buttons off-screen.
+
 ## [1.3.13] - 2026-11-18
 
 ### Added & Improved

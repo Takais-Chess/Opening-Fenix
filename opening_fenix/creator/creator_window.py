@@ -54,7 +54,7 @@ from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style, get_settings_gear_icon
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale, scaler, get_available_geometry
 from opening_fenix.core.translation import tr_ui
@@ -3543,12 +3543,21 @@ class AutoShrinkPillButton(QPushButton):
         self.setMinimumHeight(scale(28))
         self.setStyleSheet(f"""
             QPushButton {{
-                padding: {scale(3)}px {scale(4)}px;
+                padding: {scale(3)}px {scale(8)}px;
                 font-weight: 600;
             }}
             {get_tooltip_style()}
         """)
         self._apply_style(self._base_size)
+
+    def _measure_text_width(self, text: str, pixel_size: int) -> int:
+        if not text:
+            return 0
+        f = QFont(self.font())
+        f.setPixelSize(pixel_size)
+        f.setWeight(QFont.Weight.DemiBold)
+        fm = QFontMetrics(f)
+        return max(fm.horizontalAdvance(text), fm.boundingRect(text).width())
 
     def setText(self, text):
         self._raw_text = text or ""
@@ -3566,17 +3575,19 @@ class AutoShrinkPillButton(QPushButton):
         f.setWeight(QFont.Weight.DemiBold)
         self.setFont(f)
 
+    def _chrome_width(self) -> int:
+        txt = self.text()
+        if not txt:
+            return scale(24)
+        sup_w = super().sizeHint().width()
+        cur_w = self._measure_text_width(txt, self._current_size)
+        return max(scale(24), sup_w - cur_w)
+
     def minimumSizeHint(self):
-        f = QFont(self.font())
-        f.setPixelSize(self._min_size)
-        fm = QFontMetrics(f)
-        return QSize(fm.horizontalAdvance(self.text()) + scale(10), scale(28))
+        return QSize(self._measure_text_width(self.text(), self._min_size) + self._chrome_width(), scale(28))
 
     def sizeHint(self):
-        f = QFont(self.font())
-        f.setPixelSize(self._base_size)
-        fm = QFontMetrics(f)
-        return QSize(fm.horizontalAdvance(self.text()) + scale(12), scale(28))
+        return QSize(self._measure_text_width(self.text(), self._base_size) + self._chrome_width(), max(scale(30), super().sizeHint().height()))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3590,14 +3601,15 @@ class AutoShrinkPillButton(QPushButton):
         txt = self.text()
         if not txt:
             return
-        avail = max(10, self.width() - scale(14))
-        best_sz = self._min_size
-        f = QFont(self.font())
-        for sz in range(self._base_size, self._min_size - 1, -1):
-            f.setPixelSize(sz)
-            if QFontMetrics(f).horizontalAdvance(txt) <= avail:
-                best_sz = sz
-                break
+        if self.width() >= self.sizeHint().width():
+            best_sz = self._base_size
+        else:
+            avail = max(10, self.width() - self._chrome_width())
+            best_sz = self._min_size
+            for sz in range(self._base_size, self._min_size - 1, -1):
+                if self._measure_text_width(txt, sz) <= avail:
+                    best_sz = sz
+                    break
         if best_sz != self._current_size:
             self._apply_style(best_sz)
 
@@ -3915,10 +3927,15 @@ class CreatorWindow(QMainWindow):
         self.btn_load_repo.clicked.connect(self.load_repertoire_dialog)
         self.toolbar.addWidget(self.btn_load_repo)
 
-        btn_repo = QPushButton(tr_ui("creator.toolbar_settings", "⚙ Einstellungen"))
+        settings_label = tr_ui("creator.toolbar_settings", "⚙ Einstellungen").lstrip("⚙️ ").strip()
+        btn_repo = QPushButton(settings_label)
         btn_repo.setProperty("class", "GlassPill")
         btn_repo.setFixedHeight(scale(40))
         self.repolish(btn_repo)
+        fm_repo = QFontMetrics(btn_repo.font())
+        gear_y_offset = (fm_repo.ascent() - fm_repo.capHeight() / 2.0) - (fm_repo.height() / 2.0)
+        btn_repo.setIcon(get_settings_gear_icon(18, y_offset=gear_y_offset))
+        btn_repo.setIconSize(QSize(scale(18), scale(18)))
         btn_repo.setToolTip(tr_ui("creator.toolbar_settings_tooltip", "Repertoire-Einstellungen öffnen"))
         btn_repo.clicked.connect(self.open_repo_settings)
         self.toolbar.addWidget(btn_repo)
@@ -4054,6 +4071,8 @@ class CreatorWindow(QMainWindow):
         t_layout.addLayout(h_header)
 
         self.tree_widget = QTreeWidget()
+        self.tree_widget.setRootIsDecorated(False)
+        self.tree_widget.setIndentation(0)
         self.tree_widget.setHeaderLabels([
             tr_ui("creator.tree_col_move", "Zug"),
             tr_ui("creator.tree_col_prio", "Prio"),

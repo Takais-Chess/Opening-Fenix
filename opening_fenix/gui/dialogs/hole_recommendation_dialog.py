@@ -32,7 +32,7 @@ class HoleRecommendationSettingsDialog(QDialog):
         self.level_spins: Dict[int, QDoubleSpinBox] = {}
 
         self.setWindowTitle(tr_ui("creator.hole_rec_dialog_title", "Regeln für Level-Empfehlungen"))
-        self.setMinimumWidth(scale(480))
+        self.setMinimumWidth(scale(520))
         self.setStyleSheet(f"""
             QDialog {{
                 background-color: {COLORS['beige']};
@@ -64,7 +64,7 @@ class HoleRecommendationSettingsDialog(QDialog):
                 padding: {scale(4)}px {scale(8)}px;
                 font-size: {scale(12)}px;
                 color: {COLORS['brown_text']};
-                min-width: {scale(80)}px;
+                /* min-width handled per widget */
             }}
             QDoubleSpinBox:focus {{
                 border-color: {COLORS['burnt_orange']};
@@ -133,6 +133,7 @@ class HoleRecommendationSettingsDialog(QDialog):
             spin.setSingleStep(0.1)
             spin.setDecimals(2)
             spin.setSuffix(" %")
+            spin.setMinimumWidth(scale(90))
 
             # Default: L1 = 1.0%, L2 = 0.5%, L3 = 0.1%, L4+ = 0.05%
             default_val = 1.0 if order == 1 else (0.5 if order == 2 else (0.1 if order == 3 else 0.05))
@@ -168,7 +169,8 @@ class HoleRecommendationSettingsDialog(QDialog):
         self.spin_loss.setRange(0.10, 10.00)
         self.spin_loss.setSingleStep(0.1)
         self.spin_loss.setDecimals(2)
-        self.spin_loss.setSuffix(" Bauern")
+        self.spin_loss.setSuffix(tr_ui("creator.hole_rec_loss_suffix", " Bauern"))
+        self.spin_loss.setMinimumWidth(scale(160))
         self.spin_loss.setValue(float(self.current_rules.get("max_engine_loss", 2.0)))
         row_thresh.addWidget(lbl_loss_thresh)
         row_thresh.addWidget(self.spin_loss)
@@ -183,6 +185,7 @@ class HoleRecommendationSettingsDialog(QDialog):
         )
         lbl_info.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: {scale(10)}px;")
         lbl_info.setWordWrap(True)
+        lbl_info.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
         loss_layout.addWidget(lbl_info)
 
         layout.addWidget(grp_loss)
@@ -239,6 +242,7 @@ class HoleRecommendationSettingsDialog(QDialog):
         h_btns.addWidget(btn_save)
 
         layout.addLayout(h_btns)
+        self.adjustSize()
 
     def restore_defaults(self):
         """Restores default popularity and loss settings."""

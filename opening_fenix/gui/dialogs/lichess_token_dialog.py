@@ -3,7 +3,7 @@ import json
 from typing import Optional, Tuple
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
-    QLineEdit, QWidget, QMessageBox, QFrame, QApplication
+    QLineEdit, QWidget, QMessageBox, QFrame, QApplication, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QUrl, QThread, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
@@ -62,8 +62,9 @@ class LichessTokenDialog(QDialog):
 
         # Explanatory card
         desc_card = QFrame()
+        desc_card.setObjectName("LichessDescCard")
         desc_card.setStyleSheet("""
-            QFrame {
+            QFrame#LichessDescCard {
                 background-color: rgba(255, 255, 255, 0.7);
                 border: 1px solid rgba(0, 0, 0, 0.1);
                 border-radius: 8px;
@@ -82,7 +83,8 @@ class LichessTokenDialog(QDialog):
             )
         )
         lbl_desc.setWordWrap(True)
-        lbl_desc.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(13)}px; line-height: 1.4;")
+        lbl_desc.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
+        lbl_desc.setStyleSheet(f"color: {COLORS['text_muted']}; font-size: {scale(13)}px; border: none; background: transparent; padding: 0;")
         v_desc.addWidget(lbl_desc)
 
         # Instructions / Link button
@@ -112,7 +114,8 @@ class LichessTokenDialog(QDialog):
             )
         )
         lbl_hint.setWordWrap(True)
-        lbl_hint.setStyleSheet(f"color: #7f8c8d; font-size: {scale(12)}px;")
+        lbl_hint.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
+        lbl_hint.setStyleSheet(f"color: #7f8c8d; font-size: {scale(12)}px; border: none; background: transparent; padding: 0;")
         v_desc.addWidget(lbl_hint)
 
         layout.addWidget(desc_card)
@@ -204,7 +207,7 @@ class LichessTokenDialog(QDialog):
         btn_cancel.clicked.connect(self.reject)
         h_bottom.addWidget(btn_cancel)
 
-        self.btn_save = QPushButton(tr_widget("common.save", "💾 Speichern & Übernehmen"))
+        self.btn_save = QPushButton(tr_widget("lichess_token.btn_save", "💾 Speichern & Übernehmen"))
         self.btn_save.setProperty("class", "Primary")
         self.btn_save.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_save.setStyleSheet(f"""
@@ -228,6 +231,7 @@ class LichessTokenDialog(QDialog):
 
         # Initial status update
         self._update_initial_status()
+        self.adjustSize()
 
     def _update_initial_status(self):
         token = self.txt_token.text().strip()

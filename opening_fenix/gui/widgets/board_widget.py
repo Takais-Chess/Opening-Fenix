@@ -209,6 +209,11 @@ class ChessBoardWidget(QWidget):
         self._last_anim_dirty_rect = None
         self._last_drag_dirty_rect = None
         self._needs_full_board_paint = True
+        self._is_resizing = False
+        self._resize_settle_timer = QTimer(self)
+        self._resize_settle_timer.setSingleShot(True)
+        self._resize_settle_timer.setInterval(90)
+        self._resize_settle_timer.timeout.connect(self._on_resize_settled)
         self.update_animation_metrics()
 
     def _invalidate_snapshot(self):
@@ -217,11 +222,23 @@ class ChessBoardWidget(QWidget):
         self._snapshot_skip_sq = None
         self._last_anim_dirty_rect = None
 
+    def _on_resize_settled(self):
+        """Re-rasterizes crisp SVG piece pixmaps once interactive resizing pauses."""
+        self._is_resizing = False
+        _, square_size, _, _ = self.get_metrics()
+        self._update_pixmap_cache(square_size)
+        self._invalidate_snapshot()
+        self._needs_full_board_paint = True
+        self.update()
+
     def resizeEvent(self, event):
         self._invalidate_snapshot()
         self._squares_pixmap = None
         self._squares_pixmap_key = None
         self._needs_full_board_paint = True
+        if self.piece_pixmaps:
+            self._is_resizing = True
+            self._resize_settle_timer.start()
         super().resizeEvent(event)
 
     def update_animation_metrics(self, anim_speed=None, target_fps=None):
@@ -324,9 +341,12 @@ class ChessBoardWidget(QWidget):
         self._last_scaled_size = 0
 
     def _update_pixmap_cache(self, square_size):
+        if getattr(self, '_is_resizing', False) and self.piece_pixmaps:
+            return
         dpr = self.devicePixelRatioF()
         scaled_size = int(square_size * dpr)
-        if scaled_size == self._last_scaled_size: return
+        if scaled_size <= 0 or scaled_size == self._last_scaled_size:
+            return
         self._last_scaled_size = scaled_size
         self.piece_pixmaps = {}
         for key, renderer in self.pieces.items():
@@ -1419,10 +1439,11 @@ class ChessBoardWidget(QWidget):
     def draw_piece(self, painter, piece, col, row, size, scale_factor=1.0):
         key = PIECE_KEY_MAP.get((piece.piece_type, piece.color))
         if key and key in self.piece_pixmaps:
-            if scale_factor == 1.0:
-                painter.drawPixmap(QPointF(col * size, row * size), self.piece_pixmaps[key])
+            pm = self.piece_pixmaps[key]
+            if scale_factor == 1.0 and not getattr(self, '_is_resizing', False):
+                painter.drawPixmap(QPointF(col * size, row * size), pm)
             else:
-                # Center-aligned scaling
+                # Center-aligned scaling (also used for smooth live-resize before SVG re-rasterization)
                 offset = (size * (scale_factor - 1.0)) / 2.0
                 target_rect = QRectF(col * size - offset, row * size - offset, size * scale_factor, size * scale_factor)
-                painter.drawPixmap(target_rect, self.piece_pixmaps[key], QRectF(self.piece_pixmaps[key].rect()))
+                painter.drawPixmap(target_rect, pm, QRectF(pm.rect()))

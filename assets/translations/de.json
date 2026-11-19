@@ -271,7 +271,8 @@
     "leadup_style_sub": "Ob direkt zur Variante gesprungen oder die Hinführung im Zeitraffer abgespielt wird.",
     "btn_restart_now": "Jetzt neu starten",
     "btn_restart_later": "Später",
-    "btn_restart_app": "🔄 Anwendung neu starten"
+    "btn_restart_app": "🔄 Anwendung neu starten",
+    "about_notice": "<b>Opening Fenix ist kostenlose Open-Source-Software, frei verfügbar unter <a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #d35400;'>github.com/Takais-Chess/Opening-Fenix</a></b><br><span style='color: #64748b; font-size: {size}px;'>Lizenziert unter der GNU General Public License v3.0 (GPLv3).</span>"
   },
   "themes": {
     "Dunkel (Modern)": "Dunkel (Modern)",
@@ -1203,7 +1204,17 @@
     "translate_error_title": "Übersetzungsfehler",
     "translate_error_msg": "Die Übersetzung ist fehlgeschlagen. Bitte prüfe deine Internetverbindung.",
     "tooltip_suggest_var": "💡 Vorschlag: '{name}' (Klicken zum Übernehmen)",
-    "tooltip_no_suggest_var": "Kein Eröffnungsname für Variante {idx} bekannt"
+    "tooltip_no_suggest_var": "Kein Eröffnungsname für Variante {idx} bekannt",
+    "hole_rec_dialog_subtitle": "Passe an, nach welchen Kriterien unanalysierte Züge bestimmten Repertoire-Leveln empfohlen werden.",
+    "hole_rec_group_pop": "Mindest-Popularität pro Repertoire-Level",
+    "hole_rec_group_loss": "Engine-Verlust Regel",
+    "hole_rec_loss_enable": "Züge mit hohem Engine-Verlust automatisch ins höchste Level einstufen",
+    "hole_rec_loss_thresh": "Schwellenwert für Verlust:",
+    "hole_rec_loss_suffix": " Bauern",
+    "hole_rec_loss_info": "💡 Züge mit großem Verlust (z.B. ≥ 2.00 Bauern) sind taktische Fehler oder schwache Nebenvarianten. Sie werden automatisch für das höchste Level empfohlen, um die Kernlevel kompakt zu halten.",
+    "hole_rec_btn_defaults": "Standard",
+    "hole_rec_btn_cancel": "Abbrechen",
+    "hole_rec_btn_save": "Speichern"
   },
   "main_window": {
     "window_title": "Opening Fenix - {profile}",
@@ -1237,7 +1248,7 @@
     "lbl_level": "Level:",
     "lbl_variation": "Variation:",
     "lbl_comment_lang": "Kommentarsprache:",
-    "comment_lang_auto": "Automatisch (Programmsprache)",
+    "comment_lang_auto": "Auto (Programmsprache)",
     "comment_lang_all": "Alle",
     "comment_lang_en": "Englisch (EN)",
     "comment_lang_de": "Deutsch (DE)",
@@ -1300,7 +1311,8 @@
     "book_limit_checkbox": "Nur bis Level:",
     "book_limit_hint": "💡 Tipp: Für große Kurse wird die Level-Begrenzung empfohlen, um ein kompaktes, lesbares Lehrbuch zu erstellen.",
     "confirm_huge_book_title": "Vollständiges Repertoire als PDF exportieren?",
-    "confirm_huge_book_text": "Sie möchten das gesamte Repertoire ohne Level-Begrenzung als PDF exportieren.\n\nBei sehr großen Kursen (mehrere tausend Stellungen) kann die PDF-Erstellung den Speicher des Systems überlasten.\n\nEmpfehlung: Begrenzen Sie den Export auf Level 1 oder 2, oder wählen Sie HTML als Ausgabeformat.\n\nMöchten Sie trotzdem fortfahren?"
+    "confirm_huge_book_text": "Sie möchten das gesamte Repertoire ohne Level-Begrenzung als PDF exportieren.\n\nBei sehr großen Kursen (mehrere tausend Stellungen) kann die PDF-Erstellung den Speicher des Systems überlasten.\n\nEmpfehlung: Begrenzen Sie den Export auf Level 1 oder 2, oder wählen Sie HTML als Ausgabeformat.\n\nMöchten Sie trotzdem fortfahren?",
+    "format_book": "Repertoire-Lehrbuch (.html / .pdf Druckformat)"
   },
   "faq": {
     "window_title": "Häufig gestellte Fragen (FAQ)",
@@ -1411,7 +1423,8 @@
     "btn_edit_card": "✏️ Ändern",
     "btn_test_card": "🧪 Testen",
     "err_401_prompt_title": "Lichess API-Fehler (401)",
-    "err_401_prompt_body": "Das hinterlegte Lichess API-Token ist ungültig oder abgelaufen (Fehler 401). Der Zugriff wurde von Lichess verweigert.\n\nMöchtest du dein Token jetzt bearbeiten?"
+    "err_401_prompt_body": "Das hinterlegte Lichess API-Token ist ungültig oder abgelaufen (Fehler 401). Der Zugriff wurde von Lichess verweigert.\n\nMöchtest du dein Token jetzt bearbeiten?",
+    "btn_save": "💾 Speichern & Übernehmen"
   },
   "course_import": {
     "window_title": "Kurs-Import-Assistent (Chessable PGN)",
@@ -1498,7 +1511,8 @@
     "pgn_warnings_found": "Achtung: In {count} Partie(n) wurden fehlerhafte oder uneindeutige PGN-Züge festgestellt. Ungültige Züge/Varianten wurden übersprungen, die Hauptlinie wurde bis zum Fehler eingelesen.",
     "pgn_warnings_note": "Hinweis: In {count} Partie(n) wurden fehlerhafte/uneindeutige PGN-Züge festgestellt (ungültige Varianten übersprungen).",
     "more_warnings": "weitere",
-    "dlg_warning_title": "Import mit Hinweisen"
+    "dlg_warning_title": "Import mit Hinweisen",
+    "file_placeholder": "z. B. Part 1.pgn, Part 2.pgn..."
   },
   "stats": {
     "window_title": "Repertoire-Statistiken & Insights",

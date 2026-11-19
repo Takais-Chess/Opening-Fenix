@@ -633,16 +633,18 @@ class TrainingManager:
                 for r in pos_rows:
                     pos_cache[r[0]] = _CachedPosition(*r)
                 move_rows = conn.exec_driver_sql(
-                    "SELECT id, from_position_id, to_position_id, uci, san, priority_score, nag FROM moves"
+                    "SELECT id, from_position_id, to_position_id, uci, san, priority_score, nag FROM moves ORDER BY COALESCE(priority_score, 0.0) DESC"
                 ).fetchall()
                 all_moves = [
                     _CachedMove(r[0], r[1], r[2], r[3], r[4], r[5] or 0.0, r[6], pos_cache.get(r[1]))
                     for r in move_rows
                 ]
+                already_sorted = True
             else:
                 for p in repo_sess.query(Position).all():
                     self._pos_cache[p.id] = p
                 all_moves = self.repertoire_manager.core.get_all_moves()
+                already_sorted = False
             for m in all_moves:
                 # Build Forward Cache
                 if m.from_position_id not in self._forward_moves_cache:
@@ -661,12 +663,13 @@ class TrainingManager:
                     self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
                     self._fen_uci_to_move_id[(pos_fen, m.uci)] = m.id
                     
-            for k in self._forward_moves_cache:
-                self._forward_moves_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
+            if not already_sorted:
+                for k in self._forward_moves_cache:
+                    self._forward_moves_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
                 
-            # Sort parent cache too for predictable ancestor selection
-            for k in self._move_parent_cache:
-                self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
+                # Sort parent cache too for predictable ancestor selection
+                for k in self._move_parent_cache:
+                    self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
 
             if self.repertoire_manager and getattr(self.repertoire_manager, 'priority_cache', None) is None:
                 self.repertoire_manager.priority_cache = {
@@ -853,7 +856,7 @@ class TrainingManager:
                     # We query the TrainingData table directly (available in user_session)
                     newly_due = self.user_session.query(TrainingData).filter(
                         TrainingData.repertoire_name == repo_name,
-                        TrainingData.next_due > settings.stats_updated_at,
+                        TrainingData.next_due > settings.stats_updated_at + datetime.timedelta(minutes=5),
                         TrainingData.next_due <= lookahead
                     ).all()
                     
@@ -922,7 +925,8 @@ class TrainingManager:
                         dist = json.loads(settings.last_dist_json)
                         dist = {int(k): v for k, v in dist.items()}
                         res = (settings.last_new_count, settings.last_due_count, dist)
-                        self._last_stats_cache = (mem_cache_key, (*res, datetime.datetime.now()))
+                        if settings.stats_updated_at is not None and (datetime.datetime.now() - settings.stats_updated_at).total_seconds() < 60:
+                            self._last_stats_cache = (mem_cache_key, (*res, settings.stats_updated_at))
                         return res
                     except Exception:
                         pass

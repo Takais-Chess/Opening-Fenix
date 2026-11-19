@@ -760,7 +760,7 @@ class CourseImportDialog(QDialog):
         f_layout.addWidget(lbl_file)
 
         self.file_input = QLineEdit()
-        self.file_input.setPlaceholderText("z.B. Part 1.pgn, Part 2.pgn...")
+        self.file_input.setPlaceholderText(tr_ui("course_import.file_placeholder", "z. B. Part 1.pgn, Part 2.pgn..."))
         self.file_input.setReadOnly(True)
         self.file_input.setFixedHeight(scale(34))
         self.file_input.setStyleSheet(f"""

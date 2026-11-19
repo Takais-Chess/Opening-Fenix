@@ -134,3 +134,66 @@ def test_mini_donut_updates_after_training_move_and_tab_switch(window, sample_re
     assert mini_donut.data == window.progress_bar.data
 
 
+def test_get_stats_for_repertoire_skips_lookahead_overlap(window, sample_repertoire):
+    """Moves within stats_updated_at..stats_updated_at+5m were already counted by get_stats()."""
+    import datetime, json
+    from opening_fenix.core.db.models import TrainingData, UserRepertoireSettings
+
+    tm = window.training_manager
+    window.repertoire_manager.set_active_repertoire(None)
+    now = datetime.datetime.now()
+    stale_time = now - datetime.timedelta(minutes=2)
+
+    settings = tm.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=sample_repertoire).first()
+    if not settings:
+        settings = UserRepertoireSettings(repertoire_name=sample_repertoire)
+        tm.user_session.add(settings)
+    settings.last_new_count = 0
+    settings.last_due_count = 1
+    settings.last_dist_json = json.dumps({1: 3})
+    settings.stats_updated_at = stale_time
+
+    # Due 2 minutes after stale_time -> already inside stale_time + 5 min lookahead
+    tm.user_session.add(TrainingData(
+        repertoire_name=sample_repertoire,
+        fen=chess.STARTING_FEN,
+        move_uci="e2e4",
+        box=1,
+        next_due=stale_time + datetime.timedelta(minutes=2),
+    ))
+    tm.user_session.commit()
+
+    _, due_c, dist = tm.get_stats_for_repertoire(sample_repertoire)
+    assert due_c == 1
+    assert dist[1] == 3
+
+
+def test_preload_stats_ready_syncs_stale_persistent_cache(window, sample_repertoire):
+    """Opening a repo with stale persistent stats refreshes stats_updated_at once preload warms caches."""
+    import datetime, json
+    from opening_fenix.core.db.models import UserRepertoireSettings
+
+    tm = window.training_manager
+    old_time = datetime.datetime.now() - datetime.timedelta(hours=2)
+    settings = tm.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=sample_repertoire).first()
+    if not settings:
+        settings = UserRepertoireSettings(repertoire_name=sample_repertoire)
+        tm.user_session.add(settings)
+    settings.last_new_count = 0
+    settings.last_due_count = 0
+    settings.last_dist_json = json.dumps({1: 0})
+    settings.stats_updated_at = old_time
+    tm.user_session.commit()
+
+    window.repertoire_manager.set_active_repertoire(None)
+    tm.on_repertoire_changed(clear_persistent_stats=False)
+    window.change_repertoire(sample_repertoire, refresh_buttons=False)
+    gen = window._repo_preload_gen
+    window._on_preload_stats_ready(sample_repertoire, gen)
+
+    tm.user_session.expire_all()
+    refreshed = tm.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=sample_repertoire).first()
+    assert refreshed.stats_updated_at > old_time
+    assert refreshed.last_new_count > 0
+
+

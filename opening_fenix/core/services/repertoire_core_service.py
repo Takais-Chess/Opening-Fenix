@@ -219,6 +219,84 @@ def get_repertoire_meta_fast(repo_name: str, db_path: Optional[str] = None) -> D
         return dict(res)
     return {}
 
+def get_repertoire_card_meta_fast(repo_name: str) -> tuple[List[Dict[str, Any]], List[str]]:
+    """
+    Fetches both repertoire levels and available comment languages in a single SQLite
+    connection (when not already cached), avoiding duplicate connection overhead.
+    """
+    if not repo_name:
+        return [], []
+
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return [], []
+
+    abs_db_path = os.path.abspath(db_path)
+    cache_key = (repo_name, abs_db_path)
+    sig = _get_db_file_sig(abs_db_path)
+
+    cached_levels = _levels_cache.get(cache_key)
+    cached_langs = _comment_languages_cache.get(cache_key)
+    levels_hit = cached_levels is not None and cached_levels[0] == sig
+    langs_hit = cached_langs is not None and cached_langs[0] == sig
+
+    if levels_hit and langs_hit:
+        return cached_levels[1], list(cached_langs[1])
+
+    if levels_hit:
+        return cached_levels[1], get_repertoire_comment_languages_fast(repo_name)
+    if langs_hit:
+        return get_repertoire_levels_fast(repo_name), list(cached_langs[1])
+
+    def _query_both(conn):
+        c = conn.cursor()
+        c.execute('SELECT id, name, "order", target_elo FROM repertoire_levels ORDER BY "order"')
+        levels = [{"id": row[0], "name": row[1], "order": row[2], "target_elo": row[3]} for row in c.fetchall()]
+        c.execute("SELECT value FROM metadata WHERE key = 'available_comment_languages'")
+        row = c.fetchone()
+        langs = None
+        if row and row[0]:
+            try:
+                parsed = json.loads(row[0])
+                if isinstance(parsed, list):
+                    langs = sorted(set(l.lower() for l in parsed if l))
+            except Exception:
+                pass
+        return levels, langs
+
+    levels, langs = None, None
+    try:
+        conn = sqlite3.connect(abs_db_path, timeout=5)
+        try:
+            levels, langs = _query_both(conn)
+        finally:
+            conn.close()
+    except Exception:
+        try:
+            import pathlib
+            uri = f"{pathlib.Path(abs_db_path).as_uri()}?immutable=1"
+            conn = sqlite3.connect(uri, uri=True, timeout=5)
+            try:
+                levels, langs = _query_both(conn)
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+    if levels is not None:
+        _levels_cache[cache_key] = (_get_db_file_sig(abs_db_path), levels)
+    else:
+        levels = get_repertoire_levels_fast(repo_name)
+
+    if langs is not None:
+        _comment_languages_cache[cache_key] = (_get_db_file_sig(abs_db_path), langs)
+        langs = list(langs)
+    else:
+        langs = get_repertoire_comment_languages_fast(repo_name)
+
+    return levels, langs
+
+
 def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
     """
     Fast, lightweight fetch of repertoire levels.

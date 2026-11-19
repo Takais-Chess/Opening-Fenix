@@ -7,7 +7,7 @@ from PyQt6.QtGui import QIcon, QAction, QColor
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize, QTimer
 
 from opening_fenix.gui.scaling import scale
-from opening_fenix.gui.styles import COLORS
+from opening_fenix.gui.styles import COLORS, get_settings_gear_icon
 from opening_fenix.core.translation import tr_ui
 
 class RepertoireTabsWidget(QWidget):
@@ -93,7 +93,9 @@ class RepertoireTabsWidget(QWidget):
         """)
         self.btn_profile.clicked.connect(self.profile_switch_requested.emit)
 
-        self.btn_settings = QPushButton("⚙")
+        self.btn_settings = QPushButton()
+        self.btn_settings.setIcon(get_settings_gear_icon(22))
+        self.btn_settings.setIconSize(QSize(scale(22), scale(22)))
         self.btn_settings.setFixedSize(scale(40), scale(40))
         self.btn_settings.setStyleSheet(f"""
             QPushButton {{ font-size: {scale(24)}px; border: none; background: transparent; border-radius: {scale(20)}px; }}

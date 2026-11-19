@@ -411,7 +411,6 @@ class RepertoireConfigCard(QFrame):
         cover_path = get_repertoire_cover_path(self.repo_name)
         pix = get_cached_scaled_pixmap(cover_path, scale(48), scale(48))
         self.lbl_cover.setPixmap(pix)
-        self.lbl_cover.setStyleSheet(f"border: 1px solid #e2e8f0; border-radius: {scale(8)}px; background: white;")
         self.layout.addWidget(self.lbl_cover)
         
         # 2. Info Container
@@ -423,7 +422,6 @@ class RepertoireConfigCard(QFrame):
         self.lbl_name = QLabel(self.repo_name)
         self.lbl_name.setObjectName("RepoName")
         self.lbl_name.setWordWrap(True)
-        self.lbl_name.setStyleSheet(f"font-weight: 700; font-size: {scale(15)}px;")
         self.info_layout.addWidget(self.lbl_name)
         
         self.levels_elo_map = {}
@@ -435,7 +433,6 @@ class RepertoireConfigCard(QFrame):
         
         self.lbl_elo = QLabel("🎓 1500 Elo")
         self.lbl_elo.setObjectName("RepoElo")
-        self.lbl_elo.setStyleSheet(f"font-size: {scale(12)}px;")
         self.elo_layout.addWidget(self.lbl_elo)
         
         self.btn_toggle = ToggleSwitch()
@@ -450,7 +447,9 @@ class RepertoireConfigCard(QFrame):
         self.combo_level.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo_level.setMinimumWidth(scale(120))
         self.combo_level.setFixedHeight(scale(32))
-        self.populate_levels()
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_card_meta_fast
+        prefetched_levels, prefetched_langs = get_repertoire_card_meta_fast(self.repo_name)
+        self.populate_levels(prefetched_levels=prefetched_levels)
         self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
         self.combo_level.currentIndexChanged.connect(self.on_level_changed)
         self.info_layout.addWidget(self.combo_level)
@@ -459,7 +458,7 @@ class RepertoireConfigCard(QFrame):
         self.combo_lang.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.combo_lang.setMinimumWidth(scale(120))
         self.combo_lang.setFixedHeight(scale(32))
-        self.populate_comment_languages()
+        self.populate_comment_languages(prefetched_langs=prefetched_langs)
         self.combo_lang.currentIndexChanged.connect(self.on_lang_changed)
         self.info_layout.addWidget(self.combo_lang)
         
@@ -524,9 +523,9 @@ class RepertoireConfigCard(QFrame):
             return self.levels_elo_map[level]
         return 1500
 
-    def populate_levels(self):
+    def populate_levels(self, prefetched_levels=None):
         self.levels_elo_map = {}
-        levels = get_repertoire_levels_fast(self.repo_name)
+        levels = prefetched_levels if prefetched_levels is not None else get_repertoire_levels_fast(self.repo_name)
         active_lvl = 1
         tm = getattr(self.main_window, 'training_manager', None)
         if tm and hasattr(tm, 'get_active_level'):
@@ -575,12 +574,12 @@ class RepertoireConfigCard(QFrame):
             self.main_window.training_manager.set_active_level(level, self.repo_name)
             self.lbl_elo.setText(f"🎓 {self.get_selected_level_elo()} Elo")
 
-    def populate_comment_languages(self):
+    def populate_comment_languages(self, prefetched_langs=None):
         from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
         from opening_fenix.core.utils import get_lang_display_label
         from opening_fenix.core.translation import tr_ui
 
-        available = get_repertoire_comment_languages_fast(self.repo_name)
+        available = prefetched_langs if prefetched_langs is not None else get_repertoire_comment_languages_fast(self.repo_name)
         curr_lang = "auto"
         tm = getattr(self.main_window, 'training_manager', None)
         if tm and hasattr(tm, 'get_comment_language'):
@@ -1251,7 +1250,7 @@ class UnifiedSettingsDialog(QDialog):
         self.setMinimumSize(scale(960), scale(560))
         from opening_fenix.gui.scaling import get_available_geometry
         avail_w, avail_h = get_available_geometry()
-        target_w = min(scale(1150), int(avail_w * 0.92))
+        target_w = min(scale(1380), int(avail_w * 0.92))
         target_h = min(scale(750), int(avail_h * 0.90))
         self.resize(target_w, target_h)
         self.setWindowFlags(
@@ -2093,6 +2092,8 @@ class UnifiedSettingsDialog(QDialog):
 
     def build_all_pages(self):
         self.all_registered_pages = []
+        self.pages.setUpdatesEnabled(False)
+        self.sidebar_tree.setUpdatesEnabled(False)
 
         # Instantiate all pages
         self.page_appearance = QWidget(); self.init_page_appearance(self.page_appearance)
@@ -2160,6 +2161,8 @@ class UnifiedSettingsDialog(QDialog):
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_backups", "⏮️ Backups & Wiederherstellung"), self.page_cr_backups, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_tools", "🔧 Verschiedene Werkzeuge"), self.page_cr_tools, is_creator=True)
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_diag", "🔍 Datenbank-Diagnose"), self.page_cr_diag, is_creator=True)
+        self.pages.setUpdatesEnabled(True)
+        self.sidebar_tree.setUpdatesEnabled(True)
 
     def add_section_header(self, text: str) -> QTreeWidgetItem:
         header = QTreeWidgetItem(self.sidebar_tree)
@@ -3052,9 +3055,13 @@ class UnifiedSettingsDialog(QDialog):
         v_card.addWidget(lbl_author)
 
         lbl_notice = QLabel(
-            "<b>Opening Fenix is free, open-source software available for free at "
-            "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #d35400;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
-            f"<span style='color: #64748b; font-size: {scale(12)}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>"
+            tr_ui(
+                "settings.about_notice",
+                "<b>Opening Fenix is free, open-source software available for free at "
+                "<a href='https://github.com/Takais-Chess/Opening-Fenix' style='color: #d35400;'>github.com/Takais-Chess/Opening-Fenix</a></b><br>"
+                "<span style='color: #64748b; font-size: {size}px;'>Licensed under the GNU General Public License v3.0 (GPLv3).</span>",
+                size=scale(12)
+            )
         )
         lbl_notice.setOpenExternalLinks(True)
         lbl_notice.setWordWrap(True)
@@ -3137,8 +3144,8 @@ class UnifiedSettingsDialog(QDialog):
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
                 border-radius: {scale(6)}px;
-                padding-left: {scale(10)}px;
-                padding-right: {scale(24)}px;
+                padding-left: {scale(8)}px;
+                padding-right: {scale(20)}px;
                 font-weight: 600;
             }}
         """)
@@ -4757,7 +4764,7 @@ class UnifiedSettingsDialog(QDialog):
         self.btn_open_task_batch.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_task_batch.clicked.connect(lambda: self.open_task_center(initial_tab=1))
 
-        self.btn_open_task_queue = QPushButton(tr_ui("repo_settings.btn_open_task_queue", "📋 Warteschlange & Verlauf"))
+        self.btn_open_task_queue = QPushButton(tr_ui("repo_settings.btn_open_task_queue", "📋 Warteschlange & Verlauf").replace("&", "&&").replace("&&&&", "&&"))
         self.btn_open_task_queue.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_open_task_queue.clicked.connect(lambda: self.open_task_center(initial_tab=2))
 

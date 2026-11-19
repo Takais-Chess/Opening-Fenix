@@ -181,12 +181,6 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
         translator.load_language(lang_code)
         from opening_fenix.creator.creator_window import CreatorWindow
         cwin = CreatorWindow(repertoire_name=chosen_repo)
-        cwin.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-        cwin.resize(1440, 920)
-        cwin.show()
-        app.processEvents()
-        time.sleep(0.3)
-        app.processEvents()
 
         tab_defs = [
             (0, "creator_tab_0_details", "Creator: 0 - Details & Moves"),
@@ -197,15 +191,11 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
         for tab_idx, key, title in tab_defs:
             if tab_idx < cwin.tabs.count():
                 cwin.tabs.setCurrentIndex(tab_idx)
-                app.processEvents()
-                time.sleep(0.2)
-                app.processEvents()
                 fname = f"{key}.png"
-                pixmap = cwin.grab()
                 out_path = os.path.join(lang_dir, fname)
-                pixmap.save(out_path, "PNG")
+                capture_widget(cwin, out_path, width=1440, height=920, delay_ms=250)
                 record_item(key, title, "Creator Window", fname)
-                print(f"     [SAVED] {title} ({pixmap.width()}x{pixmap.height()})")
+                print(f"     [SAVED] {title} ({cwin.width()}x{cwin.height()})")
 
         # Export Dialog (uses cwin.backend)
         print("  -> Capturing ExportDialog...")
@@ -239,11 +229,6 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
         translator.load_language(lang_code)
         from opening_fenix.gui.dialogs.unified_settings_dialog import UnifiedSettingsDialog
         settings_dlg = UnifiedSettingsDialog()
-        settings_dlg.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
-        settings_dlg.resize(1440, 840)
-        settings_dlg.show()
-        app.processEvents()
-        time.sleep(0.2)
 
         # Map sidebar items to capture
         page_index_map = [
@@ -280,16 +265,11 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
                         settings_dlg.on_tree_item_clicked(child, 0)
                         break
 
-            app.processEvents()
-            time.sleep(0.15)
-            app.processEvents()
-
             fname = f"{key}.png"
             out_path = os.path.join(lang_dir, fname)
-            pixmap = settings_dlg.grab()
-            pixmap.save(out_path, "PNG")
+            capture_widget(settings_dlg, out_path, width=1440, height=840, delay_ms=150)
             record_item(key, title, "Settings Pages", fname)
-            print(f"     [SAVED] {title} ({pixmap.width()}x{pixmap.height()})")
+            print(f"     [SAVED] {title} ({settings_dlg.width()}x{settings_dlg.height()})")
 
     except Exception as e:
         print(f"     [ERROR] UnifiedSettingsDialog: {e}")
