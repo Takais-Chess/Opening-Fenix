@@ -24,6 +24,7 @@ class ExportDialog(QDialog):
         self.setMinimumWidth(scale(560))
         self.result_data = None
         self.current_estimation = None
+        self._last_est_risk = None
 
         self.backend = backend
         self.setStyleSheet(get_export_dialog_style())
@@ -256,16 +257,20 @@ class ExportDialog(QDialog):
         size_mb = f"{est.get('estimated_size_mb', 0.0):.1f}"
         ratio = f"{est.get('expansion_factor', 1.0):.1f}"
 
+        risk_changed = (risk != self._last_est_risk)
+        self._last_est_risk = risk
+
         if risk == "critical":
-            self.banner_est.setStyleSheet(f"""
-                #ExportEstimationBanner {{
-                    background-color: rgba(220, 38, 38, 0.12);
-                    border: 1px solid rgba(220, 38, 38, 0.5);
-                    border-radius: {scale(8)}px;
-                }}
-            """)
-            self.lbl_est_title.setStyleSheet(f"font-weight: bold; color: #b91c1c; font-size: {scale(13)}px;")
-            self.lbl_est_body.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(12)}px; line-height: 140%;")
+            if risk_changed:
+                self.banner_est.setStyleSheet(f"""
+                    #ExportEstimationBanner {{
+                        background-color: rgba(220, 38, 38, 0.12);
+                        border: 1px solid rgba(220, 38, 38, 0.5);
+                        border-radius: {scale(8)}px;
+                    }}
+                """)
+                self.lbl_est_title.setStyleSheet(f"font-weight: bold; color: #b91c1c; font-size: {scale(13)}px;")
+                self.lbl_est_body.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(12)}px; line-height: 140%;")
             self.lbl_est_title.setText("⚠️ " + tr_ui("export.est_warn_critical_title", "Achtung: Extrem große PGN durch Transpositionen!"))
             self.lbl_est_body.setText(tr_ui(
                 "export.est_warn_critical_body",
@@ -274,14 +279,15 @@ class ExportDialog(QDialog):
             ))
             self.lbl_est_body.setVisible(True)
         elif risk == "moderate":
-            self.banner_est.setStyleSheet(f"""
-                #ExportEstimationBanner {{
-                    background-color: rgba(217, 119, 6, 0.1);
-                    border: 1px solid rgba(217, 119, 6, 0.4);
-                    border-radius: {scale(8)}px;
-                }}
-            """)
-            self.lbl_est_title.setStyleSheet(f"font-weight: bold; color: #d97706; font-size: {scale(13)}px;")
+            if risk_changed:
+                self.banner_est.setStyleSheet(f"""
+                    #ExportEstimationBanner {{
+                        background-color: rgba(217, 119, 6, 0.1);
+                        border: 1px solid rgba(217, 119, 6, 0.4);
+                        border-radius: {scale(8)}px;
+                    }}
+                """)
+                self.lbl_est_title.setStyleSheet(f"font-weight: bold; color: #d97706; font-size: {scale(13)}px;")
             self.lbl_est_title.setText("ℹ️ " + tr_ui(
                 "export.est_warn_moderate",
                 "Hinweis: Durch Transpositionen wächst die PGN auf ca. {moves} Züge (~{size_mb} MB, {ratio}x Vergrößerung).",
@@ -289,14 +295,15 @@ class ExportDialog(QDialog):
             ))
             self.lbl_est_body.setVisible(False)
         else:
-            self.banner_est.setStyleSheet(f"""
-                #ExportEstimationBanner {{
-                    background-color: rgba(46, 125, 50, 0.08);
-                    border: 1px solid rgba(46, 125, 50, 0.3);
-                    border-radius: {scale(8)}px;
-                }}
-            """)
-            self.lbl_est_title.setStyleSheet(f"font-weight: normal; color: #2e7d32; font-size: {scale(12)}px;")
+            if risk_changed:
+                self.banner_est.setStyleSheet(f"""
+                    #ExportEstimationBanner {{
+                        background-color: rgba(46, 125, 50, 0.08);
+                        border: 1px solid rgba(46, 125, 50, 0.3);
+                        border-radius: {scale(8)}px;
+                    }}
+                """)
+                self.lbl_est_title.setStyleSheet(f"font-weight: normal; color: #2e7d32; font-size: {scale(12)}px;")
             if est.get("transposition_cuts", 0) > 0:
                 text = "✓ " + tr_ui(
                     "export.est_info",

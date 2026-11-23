@@ -931,6 +931,7 @@ class AutoBackupThread(QThread):
     def run(self):
         from opening_fenix.core.services.maintenance_service import list_all_repertoires
         from opening_fenix.core.services.backup_service import create_repertoire_backup
+        from opening_fenix.core.services.cloud_sync_service import CloudSyncService
         from opening_fenix.core.logger import logger
 
         try:
@@ -947,8 +948,43 @@ class AutoBackupThread(QThread):
                 except Exception as e:
                     logger.warning(f"AutoBackupThread error for repertoire '{repo_name}': {e}")
                 self.msleep(100)  # Yield GIL to keep GUI animation butter-smooth
+
+            if not self.isInterruptionRequested() and CloudSyncService.is_enabled():
+                try:
+                    CloudSyncService.update_session_heartbeat()
+                    CloudSyncService.sync_now(direction="push")
+                except Exception as sync_err:
+                    logger.warning(f"AutoBackupThread cloud sync push error: {sync_err}")
         except Exception as ex:
             logger.error(f"AutoBackupThread main error: {ex}")
+
+
+class CloudSyncThread(QThread):
+    """
+    Background worker thread for non-blocking CloudSyncService synchronization
+    (e.g., startup/shutdown sync, manual 'Sync Now' in Settings, or debounced push after training/editing).
+    """
+    progress_signal = pyqtSignal(str, int, int)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, direction: str = "both", parent=None):
+        super().__init__(parent)
+        self.direction = direction
+
+    def run(self):
+        from opening_fenix.core.services.cloud_sync_service import CloudSyncService
+        from opening_fenix.core.logger import logger
+        try:
+            if CloudSyncService.is_enabled():
+                CloudSyncService.update_session_heartbeat()
+            summary = CloudSyncService.sync_now(
+                direction=self.direction,
+                progress_callback=lambda msg, cur, tot: self.progress_signal.emit(msg, cur, tot),
+            )
+            self.finished_signal.emit(summary)
+        except Exception as e:
+            logger.error(f"CloudSyncThread error: {e}")
+            self.finished_signal.emit({"enabled": CloudSyncService.is_enabled(), "errors": [str(e)]})
 
 
 class RepertoireMistakeScanThread(QThread):

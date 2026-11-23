@@ -4,7 +4,8 @@ Provides underline formatting for misspelled words and right-click correction me
 """
 
 from typing import Optional, Callable
-from PyQt6.QtCore import Qt, QPoint
+from PyQt6 import sip
+from PyQt6.QtCore import Qt, QPoint, pyqtSignal
 from PyQt6.QtGui import (
     QSyntaxHighlighter,
     QTextCharFormat,
@@ -24,18 +25,47 @@ class SpellCheckHighlighter(QSyntaxHighlighter):
     Syntax highlighter that inspects words using SpellCheckService
     and marks unrecognized words with a red wavy underline.
     """
+    _rehighlight_requested = pyqtSignal()
 
-    def __init__(self, document, get_lang_fn: Optional[Callable[[], str]] = None):
+    def __init__(self, document, get_lang_fn: Optional[Callable[[], str]] = None, editor=None):
         super().__init__(document)
         self.get_lang_fn = get_lang_fn
+        self._editor = editor
         self.service: SpellCheckService = get_spellcheck_service()
 
         self.error_format = QTextCharFormat()
         self.error_format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SpellCheckUnderline)
         self.error_format.setUnderlineColor(QColor("#E53935")) # Vivid Red
 
-        # Automatically refresh when dictionary or settings change
-        self.service.register_listener(self.rehighlight)
+        self._rehighlight_requested.connect(self._safe_rehighlight, Qt.ConnectionType.QueuedConnection)
+        self._listener_cb = self._request_rehighlight
+        # Automatically refresh when dictionary or settings change (thread-safe via queued signal)
+        self.service.register_listener(self._listener_cb)
+        # Unregister before C++ teardown so background warmup threads never emit on a dying QObject
+        service = self.service
+        listener_cb = self._listener_cb
+        self.destroyed.connect(lambda _obj=None: service.unregister_listener(listener_cb))
+
+    def _request_rehighlight(self):
+        if not sip.isdeleted(self):
+            try:
+                self._rehighlight_requested.emit()
+            except RuntimeError:
+                pass
+
+    def _safe_rehighlight(self):
+        if sip.isdeleted(self):
+            return
+        ed = self._editor
+        if ed is not None and not sip.isdeleted(ed):
+            was_blocked = ed.blockSignals(True)
+            try:
+                self.rehighlight()
+            finally:
+                if not sip.isdeleted(ed):
+                    ed.blockSignals(was_blocked)
+        else:
+            self.rehighlight()
 
     def current_language(self) -> str:
         if callable(self.get_lang_fn):
@@ -52,6 +82,10 @@ class SpellCheckHighlighter(QSyntaxHighlighter):
             return
 
         lang = self.current_language()
+        if not self.service.is_checker_ready(lang):
+            self.service.warm_up_async(lang)
+            return
+
         words_with_spans = self.service.extract_words_with_spans(text)
         valid_cache = {}
         is_valid_fn = self.service.is_word_valid
@@ -73,12 +107,12 @@ def attach_spell_check(
     Attaches spell checking and custom right-click context menu to a QPlainTextEdit or QTextEdit.
     Returns the created SpellCheckHighlighter.
     """
-    highlighter = SpellCheckHighlighter(editor.document(), get_lang_fn=get_lang_fn)
+    highlighter = SpellCheckHighlighter(editor.document(), get_lang_fn=get_lang_fn, editor=editor)
     editor._spell_highlighter = highlighter  # prevent GC
 
     # Unregister listener when widget is deleted to avoid leaks
     try:
-        editor.destroyed.connect(lambda *_args: highlighter.service.unregister_listener(highlighter.rehighlight))
+        editor.destroyed.connect(lambda *_args: highlighter.service.unregister_listener(highlighter._listener_cb))
     except Exception:
         pass
 

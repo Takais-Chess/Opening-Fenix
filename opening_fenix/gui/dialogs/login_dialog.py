@@ -406,11 +406,21 @@ class LoginDialog(QDialog):
 
         layout.addSpacing(scale(10))
 
-        # Checkbox for automatic login
+        # Checkbox for automatic login + Quick Cloud Sync button
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(scale(10))
         self.chk_auto_login = QCheckBox(tr_ui("login.auto_login_checkbox", "Beim nächsten Start dieses Profil wieder verwenden"))
         self.chk_auto_login.setObjectName("AutoLoginCheckbox")
         self.chk_auto_login.setCursor(Qt.CursorShape.PointingHandCursor)
-        layout.addWidget(self.chk_auto_login)
+        meta_row.addWidget(self.chk_auto_login, 1)
+
+        self.btn_cloud_sync = QPushButton()
+        self.btn_cloud_sync.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cloud_sync.setFixedHeight(scale(32))
+        self.btn_cloud_sync.clicked.connect(self.handle_cloud_sync_click)
+        meta_row.addWidget(self.btn_cloud_sync)
+        layout.addLayout(meta_row)
+        self._refresh_cloud_sync_button()
 
         layout.addSpacing(scale(15))
 
@@ -459,6 +469,118 @@ class LoginDialog(QDialog):
         
         self.loading_overlay.hide()
 
+    def _refresh_cloud_sync_button(self):
+        from opening_fenix.core.services.cloud_sync_service import CloudSyncService
+        from opening_fenix.gui.styles import get_cloud_sync_icon
+        if not hasattr(self, "btn_cloud_sync"):
+            return
+        self.btn_cloud_sync.setIconSize(QSize(scale(18), scale(18)))
+        if CloudSyncService.is_offline():
+            label = tr_ui("login.cloud_btn_offline", "Cloud Offline").replace("☁️", "").strip()
+            self.btn_cloud_sync.setIcon(get_cloud_sync_icon("offline", size=18, color="#a16207"))
+            self.btn_cloud_sync.setText(f" {label}")
+            self.btn_cloud_sync.setToolTip(
+                tr_ui(
+                    "login.cloud_tip_offline",
+                    "Cloud-Ordner aktuell nicht erreichbar ({path}). Klicken zum Ändern.",
+                    path=CloudSyncService.get_configured_cloud_dir() or "",
+                )
+            )
+            self.btn_cloud_sync.setStyleSheet(
+                f"QPushButton {{ background: rgba(255, 255, 255, 0.55); color: #854d0e; border: 1px solid rgba(161, 98, 7, 0.35); "
+                f"border-radius: {scale(10)}px; padding: {scale(4)}px {scale(12)}px; font-weight: 600; font-size: {scale(12)}px; }}"
+                f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.85); }}"
+            )
+        elif CloudSyncService.is_enabled():
+            label = tr_ui("login.cloud_btn_sync", "Cloud Sync").replace("☁️", "").replace("✓", "").strip()
+            self.btn_cloud_sync.setIcon(get_cloud_sync_icon("synced", size=18, color="#6d6475"))
+            self.btn_cloud_sync.setText(f" {label}")
+            self.btn_cloud_sync.setToolTip(
+                tr_ui(
+                    "login.cloud_tip_active",
+                    "Verbunden mit: {path}\nKlicken, um jetzt Profile & Repertoires aus der Cloud zu aktualisieren.",
+                    path=CloudSyncService.get_cloud_dir() or "",
+                )
+            )
+            self.btn_cloud_sync.setStyleSheet(
+                f"QPushButton {{ background: rgba(255, 255, 255, 0.52); color: {COLORS['brown_text']}; border: 1px solid rgba(139, 90, 43, 0.25); "
+                f"border-radius: {scale(10)}px; padding: {scale(4)}px {scale(12)}px; font-weight: 600; font-size: {scale(12)}px; }}"
+                f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.85); }}"
+            )
+        else:
+            label = tr_ui("login.cloud_btn_connect", "Cloud-Ordner verbinden").replace("☁️", "").strip()
+            self.btn_cloud_sync.setIcon(get_cloud_sync_icon("connect", size=18, color=COLORS['brown_text']))
+            self.btn_cloud_sync.setText(f" {label}")
+            self.btn_cloud_sync.setToolTip(
+                tr_ui(
+                    "login.cloud_tip_connect",
+                    "Verbinde Google Drive / OneDrive, um deine Profile & Repertoires von einem anderen PC sofort zu laden.",
+                )
+            )
+            self.btn_cloud_sync.setStyleSheet(
+                f"QPushButton {{ background: rgba(255, 255, 255, 0.52); color: {COLORS['brown_text']}; border: 1px solid rgba(139, 90, 43, 0.25); "
+                f"border-radius: {scale(10)}px; padding: {scale(4)}px {scale(12)}px; font-weight: 600; font-size: {scale(12)}px; }}"
+                f"QPushButton:hover {{ background: rgba(255, 255, 255, 0.85); }}"
+            )
+
+    def handle_cloud_sync_click(self):
+        from opening_fenix.core.services.cloud_sync_service import CloudSyncService
+        from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+        from opening_fenix.core.utils import set_custom_data_dir, migrate_user_data
+        from opening_fenix.gui.widgets.cloud_sync_widgets import (
+            CloudFolderSetupDialog,
+            run_sync_with_progress,
+            CloudSyncConflictDialog,
+        )
+
+        if CloudSyncService.is_enabled():
+            summary = run_sync_with_progress(
+                direction="both",
+                title=tr_ui("cloud_sync.progress_title", "☁️ Cloud-Synchronisation"),
+                subtitle=tr_ui("cloud_sync.startup_subtitle", "Prüfe Cloud-Ordner auf aktuelle Repertoires & Profile..."),
+                parent=self,
+            )
+            if summary.get("conflicts") or summary.get("provider_conflict_files"):
+                CloudSyncConflictDialog(
+                    conflicts=summary.get("conflicts"),
+                    merged_profiles=summary.get("merged_profiles"),
+                    provider_conflict_files=summary.get("provider_conflict_files"),
+                    parent=self,
+                ).exec()
+            self._refresh_cloud_sync_button()
+            self.load_profiles()
+            return
+
+        dlg = CloudFolderSetupDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or not dlg.selected_folder:
+            return
+
+        selected_dir = dlg.selected_folder
+        prev_local_dir = get_user_dir()
+        set_custom_data_dir(selected_dir)
+        new_local_dir = get_user_dir()
+        if os.path.normcase(os.path.abspath(prev_local_dir)) != os.path.normcase(os.path.abspath(new_local_dir)):
+            migrate_user_data(prev_local_dir, new_local_dir)
+
+        CloudSyncService.acquire_session_lock(selected_dir)
+        summary = run_sync_with_progress(
+            direction="both",
+            title=tr_ui("cloud_sync.progress_title", "☁️ Cloud-Synchronisation"),
+            subtitle=tr_ui("cloud_sync.setup_syncing_subtitle", "Lade Repertoires & Profile aus dem Cloud-Ordner..."),
+            parent=self,
+        )
+        CloudSyncManager.instance().start_heartbeat()
+        CloudSyncManager.instance().refresh_status()
+        if summary.get("conflicts") or summary.get("provider_conflict_files"):
+            CloudSyncConflictDialog(
+                conflicts=summary.get("conflicts"),
+                merged_profiles=summary.get("merged_profiles"),
+                provider_conflict_files=summary.get("provider_conflict_files"),
+                parent=self,
+            ).exec()
+        self._refresh_cloud_sync_button()
+        self.load_profiles()
+
     def closeEvent(self, event):
         uninstall_taskbar_close_filter(self._taskbar_filter)
         self._taskbar_filter = None
@@ -492,6 +614,22 @@ class LoginDialog(QDialog):
                 )
             if not has_profiles:
                 QTimer.singleShot(0, self.create_new_profile)
+            else:
+                QTimer.singleShot(80, self._start_idle_prewarm)
+
+    def _start_idle_prewarm(self):
+        import sys
+        import threading
+        if "pytest" in sys.modules:
+            return
+        def _bg():
+            try:
+                import opening_fenix.gui.main_window  # noqa: F401
+                from opening_fenix.gui.dialogs.unified_settings_dialog import prewarm_priority_repertoire_assets
+                prewarm_priority_repertoire_assets()
+            except Exception:
+                pass
+        threading.Thread(target=_bg, daemon=True, name="LoginIdlePrewarm").start()
 
     def show_loading_state(self, profile_name):
         """Displays a loading message and disables interaction."""

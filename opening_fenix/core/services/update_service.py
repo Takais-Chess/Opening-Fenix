@@ -223,6 +223,8 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
+            if not self.manual and not should_check_for_updates(manual=False):
+                return
             logger.info(f"UpdateCheckWorker: Checking GitHub releases for updates (manual={self.manual})...")
 
             api_data = None

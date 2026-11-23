@@ -578,6 +578,8 @@ class ChessBoardWidget(QWidget):
             self.drawing_current_sq = None
             self.drawing_color = None
             self.drawing_highlight_color = None
+            if changed:
+                self._invalidate_snapshot()
             self.update()
             if changed:
                 self.drawings_changed.emit()
@@ -750,13 +752,13 @@ class ChessBoardWidget(QWidget):
         painter.drawEllipse(QPointF(center_x, center_y), radius, radius)
         painter.restore()
 
-    def _paint_circles(self, painter, square_size):
+    def _paint_circles(self, painter, square_size, include_live_preview=True):
         """Draws circle highlights on marked squares."""
         for sq, color in self.user_highlights.items():
             self._draw_circle(painter, sq, color, square_size)
 
         # Live preview circle while holding right-click without drag
-        if (self.is_drawing and self.drawing_start_sq is not None 
+        if (include_live_preview and self.is_drawing and self.drawing_start_sq is not None 
                 and self.drawing_current_sq == self.drawing_start_sq 
                 and self.drawing_highlight_color is not None):
             self._draw_circle(painter, self.drawing_start_sq, self.drawing_highlight_color, square_size)
@@ -866,8 +868,8 @@ class ChessBoardWidget(QWidget):
                 rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
                 painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
         self._paint_pieces(painter, square_size, skip_square=skip_square, skip_squares=skip_squares)
-        self._paint_circles(painter, square_size)
-        self._paint_arrows(painter, square_size)
+        self._paint_circles(painter, square_size, include_live_preview=False)
+        self._paint_arrows(painter, square_size, include_live_preview=False)
         painter.end()
 
         self._snapshot_flipped = self.flipped
@@ -876,7 +878,7 @@ class ChessBoardWidget(QWidget):
         self._snapshot_skip_sq = skip_square
         return snapshot
 
-    def _paint_arrows(self, painter, square_size):
+    def _paint_arrows(self, painter, square_size, include_live_preview=True):
         """Draws all arrows (hint, solution, explorer, user)."""
         if self.hint_arrow:
             if isinstance(self.hint_arrow, chess.Move):
@@ -907,10 +909,20 @@ class ChessBoardWidget(QWidget):
             self._draw_arrow(painter, from_sq, to_sq, color, square_size)
 
         # 5. Live preview arrow while dragging
-        if (self.is_drawing and self.drawing_start_sq is not None 
+        if (include_live_preview and self.is_drawing and self.drawing_start_sq is not None 
                 and self.drawing_current_sq is not None 
                 and self.drawing_start_sq != self.drawing_current_sq 
                 and self.drawing_color is not None):
+            self._draw_arrow(painter, self.drawing_start_sq, self.drawing_current_sq, self.drawing_color, square_size)
+
+    def _paint_live_drawing_preview(self, painter, square_size):
+        """Draws only the active right-click preview circle or arrow over a cached snapshot."""
+        if not self.is_drawing or self.drawing_start_sq is None or self.drawing_current_sq is None:
+            return
+        if self.drawing_current_sq == self.drawing_start_sq:
+            if self.drawing_highlight_color is not None:
+                self._draw_circle(painter, self.drawing_start_sq, self.drawing_highlight_color, square_size)
+        elif self.drawing_color is not None:
             self._draw_arrow(painter, self.drawing_start_sq, self.drawing_current_sq, self.drawing_color, square_size)
 
     def paintEvent(self, event):
@@ -923,9 +935,10 @@ class ChessBoardWidget(QWidget):
         
         is_drag = self.dragging_piece is not None
         is_anim = bool(self.is_animating and self.animating_piece_data)
+        is_draw = bool(self.is_drawing)
 
-        if is_anim or is_drag:
-            # High-performance 2-draw-call pipeline for both animations and piece dragging:
+        if is_anim or is_drag or is_draw:
+            # High-performance 2-draw-call pipeline for animations, piece dragging, and arrow drawing:
             # 1. Blit pre-rendered static board snapshot (squares + stationary pieces + annotations)
             dt = painter.deviceTransform()
             dpr = dt.m11() if dt.m11() > 0 else self.devicePixelRatioF()
@@ -934,7 +947,7 @@ class ChessBoardWidget(QWidget):
             rem_dy_phys = dev_dy - round(dev_dy)
             phase_key = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
             expected_skip_sq = (
-                self.animating_piece_data['from_square'] if is_anim else self.drag_start_square
+                self.animating_piece_data['from_square'] if is_anim else (self.drag_start_square if is_drag else None)
             )
 
             if (self._board_snapshot is None or
@@ -956,6 +969,8 @@ class ChessBoardWidget(QWidget):
                 painter.translate(x_offset, y_offset)
                 if clip_rect.isEmpty() or not inner_board_rect.contains(clip_rect):
                     self._paint_coordinates(painter, square_size)
+                if is_draw:
+                    self._paint_live_drawing_preview(painter, square_size)
             else:
                 skip_sq_fallback = expected_skip_sq
                 skip_squares = {skip_sq_fallback} if skip_sq_fallback is not None else None
@@ -987,9 +1002,27 @@ class ChessBoardWidget(QWidget):
                     self.draw_piece(painter, d['rook_piece'], r_col, r_row, square_size, scale_factor=r_scale)
 
         else:
-            # Standard direct rendering when idle
+            # Fast idle rendering: reuse cached 8x8 checkerboard pixmap instead of 64 rect fills
+            dt = painter.deviceTransform()
+            dpr = dt.m11() if dt.m11() > 0 else self.devicePixelRatioF()
+            dev_dx, dev_dy = dt.dx(), dt.dy()
+            rem_dx_phys = dev_dx - round(dev_dx)
+            rem_dy_phys = dev_dy - round(dev_dy)
+            w_px = max(1, round(self.width() * dpr)) + 2
+            h_px = max(1, round(self.height() * dpr)) + 2
+            squares_pm = self._ensure_squares_pixmap(
+                w_px, h_px, dpr, rem_dx_phys, rem_dy_phys, x_offset, y_offset, square_size
+            )
+            painter.drawPixmap(QPointF(-rem_dx_phys / dpr, -rem_dy_phys / dpr), squares_pm)
             painter.translate(x_offset, y_offset)
-            self._paint_board_base(painter, square_size)
+            if self.last_move:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._highlight_brush)
+                for sq in [self.last_move.from_square, self.last_move.to_square]:
+                    f, r = chess.square_file(sq), chess.square_rank(sq)
+                    rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+                    painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+            self._paint_coordinates(painter, square_size)
             self._paint_pieces(painter, square_size, skip_square=None)
             self._paint_circles(painter, square_size)
             self._paint_arrows(painter, square_size)

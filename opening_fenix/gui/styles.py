@@ -169,6 +169,81 @@ def get_settings_gear_icon(size: int = 22, color: str = None, y_offset: float = 
         icon.addPixmap(pixmap)
     return icon
 
+
+def get_cloud_sync_icon(state: str = "synced", size: int = 20, color: str = None) -> QIcon:
+    """Renders a crisp HiDPI SVG cloud-sync QIcon (synced, syncing, offline, warning, connect), avoiding Windows emoji artifacts."""
+    from PyQt6.QtCore import Qt, QByteArray, QRectF
+    from PyQt6.QtGui import QPixmap, QPainter
+    from PyQt6.QtSvg import QSvgRenderer
+
+    default_colors = {
+        "synced": "#15803d",
+        "syncing": "#1d4ed8",
+        "offline": "#b45309",
+        "warning": "#b91c1c",
+        "other_device": "#a16207",
+        "connect": "#5d4037",
+    }
+    stroke = color or default_colors.get(state, "#15803d")
+
+    # Clean 24x24 Lucide-style cloud paths with crisp state glyphs inside
+    cloud_outline = (
+        f'<path fill="none" stroke="{stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+        f'd="M6.5 19h11a4.5 4.5 0 0 0 .9-8.91A6 6 0 0 0 6.8 8.3 4 4 0 0 0 6.5 19z"/>'
+    )
+
+    if state == "synced":
+        inner = (
+            f'<path fill="none" stroke="{stroke}" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" '
+            f'd="M9.5 13.6l1.8 1.8 3.6-3.8"/>'
+        )
+        body = cloud_outline + inner
+    elif state == "syncing":
+        inner = (
+            f'<path fill="none" stroke="{stroke}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" '
+            f'd="M9.5 13.2a2.6 2.6 0 0 1 4.4-1.5m.6 2.1a2.6 2.6 0 0 1-4.4 1.5"/>'
+            f'<polyline fill="none" stroke="{stroke}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
+            f'points="14.2 10.6 14.2 12.2 12.6 12.2"/>'
+            f'<polyline fill="none" stroke="{stroke}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" '
+            f'points="9.8 16.4 9.8 14.8 11.4 14.8"/>'
+        )
+        body = cloud_outline + inner
+    elif state == "offline":
+        body = (
+            f'<path fill="none" stroke="{stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" '
+            f'd="M6.5 19h9.5m3.5-1.1A4.5 4.5 0 0 0 18.4 10.1 6 6 0 0 0 9.6 6.2M6.8 8.3A4 4 0 0 0 6.5 19"/>'
+            f'<line x1="3" y1="3" x2="21" y2="21" stroke="{stroke}" stroke-width="2" stroke-linecap="round"/>'
+        )
+    elif state in ("warning", "other_device"):
+        inner = (
+            f'<line x1="12" y1="10.2" x2="12" y2="14.2" stroke="{stroke}" stroke-width="2.1" stroke-linecap="round"/>'
+            f'<circle cx="12" cy="16.6" r="1.05" fill="{stroke}"/>'
+        )
+        body = cloud_outline + inner
+    else:
+        # connect / local
+        inner = (
+            f'<line x1="12" y1="10.8" x2="12" y2="16.2" stroke="{stroke}" stroke-width="2" stroke-linecap="round"/>'
+            f'<line x1="9.3" y1="13.5" x2="14.7" y2="13.5" stroke="{stroke}" stroke-width="2" stroke-linecap="round"/>'
+        )
+        body = cloud_outline + inner
+
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>'
+    px_size = max(16, scale(size))
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    icon = QIcon()
+    for dpr in (1, 2, 3):
+        pixmap = QPixmap(px_size * dpr, px_size * dpr)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        pixmap.setDevicePixelRatio(dpr)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        renderer.render(painter, QRectF(0, 0, px_size, px_size))
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
+
 def get_indicator_style(accent_color=COLORS['burnt_orange'], border_color="rgba(62, 39, 35, 0.35)", bg_color="rgba(255, 255, 255, 0.85)"):
     """Returns standard styling for QCheckBox and ItemView indicators across the app."""
     hover_accent = "#e67e22" if accent_color == COLORS['burnt_orange'] else accent_color

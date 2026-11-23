@@ -33,14 +33,13 @@ class BatchDualModeCell(QWidget):
     """
     def __init__(self, initial_text: str = "-", parent=None):
         super().__init__(parent)
-        self.setStyleSheet("background: transparent;")
+        self.setObjectName("BatchDualModeCell")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(scale(6), scale(3), scale(6), scale(3))
         layout.setSpacing(0)
 
         self.label = QLabel(initial_text)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.label.setStyleSheet(f"font-size: {scale(12)}px; color: #1e293b; font-weight: 500; background: transparent;")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -103,8 +102,10 @@ class TaskCenterDialog(QDialog):
         self.tm = get_task_manager()
         self.config = get_config_dict()
         self.stats_worker: Optional[RepertoireStatsWorker] = None
+        self._batch_table_populated = False
         self._batch_stats_loaded = False
         self._batch_name_to_row: Dict[str, int] = {}
+        self._all_repos: List[str] = []
 
         self._init_ui()
         self._apply_dialog_styles()
@@ -238,6 +239,15 @@ class TaskCenterDialog(QDialog):
                 background-color: #16a34a;
                 border-radius: {scale(4)}px;
             }}
+            QWidget#BatchDualModeCell, QWidget#BatchCellContainer {{
+                background: transparent;
+            }}
+            QWidget#BatchDualModeCell QLabel {{
+                font-size: {scale(12)}px;
+                color: #1e293b;
+                font-weight: 500;
+                background: transparent;
+            }}
         """)
 
     def _init_ui(self):
@@ -337,9 +347,11 @@ class TaskCenterDialog(QDialog):
         main_layout.addLayout(bottom_bar)
 
     def _on_tab_changed(self, idx: int):
-        if idx == 1 and not self._batch_stats_loaded:
-            self._batch_stats_loaded = True
-            self._start_batch_stats_worker()
+        if idx == 1:
+            self._ensure_batch_table_populated()
+            if not self._batch_stats_loaded:
+                self._batch_stats_loaded = True
+                self._start_batch_stats_worker()
 
     def _update_pill_badge(self, state: str, text: str):
         if state == "running":
@@ -386,6 +398,7 @@ class TaskCenterDialog(QDialog):
         self.combo_repo.setFixedHeight(scale(32))
         self.combo_repo.setMinimumWidth(scale(300))
         all_repos = RepertoireService().get_all_repertoires()
+        self._all_repos = list(all_repos)
         for r in all_repos:
             self.combo_repo.addItem(r)
         if self.active_repo_name and self.active_repo_name in all_repos:
@@ -728,7 +741,7 @@ class TaskCenterDialog(QDialog):
         self.table_batch.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_batch.setShowGrid(False)
 
-        self._populate_batch_table()
+        # Batch rows are lazily populated on first visit to Tab 2 (or when syncing a running batch job)
         layout.addWidget(self.table_batch, 1)
 
         # Bottom Live Overall Progress & Start/Stop Bar
@@ -761,8 +774,14 @@ class TaskCenterDialog(QDialog):
         layout.addWidget(bottom_batch_frame)
         _update_batch_enables()
 
+    def _ensure_batch_table_populated(self):
+        if self._batch_table_populated:
+            return
+        self._batch_table_populated = True
+        self._populate_batch_table()
+
     def _populate_batch_table(self):
-        all_repos = RepertoireService().get_all_repertoires()
+        all_repos = self._all_repos if self._all_repos else RepertoireService().get_all_repertoires()
         self.table_batch.setUpdatesEnabled(False)
         try:
             self._populate_batch_table_rows(all_repos)
@@ -784,7 +803,7 @@ class TaskCenterDialog(QDialog):
             chk.setChecked(True)
             chk.toggled.connect(self._update_batch_selection_count)
             chk_widget = QWidget()
-            chk_widget.setStyleSheet("background: transparent;")
+            chk_widget.setObjectName("BatchCellContainer")
             ch_lay = QHBoxLayout(chk_widget)
             ch_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
             ch_lay.setContentsMargins(0, 0, 0, 0)
@@ -802,8 +821,9 @@ class TaskCenterDialog(QDialog):
             item_name.setFlags(item_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table_batch.setItem(row, 1, item_name)
 
-            # Col 2: Target Elo
-            repo_elo = get_repertoire_elo(r_name)
+            # Col 2: Target Elo (reused from meta without opening a 2nd SQLite connection)
+            raw_elo = (meta.get("lichess_elo") or meta.get("elo") or "high") if meta else "high"
+            repo_elo = get_elo_internal(str(raw_elo).strip())
             elo_disp = get_elo_display(repo_elo)
             item_elo = QTableWidgetItem(elo_disp)
             item_elo.setToolTip(elo_disp)
@@ -821,7 +841,7 @@ class TaskCenterDialog(QDialog):
 
             # Col 5: Per-Repo Task Progress Bar
             pb_container = QWidget()
-            pb_container.setStyleSheet("background: transparent;")
+            pb_container.setObjectName("BatchCellContainer")
             h_pb = QHBoxLayout(pb_container)
             h_pb.setContentsMargins(scale(6), scale(3), scale(10), scale(3))
             pb = QProgressBar()
@@ -924,6 +944,7 @@ class TaskCenterDialog(QDialog):
         )
 
     def _set_all_batch_checked(self, checked: bool):
+        self._ensure_batch_table_populated()
         for r in range(self.table_batch.rowCount()):
             cb = self._get_batch_row_checkbox(r)
             if cb:
@@ -1195,6 +1216,7 @@ class TaskCenterDialog(QDialog):
         self.tm.enqueue(job)
 
     def _on_start_batch(self):
+        self._ensure_batch_table_populated()
         curr = self.tm.get_current_job()
         if curr and curr.job_type == JobType.BATCH_MAINTENANCE and curr.status == JobStatus.RUNNING:
             self.lbl_batch_overall.setText(tr_ui("repo_settings.stopping_maintenance", "Wartung wird gestoppt..."))
@@ -1306,6 +1328,7 @@ class TaskCenterDialog(QDialog):
             return
         self._on_task_started(curr)
         if curr.job_type == JobType.BATCH_MAINTENANCE and hasattr(curr, 'repo_task_status'):
+            self._ensure_batch_table_populated()
             for r_name, t_map in curr.repo_task_status.items():
                 for t_type, (pct, st) in t_map.items():
                     if pct > 0 or st != "Wartend":
@@ -1446,6 +1469,8 @@ class TaskCenterDialog(QDialog):
     def _on_batch_repo_status(self, job, name: str, task_type: str, pct: int, status_text: str):
         if sip.isdeleted(self):
             return
+        if not self._batch_table_populated:
+            self._ensure_batch_table_populated()
         row = self._batch_name_to_row.get(name)
         if row is None or row >= self.table_batch.rowCount():
             return

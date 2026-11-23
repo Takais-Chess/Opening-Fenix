@@ -365,6 +365,44 @@ class TestSettingsDialogRepoPage:
         assert not settings_dialog.info_content_widget.isHidden()
         assert settings_dialog.btn_reset.isEnabled()
 
+    def test_single_active_card_no_vertical_overlap(self, settings_dialog, main_window, monkeypatch):
+        """Wenn nur eine Repertoire-Card aktiv ist, dürfen sich Zeilen im Grid nicht vertikal überlappen."""
+        from PyQt6.QtWidgets import QApplication
+        from opening_fenix.core.services.repertoire_core_service import RepertoireService
+
+        fake_repos = [
+            "Gawain's 1.e4 e5",
+            "1... e5 Gus",
+            "1.D4 Ben Finegold",
+            "1.e4 Empfelung Anfänger",
+            "1.e4 e5 - Dreckige Offene Spiele",
+            "1.e4 giri",
+            "Anfänger gegen Weiß",
+            "Attacking Repertoire for Club Players for Black",
+            "Benko Gambit",
+            "Caruana's Ruy Lopez - Dark Archangel",
+            "Der Noori Grand Prix",
+            "Französisch Giri",
+        ]
+        monkeypatch.setattr(RepertoireService, "get_all_repertoires", lambda self: list(fake_repos))
+        monkeypatch.setattr(
+            main_window.training_manager,
+            "is_repo_visible",
+            lambda name: name == "Gawain's 1.e4 e5",
+        )
+
+        settings_dialog.refresh_trainer_repertoire_cards()
+        settings_dialog.show()
+        QApplication.processEvents()
+
+        layout = settings_dialog.trainer_cards_layout
+        assert layout.count() == len(fake_repos)
+        for i in range(layout.count()):
+            g1 = layout.itemAt(i).widget().geometry()
+            for j in range(i + 1, layout.count()):
+                g2 = layout.itemAt(j).widget().geometry()
+                assert not g1.intersects(g2), f"Card {i} ({g1}) overlaps Card {j} ({g2})"
+
 
 # ─── Seite 3: Software-Updates ──────────────────────────────────────────────────
 

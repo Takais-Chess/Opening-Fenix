@@ -139,9 +139,9 @@ def test_tr_widget_helper():
     from opening_fenix.core.translation import tr_widget
     
     translator.load_language("de")
-    # settings.storage_title in de.json is "📁 Speicherort & Cloud-Synchronisation"
-    res = tr_widget("settings.storage_title", "📁 Speicherort & Cloud-Synchronisation")
-    assert res == "📁 Speicherort && Cloud-Synchronisation"
+    # settings.audio_title in de.json is "🔊 Klang & Lautstärke"
+    res = tr_widget("settings.audio_title", "🔊 Klang & Lautstärke")
+    assert res == "🔊 Klang && Lautstärke"
     
     # Fallback default should also be escaped
     fallback_res = tr_widget("non_existent_key", "Custom & Fallback")

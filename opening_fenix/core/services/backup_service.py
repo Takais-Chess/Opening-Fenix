@@ -8,13 +8,20 @@ import zipfile
 import shutil
 from datetime import datetime, timedelta, timezone
 
-from opening_fenix.core.utils import get_user_dir, get_base_path, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict, has_meaningful_comment
+from opening_fenix.core.utils import get_user_dir, get_base_path, get_custom_data_dir, get_local_workspace_dir, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict, has_meaningful_comment
+from opening_fenix.core.services.cloud_sync_service import verify_sqlite_db
 from opening_fenix.core.logger import logger
 
 
 def get_backups_base_dir() -> str:
-    """Returns the absolute path to the main backups directory."""
-    b_dir = os.path.join(get_user_dir(), "backups")
+    """Returns the absolute path to the main backups directory (in cloud dir if active, else user_dir)."""
+    u_dir = get_user_dir()
+    cloud_dir = get_custom_data_dir()
+    if cloud_dir and os.path.normcase(os.path.abspath(u_dir)) == os.path.normcase(os.path.abspath(get_local_workspace_dir())):
+        base = cloud_dir
+    else:
+        base = u_dir
+    b_dir = os.path.join(base, "backups")
     os.makedirs(b_dir, exist_ok=True)
     return b_dir
 
@@ -272,6 +279,13 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
         logger.warning(f"Cannot backup repertoire '{repo_name}': DB file does not exist at {db_path}")
         return None
 
+    if not verify_sqlite_db(db_path):
+        logger.error(
+            f"Aborting backup for '{repo_name}': database failed integrity check ({db_path}). "
+            f"Refusing to overwrite healthy backups with a corrupted DB."
+        )
+        return None
+
     repo_dir = get_repertoire_dir(repo_name)
     backup_dir = get_repertoire_backup_dir(repo_name)
     
@@ -315,19 +329,46 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             fd, temp_backup_db = tempfile.mkstemp(suffix=".db")
             os.close(fd)
             src_uri = f"file:{os.path.abspath(db_path)}?mode=ro"
-            with sqlite3.connect(src_uri, uri=True, timeout=10.0) as src_conn:
-                with sqlite3.connect(temp_backup_db) as dst_conn:
-                    src_conn.backup(dst_conn)
+            src_conn = None
+            dst_conn = None
+            try:
+                src_conn = sqlite3.connect(src_uri, uri=True, timeout=10.0)
+                dst_conn = sqlite3.connect(temp_backup_db, timeout=10.0)
+                src_conn.backup(dst_conn)
+            finally:
+                if dst_conn is not None:
+                    try:
+                        dst_conn.close()
+                    except Exception:
+                        pass
+                if src_conn is not None:
+                    try:
+                        src_conn.close()
+                    except Exception:
+                        pass
             db_source_for_zip = temp_backup_db
         except Exception as bk_err:
             logger.debug(f"SQLite online backup fallback ({repo_name}): {bk_err}")
             # Fallback: passive checkpoint
+            chk_conn = None
             try:
-                with sqlite3.connect(db_path, timeout=5) as conn:
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                chk_conn = sqlite3.connect(db_path, timeout=5)
+                chk_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
             except Exception:
                 pass
+            finally:
+                if chk_conn is not None:
+                    try:
+                        chk_conn.close()
+                    except Exception:
+                        pass
             db_source_for_zip = db_path
+
+        if not verify_sqlite_db(db_source_for_zip):
+            logger.error(
+                f"Aborting backup for '{repo_name}': snapshot database failed integrity check ({db_source_for_zip})."
+            )
+            return None
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             # 1. Add DB file

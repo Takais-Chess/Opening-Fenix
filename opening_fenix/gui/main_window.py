@@ -258,9 +258,12 @@ class MainWindow(QMainWindow):
         import sys
         if "pytest" in sys.modules:
             return
-        from opening_fenix.core.services.update_service import should_check_for_updates, UpdateCheckWorker
-        if not should_check_for_updates(manual=False):
+        if sip.isdeleted(self):
             return
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            QTimer.singleShot(500, self.check_for_updates)
+            return
+        from opening_fenix.core.services.update_service import UpdateCheckWorker
 
         self.update_checker = UpdateCheckWorker(manual=False, parent=self)
         self.update_checker.update_found.connect(self.on_update_found)
@@ -272,6 +275,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(3000, self._start_background_workers)
 
     def _start_background_workers(self):
+        if sip.isdeleted(self):
+            return
+        if getattr(self, 'board_widget', None) and (self.board_widget.is_animating or self.animation_moves):
+            QTimer.singleShot(500, self._start_background_workers)
+            return
         try:
             if hasattr(self, 'update_checker') and self.update_checker and not self.update_checker.isRunning():
                 logger.info("MainWindow: Starting background UpdateCheckWorker...")
@@ -520,9 +528,14 @@ class MainWindow(QMainWindow):
 
         self.btn_settings.clicked.connect(self.open_settings)
 
+        from opening_fenix.gui.widgets.cloud_sync_widgets import CloudSyncStatusPill
+        self.cloud_sync_pill = CloudSyncStatusPill(self, compact_height=40, icon_only=True)
+        self.cloud_sync_pill.open_settings_requested.connect(self.open_storage_settings)
+
         top_right_layout.addWidget(self.btn_filter)
         top_right_layout.addWidget(self.lbl_elo)
         top_right_layout.addWidget(self.btn_switch_profile)
+        top_right_layout.addWidget(self.cloud_sync_pill)
         top_right_layout.addWidget(self.btn_settings)
         top_layout.addWidget(top_right_container)
 
@@ -1001,7 +1014,10 @@ class MainWindow(QMainWindow):
                 mini_donut.update_stats(new, due, done_dist)
         
         # Update Elo display
-        elo = self.training_manager.get_current_elo()
+        try:
+            elo = self.training_manager.get_current_elo(allow_stale_cache=allow_stale_cache)
+        except TypeError:
+            elo = self.training_manager.get_current_elo()
         self.lbl_elo.setText(f"🎓 {elo}")
         return new, due, done_dist
 
@@ -1016,7 +1032,10 @@ class MainWindow(QMainWindow):
             self._db_commit_timer.stop()
         if getattr(self, 'training_manager', None) and hasattr(self.training_manager, 'flush_pending_commits'):
             try:
-                self.training_manager.flush_pending_commits()
+                flushed = self.training_manager.flush_pending_commits()
+                if flushed or flushed is None:
+                    from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+                    CloudSyncManager.instance().schedule_background_push(delay_ms=15000)
             except Exception as e:
                 logger.error(f"Error flushing pending DB commits: {e}")
 
@@ -1068,6 +1087,7 @@ class MainWindow(QMainWindow):
         gen = self._repo_preload_gen
         mode = self.training_mode
         var_filter = self.active_variation_filter
+        eff_lang = self.get_effective_comment_language()
         should_check_integrity = repo_name not in self._checked_integrity_repos
 
         def _is_stale():
@@ -1115,6 +1135,10 @@ class MainWindow(QMainWindow):
                     anim_ctx = self._precompute_move_anim_context(next_move, var_filter) if next_move else None
                     if not _is_stale():
                         self._preloaded_start_challenge = (repo_name, mode, var_filter, next_move, anim_ctx)
+                if not _is_stale():
+                    with self._preload_lock:
+                        if not _is_stale():
+                            self.repertoire_manager.get_variation_structure(lang=eff_lang)
             except Exception as e:
                 logger.debug(f"Background repertoire preload skipped: {e}")
 
@@ -1677,18 +1701,43 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(500, self._prewarm_settings_dialog)
             return
 
+        first_visible = None
+        ordered_active_repos = []
+        try:
+            vis = self.training_manager.get_visible_repos() if getattr(self, 'training_manager', None) else []
+            if vis:
+                first_visible = sorted(vis)[0]
+                ordered_active_repos = list(self.sorted_repo_names or vis)
+        except Exception:
+            pass
+
         def _bg_prewarm():
             try:
-                from opening_fenix.core.services.repertoire_core_service import (
-                    RepertoireService, get_repertoire_levels_fast, get_repertoire_comment_languages_fast
+                from opening_fenix.gui.dialogs.unified_settings_dialog import prewarm_priority_repertoire_assets
+                from opening_fenix.creator.repo_selection_dialog import _load_favorite_repertoires
+                tm = getattr(self, 'training_manager', None)
+                if tm and hasattr(tm, 'prewarm_repertoire_graph'):
+                    favs = _load_favorite_repertoires()
+                    # Prioritize active profile's top repertoires (active first, then favorites in active, then remaining)
+                    active_favs = [r for r in ordered_active_repos if r in favs]
+                    active_rest = [r for r in ordered_active_repos if r not in favs]
+                    graph_targets = []
+                    for r in (ordered_active_repos[:1] + active_favs + active_rest):
+                        if r not in graph_targets:
+                            graph_targets.append(r)
+                    for vr in graph_targets:
+                        tm.prewarm_repertoire_graph(vr, respect_budget=True)
+                prewarm_priority_repertoire_assets(
+                    profile_name=self.profile_name,
+                    explicit_active=ordered_active_repos,
+                    first_stat_repo=first_visible,
                 )
-                for repo_name in RepertoireService().get_all_repertoires():
-                    get_repertoire_levels_fast(repo_name)
-                    get_repertoire_comment_languages_fast(repo_name)
             except Exception as e:
                 logger.debug(f"Background settings metadata prewarm skipped: {e}")
 
-        threading.Thread(target=_bg_prewarm, daemon=True, name="SettingsMetadataPrewarm").start()
+        t = threading.Thread(target=_bg_prewarm, daemon=True, name="SettingsMetadataPrewarm")
+        self._prewarm_thread = t
+        t.start()
 
     def open_settings(self):
         from PyQt6 import sip
@@ -1703,9 +1752,19 @@ class MainWindow(QMainWindow):
         self.settings_dialog.raise_()
         self.settings_dialog.activateWindow()
 
+    def open_storage_settings(self):
+        self.open_settings()
+        if hasattr(self, 'settings_dialog') and self.settings_dialog and hasattr(self.settings_dialog, 'navigate_to_storage'):
+            self.settings_dialog.navigate_to_storage()
+
     def _on_settings_closed(self):
         self.refresh_repertoire_buttons()
         self.update_settings_from_manager()
+        try:
+            from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+            CloudSyncManager.instance().refresh_status()
+        except Exception:
+            pass
         self._do_update_stats_display()
 
     def update_settings_from_manager(self):
@@ -2089,6 +2148,15 @@ class MainWindow(QMainWindow):
                 self.creator_window.close()
             except: pass
 
+        if hasattr(self, '_bg_cloud_sync_worker') and self._bg_cloud_sync_worker and self._bg_cloud_sync_worker.isRunning():
+            try:
+                self._bg_cloud_sync_worker.wait(500)
+            except Exception: pass
+        try:
+            from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+            CloudSyncManager.instance().wait_for_active_sync(500)
+        except Exception:
+            pass
         if hasattr(self, 'backup_worker') and self.backup_worker and self.backup_worker.isRunning():
             try:
                 self.backup_worker.requestInterruption()

@@ -92,7 +92,9 @@ class SpellCheckService:
 
     def __init__(self):
         self._checkers: Dict[str, Optional[SpellChecker]] = {}
+        self._warming_langs: Set[str] = set()
         self._checker_lock = threading.Lock()
+        self._listener_lock = threading.RLock()
         self._user_dictionary: Set[str] = set()
         self._ignored_words: Set[str] = set()
         self._listeners: Set = set()
@@ -174,19 +176,22 @@ class SpellCheckService:
     def register_listener(self, callback):
         """Registers a callback to be invoked when dictionary or enabled state changes."""
         if callable(callback):
-            self._listeners.add(callback)
+            with self._listener_lock:
+                self._listeners.add(callback)
 
     def unregister_listener(self, callback):
         """Unregisters a previously registered callback."""
-        self._listeners.discard(callback)
+        with self._listener_lock:
+            self._listeners.discard(callback)
 
     def notify_change(self):
         """Invokes all registered callbacks to refresh highlighters."""
-        for cb in list(self._listeners):
-            try:
-                cb()
-            except Exception as e:
-                logger.debug(f"Error in spellcheck listener: {e}")
+        with self._listener_lock:
+            for cb in list(self._listeners):
+                try:
+                    cb()
+                except Exception as e:
+                    logger.debug(f"Error in spellcheck listener: {e}")
 
     def normalize_lang(self, lang_code: Optional[str]) -> str:
         """Normalizes lang code to 'de', 'en', etc. Fallback to 'de'."""
@@ -223,14 +228,30 @@ class SpellCheckService:
                     self._checkers[lang] = None
         return self._checkers[lang]
 
+    def is_checker_ready(self, lang: Optional[str] = None) -> bool:
+        """Returns True if the spellchecker dictionary for `lang` is already loaded in memory."""
+        if not SPELLCHECKER_AVAILABLE:
+            return True
+        norm_lang = self.normalize_lang(lang or "auto")
+        return norm_lang in self._checkers
+
     def warm_up_async(self, lang: Optional[str] = None) -> None:
         """Pre-loads the spellchecker dictionary on a daemon thread to prevent GUI thread stalls."""
         if not self.is_enabled():
             return
         norm_lang = self.normalize_lang(lang or "auto")
-        if norm_lang in self._checkers:
+        if norm_lang in self._checkers or norm_lang in self._warming_langs:
             return
-        threading.Thread(target=self._get_checker, args=(norm_lang,), daemon=True).start()
+        self._warming_langs.add(norm_lang)
+
+        def _load():
+            try:
+                self._get_checker(norm_lang)
+            finally:
+                self._warming_langs.discard(norm_lang)
+            self.notify_change()
+
+        threading.Thread(target=_load, daemon=True, name=f"SpellCheckWarmup-{norm_lang}").start()
 
     def is_chess_token(self, token: str) -> bool:
         """Returns True if the token represents a chess move, evaluation symbol, or chess term."""

@@ -2,7 +2,7 @@ import os
 import datetime
 import random
 import json
-from collections import deque
+from collections import deque, OrderedDict
 from typing import List, Dict, Tuple, Any, Optional, Set
 from sqlalchemy import or_, and_
 from dataclasses import dataclass
@@ -148,7 +148,6 @@ class TrainingManager:
         # O(1) index caches for hot-path lookups
         self._move_by_id_cache: Optional[Dict[int, Move]] = None
         self._move_by_fen_uci_cache: Optional[Dict[Tuple[str, str], Move]] = None
-        self._fen_uci_to_move_id: Optional[Dict[Tuple[str, str], int]] = None
         self._moves_by_level: Optional[Dict[int, List[int]]] = None
         self._levels_cache: Optional[List[Dict[str, Any]]] = None
         self._cached_elo: Optional[int] = None
@@ -162,6 +161,7 @@ class TrainingManager:
         self._user_settings_cache = None # Cached UserRepertoireSettings for active repertoire
         self._all_user_settings_cache: Optional[Dict[str, UserRepertoireSettings]] = None
         self._settings_dirty: bool = False
+        self._repo_graph_lru: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         
         self.navigator = RepertoireNavigator(repertoire_manager)
         
@@ -367,6 +367,7 @@ class TrainingManager:
                 from opening_fenix.core.logger import logger
                 logger.warning(f"Failed to clean up orphaned profile settings: {e}")
 
+        self._all_user_settings_cache = {s.repertoire_name: s for s in settings if s not in orphaned}
         return valid_repos
 
     def _get_all_user_settings_map(self) -> Dict[str, UserRepertoireSettings]:
@@ -385,12 +386,10 @@ class TrainingManager:
         active = self.repertoire_manager.active_repertoire_name if self.repertoire_manager else None
         if repo_name == active and self._user_settings_cache is not None:
             return self._user_settings_cache
-        if self._all_user_settings_cache is not None and repo_name in self._all_user_settings_cache:
-            return self._all_user_settings_cache[repo_name]
+        if self._all_user_settings_cache is not None:
+            return self._all_user_settings_cache.get(repo_name)
         with self.user_session.no_autoflush:
             settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
-        if self._all_user_settings_cache is not None and settings is not None:
-            self._all_user_settings_cache[repo_name] = settings
         return settings
 
     def set_repo_visibility(self, repo_name: str, is_visible: bool) -> None:
@@ -516,7 +515,6 @@ class TrainingManager:
         self._norm_td_cache = None
         self._move_by_id_cache = None
         self._move_by_fen_uci_cache = None
-        self._fen_uci_to_move_id = None
         self._moves_by_level = None
         self._levels_cache = None
         self._cached_elo = None
@@ -526,6 +524,9 @@ class TrainingManager:
         self._reachable_moves_by_key = {}
         self._last_stats_cache = None
         self._user_settings_cache = None
+        if clear_persistent_stats:
+            if hasattr(self, '_repo_graph_lru'):
+                self._repo_graph_lru.clear()
         if clear_persistent_stats and self.user_session and self.repertoire_manager and self.repertoire_manager.active_repertoire_name:
             try:
                 settings = self.user_session.query(UserRepertoireSettings).filter_by(
@@ -611,16 +612,170 @@ class TrainingManager:
             self.user_session.rollback()
             return False, f"Error updating user data: {e}"
 
+    def _get_repo_graph_sig_for_path(self, repo_name: str, db_filename: str) -> Optional[Tuple[str, str, int, int]]:
+        if not repo_name or not db_filename or db_filename == ":memory:":
+            return None
+        try:
+            abs_p = os.path.abspath(db_filename)
+            db_mtime = os.stat(abs_p).st_mtime_ns
+            wal_path = abs_p + "-wal"
+            wal_mtime = os.stat(wal_path).st_mtime_ns if os.path.exists(wal_path) else 0
+            return (repo_name, abs_p, db_mtime, wal_mtime)
+        except OSError:
+            return None
+
+    def _get_active_repo_graph_sig(self) -> Optional[Tuple[str, str, int, int]]:
+        if not self.repertoire_manager:
+            return None
+        repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        repo_db = getattr(self.repertoire_manager, 'repo_db', None)
+        db_filename = getattr(repo_db, 'db_filename', None) if repo_db else None
+        return self._get_repo_graph_sig_for_path(repo_name, db_filename)
+
+    _MAX_CACHED_GRAPH_MOVES = 45_000
+    _MAX_CACHED_GRAPH_REPOS = 8
+
+    def _get_lru_cached_moves_total(self) -> int:
+        if not hasattr(self, '_repo_graph_lru'):
+            return 0
+        return sum(int(entry.get('move_count', 0)) for entry in self._repo_graph_lru.values())
+
+    def _put_repo_graph_lru(self, repo_name: str, entry: Dict[str, Any]) -> None:
+        if not hasattr(self, '_repo_graph_lru'):
+            return
+        self._repo_graph_lru[repo_name] = entry
+        self._repo_graph_lru.move_to_end(repo_name)
+        while len(self._repo_graph_lru) > 1 and (
+            len(self._repo_graph_lru) > self._MAX_CACHED_GRAPH_REPOS
+            or self._get_lru_cached_moves_total() > self._MAX_CACHED_GRAPH_MOVES
+        ):
+            self._repo_graph_lru.popitem(last=False)
+
+    def prewarm_repertoire_graph(self, repo_name: str, respect_budget: bool = True) -> bool:
+        """
+        Thread-safe background preloader that builds the move/position graph for `repo_name`
+        using a standalone read-only sqlite3 connection and stores it in `_repo_graph_lru`
+        without mutating the active repertoire state.
+        """
+        if not repo_name or not hasattr(self, '_repo_graph_lru'):
+            return False
+        from opening_fenix.core.utils import get_repertoire_db_path
+        import sqlite3
+        db_path = get_repertoire_db_path(repo_name)
+        if not db_path or not os.path.exists(db_path):
+            return False
+        sig = self._get_repo_graph_sig_for_path(repo_name, db_path)
+        if sig is None:
+            return False
+        cached = self._repo_graph_lru.get(repo_name)
+        if cached is not None and cached.get('sig') == sig:
+            return True
+        if respect_budget and len(self._repo_graph_lru) > 0:
+            if self._get_lru_cached_moves_total() >= self._MAX_CACHED_GRAPH_MOVES:
+                return False
+        conn = None
+        try:
+            conn = sqlite3.connect(sig[1], timeout=5.0)
+            cur = conn.cursor()
+            if respect_budget and len(self._repo_graph_lru) > 0:
+                n_moves = cur.execute("SELECT COUNT(id) FROM moves").fetchone()[0] or 0
+                if self._get_lru_cached_moves_total() + n_moves > self._MAX_CACHED_GRAPH_MOVES:
+                    return False
+            cur.execute("SELECT value FROM metadata WHERE key = 'color'")
+            c_row = cur.fetchone()
+            side = (c_row[0] if c_row and c_row[0] else 'w').lower()
+            pos_rows = cur.execute(
+                "SELECT id, fen, comment, good_moves, variation_1, variation_2, variation_3, cached_v1, cached_v2, cached_v3 FROM positions"
+            ).fetchall()
+            move_rows = cur.execute(
+                "SELECT id, from_position_id, to_position_id, uci, san, priority_score, nag FROM moves ORDER BY COALESCE(priority_score, 0.0) DESC"
+            ).fetchall()
+            rm_rows = cur.execute(
+                "SELECT move_id, level, is_active FROM repertoire_moves WHERE is_active = 1"
+            ).fetchall()
+        except Exception:
+            return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+        pos_cache = {r[0]: _CachedPosition(*r) for r in pos_rows}
+        forward_moves_cache: Dict[int, list] = {}
+        move_parent_cache: Dict[int, list] = {}
+        move_by_id_cache: Dict[int, _CachedMove] = {}
+        move_by_fen_uci_cache: Dict[Tuple[str, str], _CachedMove] = {}
+
+        for r in move_rows:
+            m = _CachedMove(r[0], r[1], r[2], r[3], r[4], r[5] or 0.0, r[6], pos_cache.get(r[1]))
+            forward_moves_cache.setdefault(m.from_position_id, []).append(m)
+            move_parent_cache.setdefault(m.to_position_id, []).append(m)
+            move_by_id_cache[m.id] = m
+            from_pos = pos_cache.get(m.from_position_id)
+            if from_pos is not None:
+                move_by_fen_uci_cache[(from_pos.fen, m.uci)] = m
+
+        all_rep_moves = [_CachedRepMove(r[0], r[1] if r[1] is not None else 1, bool(r[2])) for r in rm_rows]
+        rep_move_cache = {rm.move_id: rm for rm in all_rep_moves}
+        moves_by_level: Dict[int, List[int]] = {}
+        for rm in all_rep_moves:
+            lvl = rm.level if rm.level is not None else 1
+            m = move_by_id_cache.get(rm.move_id)
+            if m and m.from_position_id in pos_cache:
+                fen = pos_cache[m.from_position_id].fen
+                parts = fen.split()
+                if len(parts) >= 2 and parts[1].lower() in ('w', 'b') and side in ('w', 'b'):
+                    if parts[1].lower() == side:
+                        moves_by_level.setdefault(lvl, []).append(rm.move_id)
+                else:
+                    moves_by_level.setdefault(lvl, []).append(rm.move_id)
+            else:
+                moves_by_level.setdefault(lvl, []).append(rm.move_id)
+
+        self._put_repo_graph_lru(repo_name, {
+            'sig': sig,
+            'move_count': len(move_by_id_cache),
+            'forward_moves_cache': forward_moves_cache,
+            'pos_cache': pos_cache,
+            'move_by_id_cache': move_by_id_cache,
+            'move_by_fen_uci_cache': move_by_fen_uci_cache,
+            'move_parent_cache': move_parent_cache,
+            'rep_move_cache': rep_move_cache,
+            'moves_by_level': moves_by_level,
+        })
+        return True
+
     def _ensure_forward_cache(self):
         if not self.repertoire_manager.repo_session:
             return
-            
-        if self._forward_moves_cache is None or self._fen_uci_to_move_id is None:
+
+        if (
+            self._forward_moves_cache is None
+            or self._move_by_fen_uci_cache is None
+            or self._rep_move_cache is None
+            or self._moves_by_level is None
+        ):
+            sig = self._get_active_repo_graph_sig()
+            if sig is not None and hasattr(self, '_repo_graph_lru'):
+                cached_graph = self._repo_graph_lru.get(sig[0])
+                if cached_graph is not None and cached_graph.get('sig') == sig:
+                    self._repo_graph_lru.move_to_end(sig[0])
+                    self._forward_moves_cache = cached_graph['forward_moves_cache']
+                    self._pos_cache = cached_graph['pos_cache']
+                    self._move_by_id_cache = cached_graph['move_by_id_cache']
+                    self._move_by_fen_uci_cache = cached_graph['move_by_fen_uci_cache']
+                    self._move_parent_cache = cached_graph['move_parent_cache']
+                    self._rep_move_cache = cached_graph['rep_move_cache']
+                    self._moves_by_level = cached_graph['moves_by_level']
+                    return
+
+        if self._forward_moves_cache is None or self._move_by_fen_uci_cache is None:
             self._forward_moves_cache = {}
             self._pos_cache = {}
             self._move_by_id_cache = {}
             self._move_by_fen_uci_cache = {}
-            self._fen_uci_to_move_id = {}
             self._move_parent_cache = {} # Local parent cache for training algorithms
             
             repo_sess = self.repertoire_manager.repo_session
@@ -661,7 +816,6 @@ class TrainingManager:
                 if m.from_position_id in self._pos_cache:
                     pos_fen = self._pos_cache[m.from_position_id].fen
                     self._move_by_fen_uci_cache[(pos_fen, m.uci)] = m
-                    self._fen_uci_to_move_id[(pos_fen, m.uci)] = m.id
                     
             if not already_sorted:
                 for k in self._forward_moves_cache:
@@ -670,12 +824,6 @@ class TrainingManager:
                 # Sort parent cache too for predictable ancestor selection
                 for k in self._move_parent_cache:
                     self._move_parent_cache[k].sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
-
-            if self.repertoire_manager and getattr(self.repertoire_manager, 'priority_cache', None) is None:
-                self.repertoire_manager.priority_cache = {
-                    (pos_fen, m.uci): (m.priority_score or 0.0)
-                    for (pos_fen, _), m in self._move_by_fen_uci_cache.items()
-                }
             
         if self._rep_move_cache is None or self._moves_by_level is None:
             if isinstance(self.repertoire_manager.repo_session, Session):
@@ -703,6 +851,20 @@ class TrainingManager:
                         self._moves_by_level.setdefault(lvl, []).append(rm.move_id)
                 else:
                     self._moves_by_level.setdefault(lvl, []).append(rm.move_id)
+
+            sig = self._get_active_repo_graph_sig()
+            if sig is not None and hasattr(self, '_repo_graph_lru'):
+                self._put_repo_graph_lru(sig[0], {
+                    'sig': sig,
+                    'move_count': len(self._move_by_id_cache) if self._move_by_id_cache else 0,
+                    'forward_moves_cache': self._forward_moves_cache,
+                    'pos_cache': self._pos_cache,
+                    'move_by_id_cache': self._move_by_id_cache,
+                    'move_by_fen_uci_cache': self._move_by_fen_uci_cache,
+                    'move_parent_cache': self._move_parent_cache,
+                    'rep_move_cache': self._rep_move_cache,
+                    'moves_by_level': self._moves_by_level,
+                })
 
     def _ensure_td_cache(self):
         if self._td_cache is not None:
@@ -985,7 +1147,6 @@ class TrainingManager:
     def get_next_move(self, mode='due', last_move_obj=None, last_was_success=False, only_continuation=False, variation_filter=None, exclude_move_ids=None):
         if not self.repertoire_manager.repo_session: return None, []
         self._ensure_forward_cache()
-        self.repertoire_manager._ensure_priority_cache()
         self._ensure_td_cache()
         
         max_lvl = self.get_active_level()
@@ -1023,11 +1184,17 @@ class TrainingManager:
 
             if due_candidates:
                 sort_order = self.get_setting("queue_priority_order") or "priority_first"
-                prio_cache = self.repertoire_manager.priority_cache
-                if sort_order == "priority_first":
-                    due_candidates.sort(key=lambda pair: (-(prio_cache.get((pair[0].fen, pair[0].move_uci)) or 0.0), pair[0].box))
+                prio_cache = getattr(self.repertoire_manager, 'priority_cache', None)
+                if prio_cache is not None:
+                    def _get_prio(pair):
+                        return prio_cache.get((pair[0].fen, pair[0].move_uci)) or 0.0
                 else:
-                    due_candidates.sort(key=lambda pair: (pair[0].box, -(prio_cache.get((pair[0].fen, pair[0].move_uci)) or 0.0)))
+                    def _get_prio(pair):
+                        return pair[1].priority_score or 0.0
+                if sort_order == "priority_first":
+                    due_candidates.sort(key=lambda pair: (-_get_prio(pair), pair[0].box))
+                else:
+                    due_candidates.sort(key=lambda pair: (pair[0].box, -_get_prio(pair)))
                 return self._get_ancestor(due_candidates[0][1], check_due=True, variation_filter=variation_filter), []
 
             if is_free_training_profile(self.profile_name):
@@ -1290,7 +1457,7 @@ class TrainingManager:
         if auto_commit and self.user_session:
             self.user_session.commit()
 
-    def get_current_elo(self, use_cache: bool = True) -> int:
+    def get_current_elo(self, use_cache: bool = True, allow_stale_cache: bool = False) -> int:
         """
         Calculates the player's Elo rating using Tiered Leitner Repertoire Mastery:
         1. Moves in Box 5 are weighted at 100% (1.00), Box 6 at 105% (1.05), Box 7 at 110% (1.10).
@@ -1307,6 +1474,11 @@ class TrainingManager:
 
         if not self.user_session or not self.repertoire_manager or not self.repertoire_manager.active_repertoire_name:
             return 800
+
+        if allow_stale_cache and (self._forward_moves_cache is None or self._td_cache is None):
+            settings = self._get_rating_settings()
+            if settings and settings.rating is not None:
+                return int(round(max(800.0, float(settings.rating))))
 
         with self.user_session.no_autoflush:
             self._ensure_forward_cache()
@@ -1325,10 +1497,10 @@ class TrainingManager:
 
             if self._td_cache:
                 for (fen, uci), td in self._td_cache.items():
-                    mid = self._fen_uci_to_move_id.get((fen, uci)) if self._fen_uci_to_move_id else None
-                    if mid is None:
+                    m_cached = self._move_by_fen_uci_cache.get((fen, uci)) if self._move_by_fen_uci_cache else None
+                    if m_cached is None:
                         continue
-                    rm = self._rep_move_cache.get(mid) if self._rep_move_cache else None
+                    rm = self._rep_move_cache.get(m_cached.id) if self._rep_move_cache else None
                     if not rm:
                         continue
                     lvl_num = rm.level if rm.level is not None else 1

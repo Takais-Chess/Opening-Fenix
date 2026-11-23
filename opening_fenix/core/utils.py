@@ -33,7 +33,8 @@ _RE_JOIN_PAREN_CLOSE = re.compile(r"\s+\)")
 _RE_MULTI_SPACE = re.compile(r" +")
 
 _FROZEN_DEFAULT_DIR_CACHE: Dict[str, str] = {}
-_CUSTOM_DATA_DIR_CACHE: Dict[str, Any] = {"key": None, "value": None}
+_CUSTOM_DATA_DIR_CACHE: Dict[str, Any] = {"key": None, "value": None, "configured_value": None}
+_APP_RESTART_REQUESTED: bool = False
 _SSL_CONTEXT_LOCK = threading.Lock()
 _SSL_CONTEXT_CACHE: Dict[bool, Any] = {}
 
@@ -328,8 +329,19 @@ def get_default_user_dir():
     parent_dir = os.path.dirname(current_dir)
     return os.path.dirname(parent_dir)
 
-def get_custom_data_dir():
-    """Returns the configured custom data directory if set and existing, otherwise None."""
+def request_app_restart(flag: bool = True) -> None:
+    """Flags the process to relaunch after main.py completes shutdown cleanup & cloud sync."""
+    global _APP_RESTART_REQUESTED
+    _APP_RESTART_REQUESTED = bool(flag)
+
+def is_app_restart_requested() -> bool:
+    return bool(_APP_RESTART_REQUESTED)
+
+def get_configured_custom_data_dir():
+    """
+    Returns the configured custom_data_dir from master config.json even if the
+    cloud drive / folder is temporarily offline or unmounted. Returns None if not configured.
+    """
     default_dir = get_default_user_dir()
     master_cfg_path = os.path.join(default_dir, "config.json")
     try:
@@ -338,30 +350,68 @@ def get_custom_data_dir():
     except OSError:
         _CUSTOM_DATA_DIR_CACHE["key"] = (default_dir, None, None)
         _CUSTOM_DATA_DIR_CACHE["value"] = None
+        _CUSTOM_DATA_DIR_CACHE["configured_value"] = None
         return None
 
     if _CUSTOM_DATA_DIR_CACHE["key"] == cache_key:
-        cached_val = _CUSTOM_DATA_DIR_CACHE["value"]
-        if cached_val is None or os.path.exists(cached_val):
-            return cached_val
+        return _CUSTOM_DATA_DIR_CACHE.get("configured_value")
 
-    result = None
+    configured = None
     try:
         with open(master_cfg_path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         custom_dir = cfg.get("custom_data_dir")
         if custom_dir and isinstance(custom_dir, str) and custom_dir.strip():
-            custom_dir = os.path.abspath(custom_dir.strip())
-            if os.path.exists(custom_dir):
-                result = custom_dir
+            configured = os.path.abspath(custom_dir.strip())
     except Exception:
         pass
     _CUSTOM_DATA_DIR_CACHE["key"] = cache_key
-    _CUSTOM_DATA_DIR_CACHE["value"] = result
-    return result
+    _CUSTOM_DATA_DIR_CACHE["configured_value"] = configured
+    _CUSTOM_DATA_DIR_CACHE["value"] = configured if (configured and os.path.exists(configured)) else None
+    return configured
+
+def is_cloud_sync_configured() -> bool:
+    """Returns True if a non-default cloud sync folder is configured (even if currently offline)."""
+    configured = get_configured_custom_data_dir()
+    if not configured:
+        return False
+    default_dir = get_default_user_dir()
+    return os.path.normcase(os.path.abspath(configured)) != os.path.normcase(os.path.abspath(default_dir))
+
+def is_cloud_dir_offline() -> bool:
+    """Returns True if cloud sync is configured, but the cloud folder is currently unreachable/unmounted."""
+    if not is_cloud_sync_configured():
+        return False
+    configured = get_configured_custom_data_dir()
+    return not bool(configured and os.path.exists(configured))
+
+def get_custom_data_dir():
+    """Returns the configured custom data directory if set and currently existing/online, otherwise None."""
+    configured = get_configured_custom_data_dir()
+    if configured and os.path.exists(configured):
+        _CUSTOM_DATA_DIR_CACHE["value"] = configured
+        return configured
+    _CUSTOM_DATA_DIR_CACHE["value"] = None
+    return None
+
+def get_local_workspace_dir():
+    """
+    Returns the local working directory where active SQLite databases run.
+    When a cloud sync folder (custom_data_dir) is configured, live databases ALWAYS run
+    inside <default_user_dir>/local_workspace (even if the cloud drive is temporarily offline)
+    so cloud sync clients never touch open SQLite .db / .db-wal files and offline launches
+    never silently jump back to an outdated default_dir.
+    """
+    default_dir = get_default_user_dir()
+    configured = get_configured_custom_data_dir()
+    if configured and os.path.normcase(os.path.abspath(configured)) != os.path.normcase(os.path.abspath(default_dir)):
+        ws_dir = os.path.join(default_dir, "local_workspace")
+        os.makedirs(ws_dir, exist_ok=True)
+        return ws_dir
+    return default_dir
 
 def set_custom_data_dir(target_dir):
-    """Updates or clears the custom_data_dir in the master config.json."""
+    """Updates or clears the custom_data_dir (cloud sync folder) in the master config.json."""
     default_dir = get_default_user_dir()
     os.makedirs(default_dir, exist_ok=True)
     master_cfg_path = os.path.join(default_dir, "config.json")
@@ -375,6 +425,13 @@ def set_custom_data_dir(target_dir):
             cfg = {}
 
     if target_dir is None or not str(target_dir).strip():
+        # Merge any data from local_workspace back to default_dir before disconnecting cloud sync
+        ws_dir = os.path.join(default_dir, "local_workspace")
+        if os.path.exists(ws_dir):
+            try:
+                migrate_user_data(ws_dir, default_dir, overwrite_newer=True)
+            except Exception:
+                pass
         cfg.pop("custom_data_dir", None)
     else:
         target_dir = os.path.abspath(str(target_dir).strip())
@@ -382,21 +439,38 @@ def set_custom_data_dir(target_dir):
         os.makedirs(os.path.join(target_dir, "repertoires"), exist_ok=True)
         os.makedirs(os.path.join(target_dir, "profiles"), exist_ok=True)
         os.makedirs(os.path.join(target_dir, "backups"), exist_ok=True)
+        os.makedirs(os.path.join(target_dir, "cloud_sync"), exist_ok=True)
+        readme_path = os.path.join(target_dir, "README_CLOUD_SYNC.txt")
+        if not os.path.exists(readme_path):
+            try:
+                with open(readme_path, "w", encoding="utf-8") as rf:
+                    rf.write(
+                        "Opening Fenix — Cloud Sync Folder\n"
+                        "=================================\n\n"
+                        "• cloud_sync/ : Verified atomic snapshots & sync manifest used to sync between PCs.\n"
+                        "• backups/    : Historical safety backups (including sync conflict backups).\n\n"
+                        "Live SQLite databases run safely in your local AppData workspace to prevent\n"
+                        "Google Drive / OneDrive database corruption. Do not manually edit files inside cloud_sync/.\n"
+                    )
+            except Exception:
+                pass
+        ws_dir = os.path.join(default_dir, "local_workspace")
+        os.makedirs(os.path.join(ws_dir, "repertoires"), exist_ok=True)
+        os.makedirs(os.path.join(ws_dir, "profiles"), exist_ok=True)
+        os.makedirs(os.path.join(ws_dir, "backups"), exist_ok=True)
         cfg["custom_data_dir"] = target_dir
 
     with open(master_cfg_path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=4, ensure_ascii=False)
     _CUSTOM_DATA_DIR_CACHE["key"] = None
     _CUSTOM_DATA_DIR_CACHE["value"] = None
+    _CUSTOM_DATA_DIR_CACHE["configured_value"] = None
 
 def get_user_dir():
-    """Returns the active user data directory (custom cloud dir if configured, else default)."""
-    custom = get_custom_data_dir()
-    if custom:
-        return custom
-    return get_default_user_dir()
+    """Returns the active local working directory (local_workspace when cloud sync is configured, else default)."""
+    return get_local_workspace_dir()
 
-def migrate_user_data(source_dir, target_dir):
+def migrate_user_data(source_dir, target_dir, overwrite_newer: bool = False):
     """
     Copies repertoires, profiles, and backups from source_dir to target_dir.
     Returns a dictionary summarizing copied items.
@@ -434,11 +508,18 @@ def migrate_user_data(source_dir, target_dir):
                                         shutil.copytree(sub_s, sub_d)
                                     else:
                                         shutil.copy2(sub_s, sub_d)
+                                elif overwrite_newer and os.path.isfile(sub_s) and os.path.isfile(sub_d):
+                                    if os.path.getmtime(sub_s) > os.path.getmtime(sub_d):
+                                        shutil.copy2(sub_s, sub_d)
                             summary[folder] += 1
                     else:
                         if not os.path.exists(d_path):
                             shutil.copy2(s_path, d_path)
                             summary[folder] += 1
+                        elif overwrite_newer and os.path.isfile(s_path) and os.path.isfile(d_path):
+                            if os.path.getmtime(s_path) > os.path.getmtime(d_path):
+                                shutil.copy2(s_path, d_path)
+                                summary[folder] += 1
                 except Exception as e:
                     print(f"Warning: Could not copy {s_path} to {d_path}: {e}")
 
@@ -522,6 +603,26 @@ def ensure_user_data_seeded():
             cfg["repertoires_seeded"] = True
             cfg_dirty = True
 
+    # Collect repertoires intentionally deleted via Cloud Sync so we never resurrect them
+    deleted_cloud_repos = set()
+    try:
+        local_sync_state_path = os.path.join(user_dir, "local_sync_state.json")
+        if os.path.exists(local_sync_state_path):
+            with open(local_sync_state_path, "r", encoding="utf-8") as f_st:
+                st_data = json.load(f_st)
+                if isinstance(st_data, dict):
+                    deleted_cloud_repos.update(st_data.get("known_deleted_repertoires", []))
+        cloud_dir_active = get_custom_data_dir()
+        if cloud_dir_active:
+            manifest_path = os.path.join(cloud_dir_active, "cloud_sync", "sync_manifest.json")
+            if os.path.exists(manifest_path):
+                with open(manifest_path, "r", encoding="utf-8") as f_mf:
+                    mf_data = json.load(f_mf)
+                    if isinstance(mf_data, dict):
+                        deleted_cloud_repos.update((mf_data.get("deleted_repertoires") or {}).keys())
+    except Exception:
+        pass
+
     dest_folder_abs = os.path.abspath(dest_folder)
     for src in sources:
         src_folder = os.path.join(src, "repertoires")
@@ -529,6 +630,8 @@ def ensure_user_data_seeded():
             if os.path.abspath(src_folder) == dest_folder_abs:
                 continue
             for item in os.listdir(src_folder):
+                if item in deleted_cloud_repos:
+                    continue
                 s_path = os.path.join(src_folder, item)
                 d_path = os.path.join(dest_folder, item)
                 
@@ -641,11 +744,10 @@ def get_repertoire_dir(repo_name, is_test=None):
         
     # If is_test is None, we probe both locations
     regular_path = os.path.join(repo_base, repo_name)
-    test_path = os.path.join(repo_base, "test", repo_name)
-    
-    if os.path.exists(regular_path) and os.path.isdir(regular_path):
+    if os.path.isdir(regular_path):
         return regular_path
-    elif os.path.exists(test_path) and os.path.isdir(test_path):
+    test_path = os.path.join(repo_base, "test", repo_name)
+    if os.path.isdir(test_path):
         return test_path
 
     # Fallback for frozen executable if app was installed to Program Files

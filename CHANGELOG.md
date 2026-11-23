@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.15] - 2026-11-23
+
+### Added & Improved
+- **Multi-PC Cloud Synchronization (Google Drive / OneDrive)**: Added safe snapshot-based cloud sync (`CloudSyncService`, `CloudSyncManager`, and Sync Inspector UI) that runs SQLite databases locally in `local_workspace/` for corruption protection and synchronizes verified snapshots on startup, after training, and on exit. Includes multi-device lock detection, offline mode resilience, provider conflict notices, per-item exclude/force push/pull controls, optional syncing for portable settings, spellcheck user dictionary, and engine cache, plus quick cloud sync controls in `LoginDialog` and full DE/EN localization.
+- **Repertoire Graph LRU Caching & Prewarming**: Added LRU repertoire graph caching and background prewarming (`prewarm_repertoire_graph`) in `TrainingManager` along with non-blocking stale-cache ELO lookups for faster repertoire switching.
+- **UI Responsiveness & Drawing Polish**: Added asynchronous spellcheck dictionary initialization with deferred rehighlighting (`SpellCheckService` / `SpellCheckHighlighter`), lazy batch table population in `TaskCenterDialog`, refined live arrow/circle drawing previews in `ChessBoardWidget`, and layout/workflow improvements across `CreatorWindow`, `RepoSelectionDialog`, `ExportDialog`, and `UnifiedSettingsDialog`.
+
 ## [1.3.14] - 2026-11-19
 
 ### Added & Improved

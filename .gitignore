@@ -105,6 +105,7 @@ venv.bak/
 .mypy_cache/
 
 # User Data & Local Config
+local_workspace/
 profiles/**/*.db
 profiles/**/*.json
 profiles/**/*.db-shm

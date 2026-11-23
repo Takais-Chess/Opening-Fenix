@@ -15,26 +15,39 @@ from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
 from opening_fenix.gui.native_close_filter import install_taskbar_close_filter, uninstall_taskbar_close_filter
 
+_cover_path_cache = {}
+
+
 def get_repertoire_cover_path(name):
     from opening_fenix.core.data_tools import get_user_dir
     repo_base = os.path.join(get_user_dir(), "repertoires")
-    
-    # Try normal path
     normal_dir = os.path.join(repo_base, name)
-    # Try test path
     test_dir = os.path.join(repo_base, "test", name)
-    
+
     for folder in (normal_dir, test_dir):
-        if os.path.isdir(folder):
-            try:
-                for f in os.listdir(folder):
-                    f_lower = f.lower()
-                    if f_lower.startswith("cover."):
-                        ext = f_lower.split(".")[-1]
-                        if ext in ("png", "jpg", "jpeg"):
-                            return os.path.join(folder, f)
-            except Exception:
-                pass
+        try:
+            st = os.stat(folder)
+        except OSError:
+            continue
+        cached = _cover_path_cache.get(folder)
+        if cached is not None and cached[0] == st.st_mtime_ns:
+            if cached[1] is not None:
+                return cached[1]
+            continue
+        found = None
+        try:
+            for f in os.listdir(folder):
+                f_lower = f.lower()
+                if f_lower.startswith("cover."):
+                    ext = f_lower.split(".")[-1]
+                    if ext in ("png", "jpg", "jpeg"):
+                        found = os.path.join(folder, f)
+                        break
+        except Exception:
+            pass
+        _cover_path_cache[folder] = (st.st_mtime_ns, found)
+        if found is not None:
+            return found
     return None
 
 class NewRepertoireDialog(QDialog):
@@ -198,7 +211,36 @@ class NewRepertoireDialog(QDialog):
 
 
 _REPO_THUMB_CACHE: "OrderedDict[tuple, QPixmap]" = OrderedDict()
-_MAX_REPO_THUMB_CACHE = 64
+_REPO_THUMB_QIMAGE_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_MAX_REPO_THUMB_CACHE = 96
+
+
+def invalidate_cover_path_cache():
+    _cover_path_cache.clear()
+    _REPO_THUMB_CACHE.clear()
+    _REPO_THUMB_QIMAGE_CACHE.clear()
+
+
+def predecode_repo_thumb_qimage(path: str, width: int, height: int) -> None:
+    """Thread-safe background pre-decoder for repertoire cover thumbnails."""
+    if not path:
+        return
+    key = (path, width, height)
+    if key in _REPO_THUMB_CACHE or key in _REPO_THUMB_QIMAGE_CACHE:
+        return
+    try:
+        reader = QImageReader(path)
+        reader.setAutoTransform(True)
+        orig_size = reader.size()
+        if orig_size.isValid() and not orig_size.isEmpty():
+            reader.setScaledSize(orig_size.scaled(QSize(width, height), Qt.AspectRatioMode.KeepAspectRatioByExpanding))
+            img = reader.read()
+            if not img.isNull():
+                _REPO_THUMB_QIMAGE_CACHE[key] = img
+                while len(_REPO_THUMB_QIMAGE_CACHE) > _MAX_REPO_THUMB_CACHE:
+                    _REPO_THUMB_QIMAGE_CACHE.popitem(last=False)
+    except Exception:
+        pass
 
 
 def _load_repo_thumb_pixmap(path: str, width: int, height: int) -> QPixmap:
@@ -207,6 +249,14 @@ def _load_repo_thumb_pixmap(path: str, width: int, height: int) -> QPixmap:
     if cached is not None and not cached.isNull():
         _REPO_THUMB_CACHE.move_to_end(key)
         return cached
+    pre_img = _REPO_THUMB_QIMAGE_CACHE.get(key)
+    if pre_img is not None and not pre_img.isNull():
+        pix = QPixmap.fromImage(pre_img)
+        _REPO_THUMB_CACHE[key] = pix
+        _REPO_THUMB_CACHE.move_to_end(key)
+        while len(_REPO_THUMB_CACHE) > _MAX_REPO_THUMB_CACHE:
+            _REPO_THUMB_CACHE.popitem(last=False)
+        return pix
     reader = QImageReader(path)
     reader.setAutoTransform(True)
     orig_size = reader.size()
@@ -321,7 +371,6 @@ class RepoSelectionButton(QPushButton):
         title_font.setPixelSize(font_size)
         title_font.setBold(True)
         self.lbl_title.setFont(title_font)
-        self.lbl_title.setStyleSheet(f"font-family: 'Segoe UI'; font-size: {font_size}px; font-weight: bold;")
         layout.addWidget(self.lbl_title)
 
         star_sz = scale(26)
@@ -343,45 +392,17 @@ class RepoSelectionButton(QPushButton):
         self._update_favorite_ui()
 
     def _update_favorite_ui(self):
-        radius = scale(13)
-        font_px = scale(15)
         if self.is_favorite:
             self.btn_favorite.setText("\u2605")
             self.btn_favorite.setToolTip(tr_ui("repo_selection.favorite_remove", "Aus Favoriten entfernen"))
-            self.btn_favorite.setStyleSheet(f"""
-                QPushButton#RepoFavoriteStar {{
-                    background-color: rgba(255, 255, 255, 0.88);
-                    color: #f39c12;
-                    border: 1px solid rgba(243, 156, 18, 0.55);
-                    border-radius: {radius}px;
-                    font-family: "Segoe UI Symbol", "Segoe UI";
-                    font-size: {font_px}px;
-                    padding: 0px;
-                }}
-                QPushButton#RepoFavoriteStar:hover {{
-                    background-color: rgba(255, 255, 255, 1.0);
-                    border-color: #e67e22;
-                }}
-            """)
+            self.btn_favorite.setProperty("favorite", "true")
         else:
             self.btn_favorite.setText("\u2606")
             self.btn_favorite.setToolTip(tr_ui("repo_selection.favorite_add", "Als Favorit markieren"))
-            self.btn_favorite.setStyleSheet(f"""
-                QPushButton#RepoFavoriteStar {{
-                    background-color: rgba(255, 255, 255, 0.72);
-                    color: rgba(93, 64, 55, 0.75);
-                    border: 1px solid rgba(0, 0, 0, 0.12);
-                    border-radius: {radius}px;
-                    font-family: "Segoe UI Symbol", "Segoe UI";
-                    font-size: {font_px}px;
-                    padding: 0px;
-                }}
-                QPushButton#RepoFavoriteStar:hover {{
-                    background-color: rgba(255, 255, 255, 0.95);
-                    color: #f39c12;
-                    border-color: rgba(243, 156, 18, 0.55);
-                }}
-            """)
+            self.btn_favorite.setProperty("favorite", "false")
+        if self.isVisible():
+            self.btn_favorite.style().unpolish(self.btn_favorite)
+            self.btn_favorite.style().polish(self.btn_favorite)
 
     _FONT_METRICS_CACHE = {}
 
@@ -515,14 +536,35 @@ class RepoSelectionDialog(QDialog):
                 border: none;
                 background: transparent;
             }}
+            QPushButton#RepoFavoriteStar {{
+                background-color: rgba(255, 255, 255, 0.72);
+                color: rgba(93, 64, 55, 0.75);
+                border: 1px solid rgba(0, 0, 0, 0.12);
+                border-radius: {scale(13)}px;
+                font-family: "Segoe UI Symbol", "Segoe UI";
+                font-size: {scale(15)}px;
+                padding: 0px;
+            }}
+            QPushButton#RepoFavoriteStar:hover {{
+                background-color: rgba(255, 255, 255, 0.95);
+                color: #f39c12;
+                border-color: rgba(243, 156, 18, 0.55);
+            }}
+            QPushButton#RepoFavoriteStar[favorite="true"] {{
+                background-color: rgba(255, 255, 255, 0.88);
+                color: #f39c12;
+                border: 1px solid rgba(243, 156, 18, 0.55);
+            }}
+            QPushButton#RepoFavoriteStar[favorite="true"]:hover {{
+                background-color: rgba(255, 255, 255, 1.0);
+                border-color: #e67e22;
+            }}
             {get_tooltip_style()}
         """)
         self.grid_layout = QGridLayout(self.scroll_content)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
-
-        self.scroll_area.setWidget(self.scroll_content)
 
         self.repo_buttons = []
         self._current_cols = None
@@ -537,11 +579,12 @@ class RepoSelectionDialog(QDialog):
         else:
             sorted_names = sorted(repo_names, key=lambda n: (0 if n in self._favorites else 1, n.lower()))
             for name in sorted_names:
-                btn = RepoSelectionButton(name, parent=self.scroll_content, is_favorite=(name in self._favorites))
+                btn = RepoSelectionButton(name, parent=None, is_favorite=(name in self._favorites))
                 btn.clicked.connect(lambda checked, n=name: self.on_repo_selected(n))
                 btn.favorite_toggled.connect(self.on_favorite_toggled)
                 self.repo_buttons.append(btn)
             self._reflow_grid(force=True)
+        self.scroll_area.setWidget(self.scroll_content)
         container_layout.addWidget(self.scroll_area)
         layout.addWidget(self.grid_container, 1)
         

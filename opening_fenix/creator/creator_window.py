@@ -94,6 +94,8 @@ class CreatorBackend:
         
         # IN-MEMORY CACHE FOR UI RESPONSIVENESS
         self._ui_cache = {}
+        self._pos_id_cache = {}
+        self._export_graph_cache = None
         self._outgoing_transpositions_cache = {}
         self._min_reachable_level_cache = None
         
@@ -127,10 +129,23 @@ class CreatorBackend:
         
         self.db_manager = DatabaseManager(db_path)
         self.session = self.db_manager.get_session()
+        from sqlalchemy import event as _sa_event
+        @_sa_event.listens_for(self.session, "after_commit")
+        def _invalidate_meta_caches_on_commit(_sess):
+            self._ui_cache.clear()
+            self._pos_id_cache.clear()
+            self._export_graph_cache = None
         self._seed_default_levels()
         try:
-            from opening_fenix.core.services.repair_service import repair_castling_ucis
-            repair_castling_ucis(self.session)
+            castling_flag = self.session.query(Metadata).filter_by(key="castling_uci_repaired_v1").first()
+            if not castling_flag or castling_flag.value != "1":
+                from opening_fenix.core.services.repair_service import repair_castling_ucis
+                repair_castling_ucis(self.session)
+                if castling_flag:
+                    castling_flag.value = "1"
+                else:
+                    self.session.add(Metadata(key="castling_uci_repaired_v1", value="1"))
+                commit_with_retry(self.session)
         except Exception as e:
             logger.warning(f"CreatorBackend: Castling repair check failed: {e}")
         self.clear_cache()
@@ -153,7 +168,9 @@ class CreatorBackend:
         If graph_changed is False (e.g. engine eval or comment edit), preserves
         expensive graph structures like _min_reachable_level_cache."""
         self._ui_cache = {}
+        self._pos_id_cache = {}
         if graph_changed:
+            self._export_graph_cache = None
             self._outgoing_transpositions_cache = {}
             self._min_reachable_level_cache = None
             self._reachable_ids_cache = {}
@@ -169,17 +186,70 @@ class CreatorBackend:
             except Exception:
                 pass
             self.session.expire_all()
+        try:
+            from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+            CloudSyncManager.instance().schedule_background_push(delay_ms=20000)
+        except Exception:
+            pass
 
-    def _get_pos_by_fen(self, fen: str):
-        """Fast O(1) indexed lookup on Position.fen (exact match + indexed range fallback for 6-part FENs)."""
+    @staticmethod
+    def _build_position_data_dict(pos) -> dict:
+        data = {
+            "id": pos.id,
+            "comment": pos.comment or "",
+            "variation_1": pos.variation_1 or "",
+            "variation_2": pos.variation_2 or "",
+            "variation_3": pos.variation_3 or "",
+            "v1_inherited": False,
+            "v2_inherited": False,
+            "v3_inherited": False,
+        }
+        if not pos.variation_1 and pos.cached_v1:
+            data["variation_1"] = pos.cached_v1
+            data["v1_inherited"] = True
+        if not pos.variation_2 and pos.cached_v2:
+            data["variation_2"] = pos.cached_v2
+            data["v2_inherited"] = True
+        if not pos.variation_3 and pos.cached_v3:
+            data["variation_3"] = pos.cached_v3
+            data["v3_inherited"] = True
+        return data
+
+    def _get_pos_id_by_fen(self, fen: str):
+        """Returns Position.id from in-memory cache with 0 SQL queries when warm."""
         if not self.session or not fen:
             return None
         clean_fen = " ".join(fen.strip().split()[:4])
-        pos = self.session.query(Position).filter_by(fen=clean_fen).first()
-        if not pos:
-            pos = self.session.query(Position).filter(
-                Position.fen.between(clean_fen + " ", clean_fen + " ~")
-            ).first()
+        cached_id = self._pos_id_cache.get(clean_fen)
+        if cached_id is not None:
+            return cached_id
+        pos = self._get_pos_by_fen(clean_fen)
+        return pos.id if pos is not None else None
+
+    def _get_pos_by_fen(self, fen: str):
+        """Fast O(1) indexed lookup on Position.fen (single indexed range query + session identity cache)."""
+        if not self.session or not fen:
+            return None
+        clean_fen = " ".join(fen.strip().split()[:4])
+        cached_id = self._pos_id_cache.get(clean_fen)
+        if cached_id is not None:
+            pos = self.session.get(Position, cached_id)
+            if pos is not None and (pos.fen == clean_fen or pos.fen.startswith(clean_fen + " ")):
+                return pos
+            self._pos_id_cache.pop(clean_fen, None)
+        candidates = self.session.query(Position).filter(
+            Position.fen.between(clean_fen, clean_fen + " ~")
+        ).limit(5).all()
+        pos = None
+        for p in candidates:
+            if p.fen == clean_fen or p.fen.startswith(clean_fen + " "):
+                pos = p
+                break
+        if pos is not None:
+            if len(self._pos_id_cache) >= 500:
+                self._pos_id_cache.clear()
+            self._pos_id_cache[clean_fen] = pos.id
+            self._ui_cache[f"pos_data_{clean_fen}"] = self._build_position_data_dict(pos)
         return pos
 
     def get_repertoire_start_move(self, force_refresh=False):
@@ -244,37 +314,74 @@ class CreatorBackend:
         return [{"move_san": san, "move_uci": uci, "parent_fen": p_fen} for san, uci, p_fen in results]
 
     def get_path_to_fen(self, fen):
-        if not self.session: return None, []
-        pos = self._get_pos_by_fen(fen)
-        if not pos: return None, []
+        if not self.session or not fen: return None, []
+        clean_fen = " ".join(fen.strip().split()[:4])
+        cache_key = f"path_{clean_fen}"
+        cached = self._ui_cache.get(cache_key)
+        if cached is not None:
+            return cached[0], list(cached[1])
+        pos_id = self._get_pos_id_by_fen(clean_fen)
+        if not pos_id: return None, []
+
+        # Single SQLite recursive CTE replaces N+1 incoming-move queries
+        try:
+            from sqlalchemy import text as _sa_text
+            cte_sql = _sa_text("""
+                WITH RECURSIVE trace(depth, pos_id, uci, visited) AS (
+                    SELECT 0, :sid, CAST(NULL AS TEXT), ',' || :sid || ','
+                    UNION ALL
+                    SELECT t.depth + 1, m.from_position_id, m.uci, t.visited || m.from_position_id || ','
+                    FROM trace t
+                    JOIN moves m ON m.id = (
+                        SELECT m2.id FROM moves m2
+                        WHERE m2.to_position_id = t.pos_id
+                        ORDER BY m2.priority_score DESC
+                        LIMIT 1
+                    )
+                    WHERE t.depth < 200
+                      AND instr(t.visited, ',' || m.from_position_id || ',') = 0
+                )
+                SELECT t.depth, t.pos_id, t.uci, p.fen
+                FROM trace t
+                LEFT JOIN positions p ON p.id = t.pos_id
+                ORDER BY t.depth DESC
+            """)
+            rows = self.session.execute(cte_sql, {"sid": pos_id}).fetchall()
+            if rows:
+                root_fen = rows[0][3]
+                path = [r[2] for r in rows if r[2] is not None]
+                self._ui_cache[cache_key] = (root_fen, tuple(path))
+                return root_fen, path
+        except Exception:
+            pass
+
         path = []
-        curr_id = pos.id
-        # Track visited positions to detect transposition cycles.
-        # Without this, a cycle (A->B->A via different moves) could cause 200 wasted
-        # iterations and land on a mid-game island as the apparent "root".
+        curr_id = pos_id
         visited_ids = {curr_id}
         for _ in range(200):
             incoming = self.session.query(Move).filter_by(to_position_id=curr_id).order_by(Move.priority_score.desc()).first()
             if not incoming: break
             next_id = incoming.from_position_id
             if next_id in visited_ids:
-                # Cycle detected – stop here to avoid infinite loop
                 break
             visited_ids.add(next_id)
             path.insert(0, incoming.uci)
             curr_id = next_id
         root_pos = self.session.get(Position, curr_id)
-        return (root_pos.fen if root_pos else None), path
+        root_fen = root_pos.fen if root_pos else None
+        self._ui_cache[cache_key] = (root_fen, tuple(path))
+        return root_fen, path
 
     def get_position_data(self, fen):
         if not self.session: return None
         
-        # Check cache
-        cache_key = f"pos_data_{fen}"
+        # Check cache (normalized 4-part FEN so transpositions hit cache)
+        clean_fen = " ".join(fen.strip().split()[:4]) if fen else ""
+        cache_key = f"pos_data_{clean_fen}"
         if cache_key in self._ui_cache:
-            return self._ui_cache[cache_key]
+            return dict(self._ui_cache[cache_key])
             
-        pos = self._get_pos_by_fen(fen)
+        pos = self._get_pos_by_fen(clean_fen)
         data = {"id": None, "comment": "", "variation_1": "", "variation_2": "", "variation_3": "",
                 "v1_inherited": False, "v2_inherited": False, "v3_inherited": False}
         if not pos: 
@@ -543,6 +650,15 @@ class CreatorBackend:
             if m: m.value = str(value)
             else: self.session.add(Metadata(key=key, value=str(value)))
         self.session.commit()
+        if key == "color":
+            self._ui_cache.pop("__repo_color__", None)
+        try:
+            from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+            CloudSyncManager.instance().schedule_background_push(delay_ms=20000)
+        except Exception:
+            pass
+        if key == "color":
+            self._ui_cache.pop("__repo_color__", None)
 
     def is_branch_fully_reviewed(self, pos_id, session_start):
         """
@@ -821,65 +937,70 @@ class CreatorBackend:
     def get_candidate_moves(self, fen):
         if not self.session: return []
         
-        # Check cache
+        # Check cache (preserve full-FEN key for compatibility, also check 4-part clean FEN)
+        clean_fen = " ".join(fen.strip().split()[:4]) if fen else ""
         cache_key = f"cand_moves_{fen}"
+        clean_cache_key = f"cand_moves_{clean_fen}"
         if cache_key in self._ui_cache:
             return self._ui_cache[cache_key]
+        if clean_cache_key in self._ui_cache:
+            results = self._ui_cache[clean_cache_key]
+            self._ui_cache[cache_key] = results
+            return results
             
-        pos = self._get_pos_by_fen(fen)
-        if not pos: 
+        pos_id = self._get_pos_id_by_fen(clean_fen)
+        if not pos_id: 
             self._ui_cache[cache_key] = []
+            if clean_cache_key != cache_key:
+                self._ui_cache[clean_cache_key] = []
             return []
         
-        moves = self.session.query(Move)\
-            .options(joinedload(Move.to_position))\
-            .filter_by(from_position_id=pos.id)\
-            .order_by(Move.priority_score.desc(), Move.id).all()
+        # Single LEFT OUTER JOIN fetches moves, target positions, and repertoire status together
+        rows = (
+            self.session.query(Move, RepertoireMove.level, RepertoireMove.is_active)
+            .options(joinedload(Move.to_position))
+            .outerjoin(RepertoireMove, RepertoireMove.move_id == Move.id)
+            .filter(Move.from_position_id == pos_id)
+            .order_by(Move.priority_score.desc(), Move.id)
+            .all()
+        )
             
-        if not moves:
+        if not rows:
             self._ui_cache[cache_key] = []
             return []
             
-        move_ids = [m.id for m in moves]
-        to_pos_ids = [m.to_position_id for m in moves]
-        
-        # 1. Which of the candidate moves are repertoire moves?
-        rep_moves = self.session.query(RepertoireMove).filter(RepertoireMove.move_id.in_(move_ids)).all()
-        rep_moves_dict = {rm.move_id: rm for rm in rep_moves}
-        
-        # 2. Are there any repertoire responses to these moves?
-        # Note: We also want to know if these responses are active
-        child_moves = self.session.query(Move.id, Move.from_position_id).filter(Move.from_position_id.in_(to_pos_ids)).all()
-        
-        child_move_map = {} 
-        child_move_ids = []
-        for c_mid, c_from_id in child_moves:
-            if c_from_id not in child_move_map:
-                child_move_map[c_from_id] = []
-            child_move_map[c_from_id].append(c_mid)
-            child_move_ids.append(c_mid)
-            
-        # Get repertoire info for those child moves
-        child_rep_moves = []
-        if child_move_ids:
-            child_rep_moves = self.session.query(RepertoireMove.move_id, RepertoireMove.level, RepertoireMove.is_active).filter(RepertoireMove.move_id.in_(child_move_ids)).all()
-        
-        child_rep_map = {rm_id: (lvl, active) for rm_id, lvl, active in child_rep_moves}
+        # Only query child repertoire responses for candidate moves that are NOT directly in repertoire_moves
+        non_repo_to_pos_ids = [m.to_position_id for m, rm_lvl, _ in rows if rm_lvl is None]
+        child_summary = {}
+        if non_repo_to_pos_ids:
+            child_rows = (
+                self.session.query(
+                    Move.from_position_id,
+                    func.min(RepertoireMove.level),
+                    func.max(RepertoireMove.is_active)
+                )
+                .join(RepertoireMove, RepertoireMove.move_id == Move.id)
+                .filter(Move.from_position_id.in_(non_repo_to_pos_ids))
+                .group_by(Move.from_position_id)
+                .all()
+            )
+            child_summary = {
+                from_pid: (min_lvl, bool(any_act))
+                for from_pid, min_lvl, any_act in child_rows
+                if min_lvl is not None
+            }
 
         results = []
-        for m in moves:
-            rep_move = rep_moves_dict.get(m.id)
-            is_repo = rep_move is not None
-            level = rep_move.level if rep_move else 0
-            is_active = rep_move.is_active if rep_move else True # Default to True if not in repo but has repo children
+        for m, rm_lvl, rm_active in rows:
+            is_repo = rm_lvl is not None
+            level = rm_lvl if is_repo else 0
+            is_active = bool(rm_active) if is_repo else True
             
             if not is_repo:
-                responses = child_move_map.get(m.to_position_id, [])
-                our_responses_data = [child_rep_map[r_mid] for r_mid in responses if r_mid in child_rep_map]
-                if our_responses_data:
+                child_info = child_summary.get(m.to_position_id)
+                if child_info is not None:
                     is_repo = True
-                    level = min(d[0] for d in our_responses_data)
-                    is_active = any(d[1] for d in our_responses_data)
+                    level, is_active = child_info
             
             next_pos = m.to_position
             results.append({
@@ -894,21 +1015,24 @@ class CreatorBackend:
             # Simple purge, dicts preserve insertion order in Python 3.7+
             keys_to_delete = list(self._ui_cache.keys())[:20]
             for k in keys_to_delete:
-                del self._ui_cache[k]
+                if k not in ("__repo_levels__", "__repo_color__"):
+                    del self._ui_cache[k]
                 
         self._ui_cache[cache_key] = results
+        if clean_cache_key != cache_key:
+            self._ui_cache[clean_cache_key] = results
         return results
 
     def get_lichess_common_moves(self, fen, elo_category, limit=None):
         if not self.session: return []
         
+        clean_fen = " ".join(fen.strip().split()[:4]) if fen else ""
         # Check cache
-        cache_key = f"lichess_{fen}_{elo_category}"
+        cache_key = f"lichess_{clean_fen}_{elo_category}"
         if cache_key in self._ui_cache:
             results = self._ui_cache[cache_key]
             return results[:limit] if limit is not None else results
             
-        clean_fen = " ".join(fen.split(" ")[:4])
         data = self.session.query(LichessData).filter_by(fen=clean_fen, elo_range=elo_category).first()
         if not data or not data.moves_json:
             self._ui_cache[cache_key] = []
@@ -953,7 +1077,12 @@ class CreatorBackend:
 
     def get_repertoire_levels(self):
         if not self.session: return []
-        return [{"name": lvl.name, "order": lvl.order, "target_elo": lvl.target_elo} for lvl in self.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()]
+        cached = self._ui_cache.get("__repo_levels__")
+        if cached is not None:
+            return [dict(x) for x in cached]
+        res = [{"name": lvl.name, "order": lvl.order, "target_elo": lvl.target_elo} for lvl in self.session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()]
+        self._ui_cache["__repo_levels__"] = res
+        return [dict(x) for x in res]
 
     def get_position_min_reachable_level(self, fen: str) -> int:
         """
@@ -1035,6 +1164,7 @@ class CreatorBackend:
         if lvl:
             lvl.target_elo = target_elo
             self.session.commit()
+            self._ui_cache.pop("__repo_levels__", None)
 
     def update_level_name(self, level_order, new_name):
         if not self.session: return
@@ -1042,6 +1172,7 @@ class CreatorBackend:
         if lvl:
             lvl.name = new_name
             self.session.commit()
+            self._ui_cache.pop("__repo_levels__", None)
 
 
     def update_move_level(self, move_id, level_order):
@@ -1334,12 +1465,24 @@ class CreatorBackend:
             if from_pos.cached_v2: to_pos.cached_v2 = from_pos.cached_v2
             if from_pos.cached_v3: to_pos.cached_v3 = from_pos.cached_v3
 
-        db_move = self.session.query(Move).filter_by(from_position_id=from_pos.id, uci=move_uci).first()
+        move_row = (
+            self.session.query(Move, RepertoireMove)
+            .outerjoin(RepertoireMove, RepertoireMove.move_id == Move.id)
+            .filter(Move.from_position_id == from_pos.id, Move.uci == move_uci)
+            .first()
+        )
+        db_move, rep_move = move_row if move_row else (None, None)
         if not db_move and move_san in CASTLING_SANS:
             alt_uci = CASTLING_ALT.get(move_uci)
             if alt_uci:
-                db_move = self.session.query(Move).filter_by(from_position_id=from_pos.id, uci=alt_uci).first()
-                if db_move:
+                alt_row = (
+                    self.session.query(Move, RepertoireMove)
+                    .outerjoin(RepertoireMove, RepertoireMove.move_id == Move.id)
+                    .filter(Move.from_position_id == from_pos.id, Move.uci == alt_uci)
+                    .first()
+                )
+                if alt_row:
+                    db_move, rep_move = alt_row
                     db_move.uci = move_uci
                     changed = True
         if not db_move:
@@ -1352,7 +1495,6 @@ class CreatorBackend:
             changed = True
 
         final_level = None
-        rep_move = self.session.query(RepertoireMove).filter_by(move_id=db_move.id).first()
         if not rep_move:
             if level_order is None:
                 # NEW DEFAULT LEVEL LOGIC:
@@ -1834,8 +1976,13 @@ class CreatorBackend:
 
     def get_repertoire_color(self):
         if not self.session: return 'w'
+        cached = self._ui_cache.get("__repo_color__")
+        if cached is not None:
+            return cached
         m = self.session.query(Metadata).filter_by(key="color").first()
-        return m.value if m else 'w'
+        val = m.value if m else 'w'
+        self._ui_cache["__repo_color__"] = val
+        return val
 
     def scan_and_update_metadata(self):
         if not self.session: return
@@ -1898,26 +2045,56 @@ class CreatorBackend:
         if start is None:
             start = chess.STARTING_FEN
         clean_start = " ".join(start.strip().split()[:4])
-        pos = self.session.query(Position).filter_by(fen=clean_start).first()
+
+        # Check cached estimation first (invalidated automatically on clear_cache / commit)
+        est_cache_key = f"est_pgn_{clean_start}_{transpos_mode}_{max_l}"
+        cached_est = self._ui_cache.get(est_cache_key)
+        if cached_est is not None:
+            return dict(cached_est)
+
+        pos = self._get_pos_by_fen(clean_start)
         if not pos:
-            pos = self.session.query(Position).filter(Position.fen.op('GLOB')(f"{clean_start}*")).first()
-            if not pos:
-                return {
-                    "estimated_moves": 0,
-                    "transposition_cuts": 0,
-                    "expansion_factor": 1.0,
-                    "estimated_size_mb": 0.0,
-                    "risk_level": "safe",
-                    "base_moves": 0
-                }
+            return {
+                "estimated_moves": 0,
+                "transposition_cuts": 0,
+                "expansion_factor": 1.0,
+                "estimated_size_mb": 0.0,
+                "risk_level": "safe",
+                "base_moves": 0
+            }
 
-        all_moves = self.session.query(Move.id, Move.from_position_id, Move.to_position_id).all()
-        rep_moves = self.session.query(RepertoireMove.move_id, RepertoireMove.level).all()
-        rep_cache = {rm[0]: rm[1] for rm in rep_moves}
+        # Reuse cached lightweight adjacency snapshot loaded via raw SQL (avoids ORM Row overhead)
+        graph_cache = getattr(self, "_export_graph_cache", None)
+        if self.session.new or self.session.dirty or self.session.deleted:
+            self.session.flush()
+            graph_cache = None
 
-        moves_by_from = {}
-        for mid, fid, tid in all_moves:
-            moves_by_from.setdefault(fid, []).append((mid, tid))
+        if graph_cache is None:
+            conn = self.session.connection()
+            all_moves = conn.exec_driver_sql(
+                "SELECT id, from_position_id, to_position_id FROM moves"
+            ).fetchall()
+            moves_by_from = {}
+            for mid, fid, tid in all_moves:
+                bucket = moves_by_from.get(fid)
+                if bucket is None:
+                    moves_by_from[fid] = [(mid, tid)]
+                else:
+                    bucket.append((mid, tid))
+            graph_cache = {"moves_by_from": moves_by_from, "rep_cache": None}
+            self._export_graph_cache = graph_cache
+
+        moves_by_from = graph_cache["moves_by_from"]
+        rep_cache = None
+        if max_l is not None:
+            rep_cache = graph_cache["rep_cache"]
+            if rep_cache is None:
+                conn = self.session.connection()
+                rep_rows = conn.exec_driver_sql(
+                    "SELECT move_id, level FROM repertoire_moves"
+                ).fetchall()
+                rep_cache = dict(rep_rows)
+                graph_cache["rep_cache"] = rep_cache
 
         repo_c = self.get_repertoire_color()
 
@@ -1934,7 +2111,7 @@ class CreatorBackend:
                 lvl = rep_cache.get(mid)
                 return lvl is not None and lvl <= max_l
             else:
-                for cmid, _ in moves_by_from.get(to_pid, []):
+                for cmid, _ in moves_by_from.get(to_pid, ()):
                     clvl = rep_cache.get(cmid)
                     if clvl is not None and clvl <= max_l:
                         return True
@@ -1944,23 +2121,39 @@ class CreatorBackend:
         cuts = 0
         m2_nodes = 0
 
-        def traverse_m2(pid, is_white):
-            nonlocal cuts, m2_nodes
-            if pid in visited_global:
-                cuts += 1
-                return
-            visited_global.add(pid)
-            for mid, tid in moves_by_from.get(pid, []):
-                if not is_move_allowed(mid, tid, is_white):
+        if max_l is None:
+            # Fast iterative DFS when all levels are exported (default ExportDialog open path)
+            stack = [pos.id]
+            while stack:
+                pid = stack.pop()
+                if pid in visited_global:
+                    cuts += 1
                     continue
-                m2_nodes += 1
-                traverse_m2(tid, not is_white)
-
-        traverse_m2(pos.id, start_is_white)
+                visited_global.add(pid)
+                children = moves_by_from.get(pid)
+                if children:
+                    m2_nodes += len(children)
+                    for _, tid in reversed(children):
+                        stack.append(tid)
+        else:
+            stack = [(pos.id, start_is_white)]
+            while stack:
+                pid, is_white = stack.pop()
+                if pid in visited_global:
+                    cuts += 1
+                    continue
+                visited_global.add(pid)
+                children = moves_by_from.get(pid)
+                if children:
+                    next_white = not is_white
+                    for mid, tid in reversed(children):
+                        if is_move_allowed(mid, tid, is_white):
+                            m2_nodes += 1
+                            stack.append((tid, next_white))
 
         if transpos_mode in (1, 2):
             est_size_mb = (m2_nodes * 68) / (1024 * 1024)
-            return {
+            res = {
                 "estimated_moves": m2_nodes,
                 "transposition_cuts": cuts,
                 "expansion_factor": 1.0,
@@ -1968,6 +2161,8 @@ class CreatorBackend:
                 "risk_level": "safe",
                 "base_moves": m2_nodes
             }
+            self._ui_cache[est_cache_key] = res
+            return dict(res)
 
         # transpos_mode == 0: Full DAG tree expansion via memoized DP
         dp = {}
@@ -1981,7 +2176,7 @@ class CreatorBackend:
                 return 0  # cycle back-edge cutoff
             visiting.add(key)
             tot = 0
-            for mid, tid in moves_by_from.get(pid, []):
+            for mid, tid in moves_by_from.get(pid, ()):
                 if not is_move_allowed(mid, tid, is_white):
                     continue
                 tot += 1 + get_subtree(tid, not is_white)
@@ -2000,7 +2195,7 @@ class CreatorBackend:
         else:
             risk = "safe"
 
-        return {
+        res = {
             "estimated_moves": expanded_nodes,
             "transposition_cuts": cuts,
             "expansion_factor": round(expansion_factor, 1),
@@ -2008,6 +2203,8 @@ class CreatorBackend:
             "risk_level": risk,
             "base_moves": m2_nodes
         }
+        self._ui_cache[est_cache_key] = res
+        return dict(res)
 
     def export_pgn(self, start=None, transpos_mode=2, cb=None, max_l=None, language='en'):
         if not self.session: return None
@@ -3991,6 +4188,12 @@ class CreatorWindow(QMainWindow):
 
         top_layout.addStretch()
 
+        # Cloud Sync Status Pill (auto-hidden when Cloud Sync is not configured)
+        from opening_fenix.gui.widgets.cloud_sync_widgets import CloudSyncStatusPill
+        self.cloud_sync_pill = CloudSyncStatusPill(self, compact_height=40, icon_only=False)
+        self.cloud_sync_pill.open_settings_requested.connect(self.open_storage_settings)
+        top_layout.addWidget(self.cloud_sync_pill)
+
         self.custom_title_bar.layout.insertLayout(1, top_layout, 1)
 
         inner_widget = QWidget()
@@ -5972,7 +6175,6 @@ class CreatorWindow(QMainWindow):
                     except Exception as e:
                         logger.error(f"Creator: Direct FEN fallback failed: {e}")
         
-        self.board_widget.update()
         self.update_ui_from_fen()
 
     def update_ui_from_fen(self, force_details=False):
@@ -6003,7 +6205,6 @@ class CreatorWindow(QMainWindow):
                 self.board_widget.last_move = self.board_widget.board.peek()
             else:
                 self.board_widget.last_move = None
-        self.board_widget.update()
         
         # Auto-mark for overhaul if session is active and NOT paused
         if self.overhaul_active and not self.overhaul_paused:
@@ -6097,10 +6298,11 @@ class CreatorWindow(QMainWindow):
             self.details_changed = False
             self.block_signals_details(False)
 
-        self.refresh_candidate_moves_table()
+        pos_id = d.get("id") if isinstance(d, dict) else None
+        self.refresh_candidate_moves_table(pos_id=pos_id)
         if self.engine_thread: self.engine_thread.set_position(f)
 
-    def refresh_candidate_moves_table(self):
+    def refresh_candidate_moves_table(self, pos_id=None):
         if not self._is_ui_valid(): return
         f = self.board_widget.board.fen()
         if not f: return
@@ -6127,9 +6329,12 @@ class CreatorWindow(QMainWindow):
             clean_f = " ".join(f.strip().split()[:4])
             clean_root = " ".join(chess.STARTING_FEN.split()[:4])
             if clean_f != clean_root and self.backend and self.backend.session:
-                db_p = self.backend._get_pos_by_fen(clean_f)
-                if db_p:
-                    p = self.backend._get_pos_prio(db_p.id)
+                target_pid = pos_id
+                if target_pid is None:
+                    db_p = self.backend._get_pos_by_fen(clean_f)
+                    target_pid = db_p.id if db_p else None
+                if target_pid is not None:
+                    p = self.backend._get_pos_prio(target_pid)
                     if p > 0:
                         p_reach = p
 
@@ -6280,12 +6485,14 @@ class CreatorWindow(QMainWindow):
         finally:
             self.table_common_moves.setUpdatesEnabled(True)
 
-        self.update_board_arrows()
+        self.update_board_arrows(candidates=cs)
         
-        # --- TRANSPOSITION DETECTION (badge update) ---
+        # --- TRANSPOSITION DETECTION (debounced badge update) ---
         idx = self.tabs.indexOf(self.tab_transpositions)
         if idx != -1:
             if self.tabs.currentIndex() == idx:
+                if getattr(self, '_transpos_badge_timer', None) and self._transpos_badge_timer.isActive():
+                    self._transpos_badge_timer.stop()
                 outgoing_list = self.backend.find_outgoing_transpositions(f)
                 total_transpos = len(outgoing_list)
                 if total_transpos > 0:
@@ -6294,21 +6501,30 @@ class CreatorWindow(QMainWindow):
                     self.tabs.tabBar().setTabTextColor(idx, QColor())  # Reset to palette default
                 self.update_transpositions_tab(outgoing=outgoing_list)
             else:
-                # Defer badge color check to next idle tick so move input remains instant
-                def _deferred_transpos_badge(fen_to_check=f):
-                    if not self._is_ui_valid():
-                        return
-                    curr_f = self.board_widget.board.fen() if hasattr(self, 'board_widget') and self.board_widget else ""
-                    if curr_f != fen_to_check:
-                        return
-                    out = self.backend.find_outgoing_transpositions(fen_to_check)
-                    t_idx = self.tabs.indexOf(self.tab_transpositions)
-                    if t_idx != -1:
-                        if len(out) > 0:
-                            self.tabs.tabBar().setTabTextColor(t_idx, QColor("#FFD700"))
-                        else:
-                            self.tabs.tabBar().setTabTextColor(t_idx, QColor())
-                QTimer.singleShot(0, _deferred_transpos_badge)
+                # Debounce badge color check (120ms) so rapid arrow-key scrubbing skips intermediate positions
+                self._pending_transpos_badge_fen = f
+                if not hasattr(self, '_transpos_badge_timer') or self._transpos_badge_timer is None:
+                    self._transpos_badge_timer = QTimer(self)
+                    self._transpos_badge_timer.setSingleShot(True)
+                    self._transpos_badge_timer.timeout.connect(self._run_debounced_transpos_badge)
+                self._transpos_badge_timer.start(120)
+
+    def _run_debounced_transpos_badge(self):
+        if not self._is_ui_valid():
+            return
+        fen_to_check = getattr(self, '_pending_transpos_badge_fen', None)
+        if not fen_to_check:
+            return
+        curr_f = self.board_widget.board.fen() if hasattr(self, 'board_widget') and self.board_widget else ""
+        if curr_f != fen_to_check:
+            return
+        out = self.backend.find_outgoing_transpositions(fen_to_check)
+        t_idx = self.tabs.indexOf(self.tab_transpositions)
+        if t_idx != -1:
+            if len(out) > 0:
+                self.tabs.tabBar().setTabTextColor(t_idx, QColor("#FFD700"))
+            else:
+                self.tabs.tabBar().setTabTextColor(t_idx, QColor())
 
 
     def block_signals_details(self, b):
@@ -6989,6 +7205,16 @@ class CreatorWindow(QMainWindow):
 
         # Re-check lockout status after closing settings in case settings were changed
         QTimer.singleShot(500, self.trigger_lichess_lockout_check)
+        try:
+            from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
+            CloudSyncManager.instance().refresh_status()
+        except Exception:
+            pass
+
+    def open_storage_settings(self):
+        self.open_repo_settings()
+        if hasattr(self, 'repo_settings_dialog') and self.repo_settings_dialog and hasattr(self.repo_settings_dialog, 'navigate_to_storage'):
+            self.repo_settings_dialog.navigate_to_storage()
 
     def refresh_active_repo_cover(self):
         """Refreshes the active repertoire load button cover thumbnail."""
@@ -7526,12 +7752,12 @@ class CreatorWindow(QMainWindow):
                 if self.training_manager:
                     self.training_manager.set_repo_visibility(n, True)
 
-    def update_board_arrows(self):
+    def update_board_arrows(self, candidates=None):
         self.board_widget.explorer_arrows = []
         if not self.chk_a.isChecked():
             self.board_widget.update()
             return
-        cs = self.backend.get_candidate_moves(self.board_widget.board.fen())
+        cs = candidates if isinstance(candidates, list) else self.backend.get_candidate_moves(self.board_widget.board.fen())
         for c in cs:
             if c['is_repo']:
                 # Use deep rich blue from styles, with level-based alpha
@@ -7550,13 +7776,24 @@ class CreatorWindow(QMainWindow):
 
     def init_sounds(self):
         vol = self.config.get("master_volume", 100)
+        vol_float = max(0.0, min(1.0, float(vol) / 100.0))
+        _WinAsyncSoundEffect = None
+        if sys.platform == "win32":
+            try:
+                from opening_fenix.gui.main_window import _WinAsyncSoundEffect as _WASE
+                _WinAsyncSoundEffect = _WASE
+            except Exception:
+                _WinAsyncSoundEffect = None
         for s in ["move", "capture"]:
             path = os.path.join(get_base_path(), "assets", "sounds", f"{s}.wav")
             if os.path.exists(path):
-                eff = QSoundEffect()
-                eff.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
-                eff.setVolume(vol / 100.0)
-                self.sounds[s] = eff
+                if _WinAsyncSoundEffect is not None:
+                    self.sounds[s] = _WinAsyncSoundEffect(s, os.path.abspath(path), vol_float)
+                else:
+                    eff = QSoundEffect()
+                    eff.setSource(QUrl.fromLocalFile(os.path.abspath(path)))
+                    eff.setVolume(vol_float)
+                    self.sounds[s] = eff
 
     def play_sound(self, n):
         if n in self.sounds: self.sounds[n].play()
@@ -12189,13 +12426,38 @@ class CreatorWindow(QMainWindow):
             except Exception:
                 pass
 
-        if hasattr(self, 'hole_anim_timer') and self.hole_anim_timer:
-            try:
-                self.hole_anim_timer.stop()
-            except Exception:
-                pass
+        for timer_attr in ('hole_anim_timer', '_transpos_badge_timer'):
+            tmr = getattr(self, timer_attr, None)
+            if tmr:
+                try:
+                    tmr.stop()
+                except Exception:
+                    pass
 
-        for attr_name in ('hole_thread', 'update_checker', 'lockout_worker', 'translation_thread', '_fen_index_thread', '_bfs_thread', '_path_quality_thread'):
+        if not hasattr(CreatorWindow, '_detached_threads'):
+            CreatorWindow._detached_threads = []
+
+        def _retain_if_still_running(t):
+            if t is not None and t.isRunning():
+                if t not in CreatorWindow._detached_threads:
+                    CreatorWindow._detached_threads.append(t)
+                    try:
+                        t.setParent(None)
+                    except Exception:
+                        pass
+                    try:
+                        t.finished.connect(
+                            lambda _t=t: CreatorWindow._detached_threads.remove(_t)
+                            if _t in CreatorWindow._detached_threads else None
+                        )
+                    except Exception:
+                        pass
+
+        for attr_name in (
+            'hole_thread', 'update_checker', 'lockout_worker', 'translation_thread',
+            '_fen_index_thread', '_bfs_thread', '_path_quality_thread',
+            '_instant_multipv_thread', '_global_transpos_thread'
+        ):
             w = getattr(self, attr_name, None)
             if w and w.isRunning():
                 try:
@@ -12207,6 +12469,7 @@ class CreatorWindow(QMainWindow):
                     w.wait(2000)
                 except Exception:
                     pass
+                _retain_if_still_running(w)
 
         if hasattr(self, 'engine_thread') and self.engine_thread:
             try:
@@ -12227,7 +12490,9 @@ class CreatorWindow(QMainWindow):
             try:
                 self.global_transpos_thread.stop()
                 self.global_transpos_thread.wait(200)
-            except: pass
+            except Exception:
+                pass
+            _retain_if_still_running(self.global_transpos_thread)
 
         if hasattr(self, 'enrichment_queue'):
             self.enrichment_queue.clear()
@@ -12235,11 +12500,31 @@ class CreatorWindow(QMainWindow):
             for t in list(self.enrichment_threads):
                 try:
                     t.finished_signal.disconnect()
+                except Exception:
+                    pass
+                try:
                     if t.isRunning():
+                        t.requestInterruption()
                         t.wait(100)
                 except Exception:
                     pass
+                _retain_if_still_running(t)
             self.enrichment_threads.clear()
+
+        for pool_attr in ('_retired_threads', '_dying_hole_threads'):
+            pool = getattr(self, pool_attr, None)
+            if pool:
+                for t in list(pool):
+                    try:
+                        if t.isRunning():
+                            if hasattr(t, 'stop'):
+                                t.stop()
+                            t.requestInterruption()
+                            t.wait(200)
+                    except Exception:
+                        pass
+                    _retain_if_still_running(t)
+                pool.clear()
             
         if hasattr(self, 'backend') and self.backend:
             try:
