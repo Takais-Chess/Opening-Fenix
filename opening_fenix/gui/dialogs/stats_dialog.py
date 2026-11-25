@@ -9,7 +9,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize, QRectF
 from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
 
 from opening_fenix.gui.scaling import scale
-from opening_fenix.gui.styles import COLORS, set_consistent_icon
+from opening_fenix.gui.styles import COLORS, set_consistent_icon, get_chevron_icon_path
 from opening_fenix.core.translation import tr_ui, tr_widget
 from opening_fenix.core.services.statistics_service import (
     calculate_repertoire_statistics,
@@ -404,7 +404,7 @@ class RepertoireStatisticsDialog(QDialog):
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
                 border-radius: {scale(6)}px;
-                padding: 0 {scale(10)}px;
+                padding: 0 {scale(24)}px 0 {scale(10)}px;
                 font-weight: 600;
                 font-size: {scale(12)}px;
             }}
@@ -412,8 +412,15 @@ class RepertoireStatisticsDialog(QDialog):
                 border-color: #94a3b8;
             }}
             QComboBox::drop-down {{
+                subcontrol-origin: border;
+                subcontrol-position: center right;
                 border: none;
-                width: {scale(20)}px;
+                width: {scale(22)}px;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(10)}px;
+                height: {scale(10)}px;
             }}
         """)
 
@@ -445,7 +452,7 @@ class RepertoireStatisticsDialog(QDialog):
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
                 border-radius: {scale(6)}px;
-                padding: 0 {scale(10)}px;
+                padding: 0 {scale(24)}px 0 {scale(10)}px;
                 font-weight: 600;
                 font-size: {scale(12)}px;
             }}
@@ -453,8 +460,15 @@ class RepertoireStatisticsDialog(QDialog):
                 border-color: #94a3b8;
             }}
             QComboBox::drop-down {{
+                subcontrol-origin: border;
+                subcontrol-position: center right;
                 border: none;
-                width: {scale(20)}px;
+                width: {scale(22)}px;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(10)}px;
+                height: {scale(10)}px;
             }}
         """)
         self.combo_level.currentIndexChanged.connect(self._on_level_selected)

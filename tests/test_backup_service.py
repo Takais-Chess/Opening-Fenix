@@ -232,3 +232,73 @@ def test_restore_legacy_backup_with_wal_and_shm(temp_repo):
         row = conn.exec_driver_sql("SELECT comment FROM positions WHERE id = 'pos1'").fetchone()
         assert row is not None
     new_manager.close()
+
+
+def test_backup_allowlist_and_lzma_compression(temp_repo):
+    import zipfile
+
+    repo_name, user_dir = temp_repo
+    repo_dir = user_dir / "repertoires" / repo_name
+
+    # Legitimate assets that SHOULD be backed up
+    (repo_dir / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 128)
+    (repo_dir / "Model Games.pgn").write_text('[Event "MG"]\n1. e4 e5 *\n', encoding="utf-8")
+
+    # Static archive & stray/junk files that MUST be excluded
+    orig_dir = repo_dir / "Original PGNs"
+    orig_dir.mkdir()
+    (orig_dir / "source_course.pgn").write_text('[Event "Orig"]\n1. d4 d5 *\n', encoding="utf-8")
+
+    (repo_dir / f"{repo_name}.db.corrupted_20260425").write_bytes(b"corrupt")
+    (repo_dir / f"{repo_name}.db.malformed").write_bytes(b"malformed")
+    (repo_dir / f"{repo_name}.db.empty").write_bytes(b"")
+    (repo_dir / "dump.sql").write_text("SELECT 1;", encoding="utf-8")
+    (repo_dir / "test_export.pdf").write_bytes(b"%PDF-1.4")
+    (repo_dir / "book_export.html").write_text("<html></html>", encoding="utf-8")
+    (repo_dir / "Model Games.ini").write_text("[General]\n", encoding="utf-8")
+    (repo_dir / "README.md").write_text("# Notes\n", encoding="utf-8")
+    (repo_dir / f"{repo_name} L1.pgn").write_text('[Event "Export"]\n1. e4 *\n', encoding="utf-8")
+
+    zip_path = create_repertoire_backup(repo_name, trigger_type="manual")
+    assert zip_path is not None
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        infos = {i.filename.replace("\\", "/"): i for i in zf.infolist()}
+
+    # Included
+    assert f"{repo_name}.db" in infos
+    assert "cover.png" in infos
+    assert "Model Games.pgn" in infos
+    assert "typical_ideas/ideas.pgn" in infos
+    assert "model_games/game1.pgn" in infos
+    assert "manifest.json" in infos
+
+    # Excluded
+    for forbidden in (
+        "Original PGNs/source_course.pgn",
+        f"{repo_name}.db.corrupted_20260425",
+        f"{repo_name}.db.malformed",
+        f"{repo_name}.db.empty",
+        "dump.sql",
+        "test_export.pdf",
+        "book_export.html",
+        "Model Games.ini",
+        "README.md",
+        f"{repo_name} L1.pgn",
+    ):
+        assert forbidden not in infos, f"Unexpected file in backup: {forbidden}"
+
+    # Compression types: LZMA for DB & PGNs, STORED for already-compressed cover image
+    assert infos[f"{repo_name}.db"].compress_type == zipfile.ZIP_LZMA
+    assert infos["Model Games.pgn"].compress_type == zipfile.ZIP_LZMA
+    assert infos["cover.png"].compress_type == zipfile.ZIP_STORED
+
+    # Modifying Original PGNs or stray files should NOT trigger a new auto backup
+    (orig_dir / "source_course.pgn").write_text('[Event "Orig2"]\n1. c4 *\n', encoding="utf-8")
+    (repo_dir / "test_export.pdf").write_bytes(b"%PDF-1.7-changed")
+    assert create_repertoire_backup(repo_name, trigger_type="auto") is None
+
+    # Restore from the LZMA backup still works cleanly
+    (repo_dir / "cover.png").unlink()
+    assert restore_repertoire_from_backup(repo_name, zip_path) is True
+    assert (repo_dir / "cover.png").exists()

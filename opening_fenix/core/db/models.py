@@ -93,6 +93,19 @@ class LichessData(Base):
 
     __table_args__ = (UniqueConstraint('fen', 'elo_range', name='_fen_elo_uc'),)
 
+class MovePriority(Base):
+    """Stores per-Elo priority scores for moves so multi-Elo courses support instant switching."""
+    __tablename__ = 'move_priorities'
+    id = Column(Integer, primary_key=True)
+    move_id = Column(Integer, ForeignKey('moves.id', ondelete='CASCADE'), nullable=False)
+    elo_range = Column(String, nullable=False, index=True)
+    priority_score = Column(Float, default=0.0)
+
+    __table_args__ = (
+        UniqueConstraint('move_id', 'elo_range', name='_move_elo_prio_uc'),
+        Index('ix_move_priorities_elo_move', 'elo_range', 'move_id'),
+    )
+
 
 # --- USER PROFILE DATABASE SCHEMA ---
 UserBase = declarative_base()
@@ -126,6 +139,7 @@ class UserRepertoireSettings(UserBase):
     repertoire_name = Column(String, primary_key=True)
     active_level = Column(Integer, default=1)
     comment_language = Column(String, default="auto")
+    active_lichess_elo = Column(String, nullable=True, default=None)
     rating = Column(Float, default=800.0)
     last_rating_update = Column(DateTime, nullable=True)
     

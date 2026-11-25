@@ -7,6 +7,7 @@ from PyQt6.QtGui import QIcon, QAction, QColor
 from PyQt6.QtCore import Qt, pyqtSignal, QPoint, QSize, QTimer
 
 from opening_fenix.gui.scaling import scale
+from opening_fenix.gui.widgets.common import FadingScrollArea
 from opening_fenix.gui.styles import COLORS, get_settings_gear_icon
 from opening_fenix.core.translation import tr_ui
 
@@ -44,7 +45,7 @@ class RepertoireTabsWidget(QWidget):
         self.btn_scroll_right.clicked.connect(self.scroll_tabs_right)
         self.btn_scroll_right.hide()
 
-        self.repo_scroll = QScrollArea()
+        self.repo_scroll = FadingScrollArea()
         self.repo_scroll.setWidgetResizable(True)
         self.repo_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.repo_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

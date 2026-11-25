@@ -2,6 +2,13 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.3.16] - 2026-11-25
+
+### Added & Improved
+- **Multi-Elo Support per Course**: Courses can now store and score multiple Lichess Elo brackets (`MovePriority` table and `active_lichess_elo` per user/course) with instant, zero-recalculation switching on active Trainer course cards, `EloPills` multi-Elo selection in Task Center single and batch imports, automatic multi-Elo refresh in `MaintenanceOrchestrator`, and full DE/EN localization.
+- **UX, Onboarding & Diagnostics**: Added `BugReportDialog`, refined `TourOverlay`, `FAQDialog`, and pre-launch UX improvements across `MainWindow`, `UnifiedSettingsDialog`, `OpenTrainingDialog`, and `StatsDialog`.
+- **Cloud Sync & Backup**: Improved `CloudSyncService`, `CloudSyncManager`, and `BackupService` reliability, and added read-only cloud repertoire sync (`scripts/sync_cloud_repertoires.py`) for release packaging.
+
 ## [1.3.15] - 2026-11-23
 
 ### Added & Improved

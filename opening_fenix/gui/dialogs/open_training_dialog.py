@@ -267,8 +267,9 @@ class OpenTrainingSetupDialog(QDialog):
     def _get_target_variation_language(self) -> Optional[str]:
         curr_comment_lang = self.combo_comment_lang.currentData() or "auto"
         if curr_comment_lang == "auto":
+            repo_name = self.combo_repo.currentData() if hasattr(self, 'combo_repo') else None
             if hasattr(self, 'main_window') and hasattr(self.main_window, 'get_effective_comment_language'):
-                return self.main_window.get_effective_comment_language()
+                return self.main_window.get_effective_comment_language(repo_name=repo_name)
             return "de"
         return curr_comment_lang
 

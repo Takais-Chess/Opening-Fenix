@@ -348,6 +348,53 @@ def get_repertoire_levels_fast(repo_name: str) -> List[Dict[str, Any]]:
     return []
 
 
+def get_repertoire_lichess_elos_fast(repo_name: str) -> Tuple[Optional[str], List[str]]:
+    """
+    Returns (default_elo, available_elos) for a course using a lightweight sqlite3 read.
+    available_elos is derived from metadata 'lichess_elos' plus the primary 'lichess_elo'.
+    """
+    from opening_fenix.core.utils import parse_elo_list
+    if not repo_name:
+        return None, []
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return None, []
+    conn = None
+    try:
+        conn = sqlite3.connect(os.path.abspath(db_path), timeout=5)
+        cur = conn.cursor()
+        cur.execute("SELECT key, value FROM metadata WHERE key IN ('lichess_elo', 'lichess_elos')")
+        meta = dict(cur.fetchall())
+        default_elo = (meta.get("lichess_elo") or "").strip().lower() or None
+        raw_elos = list(parse_elo_list(meta.get("lichess_elos") or ""))
+        try:
+            for (er,) in cur.execute("SELECT DISTINCT elo_range FROM lichess_data").fetchall():
+                if er:
+                    raw_elos.append(er)
+        except Exception:
+            pass
+        try:
+            for (er,) in cur.execute("SELECT DISTINCT elo_range FROM move_priorities").fetchall():
+                if er:
+                    raw_elos.append(er)
+        except Exception:
+            pass
+        elos = parse_elo_list(raw_elos)
+        if not elos and default_elo:
+            elos = parse_elo_list([default_elo])
+        if default_elo not in elos:
+            default_elo = elos[0] if elos else None
+        return default_elo, elos
+    except Exception:
+        return None, []
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def get_repertoire_coverage_fast(repo_name: str) -> float:
     """Computes Lichess coverage percentage via lightweight sqlite3 without SQLAlchemy engine init."""
     if not repo_name:
@@ -483,6 +530,20 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         set_meta(session, "cov_cache_covered", covered_pos)
         session.commit()
     
+    # Per-Elo coverage (only computed for multi-Elo courses)
+    from opening_fenix.core.utils import parse_elo_list
+    available_elos = parse_elo_list(get_meta(session, "lichess_elos", "") or "")
+    if not available_elos and elo_cat in ("low", "mid", "high", "masters"):
+        available_elos = [elo_cat]
+    elo_coverage: Dict[str, float] = {}
+    if len(available_elos) > 1 and total_pos > 0:
+        grouped = session.query(LichessData.elo_range, func.count(func.distinct(Position.id)))\
+            .join(Position, Position.fen == LichessData.fen)\
+            .filter(LichessData.elo_range.in_(available_elos))\
+            .group_by(LichessData.elo_range).all()
+        elo_coverage = {e: min(100.0, c / total_pos * 100) for e, c in grouped}
+        for e in available_elos:
+            elo_coverage.setdefault(e, 0.0)
 
     return {
         "name": get_meta(session, "name", repo_name),
@@ -491,6 +552,8 @@ def fetch_repertoire_info(session: Session, repo_name: str, fast_only: bool = Fa
         "level_details": level_details,
         "depth": get_repertoire_analysis_status(repo_name, session),
         "elo": elo_cat,
+        "available_elos": available_elos,
+        "elo_coverage": elo_coverage,
         "coverage_pct": coverage_pct,
         "covered_pos": covered_pos,
         "total_pos": total_pos,

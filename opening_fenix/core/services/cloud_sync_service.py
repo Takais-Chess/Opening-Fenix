@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import gzip
 import json
 import time
 import shutil
@@ -11,7 +12,7 @@ import zipfile
 import tempfile
 import threading
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, List, Tuple, Callable
+from typing import Dict, Any, Optional, List, Tuple, Callable, Iterable
 
 from opening_fenix.core.utils import (
     get_default_user_dir,
@@ -30,14 +31,20 @@ LOCAL_SYNC_STATE_FILENAME = "local_sync_state.json"
 SHARED_SETTINGS_FILENAME = "shared_settings.json"
 USER_DICTIONARY_FILENAME = "user_dictionary.txt"
 ENGINE_CACHE_SNAPSHOT_FILENAME = "engine_eval_cache.fenixsync.zip"
+ENGINE_CACHE_DELTAS_SUBDIR = "engine_cache_deltas"
 CLOUD_SYNC_SUBDIR = "cloud_sync"
+
+# Engine cache delta sync compaction thresholds
+ENGINE_CACHE_DELTA_COMPACT_COUNT = 20
+ENGINE_CACHE_DELTA_COMPACT_BYTES = 2 * 1024 * 1024
+ENGINE_CACHE_DELTA_MAX_ROWS = 5000
 
 # Global re-entrant lock protecting sync operations within the process
 _SYNC_LOCK = threading.RLock()
 
 # Default heartbeat cadence & stale lock timeout (modern clients)
-HEARTBEAT_INTERVAL_SECONDS = 60
-MODERN_SESSION_MAX_AGE_SECONDS = 10 * 60
+HEARTBEAT_INTERVAL_SECONDS = 240
+MODERN_SESSION_MAX_AGE_SECONDS = 15 * 60
 LEGACY_SESSION_MAX_AGE_SECONDS = 6 * 3600
 
 # Portable config.json keys safe to synchronize across PC & Laptop
@@ -85,6 +92,13 @@ _CONFLICT_FILE_PATTERNS = (
 )
 
 
+# Already-compressed asset extensions (store without wasting CPU re-compressing)
+_ALREADY_COMPRESSED_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".zip", ".gz", ".7z", ".xz")
+
+# Resource PGN keywords kept in repertoire roots (matches backup_service.is_resource_pgn_file)
+_RESOURCE_PGN_KEYWORDS = ("model games", "typical motives", "typical ideas", "tactics", "ideas")
+
+
 def _is_ignored_repo_file(filename: str) -> bool:
     low = filename.lower()
     if low.endswith(_IGNORED_SUFFIXES):
@@ -94,6 +108,32 @@ def _is_ignored_repo_file(filename: str) -> bool:
     if low == "dump.sql":
         return True
     return False
+
+
+def _is_syncable_repo_asset(filename: str, repo_name: str = "", is_root: bool = False) -> bool:
+    """
+    Returns True if a non-DB file inside a repertoire folder should be synced to the cloud.
+    Excludes SQLite sidecars, temporary/corrupted files, generated root PDF exports,
+    and generated repertoire-level PGN exports (e.g. '<RepoName> L1.pgn').
+    """
+    if _is_ignored_repo_file(filename):
+        return False
+    low = filename.lower()
+    if is_root and low.endswith(".db"):
+        return False
+    # Exclude generated PDF exports placed in repertoire root (e.g. test_export.pdf)
+    if is_root and low.endswith(".pdf"):
+        return False
+    # For root-level PGNs, exclude generated repertoire exports while keeping resource PGNs
+    if is_root and low.endswith(".pgn"):
+        for kw in _RESOURCE_PGN_KEYWORDS:
+            if kw in low:
+                return True
+        if repo_name:
+            safe_repo = repo_name.lower().replace("_", " ").strip()
+            if safe_repo and (low.startswith(safe_repo) or f"{safe_repo}.pgn" in low):
+                return False
+    return True
 
 
 def get_device_name() -> str:
@@ -312,6 +352,32 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _sha256_sqlite_content(path: str) -> str:
+    """
+    Computes a deterministic SHA256 of a SQLite database file while masking out
+    volatile 100-byte header fields that SQLite rewrites without any logical data
+    change (e.g. toggling WAL <-> DELETE journal mode or different SQLite versions):
+      - bytes 24..27: File change counter
+      - bytes 92..95: Version-valid-for number
+      - bytes 96..99: SQLITE_VERSION_NUMBER
+    """
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        first = f.read(131072)
+        if len(first) >= 100 and first[:16] == b"SQLite format 3\x00":
+            hdr = bytearray(first[:100])
+            hdr[24:28] = b"\x00\x00\x00\x00"
+            hdr[92:100] = b"\x00\x00\x00\x00\x00\x00\x00\x00"
+            h.update(hdr)
+            if len(first) > 100:
+                h.update(first[100:])
+        elif first:
+            h.update(first)
+        for chunk in iter(lambda: f.read(131072), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _atomic_write_json(path: str, data: dict) -> None:
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     tmp_path = _unique_tmp_path(path)
@@ -337,22 +403,29 @@ def _read_json_safe(path: str, default: Optional[dict] = None) -> dict:
 
 def _compute_repo_local_fingerprint(repo_dir: str, repo_name: str) -> str:
     """
-    Fast O(1) metadata fingerprint (mtime_ns + size) for all relevant files in a local
+    Fast O(1) metadata fingerprint (mtime_ns + size) for all sync-relevant files in a local
     repertoire directory to skip unchanged repertoires without reading megabytes of data.
+    Ignores empty 0-byte -wal files (touched by read-only opens) and non-syncable exports.
     """
     parts: List[str] = []
     if not os.path.exists(repo_dir):
         return ""
     for root, dirs, files in os.walk(repo_dir):
         dirs.sort()
+        is_root = (root == repo_dir)
         for fname in sorted(files):
             low = fname.lower()
-            if low.endswith(("-shm", ".tmp")) or ".corrupted" in low or ".malformed" in low or ".tmp." in low:
-                continue
+            is_wal = low.endswith((".db-wal", "-wal"))
+            is_main_db = is_root and low == f"{repo_name.lower()}.db"
+            if not is_main_db and not is_wal:
+                if not _is_syncable_repo_asset(fname, repo_name=repo_name, is_root=is_root):
+                    continue
             full_p = os.path.join(root, fname)
             rel_p = os.path.relpath(full_p, repo_dir).replace("\\", "/")
             try:
                 st = os.stat(full_p)
+                if is_wal and st.st_size == 0:
+                    continue
                 parts.append(f"{rel_p}:{st.st_size}:{st.st_mtime_ns}")
             except OSError:
                 pass
@@ -366,6 +439,8 @@ def _compute_profile_local_fingerprint(profiles_dir: str, profile_name: str) -> 
         if os.path.exists(fp):
             try:
                 st = os.stat(fp)
+                if suffix.endswith("-wal") and st.st_size == 0:
+                    continue
                 parts.append(f"{suffix}:{st.st_size}:{st.st_mtime_ns}")
             except OSError:
                 pass
@@ -853,6 +928,9 @@ class CloudSyncService:
             "user_dictionary_sha256": None,
             "engine_cache_sha256": None,
             "engine_cache_local_fp": None,
+            "engine_cache_last_pushed_ts": None,
+            "engine_cache_boundary_fens": [],
+            "applied_engine_cache_deltas": [],
         }
         data = _read_json_safe(s_path, default_state)
         # If the user switched to a different cloud directory, reset per-item sync state
@@ -1058,15 +1136,18 @@ class CloudSyncService:
         repo_name: str,
         cloud_sync_root: str,
         existing_sha: Optional[str] = None,
+        existing_entry: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Verifies the local repertoire DB, computes deterministic composite SHA256,
-        and if changed (or snapshot missing), packages the clean DB + repertoire assets into an
-        atomic .fenixsync.zip in cloud_sync/repertoires/.
+        Verifies the local repertoire DB, computes deterministic normalized-header DB SHA256
+        and static assets SHA256, and packages changed parts into split LZMA archives:
+          - `repertoires/<repo_name>.fenixsync.zip` (DB only, LZMA)
+          - `repertoires/<repo_name>.assets.fenixsync.zip` (syncable assets only, if any)
+        Unchanged DB or unchanged assets are reused in place without rewriting or re-uploading.
         Returns:
           - None if local DB is missing or fails integrity verification.
-          - {"unchanged": True, "sha256": ...} if content hash matches existing_sha and zip exists.
-          - Full manifest entry dict if a new snapshot was written.
+          - {"unchanged": True, "sha256": ...} if content matches cloud and zips exist.
+          - Full manifest entry dict if a snapshot was written/updated.
         """
         local_db_path = os.path.join(local_repo_dir, f"{repo_name}.db")
         if not os.path.exists(local_db_path):
@@ -1081,52 +1162,133 @@ class CloudSyncService:
                 )
                 return None
 
-            content_hasher = hashlib.sha256()
-            db_sha256 = _sha256_file(clean_db_path)
-            content_hasher.update(f"DB:{db_sha256}".encode("utf-8"))
+            db_sha256 = _sha256_sqlite_content(clean_db_path)
 
             asset_files: List[Tuple[str, str]] = []
+            assets_hasher = hashlib.sha256()
             for root, dirs, files in os.walk(local_repo_dir):
                 dirs.sort()
+                is_root = (root == local_repo_dir)
                 for fname in sorted(files):
-                    if _is_ignored_repo_file(fname):
-                        continue
-                    if fname.lower().endswith(".db") and root == local_repo_dir:
+                    if not _is_syncable_repo_asset(fname, repo_name=repo_name, is_root=is_root):
                         continue
                     full_p = os.path.join(root, fname)
                     if not os.path.isfile(full_p):
                         continue
                     rel_p = os.path.relpath(full_p, local_repo_dir).replace("\\", "/")
                     asset_files.append((full_p, rel_p))
-                    content_hasher.update(f"ASSET:{rel_p}:{_sha256_file(full_p)}".encode("utf-8"))
+                    assets_hasher.update(f"ASSET:{rel_p}:{_sha256_file(full_p)}".encode("utf-8"))
 
-            composite_sha256 = content_hasher.hexdigest()
+            assets_sha256 = assets_hasher.hexdigest() if asset_files else ""
+            composite_sha256 = hashlib.sha256(
+                f"DB:{db_sha256}|ASSETS:{assets_sha256}".encode("utf-8")
+            ).hexdigest()
 
-            rel_zip_path = f"repertoires/{repo_name}.fenixsync.zip"
-            final_zip_path = os.path.join(cloud_sync_root, "repertoires", f"{repo_name}.fenixsync.zip")
+            rel_db_zip = f"repertoires/{repo_name}.fenixsync.zip"
+            final_db_zip = os.path.join(cloud_sync_root, "repertoires", f"{repo_name}.fenixsync.zip")
+            rel_assets_zip = f"repertoires/{repo_name}.assets.fenixsync.zip"
+            final_assets_zip = os.path.join(cloud_sync_root, "repertoires", f"{repo_name}.assets.fenixsync.zip")
 
-            # Skip rewriting zip & manifest if content is byte-for-byte identical to cloud
-            if existing_sha and existing_sha == composite_sha256 and os.path.exists(final_zip_path):
-                return {"unchanged": True, "sha256": composite_sha256, "db_sha256": db_sha256}
+            eff_existing_sha = existing_sha or (existing_entry.get("sha256") if existing_entry else None)
+            is_existing_v2 = bool(existing_entry and existing_entry.get("format_version", 1) >= 2)
 
-            os.makedirs(os.path.dirname(final_zip_path), exist_ok=True)
-            tmp_zip_path = _unique_tmp_path(final_zip_path)
+            # Fast check: v2 entry matches both DB and assets and files exist on disk
+            if eff_existing_sha and eff_existing_sha == composite_sha256 and os.path.exists(final_db_zip):
+                assets_ok = (not asset_files) or os.path.exists(final_assets_zip)
+                if assets_ok:
+                    return {
+                        "unchanged": True,
+                        "sha256": composite_sha256,
+                        "db_sha256": db_sha256,
+                        "assets_sha256": assets_sha256,
+                    }
 
-            with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.write(clean_db_path, f"{repo_name}.db")
-                for full_p, rel_p in asset_files:
-                    zf.write(full_p, rel_p)
+            # Backwards-compat check: avoid spurious re-upload of untouched legacy v1 zips
+            # when only volatile SQLite header bytes (journal_mode / sqlite_version) or mtime changed
+            if existing_entry and not is_existing_v2 and os.path.exists(final_db_zip):
+                prev_db_sha = existing_entry.get("db_sha256")
+                if prev_db_sha and prev_db_sha in (db_sha256, _sha256_file(clean_db_path)):
+                    # Check if raw v1 composite matches with prev_db_sha
+                    v1_h = hashlib.sha256()
+                    v1_h.update(f"DB:{prev_db_sha}".encode("utf-8"))
+                    for full_p, rel_p in asset_files:
+                        v1_h.update(f"ASSET:{rel_p}:{_sha256_file(full_p)}".encode("utf-8"))
+                    if v1_h.hexdigest() == existing_entry.get("sha256"):
+                        return {
+                            "unchanged": True,
+                            "sha256": existing_entry["sha256"],
+                            "db_sha256": prev_db_sha,
+                            "assets_sha256": assets_sha256,
+                        }
 
-            zip_sha256 = _sha256_file(tmp_zip_path)
-            _safe_replace(tmp_zip_path, final_zip_path)
+            os.makedirs(os.path.dirname(final_db_zip), exist_ok=True)
+
+            # 1. Package DB zip ONLY if DB changed, format upgraded from v1, or file missing
+            reuse_db_zip = (
+                is_existing_v2
+                and existing_entry.get("db_sha256") == db_sha256
+                and os.path.exists(final_db_zip)
+                and bool(existing_entry.get("zip_sha256"))
+            )
+            if reuse_db_zip:
+                db_zip_sha256 = existing_entry["zip_sha256"]
+                db_zip_size = os.path.getsize(final_db_zip)
+            else:
+                tmp_db_zip = _unique_tmp_path(final_db_zip)
+                with zipfile.ZipFile(tmp_db_zip, "w", zipfile.ZIP_LZMA) as zf:
+                    zf.write(clean_db_path, f"{repo_name}.db")
+                db_zip_sha256 = _sha256_file(tmp_db_zip)
+                _safe_replace(tmp_db_zip, final_db_zip)
+                db_zip_size = os.path.getsize(final_db_zip)
+
+            # 2. Package assets zip ONLY if assets changed or file missing (never re-upload static assets on DB edit!)
+            if asset_files:
+                reuse_assets_zip = (
+                    is_existing_v2
+                    and existing_entry.get("assets_sha256") == assets_sha256
+                    and existing_entry.get("assets_snapshot_file") == rel_assets_zip
+                    and os.path.exists(final_assets_zip)
+                    and bool(existing_entry.get("assets_zip_sha256"))
+                )
+                if reuse_assets_zip:
+                    assets_zip_sha256 = existing_entry["assets_zip_sha256"]
+                    assets_zip_size = os.path.getsize(final_assets_zip)
+                else:
+                    tmp_assets_zip = _unique_tmp_path(final_assets_zip)
+                    with zipfile.ZipFile(tmp_assets_zip, "w") as zf:
+                        for full_p, rel_p in asset_files:
+                            ext = os.path.splitext(rel_p)[1].lower()
+                            comp = zipfile.ZIP_STORED if ext in _ALREADY_COMPRESSED_EXTS else zipfile.ZIP_LZMA
+                            zf.write(full_p, rel_p, compress_type=comp)
+                    assets_zip_sha256 = _sha256_file(tmp_assets_zip)
+                    _safe_replace(tmp_assets_zip, final_assets_zip)
+                    assets_zip_size = os.path.getsize(final_assets_zip)
+                out_assets_rel: Optional[str] = rel_assets_zip
+            else:
+                # All syncable assets were removed -> clean up stale assets archive
+                if os.path.exists(final_assets_zip):
+                    try:
+                        os.remove(final_assets_zip)
+                    except Exception:
+                        pass
+                out_assets_rel = None
+                assets_zip_sha256 = None
+                assets_zip_size = 0
+
             return {
+                "format_version": 2,
                 "sha256": composite_sha256,
                 "db_sha256": db_sha256,
-                "zip_sha256": zip_sha256,
+                "zip_sha256": db_zip_sha256,
+                "db_size_bytes": db_zip_size,
+                "assets_sha256": assets_sha256,
+                "assets_snapshot_file": out_assets_rel,
+                "assets_zip_sha256": assets_zip_sha256,
+                "assets_size_bytes": assets_zip_size,
                 "updated_at": _now_iso(),
                 "updated_by": get_device_name(),
-                "snapshot_file": rel_zip_path,
-                "size_bytes": os.path.getsize(final_zip_path),
+                "snapshot_file": rel_db_zip,
+                "size_bytes": db_zip_size + assets_zip_size,
             }
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -1137,126 +1299,222 @@ class CloudSyncService:
         repo_name: str,
         manifest_entry: dict,
         local_repo_dir: str,
+        prev_local_info: Optional[dict] = None,
     ) -> Tuple[bool, str]:
         """
-        Extracts a repertoire .fenixsync.zip from cloud_sync into a temp folder,
-        verifies zip CRC, verifies SQLite integrity + expected db_sha256 (catching
-        Google Drive/OneDrive manifest-ahead-of-zip races), removes stale deleted
-        local assets, and atomically updates local_repo_dir.
+        Extracts a repertoire snapshot (both v2 split DB+assets and legacy v1 combined zip)
+        from cloud_sync into a temp folder, verifies zip CRC + SQLite integrity + db_sha256
+        (catching Google Drive/OneDrive manifest-ahead-of-zip races), removes stale deleted
+        local syncable assets (preserving local exports like PDFs), and atomically updates local_repo_dir.
         Returns (success, error_reason).
         """
+        is_split_v2 = (manifest_entry.get("format_version", 1) >= 2) or ("assets_sha256" in manifest_entry)
         rel_zip = manifest_entry.get("snapshot_file") or f"repertoires/{repo_name}.fenixsync.zip"
         zip_path = os.path.join(cloud_sync_root, rel_zip.replace("/", os.sep))
-        if not os.path.exists(zip_path):
-            logger.warning(f"CloudSync: Snapshot zip not found at {zip_path}")
-            return False, "snapshot_missing"
 
-        # Fast pre-check on zip hash if available
-        expected_zip_sha = manifest_entry.get("zip_sha256")
-        if expected_zip_sha:
-            try:
-                actual_zip_sha = _sha256_file(zip_path)
-                if actual_zip_sha != expected_zip_sha:
-                    logger.warning(
-                        f"CloudSync: Snapshot zip for '{repo_name}' does not match manifest hash "
-                        f"(cloud client may still be downloading)."
-                    )
-                    return False, "pending_cloud_download"
-            except Exception as e:
-                return False, f"read_error:{e}"
+        local_db_path = os.path.join(local_repo_dir, f"{repo_name}.db")
+        local_db_valid = os.path.exists(local_db_path) and verify_sqlite_db(local_db_path)
+
+        need_db_extract = (
+            (not is_split_v2)
+            or (not local_db_valid)
+            or (prev_local_info is None)
+            or (prev_local_info.get("synced_db_sha256") != manifest_entry.get("db_sha256"))
+        )
+        need_assets_extract = is_split_v2 and (
+            (prev_local_info is None)
+            or (prev_local_info.get("synced_assets_sha256") != manifest_entry.get("assets_sha256"))
+        )
+
+        # Pre-validate required archive files & hashes before touching local workspace
+        if need_db_extract:
+            if not os.path.exists(zip_path):
+                logger.warning(f"CloudSync: Snapshot zip not found at {zip_path}")
+                return False, "snapshot_missing"
+            expected_zip_sha = manifest_entry.get("zip_sha256")
+            if expected_zip_sha:
+                try:
+                    actual_zip_sha = _sha256_file(zip_path)
+                    if actual_zip_sha != expected_zip_sha:
+                        logger.warning(
+                            f"CloudSync: Snapshot zip for '{repo_name}' does not match manifest hash "
+                            f"(cloud client may still be downloading)."
+                        )
+                        return False, "pending_cloud_download"
+                except Exception as e:
+                    return False, f"read_error:{e}"
+
+        rel_assets_zip = manifest_entry.get("assets_snapshot_file") if is_split_v2 else None
+        assets_zip_path = (
+            os.path.join(cloud_sync_root, rel_assets_zip.replace("/", os.sep))
+            if rel_assets_zip
+            else None
+        )
+        if need_assets_extract and assets_zip_path:
+            if not os.path.exists(assets_zip_path):
+                logger.warning(f"CloudSync: Assets snapshot zip not found at {assets_zip_path}")
+                return False, "pending_cloud_download"
+            expected_assets_zip_sha = manifest_entry.get("assets_zip_sha256")
+            if expected_assets_zip_sha:
+                try:
+                    if _sha256_file(assets_zip_path) != expected_assets_zip_sha:
+                        logger.warning(
+                            f"CloudSync: Assets zip for '{repo_name}' does not match manifest hash "
+                            f"(cloud client may still be downloading)."
+                        )
+                        return False, "pending_cloud_download"
+                except Exception as e:
+                    return False, f"read_error:{e}"
 
         tmp_dir = tempfile.mkdtemp(prefix="fenix_pull_repo_")
         try:
-            ok, err = _safe_extract_zip(zip_path, tmp_dir)
-            if not ok:
-                logger.error(f"CloudSync: Invalid snapshot archive for '{repo_name}': {err}")
-                return False, f"bad_archive:{err}"
+            db_stage_dir = os.path.join(tmp_dir, "db_stage")
+            assets_stage_dir = os.path.join(tmp_dir, "assets_stage")
+            os.makedirs(db_stage_dir, exist_ok=True)
+            os.makedirs(assets_stage_dir, exist_ok=True)
 
-            extracted_db = os.path.join(tmp_dir, f"{repo_name}.db")
-            if not os.path.exists(extracted_db):
-                dbs = [f for f in os.listdir(tmp_dir) if f.lower().endswith(".db")]
-                if dbs:
-                    os.replace(os.path.join(tmp_dir, dbs[0]), extracted_db)
+            if need_db_extract:
+                ok, err = _safe_extract_zip(zip_path, db_stage_dir)
+                if not ok:
+                    logger.error(f"CloudSync: Invalid snapshot archive for '{repo_name}': {err}")
+                    return False, f"bad_archive:{err}"
 
-            if not verify_sqlite_db(extracted_db):
-                logger.error(f"CloudSync: Extracted snapshot DB for '{repo_name}' failed integrity verification!")
-                return False, "db_integrity_failed"
+                extracted_db = os.path.join(db_stage_dir, f"{repo_name}.db")
+                if not os.path.exists(extracted_db):
+                    dbs = [f for f in os.listdir(db_stage_dir) if f.lower().endswith(".db")]
+                    if dbs:
+                        os.replace(os.path.join(db_stage_dir, dbs[0]), extracted_db)
 
-            # Verify extracted DB matches manifest db_sha256 (prevents manifest-ahead-of-zip race)
-            expected_db_sha = manifest_entry.get("db_sha256")
-            if expected_db_sha:
-                actual_db_sha = _sha256_file(extracted_db)
-                if actual_db_sha != expected_db_sha:
-                    logger.warning(
-                        f"CloudSync: Extracted DB hash mismatch for '{repo_name}' "
-                        f"(expected {expected_db_sha[:12]}, got {actual_db_sha[:12]}). "
-                        f"Cloud sync client likely hasn't finished downloading the updated snapshot yet."
-                    )
-                    return False, "pending_cloud_download"
+                if not verify_sqlite_db(extracted_db):
+                    logger.error(f"CloudSync: Extracted snapshot DB for '{repo_name}' failed integrity verification!")
+                    return False, "db_integrity_failed"
 
-            # Invalidate SQLAlchemy cache for this DB path before replacing
-            local_db_path = os.path.join(local_repo_dir, f"{repo_name}.db")
-            try:
-                from opening_fenix.core.db.database import DatabaseManager
-                DatabaseManager.invalidate_verified_key(local_db_path)
-            except Exception:
-                pass
+                # Verify extracted DB matches manifest db_sha256 (supports both v2 normalized and v1 raw hashes)
+                expected_db_sha = manifest_entry.get("db_sha256")
+                if expected_db_sha:
+                    actual_norm_sha = _sha256_sqlite_content(extracted_db)
+                    actual_raw_sha = _sha256_file(extracted_db)
+                    if expected_db_sha not in (actual_norm_sha, actual_raw_sha):
+                        logger.warning(
+                            f"CloudSync: Extracted DB hash mismatch for '{repo_name}' "
+                            f"(expected {expected_db_sha[:12]}, got {actual_norm_sha[:12]}). "
+                            f"Cloud sync client likely hasn't finished downloading the updated snapshot yet."
+                        )
+                        return False, "pending_cloud_download"
+
+            if need_assets_extract and assets_zip_path:
+                ok, err = _safe_extract_zip(assets_zip_path, assets_stage_dir)
+                if not ok:
+                    logger.error(f"CloudSync: Invalid assets archive for '{repo_name}': {err}")
+                    return False, f"bad_archive:{err}"
 
             os.makedirs(local_repo_dir, exist_ok=True)
-            for sidecar in (local_db_path + "-wal", local_db_path + "-shm", local_db_path + "-journal"):
-                if os.path.exists(sidecar):
-                    try:
-                        os.remove(sidecar)
-                    except Exception:
-                        pass
 
-            # Collect relative paths present in the new snapshot
-            snapshot_rel_files = set()
-            for root, _, files in os.walk(tmp_dir):
-                for fname in files:
-                    full_p = os.path.join(root, fname)
-                    rel_p = os.path.relpath(full_p, tmp_dir).replace("\\", "/")
-                    snapshot_rel_files.add(os.path.normcase(rel_p))
+            # Apply DB (and v1 bundled assets)
+            if need_db_extract:
+                try:
+                    from opening_fenix.core.db.database import DatabaseManager
+                    DatabaseManager.invalidate_verified_key(local_db_path)
+                except Exception:
+                    pass
 
-            # Copy/replace snapshot files into local_repo_dir
-            for root, _, files in os.walk(tmp_dir):
-                rel_root = os.path.relpath(root, tmp_dir)
-                target_root = local_repo_dir if rel_root == "." else os.path.join(local_repo_dir, rel_root)
-                os.makedirs(target_root, exist_ok=True)
-                for fname in files:
-                    src_f = os.path.join(root, fname)
-                    dst_f = os.path.join(target_root, fname)
-                    tmp_dst = _unique_tmp_path(dst_f)
-                    shutil.copy2(src_f, tmp_dst)
-                    try:
-                        _safe_replace(tmp_dst, dst_f)
-                    except PermissionError:
+                for sidecar in (local_db_path + "-wal", local_db_path + "-shm", local_db_path + "-journal"):
+                    if os.path.exists(sidecar):
                         try:
-                            if os.path.exists(tmp_dst):
-                                os.remove(tmp_dst)
+                            os.remove(sidecar)
                         except Exception:
                             pass
-                        logger.warning(f"CloudSync: File locked while updating '{dst_f}'.")
-                        return False, "file_locked"
 
-            # Remove stale local asset files that were deleted on the other device
-            for root, dirs, files in os.walk(local_repo_dir, topdown=False):
-                for fname in files:
-                    if _is_ignored_repo_file(fname):
-                        continue
-                    full_p = os.path.join(root, fname)
-                    rel_p = os.path.relpath(full_p, local_repo_dir).replace("\\", "/")
-                    if os.path.normcase(rel_p) not in snapshot_rel_files:
+                for root, _, files in os.walk(db_stage_dir):
+                    rel_root = os.path.relpath(root, db_stage_dir)
+                    target_root = local_repo_dir if rel_root == "." else os.path.join(local_repo_dir, rel_root)
+                    os.makedirs(target_root, exist_ok=True)
+                    for fname in files:
+                        src_f = os.path.join(root, fname)
+                        dst_f = os.path.join(target_root, fname)
+                        tmp_dst = _unique_tmp_path(dst_f)
+                        shutil.copy2(src_f, tmp_dst)
                         try:
-                            os.remove(full_p)
+                            _safe_replace(tmp_dst, dst_f)
+                        except PermissionError:
+                            try:
+                                if os.path.exists(tmp_dst):
+                                    os.remove(tmp_dst)
+                            except Exception:
+                                pass
+                            logger.warning(f"CloudSync: File locked while updating '{dst_f}'.")
+                            return False, "file_locked"
+
+            # Apply v2 split assets & clean up stale syncable assets
+            if is_split_v2 and need_assets_extract:
+                snapshot_rel_assets = set()
+                for root, _, files in os.walk(assets_stage_dir):
+                    rel_root = os.path.relpath(root, assets_stage_dir)
+                    target_root = local_repo_dir if rel_root == "." else os.path.join(local_repo_dir, rel_root)
+                    os.makedirs(target_root, exist_ok=True)
+                    for fname in files:
+                        src_f = os.path.join(root, fname)
+                        rel_p = os.path.relpath(src_f, assets_stage_dir).replace("\\", "/")
+                        snapshot_rel_assets.add(os.path.normcase(rel_p))
+                        dst_f = os.path.join(target_root, fname)
+                        tmp_dst = _unique_tmp_path(dst_f)
+                        shutil.copy2(src_f, tmp_dst)
+                        try:
+                            _safe_replace(tmp_dst, dst_f)
+                        except PermissionError:
+                            try:
+                                if os.path.exists(tmp_dst):
+                                    os.remove(tmp_dst)
+                            except Exception:
+                                pass
+                            logger.warning(f"CloudSync: File locked while updating asset '{dst_f}'.")
+                            return False, "file_locked"
+
+                # Remove stale local syncable assets deleted on the other device (never touches local PDFs/exports!)
+                for root, dirs, files in os.walk(local_repo_dir, topdown=False):
+                    is_root = (root == local_repo_dir)
+                    for fname in files:
+                        if not _is_syncable_repo_asset(fname, repo_name=repo_name, is_root=is_root):
+                            continue
+                        full_p = os.path.join(root, fname)
+                        rel_p = os.path.relpath(full_p, local_repo_dir).replace("\\", "/")
+                        if os.path.normcase(rel_p) not in snapshot_rel_assets:
+                            try:
+                                os.remove(full_p)
+                            except Exception:
+                                pass
+                    if root != local_repo_dir:
+                        try:
+                            if not os.listdir(root):
+                                os.rmdir(root)
                         except Exception:
                             pass
-                if root != local_repo_dir:
-                    try:
-                        if not os.listdir(root):
-                            os.rmdir(root)
-                    except Exception:
-                        pass
+            elif not is_split_v2:
+                # Legacy v1 combined archive stale-asset cleanup
+                snapshot_rel_files = set()
+                for root, _, files in os.walk(db_stage_dir):
+                    for fname in files:
+                        full_p = os.path.join(root, fname)
+                        rel_p = os.path.relpath(full_p, db_stage_dir).replace("\\", "/")
+                        snapshot_rel_files.add(os.path.normcase(rel_p))
+                for root, dirs, files in os.walk(local_repo_dir, topdown=False):
+                    is_root = (root == local_repo_dir)
+                    for fname in files:
+                        if not _is_syncable_repo_asset(fname, repo_name=repo_name, is_root=is_root):
+                            continue
+                        full_p = os.path.join(root, fname)
+                        rel_p = os.path.relpath(full_p, local_repo_dir).replace("\\", "/")
+                        if os.path.normcase(rel_p) not in snapshot_rel_files:
+                            try:
+                                os.remove(full_p)
+                            except Exception:
+                                pass
+                    if root != local_repo_dir:
+                        try:
+                            if not os.listdir(root):
+                                os.rmdir(root)
+                        except Exception:
+                            pass
 
             return True, ""
         except Exception as e:
@@ -1286,7 +1544,7 @@ class CloudSyncService:
                 return None
 
             content_hasher = hashlib.sha256()
-            db_sha256 = _sha256_file(clean_db_path)
+            db_sha256 = _sha256_sqlite_content(clean_db_path)
             content_hasher.update(f"DB:{db_sha256}".encode("utf-8"))
 
             settings_name = f"{profile_name}_settings.json"
@@ -1305,7 +1563,7 @@ class CloudSyncService:
             os.makedirs(os.path.dirname(final_zip_path), exist_ok=True)
             tmp_zip_path = _unique_tmp_path(final_zip_path)
 
-            with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_LZMA) as zf:
                 zf.write(clean_db_path, f"{profile_name}.db")
                 if has_settings:
                     zf.write(settings_path, settings_name)
@@ -1365,8 +1623,9 @@ class CloudSyncService:
 
             expected_db_sha = manifest_entry.get("db_sha256")
             if expected_db_sha:
-                actual_db_sha = _sha256_file(extracted_db)
-                if actual_db_sha != expected_db_sha:
+                actual_norm_sha = _sha256_sqlite_content(extracted_db)
+                actual_raw_sha = _sha256_file(extracted_db)
+                if expected_db_sha not in (actual_norm_sha, actual_raw_sha):
                     logger.warning(
                         f"CloudSync: Extracted profile DB hash mismatch for '{profile_name}' "
                         f"(cloud client may still be downloading)."
@@ -1558,6 +1817,136 @@ class CloudSyncService:
         return manifest_dirty
 
     @staticmethod
+    def _compute_engine_cache_fp(local_cache_db: str) -> str:
+        """Fast fingerprint of engine_eval_cache.db (ignoring empty 0-byte WAL files)."""
+        parts: List[str] = []
+        for p, is_wal in ((local_cache_db, False), (local_cache_db + "-wal", True)):
+            try:
+                if os.path.isfile(p):
+                    st = os.stat(p)
+                    if is_wal and st.st_size == 0:
+                        continue
+                    parts.append(f"{os.path.basename(p)}:{st.st_size}:{st.st_mtime_ns}")
+            except OSError:
+                pass
+        return "|".join(parts)
+
+    @staticmethod
+    def _read_engine_cache_watermark(db_path: str) -> Tuple[Optional[str], List[str]]:
+        """Returns (max_updated_at, boundary_fens) if engine_evals has updated_at, else (None, [])."""
+        if not os.path.isfile(db_path):
+            return None, []
+        conn = None
+        try:
+            conn = sqlite3.connect(f"file:{os.path.abspath(db_path)}?mode=ro", uri=True, timeout=15.0)
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(engine_evals)").fetchall()]
+            if "updated_at" not in cols:
+                return None, []
+            row = conn.execute("SELECT MAX(updated_at) FROM engine_evals").fetchone()
+            max_ts = row[0] if row and row[0] is not None else None
+            if not max_ts:
+                return None, []
+            fens = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT fen FROM engine_evals WHERE updated_at = ? ORDER BY fen LIMIT 500",
+                    (max_ts,),
+                ).fetchall()
+                if r and r[0]
+            ]
+            return str(max_ts), fens
+        except Exception:
+            return None, []
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    def _merge_engine_cache_delta_rows(local_cache_db: str, cols: List[str], rows: List[list]) -> int:
+        """Merges incremental engine_evals delta rows into local_cache_db keeping max depth per FEN."""
+        if not cols or not rows or "fen" not in cols or "depth" not in cols:
+            return 0
+        os.makedirs(os.path.dirname(os.path.abspath(local_cache_db)), exist_ok=True)
+        conn = None
+        try:
+            conn = sqlite3.connect(local_cache_db, timeout=20.0)
+            # Ensure table exists if bootstrapping onto a fresh machine
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            if "engine_evals" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS engine_evals (
+                        fen TEXT PRIMARY KEY,
+                        depth INTEGER NOT NULL,
+                        best_uci TEXT NOT NULL,
+                        eval_json TEXT,
+                        alternate_moves_json TEXT,
+                        alternates_depth INTEGER,
+                        alternates_exhaustive INTEGER DEFAULT 0,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            local_cols = [r[1] for r in conn.execute("PRAGMA table_info(engine_evals)").fetchall()]
+            common_cols = [c for c in local_cols if c in cols]
+            if "fen" not in common_cols or "depth" not in common_cols:
+                return 0
+            src_idx = [cols.index(c) for c in common_cols]
+            fen_i = common_cols.index("fen")
+            depth_i = common_cols.index("depth")
+            alt_depth_i = common_cols.index("alternates_depth") if "alternates_depth" in common_cols else None
+
+            # Fetch existing depths only for incoming FENs (chunked for large deltas)
+            incoming_fens = [r[cols.index("fen")] for r in rows if r[cols.index("fen")]]
+            existing_map: Dict[str, Tuple[int, int]] = {}
+            has_alt_col = "alternates_depth" in local_cols
+            for i in range(0, len(incoming_fens), 500):
+                chunk = incoming_fens[i : i + 500]
+                ph = ",".join("?" for _ in chunk)
+                q = (
+                    f"SELECT fen, depth, COALESCE(alternates_depth, 0) FROM engine_evals WHERE fen IN ({ph})"
+                    if has_alt_col
+                    else f"SELECT fen, depth, 0 FROM engine_evals WHERE fen IN ({ph})"
+                )
+                for r_fen, r_d, r_ad in conn.execute(q, chunk).fetchall():
+                    existing_map[r_fen] = (r_d or 0, r_ad or 0)
+
+            to_upsert = []
+            for r in rows:
+                projected = tuple(r[i] for i in src_idx)
+                fen = projected[fen_i]
+                if not fen:
+                    continue
+                d = projected[depth_i] or 0
+                ad = (projected[alt_depth_i] or 0) if alt_depth_i is not None else 0
+                prev = existing_map.get(fen)
+                if prev is None or d > prev[0] or (d >= prev[0] and ad > prev[1]):
+                    to_upsert.append(projected)
+                    existing_map[fen] = (max(d, prev[0] if prev else 0), max(ad, prev[1] if prev else 0))
+
+            if to_upsert:
+                cols_sql = ", ".join(common_cols)
+                ph = ", ".join(["?"] * len(common_cols))
+                with conn:
+                    conn.executemany(
+                        f"INSERT OR REPLACE INTO engine_evals ({cols_sql}) VALUES ({ph})",
+                        to_upsert,
+                    )
+            return len(to_upsert)
+        except Exception as e:
+            logger.warning(f"CloudSync: Failed merging engine cache delta rows: {e}")
+            return 0
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    @staticmethod
     def _sync_engine_cache(
         cloud_sync_root: str,
         local_dir: str,
@@ -1566,75 +1955,258 @@ class CloudSyncService:
         direction: str,
         summary: dict,
     ) -> bool:
-        """Opt-in sync for global Stockfish evaluation cache (cache/engine_eval_cache.db)."""
+        """
+        Opt-in sync for global Stockfish evaluation cache (cache/engine_eval_cache.db).
+        Uses LZMA-compressed base snapshot + tiny gzipped JSON incremental delta files
+        so newly evaluated positions upload in a few KB instead of re-uploading the full DB,
+        automatically compacting deltas back into the base snapshot once thresholds are reached.
+        """
         manifest_dirty = False
         local_cache_db = os.path.join(local_dir, "cache", "engine_eval_cache.db")
         cloud_zip_path = os.path.join(cloud_sync_root, ENGINE_CACHE_SNAPSHOT_FILENAME)
+        deltas_dir = os.path.join(cloud_sync_root, ENGINE_CACHE_DELTAS_SUBDIR)
         m_entry = manifest.get("engine_cache") or {}
         cloud_sha = m_entry.get("sha256")
+        cloud_deltas = list(m_entry.get("deltas") or [])
+        applied_deltas = set(local_state.get("applied_engine_cache_deltas") or [])
 
-        # Pull / merge from cloud if cloud has newer cache
-        if direction in ("both", "pull") and cloud_sha and os.path.isfile(cloud_zip_path):
-            if local_state.get("engine_cache_sha256") != cloud_sha or not os.path.exists(local_cache_db):
-                tmp_dir = tempfile.mkdtemp(prefix="fenix_ecache_pull_")
+        pre_pull_fp = CloudSyncService._compute_engine_cache_fp(local_cache_db)
+        had_unpushed_local = bool(
+            pre_pull_fp and local_state.get("engine_cache_local_fp") != pre_pull_fp
+        )
+
+        # 1. PULL phase: base snapshot + unapplied incremental deltas
+        if direction in ("both", "pull"):
+            if cloud_sha and os.path.isfile(cloud_zip_path):
+                if local_state.get("engine_cache_sha256") != cloud_sha or not os.path.exists(local_cache_db):
+                    had_local_before = os.path.exists(local_cache_db) and verify_sqlite_db(local_cache_db)
+                    tmp_dir = tempfile.mkdtemp(prefix="fenix_ecache_pull_")
+                    try:
+                        ok, _ = _safe_extract_zip(cloud_zip_path, tmp_dir)
+                        ext_db = os.path.join(tmp_dir, "engine_eval_cache.db")
+                        if ok and verify_sqlite_db(ext_db):
+                            expected_db_sha = m_entry.get("db_sha256")
+                            hash_ok = (not expected_db_sha) or (
+                                expected_db_sha in (_sha256_sqlite_content(ext_db), _sha256_file(ext_db))
+                            )
+                            if hash_ok:
+                                os.makedirs(os.path.dirname(local_cache_db), exist_ok=True)
+                                if had_local_before:
+                                    merged_db = os.path.join(tmp_dir, "merged_cache.db")
+                                    if _merge_engine_cache_dbs(local_cache_db, ext_db, merged_db):
+                                        ext_db = merged_db
+                                tmp_dst = _unique_tmp_path(local_cache_db)
+                                shutil.copy2(ext_db, tmp_dst)
+                                try:
+                                    _safe_replace(tmp_dst, local_cache_db)
+                                    local_state["engine_cache_sha256"] = cloud_sha
+                                    # Keep only applied deltas still listed in manifest
+                                    active_delta_names = {d.get("filename") for d in cloud_deltas if d.get("filename")}
+                                    applied_deltas &= active_delta_names
+                                    if not had_local_before:
+                                        wm_ts, wm_fens = CloudSyncService._read_engine_cache_watermark(local_cache_db)
+                                        local_state["engine_cache_last_pushed_ts"] = wm_ts
+                                        local_state["engine_cache_boundary_fens"] = wm_fens
+                                        local_state["engine_cache_local_fp"] = CloudSyncService._compute_engine_cache_fp(
+                                            local_cache_db
+                                        )
+                                        had_unpushed_local = False
+                                    summary["synced_extras"].append("engine_cache:pulled")
+                                except PermissionError:
+                                    if os.path.exists(tmp_dst):
+                                        os.remove(tmp_dst)
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            # Apply any unapplied cloud deltas
+            pulled_any_delta = False
+            for d_entry in cloud_deltas:
+                d_fname = d_entry.get("filename")
+                if not d_fname or d_fname in applied_deltas:
+                    continue
+                d_path = os.path.join(deltas_dir, d_fname)
+                if not os.path.isfile(d_path):
+                    continue
+                expected_d_sha = d_entry.get("sha256")
+                if expected_d_sha:
+                    try:
+                        if _sha256_file(d_path) != expected_d_sha:
+                            continue
+                    except Exception:
+                        continue
                 try:
-                    ok, _ = _safe_extract_zip(cloud_zip_path, tmp_dir)
-                    ext_db = os.path.join(tmp_dir, "engine_eval_cache.db")
-                    if ok and verify_sqlite_db(ext_db):
-                        if not m_entry.get("db_sha256") or _sha256_file(ext_db) == m_entry.get("db_sha256"):
-                            os.makedirs(os.path.dirname(local_cache_db), exist_ok=True)
-                            if os.path.exists(local_cache_db) and verify_sqlite_db(local_cache_db):
-                                merged_db = os.path.join(tmp_dir, "merged_cache.db")
-                                if _merge_engine_cache_dbs(local_cache_db, ext_db, merged_db):
-                                    ext_db = merged_db
-                            tmp_dst = _unique_tmp_path(local_cache_db)
-                            shutil.copy2(ext_db, tmp_dst)
-                            try:
-                                _safe_replace(tmp_dst, local_cache_db)
-                                local_state["engine_cache_sha256"] = cloud_sha
-                                summary["synced_extras"].append("engine_cache:pulled")
-                            except PermissionError:
-                                if os.path.exists(tmp_dst):
-                                    os.remove(tmp_dst)
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    with gzip.open(d_path, "rt", encoding="utf-8") as gf:
+                        payload = json.load(gf)
+                    cols = payload.get("columns") or []
+                    rows = payload.get("rows") or []
+                    CloudSyncService._merge_engine_cache_delta_rows(local_cache_db, cols, rows)
+                    applied_deltas.add(d_fname)
+                    pulled_any_delta = True
+                    summary["synced_extras"].append("engine_cache:delta_pulled")
+                except Exception as e:
+                    logger.warning(f"CloudSync: Could not apply engine cache delta '{d_fname}': {e}")
 
-        # Push local cache if present and changed
+            if pulled_any_delta and not had_unpushed_local and os.path.isfile(local_cache_db):
+                wm_ts, wm_fens = CloudSyncService._read_engine_cache_watermark(local_cache_db)
+                local_state["engine_cache_last_pushed_ts"] = wm_ts
+                local_state["engine_cache_boundary_fens"] = wm_fens
+                local_state["engine_cache_local_fp"] = CloudSyncService._compute_engine_cache_fp(local_cache_db)
+
+        # 2. PUSH phase: incremental gzipped delta when possible, else LZMA base snapshot / compaction
         if direction in ("both", "push") and os.path.exists(local_cache_db):
-            try:
-                st = os.stat(local_cache_db)
-                cur_fp = f"{st.st_size}:{st.st_mtime_ns}"
-            except OSError:
-                cur_fp = ""
-            if cur_fp and (
-                local_state.get("engine_cache_local_fp") != cur_fp
-                or not os.path.isfile(cloud_zip_path)
-                or local_state.get("engine_cache_sha256") != cloud_sha
-            ):
-                tmp_dir = tempfile.mkdtemp(prefix="fenix_ecache_push_")
-                try:
-                    clean_db = os.path.join(tmp_dir, "engine_eval_cache.db")
-                    if create_verified_db_snapshot(local_cache_db, clean_db):
-                        db_sha = _sha256_file(clean_db)
-                        if db_sha != cloud_sha or not os.path.isfile(cloud_zip_path):
-                            tmp_zip = _unique_tmp_path(cloud_zip_path)
-                            with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
-                                zf.write(clean_db, "engine_eval_cache.db")
-                            _safe_replace(tmp_zip, cloud_zip_path)
-                            manifest["engine_cache"] = {
-                                "sha256": db_sha,
-                                "db_sha256": db_sha,
-                                "size_bytes": os.path.getsize(cloud_zip_path),
-                                "updated_at": _now_iso(),
-                                "updated_by": get_device_name(),
-                            }
-                            summary["synced_extras"].append("engine_cache:pushed")
-                            manifest_dirty = True
-                        local_state["engine_cache_sha256"] = db_sha
-                        local_state["engine_cache_local_fp"] = cur_fp
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+            cur_fp = CloudSyncService._compute_engine_cache_fp(local_cache_db)
+            total_delta_bytes = sum(int(d.get("size_bytes") or 0) for d in cloud_deltas)
+            need_compaction = (
+                len(cloud_deltas) >= ENGINE_CACHE_DELTA_COMPACT_COUNT
+                or total_delta_bytes >= ENGINE_CACHE_DELTA_COMPACT_BYTES
+            )
+            needs_push_check = bool(
+                cur_fp
+                and (
+                    local_state.get("engine_cache_local_fp") != cur_fp
+                    or not os.path.isfile(cloud_zip_path)
+                    or local_state.get("engine_cache_sha256") != cloud_sha
+                    or need_compaction
+                )
+            )
+            if needs_push_check:
+                last_pushed_ts = local_state.get("engine_cache_last_pushed_ts")
+                boundary_fens = set(local_state.get("engine_cache_boundary_fens") or [])
+                can_try_delta = (
+                    os.path.isfile(cloud_zip_path)
+                    and bool(cloud_sha)
+                    and bool(last_pushed_ts)
+                    and not need_compaction
+                )
 
+                delta_handled = False
+                if can_try_delta:
+                    conn = None
+                    try:
+                        conn = sqlite3.connect(
+                            f"file:{os.path.abspath(local_cache_db)}?mode=ro", uri=True, timeout=15.0
+                        )
+                        cols = [r[1] for r in conn.execute("PRAGMA table_info(engine_evals)").fetchall()]
+                        if "updated_at" in cols and "fen" in cols and "depth" in cols:
+                            cols_sql = ", ".join(cols)
+                            fen_i = cols.index("fen")
+                            ts_i = cols.index("updated_at")
+                            raw_rows = conn.execute(
+                                f"SELECT {cols_sql} FROM engine_evals WHERE updated_at >= ? ORDER BY updated_at ASC",
+                                (last_pushed_ts,),
+                            ).fetchall()
+                            delta_rows = [
+                                list(r)
+                                for r in raw_rows
+                                if not (str(r[ts_i]) == str(last_pushed_ts) and r[fen_i] in boundary_fens)
+                            ]
+                            if not delta_rows:
+                                # Nothing logically changed (e.g., mtime/WAL touched only) -> zero upload!
+                                local_state["engine_cache_local_fp"] = cur_fp
+                                delta_handled = True
+                            elif len(delta_rows) <= ENGINE_CACHE_DELTA_MAX_ROWS:
+                                os.makedirs(deltas_dir, exist_ok=True)
+                                payload_bytes = json.dumps(
+                                    {"columns": cols, "rows": delta_rows},
+                                    separators=(",", ":"),
+                                    ensure_ascii=False,
+                                ).encode("utf-8")
+                                gz_bytes = gzip.compress(payload_bytes, compresslevel=6)
+                                gz_sha = hashlib.sha256(gz_bytes).hexdigest()
+                                safe_dev = re.sub(r"[^A-Za-z0-9_-]+", "_", get_device_name())[:24]
+                                ts_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                d_fname = f"delta_{ts_tag}_{safe_dev}_{gz_sha[:8]}.json.gz"
+                                d_path = os.path.join(deltas_dir, d_fname)
+                                tmp_d = _unique_tmp_path(d_path)
+                                with open(tmp_d, "wb") as df:
+                                    df.write(gz_bytes)
+                                    df.flush()
+                                    os.fsync(df.fileno())
+                                _safe_replace(tmp_d, d_path)
+
+                                cloud_deltas.append({
+                                    "filename": d_fname,
+                                    "sha256": gz_sha,
+                                    "row_count": len(delta_rows),
+                                    "size_bytes": len(gz_bytes),
+                                    "created_at": _now_iso(),
+                                    "created_by": get_device_name(),
+                                })
+                                m_new = dict(m_entry)
+                                m_new["deltas"] = cloud_deltas
+                                m_new["updated_at"] = _now_iso()
+                                m_new["updated_by"] = get_device_name()
+                                manifest["engine_cache"] = m_new
+
+                                applied_deltas.add(d_fname)
+                                new_max_ts = str(delta_rows[-1][ts_i])
+                                new_boundary = sorted(
+                                    {str(r[fen_i]) for r in delta_rows if str(r[ts_i]) == new_max_ts}
+                                    | (boundary_fens if new_max_ts == str(last_pushed_ts) else set())
+                                )[:500]
+                                local_state["engine_cache_last_pushed_ts"] = new_max_ts
+                                local_state["engine_cache_boundary_fens"] = new_boundary
+                                local_state["engine_cache_local_fp"] = cur_fp
+                                summary["synced_extras"].append("engine_cache:delta_pushed")
+                                manifest_dirty = True
+                                delta_handled = True
+                    except Exception as e:
+                        logger.warning(f"CloudSync: Engine cache delta check fallback to snapshot: {e}")
+                    finally:
+                        if conn is not None:
+                            try:
+                                conn.close()
+                            except Exception:
+                                pass
+
+                if not delta_handled:
+                    # Write/compact full LZMA base snapshot
+                    tmp_dir = tempfile.mkdtemp(prefix="fenix_ecache_push_")
+                    try:
+                        clean_db = os.path.join(tmp_dir, "engine_eval_cache.db")
+                        if create_verified_db_snapshot(local_cache_db, clean_db):
+                            db_sha = _sha256_sqlite_content(clean_db)
+                            raw_db_sha = _sha256_file(clean_db)
+                            unchanged_base = (
+                                cloud_sha in (db_sha, raw_db_sha)
+                                and os.path.isfile(cloud_zip_path)
+                                and not cloud_deltas
+                            )
+                            if not unchanged_base:
+                                tmp_zip = _unique_tmp_path(cloud_zip_path)
+                                with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_LZMA) as zf:
+                                    zf.write(clean_db, "engine_eval_cache.db")
+                                _safe_replace(tmp_zip, cloud_zip_path)
+                                # Prune compacted delta files
+                                for old_d in cloud_deltas:
+                                    old_fn = old_d.get("filename")
+                                    if old_fn:
+                                        old_p = os.path.join(deltas_dir, old_fn)
+                                        if os.path.isfile(old_p):
+                                            try:
+                                                os.remove(old_p)
+                                            except Exception:
+                                                pass
+                                applied_deltas.clear()
+                                manifest["engine_cache"] = {
+                                    "sha256": db_sha,
+                                    "db_sha256": db_sha,
+                                    "size_bytes": os.path.getsize(cloud_zip_path),
+                                    "deltas": [],
+                                    "updated_at": _now_iso(),
+                                    "updated_by": get_device_name(),
+                                }
+                                summary["synced_extras"].append("engine_cache:pushed")
+                                manifest_dirty = True
+                            wm_ts, wm_fens = CloudSyncService._read_engine_cache_watermark(clean_db)
+                            local_state["engine_cache_sha256"] = db_sha if not unchanged_base else cloud_sha
+                            local_state["engine_cache_last_pushed_ts"] = wm_ts
+                            local_state["engine_cache_boundary_fens"] = wm_fens
+                            local_state["engine_cache_local_fp"] = cur_fp
+                    finally:
+                        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+        local_state["applied_engine_cache_deltas"] = sorted(applied_deltas)
         return manifest_dirty
 
     # ─── Automatic Stepover / Legacy Migration ──────────────────────────────
@@ -1661,7 +2233,7 @@ class CloudSyncService:
         if not cloud_sync_root:
             return migrated_repos, migrated_profs
 
-        # 1. Seed config.json from cloud_dir if local_workspace doesn't have one yet
+        # 1. Seed config.json & user_dictionary.txt from cloud_dir if local_workspace doesn't have them yet
         cloud_cfg = os.path.join(cloud_dir, "config.json")
         local_cfg = os.path.join(local_dir, "config.json")
         if os.path.exists(cloud_cfg) and not os.path.exists(local_cfg):
@@ -1670,6 +2242,15 @@ class CloudSyncService:
                 shutil.copy2(cloud_cfg, local_cfg)
             except Exception as e:
                 logger.warning(f"CloudSync stepover: Could not copy config.json: {e}")
+
+        cloud_legacy_dict = os.path.join(cloud_dir, USER_DICTIONARY_FILENAME)
+        local_dict = os.path.join(local_dir, USER_DICTIONARY_FILENAME)
+        if os.path.isfile(cloud_legacy_dict) and not os.path.exists(local_dict):
+            try:
+                os.makedirs(local_dir, exist_ok=True)
+                shutil.copy2(cloud_legacy_dict, local_dict)
+            except Exception as e:
+                logger.warning(f"CloudSync stepover: Could not copy {USER_DICTIONARY_FILENAME}: {e}")
 
         # 2. Import legacy repertoires from cloud_dir/repertoires
         cloud_repos_dir = os.path.join(cloud_dir, "repertoires")
@@ -1728,6 +2309,8 @@ class CloudSyncService:
                     manifest.setdefault("repertoires", {})[repo_name] = entry
                     local_state.setdefault("repertoires", {})[repo_name] = {
                         "synced_snapshot_sha256": entry["sha256"],
+                        "synced_db_sha256": entry.get("db_sha256"),
+                        "synced_assets_sha256": entry.get("assets_sha256", ""),
                         "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, repo_name),
                         "synced_at": entry["updated_at"],
                     }
@@ -1786,11 +2369,14 @@ class CloudSyncService:
     def sync_now(
         direction: str = "both",
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        scopes: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         """
         Synchronizes the local workspace with the cloud sync folder.
         Thread-safe (guarded by _SYNC_LOCK).
         direction: "both" (default), "pull" (cloud -> local), or "push" (local -> cloud).
+        scopes: Optional subset of {"repertoires", "profiles", "settings", "dictionary", "engine_cache"}.
+                When None (default), syncs all enabled categories.
         """
         with _SYNC_LOCK:
             configured = CloudSyncService.is_configured()
@@ -1798,6 +2384,13 @@ class CloudSyncService:
             enabled = CloudSyncService.is_enabled()
             cloud_dir = CloudSyncService.get_cloud_dir()
             local_dir = get_local_workspace_dir()
+
+            active_scopes = set(scopes) if scopes is not None else None
+            do_repertoires = active_scopes is None or "repertoires" in active_scopes
+            do_profiles = active_scopes is None or "profiles" in active_scopes
+            do_settings = active_scopes is None or "settings" in active_scopes
+            do_dictionary = active_scopes is None or "dictionary" in active_scopes
+            do_engine_cache = active_scopes is None or "engine_cache" in active_scopes
 
             summary: Dict[str, Any] = {
                 "configured": configured,
@@ -1850,28 +2443,30 @@ class CloudSyncService:
             excluded_repos = set(sync_opts.get("excluded_repertoires", []))
             manifest_dirty = False
 
-            # Check for cloud provider conflict copies (Google Drive / OneDrive)
-            summary["provider_conflict_files"] = CloudSyncService.detect_provider_conflict_files(cloud_dir)
+            # Check for cloud provider conflict copies (full syncs only)
+            if active_scopes is None:
+                summary["provider_conflict_files"] = CloudSyncService.detect_provider_conflict_files(cloud_dir)
 
             # 0. One-time automatic stepover from legacy raw folders in Google Drive
-            _report("Checking cloud folder...", 0, 100)
-            mig_repos, mig_profs = CloudSyncService._migrate_legacy_cloud_data_if_needed(
-                cloud_dir, local_dir, manifest, local_state
-            )
-            if mig_repos or mig_profs:
-                summary["migrated_repertoires"].extend(mig_repos)
-                summary["migrated_profiles"].extend(mig_profs)
-                manifest_dirty = True
+            if active_scopes is None and not local_state.get("legacy_migration_done"):
+                _report("Checking cloud folder...", 0, 100)
+                mig_repos, mig_profs = CloudSyncService._migrate_legacy_cloud_data_if_needed(
+                    cloud_dir, local_dir, manifest, local_state
+                )
+                if mig_repos or mig_profs:
+                    summary["migrated_repertoires"].extend(mig_repos)
+                    summary["migrated_profiles"].extend(mig_profs)
+                    manifest_dirty = True
 
             local_repos_dir = os.path.join(local_dir, "repertoires")
             local_profs_dir = os.path.join(local_dir, "profiles")
 
             # Compute rough total work items for progress reporting
             total_steps = (
-                len(manifest.get("repertoires", {}))
-                + len(manifest.get("profiles", {}))
-                + (len(os.listdir(local_repos_dir)) if os.path.isdir(local_repos_dir) else 0)
-                + (len(os.listdir(local_profs_dir)) if os.path.isdir(local_profs_dir) else 0)
+                (len(manifest.get("repertoires", {})) if do_repertoires else 0)
+                + (len(manifest.get("profiles", {})) if do_profiles else 0)
+                + ((len(os.listdir(local_repos_dir)) if os.path.isdir(local_repos_dir) else 0) if do_repertoires else 0)
+                + ((len(os.listdir(local_profs_dir)) if os.path.isdir(local_profs_dir) else 0) if do_profiles else 0)
                 + 3
             )
             step_idx = 0
@@ -1879,226 +2474,237 @@ class CloudSyncService:
             # 1. PULL phase (Cloud -> Local)
             if direction in ("both", "pull"):
                 # 1a. Propagate repertoire deletions from cloud -> local
-                for del_repo in list(manifest.get("deleted_repertoires", {}).keys()):
-                    if del_repo in excluded_repos:
-                        continue
-                    l_repo_path = os.path.join(local_repos_dir, del_repo)
-                    if del_repo in local_state.get("repertoires", {}):
-                        if os.path.exists(l_repo_path):
-                            cur_fp = _compute_repo_local_fingerprint(l_repo_path, del_repo)
-                            prev_fp = local_state["repertoires"][del_repo].get("local_fingerprint")
-                            if cur_fp == prev_fp:
-                                shutil.rmtree(l_repo_path, ignore_errors=True)
-                                summary["deleted_local_repertoires"].append(del_repo)
-                        local_state["repertoires"].pop(del_repo, None)
+                if do_repertoires:
+                    for del_repo in list(manifest.get("deleted_repertoires", {}).keys()):
+                        if del_repo in excluded_repos:
+                            continue
+                        l_repo_path = os.path.join(local_repos_dir, del_repo)
+                        if del_repo in local_state.get("repertoires", {}):
+                            if os.path.exists(l_repo_path):
+                                cur_fp = _compute_repo_local_fingerprint(l_repo_path, del_repo)
+                                prev_fp = local_state["repertoires"][del_repo].get("local_fingerprint")
+                                if cur_fp == prev_fp:
+                                    shutil.rmtree(l_repo_path, ignore_errors=True)
+                                    summary["deleted_local_repertoires"].append(del_repo)
+                            local_state["repertoires"].pop(del_repo, None)
 
                 # 1b. Propagate profile deletions from cloud -> local
-                for del_prof in list(manifest.get("deleted_profiles", {}).keys()):
-                    l_db_path = os.path.join(local_profs_dir, f"{del_prof}.db")
-                    l_set_path = os.path.join(local_profs_dir, f"{del_prof}_settings.json")
-                    if del_prof in local_state.get("profiles", {}):
-                        if os.path.exists(l_db_path):
-                            cur_fp = _compute_profile_local_fingerprint(local_profs_dir, del_prof)
-                            prev_fp = local_state["profiles"][del_prof].get("local_fingerprint")
-                            if cur_fp == prev_fp:
-                                for p_rm in (
-                                    l_db_path,
-                                    l_db_path + "-wal",
-                                    l_db_path + "-shm",
-                                    l_db_path + "-journal",
-                                    l_set_path,
-                                ):
-                                    if os.path.exists(p_rm):
-                                        try:
-                                            os.remove(p_rm)
-                                        except Exception:
-                                            pass
-                                summary["deleted_local_profiles"].append(del_prof)
-                        local_state["profiles"].pop(del_prof, None)
+                if do_profiles:
+                    for del_prof in list(manifest.get("deleted_profiles", {}).keys()):
+                        l_db_path = os.path.join(local_profs_dir, f"{del_prof}.db")
+                        l_set_path = os.path.join(local_profs_dir, f"{del_prof}_settings.json")
+                        if del_prof in local_state.get("profiles", {}):
+                            if os.path.exists(l_db_path):
+                                cur_fp = _compute_profile_local_fingerprint(local_profs_dir, del_prof)
+                                prev_fp = local_state["profiles"][del_prof].get("local_fingerprint")
+                                if cur_fp == prev_fp:
+                                    for p_rm in (
+                                        l_db_path,
+                                        l_db_path + "-wal",
+                                        l_db_path + "-shm",
+                                        l_db_path + "-journal",
+                                        l_set_path,
+                                    ):
+                                        if os.path.exists(p_rm):
+                                            try:
+                                                os.remove(p_rm)
+                                            except Exception:
+                                                pass
+                                    summary["deleted_local_profiles"].append(del_prof)
+                            local_state["profiles"].pop(del_prof, None)
 
                 # 1c. Pull updated/new repertoires
-                for repo_name, entry in list(manifest.get("repertoires", {}).items()):
-                    step_idx += 1
-                    if repo_name in excluded_repos:
-                        continue
-                    cloud_sha = entry.get("sha256")
-                    if not cloud_sha:
-                        continue
-                    l_repo_path = os.path.join(local_repos_dir, repo_name)
-                    l_db_path = os.path.join(l_repo_path, f"{repo_name}.db")
-                    l_info = local_state.get("repertoires", {}).get(repo_name)
+                if do_repertoires:
+                    for repo_name, entry in list(manifest.get("repertoires", {}).items()):
+                        step_idx += 1
+                        if repo_name in excluded_repos:
+                            continue
+                        cloud_sha = entry.get("sha256")
+                        if not cloud_sha:
+                            continue
+                        l_repo_path = os.path.join(local_repos_dir, repo_name)
+                        l_db_path = os.path.join(l_repo_path, f"{repo_name}.db")
+                        l_info = local_state.get("repertoires", {}).get(repo_name)
 
-                    local_exists_and_valid = os.path.exists(l_db_path) and verify_sqlite_db(l_db_path)
-                    cloud_changed = (l_info is None) or (l_info.get("synced_snapshot_sha256") != cloud_sha)
+                        local_exists_and_valid = os.path.exists(l_db_path) and verify_sqlite_db(l_db_path)
+                        cloud_changed = (l_info is None) or (l_info.get("synced_snapshot_sha256") != cloud_sha)
 
-                    if not local_exists_and_valid or cloud_changed:
-                        _report(f"Pulling repertoire: {repo_name}", step_idx, max(total_steps, step_idx))
-                        is_conflict = False
-                        conflict_backup_path = None
-                        if local_exists_and_valid and l_info is not None:
-                            cur_fp = _compute_repo_local_fingerprint(l_repo_path, repo_name)
-                            if cur_fp != l_info.get("local_fingerprint"):
-                                is_conflict = True
-                                try:
-                                    from opening_fenix.core.services.backup_service import create_repertoire_backup
-                                    conflict_backup_path = create_repertoire_backup(
-                                        repo_name, trigger_type="sync_conflict"
-                                    )
-                                    summary["conflicts_backed_up"].append(repo_name)
-                                except Exception as bk_e:
-                                    logger.warning(f"CloudSync: Could not create conflict backup for '{repo_name}': {bk_e}")
+                        if not local_exists_and_valid or cloud_changed:
+                            _report(f"Pulling repertoire: {repo_name}", step_idx, max(total_steps, step_idx))
+                            is_conflict = False
+                            conflict_backup_path = None
+                            if local_exists_and_valid and l_info is not None:
+                                cur_fp = _compute_repo_local_fingerprint(l_repo_path, repo_name)
+                                if cur_fp != l_info.get("local_fingerprint"):
+                                    is_conflict = True
+                                    try:
+                                        from opening_fenix.core.services.backup_service import create_repertoire_backup
+                                        conflict_backup_path = create_repertoire_backup(
+                                            repo_name, trigger_type="sync_conflict"
+                                        )
+                                        summary["conflicts_backed_up"].append(repo_name)
+                                    except Exception as bk_e:
+                                        logger.warning(f"CloudSync: Could not create conflict backup for '{repo_name}': {bk_e}")
 
-                        ok, reason = CloudSyncService._extract_repertoire_from_cloud(
-                            cloud_sync_root, repo_name, entry, l_repo_path
-                        )
-                        if ok:
-                            local_state.setdefault("repertoires", {})[repo_name] = {
-                                "synced_snapshot_sha256": cloud_sha,
-                                "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, repo_name),
-                                "synced_at": _now_iso(),
-                            }
-                            summary["pulled_repertoires"].append(repo_name)
-                            if is_conflict:
-                                summary["conflicts"].append({
-                                    "kind": "repertoire",
-                                    "name": repo_name,
-                                    "backup_path": conflict_backup_path,
-                                    "cloud_updated_by": entry.get("updated_by"),
-                                    "cloud_updated_at": entry.get("updated_at"),
-                                    "resolution": "cloud_won_backup_created",
-                                })
-                        elif reason == "pending_cloud_download":
-                            summary["pending_downloads"].append(f"repertoire:{repo_name}")
-                            summary["errors"].append(
-                                f"Cloud snapshot for repertoire '{repo_name}' is still downloading; skipped for safety."
+                            ok, reason = CloudSyncService._extract_repertoire_from_cloud(
+                                cloud_sync_root, repo_name, entry, l_repo_path, prev_local_info=l_info
                             )
-                        elif reason == "file_locked":
-                            summary["errors"].append(
-                                f"Repertoire '{repo_name}' is currently open in this session; restart or close it to apply the cloud update."
-                            )
-                        else:
-                            summary["errors"].append(f"Failed to pull repertoire '{repo_name}' ({reason})")
+                            if ok:
+                                local_state.setdefault("repertoires", {})[repo_name] = {
+                                    "synced_snapshot_sha256": cloud_sha,
+                                    "synced_db_sha256": entry.get("db_sha256"),
+                                    "synced_assets_sha256": entry.get("assets_sha256", ""),
+                                    "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, repo_name),
+                                    "synced_at": _now_iso(),
+                                }
+                                summary["pulled_repertoires"].append(repo_name)
+                                if is_conflict:
+                                    summary["conflicts"].append({
+                                        "kind": "repertoire",
+                                        "name": repo_name,
+                                        "backup_path": conflict_backup_path,
+                                        "cloud_updated_by": entry.get("updated_by"),
+                                        "cloud_updated_at": entry.get("updated_at"),
+                                        "resolution": "cloud_won_backup_created",
+                                    })
+                            elif reason == "pending_cloud_download":
+                                summary["pending_downloads"].append(f"repertoire:{repo_name}")
+                                summary["errors"].append(
+                                    f"Cloud snapshot for repertoire '{repo_name}' is still downloading; skipped for safety."
+                                )
+                            elif reason == "file_locked":
+                                summary["errors"].append(
+                                    f"Repertoire '{repo_name}' is currently open in this session; restart or close it to apply the cloud update."
+                                )
+                            else:
+                                summary["errors"].append(f"Failed to pull repertoire '{repo_name}' ({reason})")
 
                 # 1d. Pull updated/new profiles (with backup + lossless SQLite merge on conflict!)
-                for prof_name, entry in list(manifest.get("profiles", {}).items()):
-                    step_idx += 1
-                    cloud_sha = entry.get("sha256")
-                    if not cloud_sha:
-                        continue
-                    l_db_path = os.path.join(local_profs_dir, f"{prof_name}.db")
-                    l_info = local_state.get("profiles", {}).get(prof_name)
+                if do_profiles:
+                    for prof_name, entry in list(manifest.get("profiles", {}).items()):
+                        step_idx += 1
+                        cloud_sha = entry.get("sha256")
+                        if not cloud_sha:
+                            continue
+                        l_db_path = os.path.join(local_profs_dir, f"{prof_name}.db")
+                        l_info = local_state.get("profiles", {}).get(prof_name)
 
-                    local_exists_and_valid = os.path.exists(l_db_path) and verify_sqlite_db(l_db_path)
-                    cloud_changed = (l_info is None) or (l_info.get("synced_snapshot_sha256") != cloud_sha)
+                        local_exists_and_valid = os.path.exists(l_db_path) and verify_sqlite_db(l_db_path)
+                        cloud_changed = (l_info is None) or (l_info.get("synced_snapshot_sha256") != cloud_sha)
 
-                    if not local_exists_and_valid or cloud_changed:
-                        _report(f"Pulling profile: {prof_name}", step_idx, max(total_steps, step_idx))
-                        is_prof_conflict = False
-                        prof_bk_path = None
-                        if local_exists_and_valid and l_info is not None:
-                            cur_fp = _compute_profile_local_fingerprint(local_profs_dir, prof_name)
-                            if cur_fp != l_info.get("local_fingerprint"):
+                        if not local_exists_and_valid or cloud_changed:
+                            _report(f"Pulling profile: {prof_name}", step_idx, max(total_steps, step_idx))
+                            is_prof_conflict = False
+                            prof_bk_path = None
+                            if local_exists_and_valid and l_info is not None:
+                                cur_fp = _compute_profile_local_fingerprint(local_profs_dir, prof_name)
+                                if cur_fp != l_info.get("local_fingerprint"):
+                                    is_prof_conflict = True
+                                    prof_bk_path = CloudSyncService.create_profile_backup(
+                                        prof_name, trigger_type="sync_conflict", local_profiles_dir=local_profs_dir
+                                    )
+                            elif local_exists_and_valid and l_info is None:
+                                # Both devices already had a profile with the same name -> smart merge!
                                 is_prof_conflict = True
                                 prof_bk_path = CloudSyncService.create_profile_backup(
                                     prof_name, trigger_type="sync_conflict", local_profiles_dir=local_profs_dir
                                 )
-                        elif local_exists_and_valid and l_info is None:
-                            # Both devices already had a profile with the same name -> smart merge!
-                            is_prof_conflict = True
-                            prof_bk_path = CloudSyncService.create_profile_backup(
-                                prof_name, trigger_type="sync_conflict", local_profiles_dir=local_profs_dir
-                            )
 
-                        ok, reason, was_merged = CloudSyncService._extract_profile_from_cloud(
-                            cloud_sync_root,
-                            prof_name,
-                            entry,
-                            local_profs_dir,
-                            merge_with_local=is_prof_conflict,
-                        )
-                        if ok:
-                            if was_merged:
-                                # Keep local_fingerprint invalidated so push phase uploads the merged DB
-                                local_state.setdefault("profiles", {})[prof_name] = {
-                                    "synced_snapshot_sha256": cloud_sha,
-                                    "local_fingerprint": "",
-                                    "synced_at": _now_iso(),
-                                }
-                                summary["merged_profiles"].append(prof_name)
-                                summary["conflicts"].append({
-                                    "kind": "profile",
-                                    "name": prof_name,
-                                    "backup_path": prof_bk_path,
-                                    "cloud_updated_by": entry.get("updated_by"),
-                                    "cloud_updated_at": entry.get("updated_at"),
-                                    "resolution": "auto_merged",
-                                })
+                            ok, reason, was_merged = CloudSyncService._extract_profile_from_cloud(
+                                cloud_sync_root,
+                                prof_name,
+                                entry,
+                                local_profs_dir,
+                                merge_with_local=is_prof_conflict,
+                            )
+                            if ok:
+                                if was_merged:
+                                    # Keep local_fingerprint invalidated so push phase uploads the merged DB
+                                    local_state.setdefault("profiles", {})[prof_name] = {
+                                        "synced_snapshot_sha256": cloud_sha,
+                                        "local_fingerprint": "",
+                                        "synced_at": _now_iso(),
+                                    }
+                                    summary["merged_profiles"].append(prof_name)
+                                    summary["conflicts"].append({
+                                        "kind": "profile",
+                                        "name": prof_name,
+                                        "backup_path": prof_bk_path,
+                                        "cloud_updated_by": entry.get("updated_by"),
+                                        "cloud_updated_at": entry.get("updated_at"),
+                                        "resolution": "auto_merged",
+                                    })
+                                else:
+                                    local_state.setdefault("profiles", {})[prof_name] = {
+                                        "synced_snapshot_sha256": cloud_sha,
+                                        "local_fingerprint": _compute_profile_local_fingerprint(local_profs_dir, prof_name),
+                                        "synced_at": _now_iso(),
+                                    }
+                                summary["pulled_profiles"].append(prof_name)
+                            elif reason == "pending_cloud_download":
+                                summary["pending_downloads"].append(f"profile:{prof_name}")
+                                summary["errors"].append(
+                                    f"Cloud snapshot for profile '{prof_name}' is still downloading; skipped for safety."
+                                )
+                            elif reason == "file_locked":
+                                summary["errors"].append(
+                                    f"Profile '{prof_name}' is currently open; restart to apply the cloud update."
+                                )
                             else:
-                                local_state.setdefault("profiles", {})[prof_name] = {
-                                    "synced_snapshot_sha256": cloud_sha,
-                                    "local_fingerprint": _compute_profile_local_fingerprint(local_profs_dir, prof_name),
-                                    "synced_at": _now_iso(),
-                                }
-                            summary["pulled_profiles"].append(prof_name)
-                        elif reason == "pending_cloud_download":
-                            summary["pending_downloads"].append(f"profile:{prof_name}")
-                            summary["errors"].append(
-                                f"Cloud snapshot for profile '{prof_name}' is still downloading; skipped for safety."
-                            )
-                        elif reason == "file_locked":
-                            summary["errors"].append(
-                                f"Profile '{prof_name}' is currently open; restart to apply the cloud update."
-                            )
-                        else:
-                            summary["errors"].append(f"Failed to pull profile '{prof_name}' ({reason})")
+                                summary["errors"].append(f"Failed to pull profile '{prof_name}' ({reason})")
 
             # 2. PUSH phase (Local -> Cloud)
             if direction in ("both", "push"):
                 # 2a. Detect local repertoire deletions
-                for tracked_repo in list(local_state.get("repertoires", {}).keys()):
-                    if tracked_repo in excluded_repos:
-                        continue
-                    l_repo_path = os.path.join(local_repos_dir, tracked_repo)
-                    l_db_path = os.path.join(l_repo_path, f"{tracked_repo}.db")
-                    if not os.path.exists(l_db_path):
-                        local_state["repertoires"].pop(tracked_repo, None)
-                        if tracked_repo in manifest.get("repertoires", {}):
-                            manifest["repertoires"].pop(tracked_repo, None)
-                            manifest.setdefault("deleted_repertoires", {})[tracked_repo] = {
-                                "deleted_at": _now_iso(),
-                                "deleted_by": get_device_name(),
-                            }
-                            snap_zip = os.path.join(cloud_sync_root, "repertoires", f"{tracked_repo}.fenixsync.zip")
-                            if os.path.exists(snap_zip):
-                                try:
-                                    os.remove(snap_zip)
-                                except Exception:
-                                    pass
-                            summary["deleted_cloud_repertoires"].append(tracked_repo)
-                            manifest_dirty = True
+                if do_repertoires:
+                    for tracked_repo in list(local_state.get("repertoires", {}).keys()):
+                        if tracked_repo in excluded_repos:
+                            continue
+                        l_repo_path = os.path.join(local_repos_dir, tracked_repo)
+                        l_db_path = os.path.join(l_repo_path, f"{tracked_repo}.db")
+                        if not os.path.exists(l_db_path):
+                            local_state["repertoires"].pop(tracked_repo, None)
+                            if tracked_repo in manifest.get("repertoires", {}):
+                                manifest["repertoires"].pop(tracked_repo, None)
+                                manifest.setdefault("deleted_repertoires", {})[tracked_repo] = {
+                                    "deleted_at": _now_iso(),
+                                    "deleted_by": get_device_name(),
+                                }
+                                for snap_zip in (
+                                    os.path.join(cloud_sync_root, "repertoires", f"{tracked_repo}.fenixsync.zip"),
+                                    os.path.join(cloud_sync_root, "repertoires", f"{tracked_repo}.assets.fenixsync.zip"),
+                                ):
+                                    if os.path.exists(snap_zip):
+                                        try:
+                                            os.remove(snap_zip)
+                                        except Exception:
+                                            pass
+                                summary["deleted_cloud_repertoires"].append(tracked_repo)
+                                manifest_dirty = True
 
                 # 2b. Detect local profile deletions
-                for tracked_prof in list(local_state.get("profiles", {}).keys()):
-                    l_db_path = os.path.join(local_profs_dir, f"{tracked_prof}.db")
-                    if not os.path.exists(l_db_path):
-                        local_state["profiles"].pop(tracked_prof, None)
-                        if tracked_prof in manifest.get("profiles", {}):
-                            manifest["profiles"].pop(tracked_prof, None)
-                            manifest.setdefault("deleted_profiles", {})[tracked_prof] = {
-                                "deleted_at": _now_iso(),
-                                "deleted_by": get_device_name(),
-                            }
-                            snap_zip = os.path.join(cloud_sync_root, "profiles", f"{tracked_prof}.fenixsync.zip")
-                            if os.path.exists(snap_zip):
-                                try:
-                                    os.remove(snap_zip)
-                                except Exception:
-                                    pass
-                            summary["deleted_cloud_profiles"].append(tracked_prof)
-                            manifest_dirty = True
+                if do_profiles:
+                    for tracked_prof in list(local_state.get("profiles", {}).keys()):
+                        l_db_path = os.path.join(local_profs_dir, f"{tracked_prof}.db")
+                        if not os.path.exists(l_db_path):
+                            local_state["profiles"].pop(tracked_prof, None)
+                            if tracked_prof in manifest.get("profiles", {}):
+                                manifest["profiles"].pop(tracked_prof, None)
+                                manifest.setdefault("deleted_profiles", {})[tracked_prof] = {
+                                    "deleted_at": _now_iso(),
+                                    "deleted_by": get_device_name(),
+                                }
+                                snap_zip = os.path.join(cloud_sync_root, "profiles", f"{tracked_prof}.fenixsync.zip")
+                                if os.path.exists(snap_zip):
+                                    try:
+                                        os.remove(snap_zip)
+                                    except Exception:
+                                        pass
+                                summary["deleted_cloud_profiles"].append(tracked_prof)
+                                manifest_dirty = True
 
                 # 2c. Push modified or new local repertoires
-                if os.path.exists(local_repos_dir):
+                if do_repertoires and os.path.exists(local_repos_dir):
                     for repo_name in sorted(os.listdir(local_repos_dir)):
                         step_idx += 1
                         if repo_name in excluded_repos:
@@ -2129,16 +2735,22 @@ class CloudSyncService:
                         _report(f"Checking/pushing repertoire: {repo_name}", step_idx, max(total_steps, step_idx))
                         existing_sha = m_entry.get("sha256") if m_entry else None
                         new_entry = CloudSyncService._package_repertoire_to_cloud(
-                            l_repo_path, repo_name, cloud_sync_root, existing_sha=existing_sha
+                            l_repo_path,
+                            repo_name,
+                            cloud_sync_root,
+                            existing_sha=existing_sha,
+                            existing_entry=m_entry,
                         )
                         if new_entry is None:
                             summary["errors"].append(f"Integrity check failed for local repertoire '{repo_name}'")
                             continue
 
                         if new_entry.get("unchanged"):
-                            # Content didn't actually change (only mtime/WAL touched); refresh fingerprint only!
+                            # Content didn't actually change (only mtime/WAL/SQLite header touched); refresh fingerprint only!
                             local_state.setdefault("repertoires", {})[repo_name] = {
                                 "synced_snapshot_sha256": new_entry["sha256"],
+                                "synced_db_sha256": new_entry.get("db_sha256"),
+                                "synced_assets_sha256": new_entry.get("assets_sha256", ""),
                                 "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, repo_name),
                                 "synced_at": (l_info or {}).get("synced_at") or _now_iso(),
                             }
@@ -2148,6 +2760,8 @@ class CloudSyncService:
                         manifest.get("deleted_repertoires", {}).pop(repo_name, None)
                         local_state.setdefault("repertoires", {})[repo_name] = {
                             "synced_snapshot_sha256": new_entry["sha256"],
+                            "synced_db_sha256": new_entry.get("db_sha256"),
+                            "synced_assets_sha256": new_entry.get("assets_sha256", ""),
                             "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, repo_name),
                             "synced_at": new_entry["updated_at"],
                         }
@@ -2156,7 +2770,7 @@ class CloudSyncService:
                         manifest_dirty = True
 
                 # 2d. Push modified or new local profiles
-                if os.path.exists(local_profs_dir):
+                if do_profiles and os.path.exists(local_profs_dir):
                     for fname in sorted(os.listdir(local_profs_dir)):
                         if not fname.lower().endswith(".db"):
                             continue
@@ -2208,8 +2822,9 @@ class CloudSyncService:
                         manifest_dirty = True
 
             # 3. Sync extra portable data (settings, custom dictionary, opt-in engine cache)
-            _report("Syncing preferences & extras...", total_steps - 1, max(total_steps, 1))
-            if sync_opts.get("sync_portable_settings", True):
+            if do_settings or do_dictionary or do_engine_cache:
+                _report("Syncing preferences & extras...", total_steps - 1, max(total_steps, 1))
+            if do_settings and sync_opts.get("sync_portable_settings", True):
                 try:
                     if CloudSyncService._sync_portable_settings(
                         cloud_sync_root, local_dir, manifest, local_state, direction, summary
@@ -2218,7 +2833,7 @@ class CloudSyncService:
                 except Exception as e:
                     logger.warning(f"CloudSync: Portable settings sync warning: {e}")
 
-            if sync_opts.get("sync_user_dictionary", True):
+            if do_dictionary and sync_opts.get("sync_user_dictionary", True):
                 try:
                     if CloudSyncService._sync_user_dictionary(
                         cloud_sync_root, local_dir, manifest, local_state, direction, summary
@@ -2227,7 +2842,7 @@ class CloudSyncService:
                 except Exception as e:
                     logger.warning(f"CloudSync: User dictionary sync warning: {e}")
 
-            if sync_opts.get("sync_engine_cache", False):
+            if do_engine_cache and sync_opts.get("sync_engine_cache", False):
                 try:
                     if CloudSyncService._sync_engine_cache(
                         cloud_sync_root, local_dir, manifest, local_state, direction, summary
@@ -2279,6 +2894,8 @@ class CloudSyncService:
                 manifest.get("deleted_repertoires", {}).pop(name, None)
                 local_state.setdefault("repertoires", {})[name] = {
                     "synced_snapshot_sha256": entry["sha256"],
+                    "synced_db_sha256": entry.get("db_sha256"),
+                    "synced_assets_sha256": entry.get("assets_sha256", ""),
                     "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, name),
                     "synced_at": entry["updated_at"],
                 }
@@ -2335,6 +2952,8 @@ class CloudSyncService:
                     return False, reason
                 local_state.setdefault("repertoires", {})[name] = {
                     "synced_snapshot_sha256": entry["sha256"],
+                    "synced_db_sha256": entry.get("db_sha256"),
+                    "synced_assets_sha256": entry.get("assets_sha256", ""),
                     "local_fingerprint": _compute_repo_local_fingerprint(l_repo_path, name),
                     "synced_at": _now_iso(),
                 }

@@ -548,3 +548,246 @@ def test_cloud_sync_ui_widgets_and_deferred_restart(qapp, temp_dir, monkeypatch)
     request_app_restart(False)
 
     assert format_relative_time(datetime.now().isoformat(timespec="seconds")) != ""
+
+
+def test_zero_byte_wal_and_sqlite_header_churn_no_false_upload(temp_dir, monkeypatch):
+    """0-byte -wal files and volatile SQLite header changes (journal_mode/version) must NOT trigger re-upload."""
+    cloud_dir = os.path.join(temp_dir, "Cloud")
+    pc_default = os.path.join(temp_dir, "PC")
+    _switch_device(monkeypatch, pc_default, "PC")
+    set_custom_data_dir(cloud_dir)
+
+    repo_dir = os.path.join(get_user_dir(), "repertoires", "Gawain")
+    repo_db = os.path.join(repo_dir, "Gawain.db")
+    _create_repo_db(repo_db, "Untouched")
+    res1 = CloudSyncService.sync_now(direction="push")
+    assert "Gawain" in res1["pushed_repertoires"]
+
+    db_zip = os.path.join(cloud_dir, "cloud_sync", "repertoires", "Gawain.fenixsync.zip")
+    orig_zip_mtime = os.stat(db_zip).st_mtime_ns
+    orig_manifest_updated = CloudSyncService.load_manifest(cloud_dir)["updated_at"]
+
+    # 1. Touch a 0-byte -wal file (simulating read-only WAL open) -> inspector must STILL say synced!
+    wal_path = repo_db + "-wal"
+    with open(wal_path, "wb"):
+        pass
+    items = {i["name"]: i for i in CloudSyncService.get_detailed_items_status() if i["kind"] == "repertoire"}
+    assert items["Gawain"]["state"] == "synced"
+
+    # 2. Simulate WAL mode toggle + volatile SQLite header bytes (change_counter [24..27] & sqlite_version [96..99])
+    time.sleep(0.05)
+    os.remove(wal_path)
+    with open(repo_db, "r+b") as f:
+        hdr = bytearray(f.read(100))
+        hdr[24:28] = b"\x00\x00\x00\x99"
+        hdr[92:100] = b"\x00\x00\x00\x99\x00\x2e\x84\x88"
+        f.seek(0)
+        f.write(hdr)
+
+    res2 = CloudSyncService.sync_now(direction="push")
+    assert "Gawain" not in res2["pushed_repertoires"]
+    assert os.stat(db_zip).st_mtime_ns == orig_zip_mtime
+    assert CloudSyncService.load_manifest(cloud_dir)["updated_at"] == orig_manifest_updated
+
+
+def test_split_db_and_assets_lzma_and_generated_exports_excluded(temp_dir, monkeypatch):
+    """
+    Verifies:
+    - Generated root .pdf and <RepoName> L1.pgn exports are excluded from cloud sync and never deleted on pull.
+    - Repertoire DB and static assets are stored in separate LZMA zips.
+    - Editing only the DB never rewrites the assets zip; editing only assets never rewrites the DB zip.
+    - Deleting the repertoire deletes both cloud archives.
+    """
+    import zipfile
+
+    cloud_dir = os.path.join(temp_dir, "Cloud")
+    pc_default = os.path.join(temp_dir, "PC")
+    laptop_default = os.path.join(temp_dir, "Laptop")
+
+    _switch_device(monkeypatch, pc_default, "PC")
+    set_custom_data_dir(cloud_dir)
+    pc_repo = os.path.join(get_user_dir(), "repertoires", "Ruy Lopez")
+    pc_db = os.path.join(pc_repo, "Ruy Lopez.db")
+    _create_repo_db(pc_db, "V1")
+    with open(os.path.join(pc_repo, "cover.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + b"0" * 1024)
+    with open(os.path.join(pc_repo, "Model Games.pgn"), "w", encoding="utf-8") as f:
+        f.write("1. e4 e5 2. Nf3 Nc6 3. Bb5 *")
+    # Generated exports that MUST be excluded
+    with open(os.path.join(pc_repo, "test_export.pdf"), "wb") as f:
+        f.write(b"%PDF-1.4 fake pdf")
+    with open(os.path.join(pc_repo, "Ruy Lopez L1-Grundlagen.pgn"), "w", encoding="utf-8") as f:
+        f.write("1. e4 e5 *")
+
+    res1 = CloudSyncService.sync_now(direction="push")
+    assert "Ruy Lopez" in res1["pushed_repertoires"]
+
+    db_zip = os.path.join(cloud_dir, "cloud_sync", "repertoires", "Ruy Lopez.fenixsync.zip")
+    assets_zip = os.path.join(cloud_dir, "cloud_sync", "repertoires", "Ruy Lopez.assets.fenixsync.zip")
+    assert os.path.isfile(db_zip)
+    assert os.path.isfile(assets_zip)
+
+    # Verify LZMA compression on DB zip and exclusion of PDF/generated PGN in assets zip
+    with zipfile.ZipFile(db_zip, "r") as zf:
+        infos = zf.infolist()
+        assert [i.filename for i in infos] == ["Ruy Lopez.db"]
+        assert infos[0].compress_type == zipfile.ZIP_LZMA
+    with zipfile.ZipFile(assets_zip, "r") as zf:
+        names = set(zf.namelist())
+        assert "cover.png" in names
+        assert "Model Games.pgn" in names
+        assert "test_export.pdf" not in names
+        assert "Ruy Lopez L1-Grundlagen.pgn" not in names
+        # PNG stored uncompressed, PGN compressed with LZMA
+        info_map = {i.filename: i for i in zf.infolist()}
+        assert info_map["cover.png"].compress_type == zipfile.ZIP_STORED
+        assert info_map["Model Games.pgn"].compress_type == zipfile.ZIP_LZMA
+
+    # Edit ONLY the DB -> assets zip must NOT be rewritten!
+    orig_assets_mtime = os.stat(assets_zip).st_mtime_ns
+    time.sleep(0.05)
+    _create_repo_db(pc_db, "V2 DB edit only")
+    res2 = CloudSyncService.sync_now(direction="push")
+    assert "Ruy Lopez" in res2["pushed_repertoires"]
+    assert os.stat(assets_zip).st_mtime_ns == orig_assets_mtime
+
+    # Edit ONLY an asset -> DB zip must NOT be rewritten!
+    orig_db_mtime = os.stat(db_zip).st_mtime_ns
+    time.sleep(0.05)
+    with open(os.path.join(pc_repo, "Model Games.pgn"), "w", encoding="utf-8") as f:
+        f.write("1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 *")
+    res3 = CloudSyncService.sync_now(direction="push")
+    assert "Ruy Lopez" in res3["pushed_repertoires"]
+    assert os.stat(db_zip).st_mtime_ns == orig_db_mtime
+
+    # Laptop pulls and also keeps its own local PDF export intact
+    _switch_device(monkeypatch, laptop_default, "LAPTOP")
+    set_custom_data_dir(cloud_dir)
+    lap_repo = os.path.join(get_user_dir(), "repertoires", "Ruy Lopez")
+    os.makedirs(lap_repo, exist_ok=True)
+    lap_pdf = os.path.join(lap_repo, "my_local_notes.pdf")
+    with open(lap_pdf, "wb") as f:
+        f.write(b"%PDF local")
+
+    res_lap = CloudSyncService.sync_now(direction="both")
+    assert "Ruy Lopez" in res_lap["pulled_repertoires"]
+    assert os.path.isfile(os.path.join(lap_repo, "cover.png"))
+    assert os.path.isfile(lap_pdf)  # Local PDF preserved!
+
+    # Delete repertoire on PC -> both DB and assets zips removed from cloud
+    _switch_device(monkeypatch, pc_default, "PC")
+    shutil.rmtree(pc_repo)
+    res_del = CloudSyncService.sync_now(direction="push")
+    assert "Ruy Lopez" in res_del["deleted_cloud_repertoires"]
+    assert not os.path.exists(db_zip)
+    assert not os.path.exists(assets_zip)
+
+
+def test_engine_cache_delta_sync_and_compaction(temp_dir, monkeypatch):
+    """Engine eval cache pushes tiny gzipped JSON deltas after initial base snapshot and compacts on threshold."""
+    import opening_fenix.core.services.cloud_sync_service as css
+
+    cloud_dir = os.path.join(temp_dir, "Cloud")
+    pc_default = os.path.join(temp_dir, "PC")
+    laptop_default = os.path.join(temp_dir, "Laptop")
+
+    def _init_cache(db_path: str, rows):
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS engine_evals (
+                fen TEXT PRIMARY KEY,
+                depth INTEGER NOT NULL,
+                best_uci TEXT NOT NULL,
+                eval_json TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT OR REPLACE INTO engine_evals (fen, depth, best_uci, eval_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
+
+    # 1. PC seeds base snapshot
+    _switch_device(monkeypatch, pc_default, "PC")
+    set_custom_data_dir(cloud_dir)
+    CloudSyncService.set_sync_options(sync_engine_cache=True)
+    pc_cache = os.path.join(get_user_dir(), "cache", "engine_eval_cache.db")
+    _init_cache(pc_cache, [
+        ("fen_a", 24, "e2e4", "{}", "2026-11-25 10:00:00"),
+        ("fen_b", 22, "d2d4", "{}", "2026-11-25 10:00:01"),
+    ])
+    res1 = CloudSyncService.sync_now(direction="push")
+    assert "engine_cache:pushed" in res1["synced_extras"]
+
+    base_zip = os.path.join(cloud_dir, "cloud_sync", "engine_eval_cache.fenixsync.zip")
+    orig_base_mtime = os.stat(base_zip).st_mtime_ns
+
+    # 2. Laptop bootstraps from base snapshot
+    _switch_device(monkeypatch, laptop_default, "LAPTOP")
+    set_custom_data_dir(cloud_dir)
+    CloudSyncService.set_sync_options(sync_engine_cache=True)
+    res_l1 = CloudSyncService.sync_now(direction="both")
+    assert "engine_cache:pulled" in res_l1["synced_extras"]
+
+    # 3. PC evaluates 2 new positions -> must write tiny delta, NOT rewrite base zip!
+    _switch_device(monkeypatch, pc_default, "PC")
+    time.sleep(0.05)
+    _init_cache(pc_cache, [
+        ("fen_c", 26, "c2c4", "{}", "2026-11-25 10:05:00"),
+        ("fen_a", 28, "e2e4", "{}", "2026-11-25 10:05:01"),
+    ])
+    res2 = CloudSyncService.sync_now(direction="push")
+    assert "engine_cache:delta_pushed" in res2["synced_extras"]
+    assert "engine_cache:pushed" not in res2["synced_extras"]
+    assert os.stat(base_zip).st_mtime_ns == orig_base_mtime
+
+    m = CloudSyncService.load_manifest(cloud_dir)
+    assert len(m["engine_cache"]["deltas"]) == 1
+
+    # 4. Laptop pulls delta cleanly and does NOT echo it back on follow-up sync
+    _switch_device(monkeypatch, laptop_default, "LAPTOP")
+    res_l2 = CloudSyncService.sync_now(direction="both")
+    assert "engine_cache:delta_pulled" in res_l2["synced_extras"]
+    assert "engine_cache:delta_pushed" not in res_l2["synced_extras"]
+
+    lap_cache = os.path.join(get_user_dir(), "cache", "engine_eval_cache.db")
+    conn = sqlite3.connect(lap_cache)
+    evals = dict(conn.execute("SELECT fen, depth FROM engine_evals").fetchall())
+    conn.close()
+    assert evals == {"fen_a": 28, "fen_b": 22, "fen_c": 26}
+
+    # 5. Compaction when delta count threshold is reached
+    monkeypatch.setattr(css, "ENGINE_CACHE_DELTA_COMPACT_COUNT", 1)
+    _switch_device(monkeypatch, pc_default, "PC")
+    time.sleep(0.05)
+    _init_cache(pc_cache, [("fen_d", 25, "g1f3", "{}", "2026-11-25 10:10:00")])
+    res3 = CloudSyncService.sync_now(direction="push")
+    assert "engine_cache:pushed" in res3["synced_extras"]
+    m_after = CloudSyncService.load_manifest(cloud_dir)
+    assert m_after["engine_cache"]["deltas"] == []
+
+
+def test_scoped_background_push_only_syncs_requested_scope(temp_dir, monkeypatch):
+    """Scoped push (e.g. scopes={'profiles'}) pushes only profiles without touching modified repertoires."""
+    cloud_dir = os.path.join(temp_dir, "Cloud")
+    pc_default = os.path.join(temp_dir, "PC")
+    _switch_device(monkeypatch, pc_default, "PC")
+    set_custom_data_dir(cloud_dir)
+
+    _create_repo_db(os.path.join(get_user_dir(), "repertoires", "Italian", "Italian.db"), "V1")
+    _create_profile_db(os.path.join(get_user_dir(), "profiles", "Felix.db"))
+
+    # Push ONLY profiles (simulates training flush)
+    res_prof = CloudSyncService.sync_now(direction="push", scopes={"profiles"})
+    assert "Felix" in res_prof["pushed_profiles"]
+    assert res_prof["pushed_repertoires"] == []
+
+    # Push ONLY repertoires (simulates Creator edit)
+    res_repo = CloudSyncService.sync_now(direction="push", scopes={"repertoires"})
+    assert "Italian" in res_repo["pushed_repertoires"]
+    assert res_repo["pushed_profiles"] == []

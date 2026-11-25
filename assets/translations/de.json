@@ -142,7 +142,7 @@
     "update_error_msg": "Konnte GitHub nicht nach Updates prüfen:\n{err}",
     "comments_format": "💬 Kommentare: {stats}",
     "no_comments": "Keine Kommentare",
-    "storage_title": "☁️ Cloud-Synchronisation (Multi-PC: Google Drive / OneDrive)",
+    "storage_title": "🔄 Cloud-Synchronisation (Multi-PC: Google Drive / OneDrive)",
     "storage_desc": "Cloud-Sync-Ordner (für geprüfte Snapshots & Backups, z. B. in Google Drive oder OneDrive):",
     "storage_current_path": "Aktueller Speicherort:",
     "storage_btn_change": "📁 Cloud-Ordner wählen...",
@@ -297,6 +297,7 @@
     "cloud_opt_settings": "App-Einstellungen synchronisieren (Theme, Sprache, Audio, Creator-Tabs — ohne lokale Engine-Pfade)",
     "cloud_opt_dictionary": "Benutzer-Wörterbuch für Rechtschreibprüfung synchronisieren (verlustfreie Zusammenführung)",
     "cloud_opt_engine_cache": "Stockfish Engine-Evaluierungs-Cache synchronisieren (optional — kann größer sein)",
+    "cloud_opt_engine_cache_sized": "Stockfish Engine-Evaluierungs-Cache synchronisieren (optional — aktuell {size})",
     "cloud_inspector_title": "📋 Sync-Inspektor (Repertoires & Profile)",
     "cloud_inspector_sub": "Prüfe den Sync-Status einzelner Repertoires & Profile, schließe einzelne Kurse vom Sync aus oder erzwinge Push/Pull.",
     "cloud_inspector_refresh": "🔄 Aktualisieren",
@@ -321,7 +322,10 @@
     "cloud_btn_include": "Aktivieren",
     "cloud_btn_exclude": "Ausschließen",
     "cloud_btn_force_push_tip": "Lokal → Cloud erzwingen",
-    "cloud_btn_force_pull_tip": "Cloud → Lokal erzwingen (mit Sicherheits-Backup)"
+    "cloud_btn_force_pull_tip": "Cloud → Lokal erzwingen (mit Sicherheits-Backup)",
+    "show_legal_moves": "Legale Züge anzeigen:",
+    "show_legal_moves_sub": "Zeigt dezente Punkte und Ringe für mögliche Zielfelder beim Auswählen oder Ziehen einer Figur.",
+    "show_legal_moves_chk": "Aktiviert"
   },
   "themes": {
     "Dunkel (Modern)": "Dunkel (Modern)",
@@ -357,7 +361,7 @@
     "q3": "Wie ändere ich das Trainingslevel und wann soll ich das machen?",
     "a3": "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.",
     "q4": "Möchtest du Fehler melden oder Änderungen am Programm vorschlagen?",
-    "a4": "Du kannst das auf diesem Discord tun: https://discord.gg/TevW5Wfkc"
+    "a4": "Am schnellsten geht das direkt in der App über das kleine Käfer-Symbol oben rechts in der Titelleiste (neben Minimieren/Schließen) — dort kannst du den Fehler beschreiben und mit einem Klick inklusive bereinigtem Diagnose-Paket absenden.\n\nFür Feature-Wünsche, Fragen oder den Austausch mit anderen Nutzern kannst du auch unserem Discord beitreten: https://discord.gg/TevW5Wfkc"
   },
   "tour": {
     "btn_next": "WEITER →",
@@ -388,7 +392,9 @@
     "step12_title": "Fokussiertes Training",
     "step12_text": "Nutze den Variantenfilter oben, um nur bestimmte Varianten zu trainieren oder lernen - ideal, wenn man eine neue Variante lernt und man möchte alle züge zu dieser Variante lernen bevor man etwas anderes lernt oder um sich auf eine spezielle Eröffnung vorzubereiten",
     "step13_title": "Ressourcen",
-    "step13_text": "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm"
+    "step13_text": "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm",
+    "step14_title": "Fehler melden",
+    "step14_text": "Falls dir jemals ein Fehler auffällt, klicke einfach auf dieses kleine Käfer-Symbol oben rechts. Du kannst den Fehler kurz beschreiben und mit einem Klick inklusive bereinigtem Diagnose-Paket direkt an den Entwickler senden."
   },
   "repo_settings": {
     "identity_title": "📋 Repertoire Identität",
@@ -781,6 +787,8 @@
     "lockout_error": "Fehler: {err}",
     "label_comment_lang": "💬 Kommentar-Sprache:",
     "label_comment_stats": "💬 Kommentare im Kurs:",
+    "label_included_elos": "📚 Enthaltene Elo-Stufen:",
+    "tip_included_elos": "Lernende können im Trainer zwischen diesen Elo-Stufen wechseln. Weitere Stufen importierst du im Task-Center.",
     "comment_lang_auto": "Automatisch",
     "comment_lang_de": "🇩🇪 Deutsch",
     "comment_lang_en": "🇬🇧 English",
@@ -1144,7 +1152,7 @@
     "common_col_black_short": "S %",
     "common_col_draw_short": "R %",
     "tab_details": "DETAILS",
-    "tab_analysis": "ANALYSIS",
+    "tab_analysis": "ANALYSE",
     "tab_holes": "Such Modus",
     "tab_kontrolle": "Rep. Kontrolle",
     "tab_transpositions": "Transpositionen",
@@ -1287,7 +1295,9 @@
     "btn_alt_repertoire": "GUTER ZUG (ANDERER REPERTOIRE-WEG)",
     "btn_alt_not_repertoire": "GUTER ZUG (NICHT IM REPERTOIRE)",
     "menu_setup_open_training": "🎯 Training anpassen (Repertoire, Level, Variation)",
-    "menu_switch_profile": "👤 Profil wechseln"
+    "menu_switch_profile": "👤 Profil wechseln",
+    "btn_mouse_slip": "↩ Verklickt?",
+    "mouse_slip_tooltip": "<b>Verklickt?</b><br>Macht den Fehler rückgängig und stellt deine vorherige Leitner-Box wieder her."
   },
   "open_training": {
     "dialog_title": "Freies Training",
@@ -1302,6 +1312,14 @@
     "comment_lang_en": "Englisch (EN)",
     "comment_lang_de": "Deutsch (DE)",
     "no_comments": "Keine Kommentare",
+    "card_comment_lang_auto": "💬 Kommentare: Auto ({lang})",
+    "card_comment_lang_all": "💬 Kommentare: Alle",
+    "card_comment_lang_en": "💬 Kommentare: Englisch",
+    "card_comment_lang_de": "💬 Kommentare: Deutsch",
+    "card_comment_lang_other": "💬 Kommentare: {lang}",
+    "card_no_comments": "💬 Keine Kommentare",
+    "card_comment_lang_tooltip": "Sprache der Zugkommentare für dieses Repertoire.\nAuto folgt der Programmsprache (aktuell: {lang}).",
+    "card_prio_elo_tooltip": "Gegner-Stärke, nach der die Zugreihenfolge gewichtet wird.",
     "no_repos_item": "(Keine Repertoires)",
     "btn_cancel": "Abbrechen",
     "btn_start": "🚀 Training starten",
@@ -1374,7 +1392,7 @@
     "q3": "Wie ändere ich das Trainingslevel und wann soll ich das machen?",
     "a3": "Das Level kannst du in den Einstellungen des Trainers bei der Repertoire-Auswahl ändern. Man sollte das Level erhöhen, sobald das vorherige Level sitzt und auch die eigene Elo die Ziel-Elo für dieses Repertoire-Level überschritten hat.",
     "q4": "Möchtest du Fehler melden oder Änderungen am Programm vorschlagen?",
-    "a4": "Du kannst das auf diesem Discord tun: https://discord.gg/TevW5Wfkc",
+    "a4": "Am schnellsten geht das direkt in der App über das kleine Käfer-Symbol oben rechts in der Titelleiste (neben Minimieren/Schließen) — dort kannst du den Fehler beschreiben und mit einem Klick inklusive bereinigtem Diagnose-Paket absenden.\n\nFür Feature-Wünsche, Fragen oder den Austausch mit anderen Nutzern kannst du auch unserem Discord beitreten: https://discord.gg/TevW5Wfkc",
     "q6": "Wird der Lichess-Import für große Kurse jemals schneller werden?",
     "a6": "Wir sind durch die Lichess-Server limitiert (die absolute Helden dafür sind, dass sie die Daten kostenlos bereitstellen), da es ein Limit dafür gibt, wie viele Stellungen wir pro Minute abfragen dürfen.\n\nFalls das Programm jemals richtig groß wird, könnte ich einen Server aufsetzen und die gesamte Lichess-Datenbank dorthin herunterladen – dann würde der Import nur noch Sekunden statt Stunden dauern. Allerdings würde das dauerhaft Geld kosten und ich müsste über eine Monetarisierung oder ein Abonnement nachdenken, woran ich aktuell kein Interesse habe.\n\nVorerst müssen wir uns also damit begnügen, das Programm nach dem Import eines großen Kurses eine Weile im Hintergrund laufen zu lassen."
   },
@@ -1668,6 +1686,9 @@
     "select_repo": "Ziel-Repertoire:",
     "card_lich_title": "🌐 Lichess-Datenbank Import",
     "lbl_elo_category": "Elo-Kategorie:",
+    "lbl_extra_elos": "Zusätzlich:",
+    "tip_extra_elos": "Optional weitere Elo-Stufen im selben Kurs mitladen. Lernende können dann zwischen ihnen wechseln.",
+    "tip_batch_extra_elos": "Optional zusätzlich bei allen ausgewählten Kursen mitladen (bereits vorhandene Multi-Elos werden immer mit aktualisiert).",
     "lbl_max_age": "Max. Datenalter:",
     "age_90": "90 Tage",
     "age_180": "180 Tage (Standard)",
@@ -1725,6 +1746,7 @@
     "batch_selected_count": "Ausgewählt: {sel} von {tot} Repertoires"
   },
   "common": {
+    "close": "Schließen",
     "browse": "Durchsuchen...",
     "cancel": "Abbrechen",
     "error": "Fehler",
@@ -1785,5 +1807,34 @@
     "tip_warning": "Cloud-Sync Hinweis:\n{details}\nKlicken für Details.",
     "tip_synced": "Sicherer Cloud-Sync aktiv\nLetzte Synchronisation: {rel}{dev}\nOrdner: {path}\nKlicken für Sync & Einstellungen.",
     "menu_open_settings": "⚙️ Cloud-Sync Einstellungen..."
+  },
+  "title_bar": {
+    "bug_report_tooltip": "Fehler melden / Diagnose exportieren"
+  },
+  "bug_report": {
+    "title": "Fehler melden & Diagnose",
+    "heading": "Fehler melden & Diagnose",
+    "intro": "Beschreibe kurz, was passiert ist, und sende den Bericht mit einem Klick direkt an das Entwicklerteam. Persönliche API-Tokens werden automatisch entfernt.",
+    "desc_label": "Was ist passiert?",
+    "desc_placeholder": "Kurze Beschreibung oder Schritte zum Reproduzieren...",
+    "chk_include_diag": "Diagnose-ZIP anhängen (App-Version, System-Infos & bereinigtes Log)",
+    "btn_send": "🚀 Fehlerbericht senden",
+    "btn_sending": "⏳ Wird gesendet...",
+    "btn_export": "📦 Diagnose-ZIP speichern...",
+    "btn_export_short": "📦 ZIP speichern",
+    "btn_github": "GitHub",
+    "btn_discord": "Discord",
+    "empty_title": "Beschreibung fehlt",
+    "empty_msg": "Bitte gib eine kurze Beschreibung ein oder aktiviere das Diagnose-ZIP.",
+    "send_success_title": "Bericht gesendet",
+    "send_success_msg": "Vielen Dank! Dein Fehlerbericht wurde erfolgreich übermittelt.",
+    "send_error_title": "Senden fehlgeschlagen",
+    "send_error_msg": "Der Bericht konnte nicht direkt gesendet werden ({error}).\n\nDu kannst stattdessen auf '📦 ZIP speichern' klicken und die Datei auf Discord oder GitHub teilen.",
+    "rate_limited": "Zu viele Berichte in kurzer Zeit. Bitte versuche es später erneut oder speichere das Diagnose-ZIP lokal.",
+    "save_dialog_title": "Diagnose-ZIP speichern",
+    "export_success_title": "Diagnose gespeichert",
+    "export_success_msg": "Diagnose-Paket wurde erfolgreich gespeichert:\n{path}",
+    "export_error_title": "Fehler beim Export",
+    "export_error_msg": "Das Diagnose-Paket konnte nicht erstellt werden:\n{error}"
   }
 }

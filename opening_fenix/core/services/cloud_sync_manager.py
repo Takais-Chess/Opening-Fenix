@@ -34,6 +34,10 @@ class CloudSyncManager(QObject):
         super().__init__(parent)
         self._worker: Optional[CloudSyncThread] = None
         self._pending_direction: Optional[str] = None
+        self._pending_worker_scopes: Optional[set] = None
+        self._pending_worker_full: bool = False
+        self._debounced_scopes: Optional[set] = None
+        self._debounced_full: bool = False
         self._was_offline: bool = CloudSyncService.is_offline()
         self._last_summary: Optional[Dict[str, Any]] = None
         self._last_errors: list = []
@@ -87,10 +91,10 @@ class CloudSyncManager(QObject):
     def is_syncing(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
 
-    def schedule_background_push(self, delay_ms: int = 15000) -> None:
+    def schedule_background_push(self, delay_ms: int = 30000, scopes=None) -> None:
         """
         Schedules a debounced background push (Local -> Cloud) after training/Creator writes.
-        Repeated calls within delay_ms coalesce into a single snapshot push.
+        Repeated calls within delay_ms coalesce their scopes into a single snapshot push.
         """
         if "pytest" in sys.modules:
             return
@@ -100,11 +104,22 @@ class CloudSyncManager(QObject):
             self._was_offline = True
             self.refresh_status()
             return
+        if scopes is None:
+            self._debounced_full = True
+            self._debounced_scopes = None
+        elif not self._debounced_full:
+            if self._debounced_scopes is None:
+                self._debounced_scopes = set(scopes)
+            else:
+                self._debounced_scopes.update(scopes)
         self._debounce_timer.start(max(1000, int(delay_ms)))
 
     def _on_debounce_timeout(self) -> None:
+        scopes_to_run = None if self._debounced_full else self._debounced_scopes
+        self._debounced_scopes = None
+        self._debounced_full = False
         if CloudSyncService.is_enabled():
-            self.trigger_sync(direction="push")
+            self.trigger_sync(direction="push", scopes=scopes_to_run)
         else:
             self.refresh_status()
 
@@ -140,19 +155,27 @@ class CloudSyncManager(QObject):
         threading.Thread(target=_bg_hb, daemon=True, name="CloudSyncHeartbeat").start()
         self.refresh_status()
 
-    def trigger_sync(self, direction: str = "both") -> bool:
+    def trigger_sync(self, direction: str = "both", scopes=None) -> bool:
         """Starts an asynchronous CloudSyncThread if enabled and not already running."""
         if not CloudSyncService.is_enabled():
             self.refresh_status()
             return False
 
         if self.is_syncing():
-            # Queue a follow-up sync once current finishes
+            # Queue a follow-up sync once current finishes (coalescing direction & scopes)
             if direction == "both" or self._pending_direction is None:
                 self._pending_direction = direction
+            if scopes is None:
+                self._pending_worker_full = True
+                self._pending_worker_scopes = None
+            elif not self._pending_worker_full:
+                if self._pending_worker_scopes is None:
+                    self._pending_worker_scopes = set(scopes)
+                else:
+                    self._pending_worker_scopes.update(scopes)
             return True
 
-        self._worker = CloudSyncThread(direction=direction, parent=self)
+        self._worker = CloudSyncThread(direction=direction, parent=self, scopes=scopes)
         self._worker.progress_signal.connect(self.sync_progress.emit)
         self._worker.finished_signal.connect(self._on_worker_finished)
         self.sync_started.emit(direction)
@@ -174,8 +197,11 @@ class CloudSyncManager(QObject):
 
         if self._pending_direction:
             next_dir = self._pending_direction
+            next_scopes = None if self._pending_worker_full else self._pending_worker_scopes
             self._pending_direction = None
-            QTimer.singleShot(300, lambda d=next_dir: self.trigger_sync(direction=d))
+            self._pending_worker_scopes = None
+            self._pending_worker_full = False
+            QTimer.singleShot(300, lambda d=next_dir, s=next_scopes: self.trigger_sync(direction=d, scopes=s))
 
     def get_ui_status_snapshot(self, syncing: Optional[bool] = None) -> Dict[str, Any]:
         """Builds a UI-ready status dictionary for status pills & banners."""

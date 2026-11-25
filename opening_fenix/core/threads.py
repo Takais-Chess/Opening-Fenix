@@ -967,19 +967,21 @@ class CloudSyncThread(QThread):
     progress_signal = pyqtSignal(str, int, int)
     finished_signal = pyqtSignal(dict)
 
-    def __init__(self, direction: str = "both", parent=None):
+    def __init__(self, direction: str = "both", parent=None, scopes=None):
         super().__init__(parent)
         self.direction = direction
+        self.scopes = set(scopes) if scopes is not None else None
 
     def run(self):
         from opening_fenix.core.services.cloud_sync_service import CloudSyncService
         from opening_fenix.core.logger import logger
         try:
-            if CloudSyncService.is_enabled():
+            if self.scopes is None and CloudSyncService.is_enabled():
                 CloudSyncService.update_session_heartbeat()
             summary = CloudSyncService.sync_now(
                 direction=self.direction,
                 progress_callback=lambda msg, cur, tot: self.progress_signal.emit(msg, cur, tot),
+                scopes=self.scopes,
             )
             self.finished_signal.emit(summary)
         except Exception as e:

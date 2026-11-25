@@ -6,10 +6,10 @@ from typing import Tuple, Callable, Optional, Dict, List, Set
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
+from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData, MovePriority
 from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta
-from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
+from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, parse_elo_list
 from opening_fenix.core.services.lichess_service import ELO_MAPPING
 
 _CASTLING_ALT = {
@@ -84,7 +84,72 @@ def _compute_depths_topo(
     return buckets
 
 
-def calculate_priority_scores(repo_name: str, elo_category: str, progress_callback: Optional[Callable[[int], None]] = None, check_cancel: Optional[Callable[[], bool]] = None) -> Tuple[bool, str]:
+def sync_move_priorities_to_default_elo(session: Session, elo_category: str, keep_missing: bool = False) -> bool:
+    """
+    Copies precomputed MovePriority rows for `elo_category` onto Move.priority_score
+    for instant default-Elo switching and backwards compatibility.
+    If keep_missing is True, moves without a stored row keep their current score instead of 0.
+    Returns True if MovePriority rows existed for `elo_category`.
+    """
+    if not elo_category:
+        return False
+    mp_rows = session.query(MovePriority.move_id, MovePriority.priority_score).filter_by(elo_range=elo_category).all()
+    if not mp_rows:
+        return False
+    score_map = {m_id: (prio or 0.0) for m_id, prio in mp_rows}
+    all_moves = session.query(Move.id, Move.priority_score).all()
+    updates = []
+    for m_id, old_prio in all_moves:
+        if keep_missing and m_id not in score_map:
+            continue
+        target = score_map.get(m_id, 0.0)
+        if old_prio is None or old_prio != target:
+            updates.append({'id': m_id, 'priority_score': target})
+    if updates:
+        for i in range(0, len(updates), 2000):
+            session.bulk_update_mappings(Move, updates[i:i + 2000])
+    return True
+
+
+def _upsert_move_priorities(session: Session, elo_category: str, scores_by_move_id: Dict[int, float]) -> None:
+    """Bulk-upserts MovePriority entries for a given elo_category."""
+    if not elo_category or not scores_by_move_id:
+        return
+    move_ids = list(scores_by_move_id.keys())
+    existing_map: Dict[int, Tuple[int, float]] = {}
+    chunk_size = 900
+    for i in range(0, len(move_ids), chunk_size):
+        chunk = move_ids[i:i + chunk_size]
+        for row_id, m_id, old_score in session.query(
+            MovePriority.id, MovePriority.move_id, MovePriority.priority_score
+        ).filter(MovePriority.elo_range == elo_category, MovePriority.move_id.in_(chunk)).all():
+            existing_map[m_id] = (row_id, old_score)
+
+    to_update = []
+    to_insert = []
+    for m_id, score in scores_by_move_id.items():
+        if m_id in existing_map:
+            row_id, old_score = existing_map[m_id]
+            if old_score is None or old_score != score:
+                to_update.append({'id': row_id, 'priority_score': score})
+        else:
+            to_insert.append({'move_id': m_id, 'elo_range': elo_category, 'priority_score': score})
+
+    if to_update:
+        for i in range(0, len(to_update), 2000):
+            session.bulk_update_mappings(MovePriority, to_update[i:i + 2000])
+    if to_insert:
+        for i in range(0, len(to_insert), 2000):
+            session.bulk_insert_mappings(MovePriority, to_insert[i:i + 2000])
+
+
+def calculate_priority_scores(
+    repo_name: str,
+    elo_category: str,
+    progress_callback: Optional[Callable[[int], None]] = None,
+    check_cancel: Optional[Callable[[], bool]] = None,
+    update_move_column: Optional[bool] = None,
+) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
     db = DatabaseManager(db_path)
     session = db.get_session()
@@ -229,15 +294,27 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
             if progress_callback:
                 progress_callback(int((depth + 1) * 100 / total_depths))
 
-        updates = []
-        for m_id, _from_id, _to_id, _uci, _san, old_prio in all_moves_rows:
-            target_prio = new_scores.get(m_id, 0.0)
-            if old_prio is None or old_prio != target_prio:
-                updates.append({'id': m_id, 'priority_score': target_prio})
+        # Always store per-Elo priorities in move_priorities for instant multi-Elo switching
+        all_target_scores = {m_id: new_scores.get(m_id, 0.0) for m_id, _, _, _, _, _ in all_moves_rows}
+        _upsert_move_priorities(session, elo_category, all_target_scores)
 
-        if updates:
-            for i in range(0, len(updates), 2000):
-                session.bulk_update_mappings(Move, updates[i:i + 2000])
+        # Sync Move.priority_score if requested or if elo_category is the course's primary/default Elo
+        if update_move_column is None:
+            primary_elo = get_meta(session, "lichess_elo") or get_meta(session, "elo")
+            should_sync_moves = (not primary_elo) or (primary_elo == elo_category)
+        else:
+            should_sync_moves = bool(update_move_column)
+
+        if should_sync_moves:
+            updates = []
+            for m_id, _from_id, _to_id, _uci, _san, old_prio in all_moves_rows:
+                target_prio = all_target_scores.get(m_id, 0.0)
+                if old_prio is None or old_prio != target_prio:
+                    updates.append({'id': m_id, 'priority_score': target_prio})
+
+            if updates:
+                for i in range(0, len(updates), 2000):
+                    session.bulk_update_mappings(Move, updates[i:i + 2000])
         commit_with_retry(session)
         return True, "Priority scores calculated successfully."
 
@@ -251,6 +328,41 @@ def calculate_priority_scores(repo_name: str, elo_category: str, progress_callba
         db.close()
 
 def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_category: str) -> Tuple[bool, str]:
+    """
+    Recomputes priority scores for the subtree below `start_pos_id`.
+    For multi-Elo courses, every additional Elo with stored priorities is refreshed too
+    (its scores are swapped into Move.priority_score, recalculated, then the primary Elo is restored).
+    """
+    ok, msg = _calculate_local_priority_scores_single(session, start_pos_id, elo_category)
+    if not ok:
+        return ok, msg
+    try:
+        elos = parse_elo_list(get_meta(session, "lichess_elos", "") or "")
+    except Exception:
+        elos = []
+    others = [e for e in elos if e != elo_category]
+    if not others:
+        return ok, msg
+
+    session.flush()
+    swapped = False
+    try:
+        for other in others:
+            session.flush()
+            if not sync_move_priorities_to_default_elo(session, other, keep_missing=True):
+                continue
+            swapped = True
+            session.expire_all()
+            _calculate_local_priority_scores_single(session, start_pos_id, other)
+    finally:
+        if swapped:
+            session.flush()
+            sync_move_priorities_to_default_elo(session, elo_category, keep_missing=True)
+            session.expire_all()
+    return ok, msg
+
+
+def _calculate_local_priority_scores_single(session: Session, start_pos_id: int, elo_category: str) -> Tuple[bool, str]:
     try:
         start_pos = session.get(Position, start_pos_id)
         if not start_pos:
@@ -369,6 +481,7 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
 
         if not seed_child_ids:
             if any_start_move_dirty:
+                _upsert_move_priorities(session, elo_category, {m.id: (m.priority_score or 0.0) for m in start_out_moves})
                 session.flush()
             return True, "Local priority scores updated."
 
@@ -554,6 +667,11 @@ def calculate_local_priority_scores(session: Session, start_pos_id: int, elo_cat
                                     split_prob
                                 )
 
+        updated_mp = {m.id: (m.priority_score or 0.0) for m in start_out_moves}
+        for m in all_moves_in_subtree:
+            if m.from_position_id in reachable_ids:
+                updated_mp[m.id] = m.priority_score or 0.0
+        _upsert_move_priorities(session, elo_category, updated_mp)
         session.flush()
         return True, "Local priority scores updated."
 

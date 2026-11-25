@@ -3,6 +3,7 @@ import json
 import threading
 import queue
 import time
+from typing import Any, Dict, List, Tuple
 from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta
@@ -252,19 +253,53 @@ class MaintenanceOrchestrator:
 
                 reuse_courses = bool(self.tasks.get('lichess_reuse_courses', False))
                 max_age = self.tasks.get('lichess_max_age_days', 180)
+                primary_elo, elo_list = self._resolve_repo_elos(cfg)
+                total_elos = len(elo_list)
+                overall_success = True
 
-                success, msg = run_lichess_import(
-                    name, elo,
-                    progress_callback=on_lichess_progress,
-                    check_cancel=self.check_cancel,
-                    reuse_other_courses=reuse_courses,
-                    max_data_age_days=max_age
-                )
+                for idx, curr_elo in enumerate(elo_list):
+                    if self.check_cancel and self.check_cancel():
+                        self._is_aborted = True
+                        break
+                    slice_start = idx * 100.0 / total_elos
+                    slice_span = 100.0 / total_elos
+
+                    def _make_progress_cb(s_start=slice_start, s_span=slice_span, i=idx, tot_e=total_elos):
+                        def _cb(pct, *args):
+                            if not self.repo_status_cb:
+                                return
+                            if len(args) >= 2 and isinstance(args[0], int) and isinstance(args[1], int):
+                                status_text = f"{args[0]}/{args[1]}"
+                            elif len(args) == 1 and isinstance(args[0], str):
+                                status_text = args[0]
+                            else:
+                                status_text = f"{pct}%"
+                            if tot_e > 1:
+                                status_text = f"[{i + 1}/{tot_e}] {status_text}"
+                            scaled_pct = int(s_start + pct * (s_span / 100.0))
+                            self.repo_status_cb(name, "lichess", scaled_pct, status_text)
+                        return _cb
+
+                    kwargs = dict(
+                        progress_callback=_make_progress_cb(),
+                        check_cancel=self.check_cancel,
+                        reuse_other_courses=reuse_courses,
+                        max_data_age_days=max_age,
+                    )
+                    if curr_elo != primary_elo:
+                        kwargs["preserve_primary_elo"] = True
+                    ok, _msg = run_lichess_import(name, curr_elo, **kwargs)
+                    if not ok:
+                        overall_success = False
+                        if self.check_cancel and self.check_cancel():
+                            self._is_aborted = True
+                            break
+
                 if self.check_cancel and self.check_cancel():
                     self._is_aborted = True
                     break
                 if self.repo_status_cb:
-                    self.repo_status_cb(name, "lichess", 100, "Fertig" if success else "Fehlgeschlagen")
+                    self.repo_status_cb(name, "lichess", 100, "Fertig" if overall_success else "Fehlgeschlagen")
                 self._mark_task_finished(name, "lichess")
                 time.sleep(0.01)  # Yield GIL between stages
 
@@ -278,6 +313,25 @@ class MaintenanceOrchestrator:
         # Signal completion to _stats_worker
         if self.tasks.get('stats'):
             self.stats_queue.put(None)
+
+    def _resolve_repo_elos(self, cfg: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """Resolves (primary_elo, ordered_elo_list) for a batch course config."""
+        from opening_fenix.core.utils import parse_elo_list
+        primary = cfg.get('elo', 'high')
+        explicit = parse_elo_list(cfg.get('elos') or [])
+        if explicit:
+            ordered = [primary] + [e for e in explicit if e != primary] if primary in explicit else explicit
+            return ordered[0], ordered
+        try:
+            from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+            def_elo, avail = get_repertoire_lichess_elos_fast(cfg['name'])
+            if avail:
+                p = def_elo or primary
+                ordered = [p] + [e for e in avail if e != p] if p in avail else avail
+                return ordered[0], ordered
+        except Exception:
+            pass
+        return primary, [primary]
 
     def _stats_worker(self):
         while not self._is_aborted:
@@ -299,12 +353,18 @@ class MaintenanceOrchestrator:
                 break
 
             name = cfg['name']
-            elo = cfg.get('elo', 'high')
+            primary_elo, elo_list = self._resolve_repo_elos(cfg)
 
             if self.repo_status_cb:
                 self.repo_status_cb(name, "stats", 0, "Statistiken...")
             try:
-                calculate_priority_scores(name, elo)
+                # Compute secondary Elos first, primary last so Move.priority_score stays synced to primary
+                ordered_stats_elos = [e for e in elo_list if e != primary_elo] + [primary_elo]
+                for curr_elo in ordered_stats_elos:
+                    if curr_elo == primary_elo:
+                        calculate_priority_scores(name, curr_elo)
+                    else:
+                        calculate_priority_scores(name, curr_elo, update_move_column=False)
                 if self.repo_status_cb:
                     self.repo_status_cb(name, "stats", 100, "Fertig")
             except Exception as e:

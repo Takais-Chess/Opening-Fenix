@@ -8,6 +8,7 @@ import webbrowser
 import math
 import time
 import threading
+from typing import Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, 
@@ -31,7 +32,7 @@ from opening_fenix.core.training import TrainingManager
 from opening_fenix.core.utils import get_base_path, get_user_dir, localize_san, parse_comment, is_free_training_profile
 from opening_fenix.gui.widgets.board_widget import ChessBoardWidget
 from opening_fenix.gui.widgets.charts import PieChartWidget
-from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame
+from opening_fenix.gui.widgets.common import ZoomableTextBrowser, AspectRatioFrame, FadingScrollArea
 from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
 
 # Lazy-loaded dialog/window classes (CreatorWindow kept at module level for test monkeypatching)
@@ -404,6 +405,17 @@ class MainWindow(QMainWindow):
         self.tour.add_step(self.btn_resources, tr_ui("tour.step13_title", "Ressourcen"), 
             tr_ui("tour.step13_text", "Hier findest du einen Ordner mit weiteren PGN Dateien die für den Kurs nützlich sind. Du kannst sie mithilfe von Lichess öffnen oder einem anderen Schach Programm"))
 
+        # Step 14: Bug Report
+        if getattr(self.custom_title_bar, "btn_bug_report", None) is not None:
+            self.tour.add_step(
+                self.custom_title_bar.btn_bug_report,
+                tr_ui("tour.step14_title", "Fehler melden"),
+                tr_ui(
+                    "tour.step14_text",
+                    "Falls dir jemals ein Fehler auffällt, klicke einfach auf dieses kleine Käfer-Symbol oben rechts. Du kannst den Fehler kurz beschreiben und mit einem Klick inklusive bereinigtem Diagnose-Paket direkt an den Entwickler senden."
+                ),
+            )
+
         self.tour.finished.connect(self.on_tour_finished)
         self.tour.start_tour()
 
@@ -457,7 +469,7 @@ class MainWindow(QMainWindow):
         self.btn_scroll_right.clicked.connect(self.scroll_tabs_right)
         self.btn_scroll_right.hide()
 
-        self.repo_scroll = QScrollArea()
+        self.repo_scroll = FadingScrollArea()
         self.repo_scroll.setWidgetResizable(True)
         self.repo_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.repo_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -663,9 +675,47 @@ class MainWindow(QMainWindow):
         stats_actions_row.addLayout(actions_grid, 1)
         hub_layout.addLayout(stats_actions_row)
 
+        smart_row = QHBoxLayout()
+        smart_row.setContentsMargins(0, 0, 0, 0)
+        smart_row.setSpacing(scale(8))
+
         self.btn_smart = QPushButton(tr_ui("main_window.btn_start", "TRAINING STARTEN"))
         self.btn_smart.setObjectName("StartButton"); self.btn_smart.clicked.connect(self.on_smart_click)
-        hub_layout.addWidget(self.btn_smart)
+        smart_row.addWidget(self.btn_smart, 1)
+
+        self.btn_mouse_slip = QPushButton(tr_ui("main_window.btn_mouse_slip", "↩ Verklickt?"))
+        self.btn_mouse_slip.setObjectName("MouseSlipButton")
+        self.btn_mouse_slip.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        self.btn_mouse_slip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mouse_slip.setToolTip(
+            tr_ui(
+                "main_window.mouse_slip_tooltip",
+                "<b>Verklickt?</b><br>Macht den Fehler rückgängig und stellt deine vorherige Leitner-Box wieder her."
+            )
+        )
+        self.btn_mouse_slip.setStyleSheet(f"""
+            QPushButton#MouseSlipButton {{
+                background-color: rgba(255, 250, 240, 235);
+                color: {COLORS['brown_text']};
+                border: 1.5px solid #d97706;
+                border-radius: {scale(10)}px;
+                padding: {scale(8)}px {scale(12)}px;
+                font-weight: bold;
+                font-size: {scale(13)}px;
+            }}
+            QPushButton#MouseSlipButton:hover {{
+                background-color: #fef3c7;
+                border-color: #b45309;
+            }}
+        """)
+        self.btn_mouse_slip.clicked.connect(self.on_mouse_slip_undo)
+        self.btn_mouse_slip.setVisible(False)
+        smart_row.addWidget(self.btn_mouse_slip, 0)
+
+        self._last_mistake_snapshot = None
+        self._mistake_penalty_applied = False
+        self._pending_fail_gen = 0
+        hub_layout.addLayout(smart_row)
 
         side_layout.addWidget(training_hub)
         
@@ -1035,7 +1085,7 @@ class MainWindow(QMainWindow):
                 flushed = self.training_manager.flush_pending_commits()
                 if flushed or flushed is None:
                     from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
-                    CloudSyncManager.instance().schedule_background_push(delay_ms=15000)
+                    CloudSyncManager.instance().schedule_background_push(delay_ms=30000, scopes={"profiles"})
             except Exception as e:
                 logger.error(f"Error flushing pending DB commits: {e}")
 
@@ -1479,6 +1529,11 @@ class MainWindow(QMainWindow):
 
     def set_button_state(self, state):
         self.button_state = state
+        if state != 'show_solution_prompt':
+            self._last_mistake_snapshot = None
+            self._mistake_penalty_applied = False
+            if hasattr(self, 'btn_mouse_slip') and self.btn_mouse_slip:
+                self.btn_mouse_slip.setVisible(False)
         if state == 'start':
             self.btn_smart.setText(tr_ui("main_window.btn_start", "TRAINING STARTEN")); self.btn_smart.setEnabled(True)
         elif state == 'waiting_for_move':
@@ -1490,15 +1545,40 @@ class MainWindow(QMainWindow):
             self.btn_smart.setText(tr_ui("main_window.btn_correct", "KORREKT!")); self.btn_smart.setEnabled(False)
         elif state == 'show_solution_prompt':
             self.btn_smart.setText(tr_ui("main_window.btn_wrong", "FALSCH! LÖSUNG ANZEIGEN")); self.btn_smart.setEnabled(True)
+            if hasattr(self, 'btn_mouse_slip') and self.btn_mouse_slip:
+                self.btn_mouse_slip.setVisible(True)
 
     def on_smart_click(self):
         self._cancel_auto_continue()
         if self.button_state == 'start':
             self.load_next_challenge()
         elif self.button_state == 'show_solution_prompt':
+            # Once the user peeks at the solution arrow, mouse-slip undo is no longer allowed
+            self._last_mistake_snapshot = None
+            self._mistake_penalty_applied = False
+            if hasattr(self, 'btn_mouse_slip') and self.btn_mouse_slip:
+                self.btn_mouse_slip.setVisible(False)
             self.board_widget.solution_arrow = chess.Move.from_uci(self.current_move_obj.uci)
             self.board_widget.update()
             self.btn_smart.setEnabled(False)
+
+    def on_mouse_slip_undo(self):
+        """Undoes a mistake penalty immediately after a misclick (before solution is shown)."""
+        if self.button_state != 'show_solution_prompt' or self.board_widget.solution_arrow is not None:
+            return
+        snapshot = getattr(self, '_last_mistake_snapshot', None)
+        penalty_applied = getattr(self, '_mistake_penalty_applied', False)
+        self._pending_fail_gen = getattr(self, '_pending_fail_gen', 0) + 1
+        self._last_mistake_snapshot = None
+        self._mistake_penalty_applied = False
+
+        if penalty_applied and snapshot and self.training_manager:
+            self.training_manager.restore_move_snapshot(snapshot, defer_commit=True)
+            if getattr(self, '_db_commit_timer', None):
+                self._db_commit_timer.start(1500)
+            self.update_stats_display()
+
+        self.set_button_state('waiting_for_move')
 
     def _flush_pending_stats(self):
         if getattr(self, '_pending_stats_task', None):
@@ -1556,9 +1636,17 @@ class MainWindow(QMainWindow):
                     self.board_widget.update()
                     if self.button_state == 'waiting_for_move':
                         current_move = self.current_move_obj
+                        snapshot = self.training_manager.capture_move_snapshot(current_move.id)
+                        self._pending_fail_gen = getattr(self, '_pending_fail_gen', 0) + 1
+                        fail_gen = self._pending_fail_gen
+                        self._last_mistake_snapshot = snapshot
+                        self._mistake_penalty_applied = False
                         self.set_button_state('show_solution_prompt')
-                        def process_after_fail():
-                            self.training_manager.register_success(current_move.id, False, defer_commit=True)
+                        def process_after_fail(fg=fail_gen, cm=current_move):
+                            if getattr(self, '_pending_fail_gen', 0) != fg:
+                                return
+                            self.training_manager.register_success(cm.id, False, defer_commit=True)
+                            self._mistake_penalty_applied = True
                             if getattr(self, '_db_commit_timer', None):
                                 self._db_commit_timer.start(1500)
                             self.update_stats_display()
@@ -1586,35 +1674,58 @@ class MainWindow(QMainWindow):
             
             if self.button_state == 'waiting_for_move':
                 current_move = self.current_move_obj
+                snapshot = self.training_manager.capture_move_snapshot(current_move.id)
+                self._pending_fail_gen = getattr(self, '_pending_fail_gen', 0) + 1
+                fail_gen = self._pending_fail_gen
+                self._last_mistake_snapshot = snapshot
+                self._mistake_penalty_applied = False
                 self.set_button_state('show_solution_prompt')
                 
                 # Defer the failure DB registration and stats update
-                def process_after_fail():
-                    self.training_manager.register_success(current_move.id, False, defer_commit=True)
+                def process_after_fail(fg=fail_gen, cm=current_move):
+                    if getattr(self, '_pending_fail_gen', 0) != fg:
+                        return
+                    self.training_manager.register_success(cm.id, False, defer_commit=True)
+                    self._mistake_penalty_applied = True
+                    if getattr(self, '_db_commit_timer', None):
+                        self._db_commit_timer.start(1500)
                     self.update_stats_display()
                     
                 QTimer.singleShot(0, process_after_fail)
 
-    def get_effective_comment_language(self) -> str:
+    def get_effective_comment_language(self, repo_name: Optional[str] = None) -> str:
         from opening_fenix.core.translation import translator
-        active_repo = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
+        from opening_fenix.core.utils import resolve_auto_comment_language
+
+        active_repo = repo_name or getattr(self.repertoire_manager, 'active_repertoire_name', None)
         if self.training_manager and active_repo and hasattr(self.training_manager, 'get_comment_language'):
             repo_profile_lang = self.training_manager.get_comment_language(active_repo)
             if repo_profile_lang and repo_profile_lang != "auto":
                 return repo_profile_lang
 
-        lang_setting = self.training_manager.get_setting("comment_language")
+        lang_setting = self.training_manager.get_setting("comment_language") if self.training_manager else None
         if lang_setting and lang_setting != "auto":
             return lang_setting
+
         current_app_lang = getattr(translator, "current_lang", None)
-        if current_app_lang:
-            return current_app_lang
-        if self.repertoire_manager and self.repertoire_manager.repo_session:
+        repo_lang = None
+        if (
+            self.repertoire_manager
+            and self.repertoire_manager.repo_session
+            and (not repo_name or repo_name == getattr(self.repertoire_manager, 'active_repertoire_name', None))
+        ):
             from opening_fenix.core.data_tools import get_meta
             repo_lang = get_meta(self.repertoire_manager.repo_session, "comment_language", "auto")
-            if repo_lang and repo_lang != "auto":
-                return repo_lang
-        return self.training_manager.get_setting("notation_language") or "de"
+
+        available_langs = get_repertoire_comment_languages_fast(active_repo) if active_repo else []
+        fallback_lang = (self.training_manager.get_setting("notation_language") if self.training_manager else None) or "de"
+        return resolve_auto_comment_language(
+            app_lang=current_app_lang,
+            available_langs=available_langs,
+            repo_meta_lang=repo_lang,
+            fallback_lang=fallback_lang,
+        )
 
     def update_notation_display(self, temp_hist=None, reveal_move=False):
         hist = temp_hist or self.repertoire_manager.get_history_for_move(self.current_move_obj, variation_name=self.active_variation_filter, training_manager=self.training_manager)
@@ -1776,6 +1887,10 @@ class MainWindow(QMainWindow):
         self.board_widget.set_theme(t_name)
         hl_color = self.training_manager.get_setting("highlight_color") or get_config_dict().get("highlight_color") or "Gelb (Standard)"
         self.board_widget.set_highlight_color(hl_color)
+        show_legal = self.training_manager.get_setting("show_legal_moves")
+        if show_legal is None:
+            show_legal = get_config_dict().get("show_legal_moves", True)
+        self.board_widget.set_show_legal_moves(bool(show_legal))
 
     def set_master_volume(self, volume):
         if hasattr(self, 'sounds'):

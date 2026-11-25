@@ -45,7 +45,31 @@ ELO_DISPLAY_MAP = {
     "masters": "Meister Datenbank"
 }
 
+VALID_ELO_KEYS = tuple(ELO_DISPLAY_MAP.keys())
+
 ELO_INTERNAL_MAP = {v: k for k, v in ELO_DISPLAY_MAP.items()}
+
+
+def parse_elo_list(raw) -> List[str]:
+    """Parses a comma-separated string or iterable of Elo keys into a deduplicated canonical-order list."""
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        items = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    else:
+        items = [str(part).strip().lower() for part in raw if str(part).strip()]
+    seen = set()
+    valid = []
+    for k in VALID_ELO_KEYS:
+        if k in items and k not in seen:
+            seen.add(k)
+            valid.append(k)
+    return valid
+
+
+def serialize_elo_list(elos) -> str:
+    """Serializes an iterable of Elo keys into a canonical comma-separated string."""
+    return ",".join(parse_elo_list(elos))
 
 # --- CASTLING NORMALIZATION CONSTANTS & HELPERS ---
 CASTLING_SANS = {'O-O', 'O-O-O', '0-0', '0-0-0'}
@@ -1004,6 +1028,35 @@ def parse_comment(raw_comment: str, lang: str = "de", default_lang: Optional[str
     if target_lang in (def_lang, "all"):
         return raw
     return ""
+
+
+def resolve_auto_comment_language(
+    app_lang: Optional[str],
+    available_langs: Optional[List[str]] = None,
+    repo_meta_lang: Optional[str] = None,
+    fallback_lang: Optional[str] = None,
+) -> str:
+    """
+    Resolves 'auto' comment language for a repertoire.
+    Prefers the app language if present in available_langs; otherwise falls back to
+    repo_meta_lang (if available), 'en' (if available), the first available language,
+    or finally app_lang / repo_meta_lang / fallback_lang / 'de'.
+    """
+    available = [l.lower() for l in (available_langs or []) if l]
+    app_l = app_lang.lower() if app_lang and app_lang != "auto" else None
+    meta_l = repo_meta_lang.lower() if repo_meta_lang and repo_meta_lang != "auto" else None
+    fb_l = fallback_lang.lower() if fallback_lang and fallback_lang != "auto" else "de"
+
+    if available:
+        if app_l and app_l in available:
+            return app_l
+        if meta_l and meta_l in available:
+            return meta_l
+        if "en" in available:
+            return "en"
+        return available[0]
+
+    return app_l or meta_l or fb_l
 
 def format_multilingual_comment(comment_dict: dict) -> str:
     """

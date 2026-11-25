@@ -164,3 +164,106 @@ class AutoAdjustButton(QPushButton):
 
         painter.drawText(avail_rect, int(text_flags), self._full_text)
 
+
+def clear_table_safely(table, widget_cols=None) -> None:
+    """
+    Clears all rows and synchronously detaches/hides any QTableWidget cell widgets
+    before scheduling deleteLater().
+
+    Pass ``widget_cols`` (e.g. ``(3,)``) when only specific columns hold cell widgets
+    to avoid scanning empty text-only columns.
+    """
+    rows = table.rowCount()
+    cols = table.columnCount()
+    if rows > 0 and cols > 0:
+        target_cols = tuple(c for c in widget_cols if 0 <= c < cols) if widget_cols is not None else range(cols)
+        for r in range(rows):
+            for c in target_cols:
+                w = table.cellWidget(r, c)
+                if w is not None:
+                    table.removeCellWidget(r, c)
+                    w.hide()
+                    w.setParent(None)
+                    w.deleteLater()
+    table.clearContents()
+    table.setRowCount(0)
+
+from PyQt6.QtWidgets import QScrollArea, QWidget
+from PyQt6.QtGui import QColor, QLinearGradient
+
+
+class _HorizontalEdgeFadeOverlay(QWidget):
+    """Lightweight mouse-transparent edge fade painted only when horizontal overflow exists."""
+
+    def __init__(self, scroll_area: QScrollArea, fade_color: QColor, fade_width: int):
+        super().__init__(scroll_area.viewport())
+        self._scroll_area = scroll_area
+        self._fade_color = QColor(fade_color)
+        self._fade_width = fade_width
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+    def paintEvent(self, event):
+        sb = self._scroll_area.horizontalScrollBar()
+        if sb is None or sb.maximum() <= 0:
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+
+        fw = min(self._fade_width, w // 3)
+        if fw <= 0:
+            return
+
+        show_left = sb.value() > 0
+        show_right = sb.value() < sb.maximum()
+        if not show_left and not show_right:
+            return
+
+        painter = QPainter(self)
+        transparent = QColor(self._fade_color.red(), self._fade_color.green(), self._fade_color.blue(), 0)
+
+        if show_left:
+            grad_l = QLinearGradient(0, 0, fw, 0)
+            grad_l.setColorAt(0.0, self._fade_color)
+            grad_l.setColorAt(1.0, transparent)
+            painter.fillRect(0, 0, fw, h, grad_l)
+
+        if show_right:
+            grad_r = QLinearGradient(w - fw, 0, w, 0)
+            grad_r.setColorAt(0.0, transparent)
+            grad_r.setColorAt(1.0, self._fade_color)
+            painter.fillRect(w - fw, 0, fw, h, grad_r)
+
+        painter.end()
+
+
+class FadingScrollArea(QScrollArea):
+    """QScrollArea with soft left/right gradient fade whenever horizontal tabs overflow."""
+
+    def __init__(self, parent=None, fade_color: QColor = None, fade_width: int = None):
+        super().__init__(parent)
+        color = fade_color if fade_color is not None else QColor(248, 245, 240, 245)
+        fw = fade_width if fade_width is not None else scale(26)
+        self._fade_overlay = _HorizontalEdgeFadeOverlay(self, color, fw)
+        sb = self.horizontalScrollBar()
+        sb.valueChanged.connect(self._fade_overlay.update)
+        sb.rangeChanged.connect(self._fade_overlay.update)
+
+    def setWidget(self, widget):
+        super().setWidget(widget)
+        self._sync_fade_overlay()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._sync_fade_overlay()
+
+    def _sync_fade_overlay(self):
+        vp = self.viewport()
+        if vp is not None and self._fade_overlay is not None:
+            self._fade_overlay.setGeometry(vp.rect())
+            self._fade_overlay.raise_()
+            self._fade_overlay.update()
+

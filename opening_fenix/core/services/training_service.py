@@ -518,6 +518,7 @@ class TrainingManager:
         self._moves_by_level = None
         self._levels_cache = None
         self._cached_elo = None
+        self._prio_elo_local = None
         self._reachable_moves_cache = None
         self._reachable_keys_cache = None
         self._norm_reachable_keys_cache = None
@@ -747,7 +748,118 @@ class TrainingManager:
         })
         return True
 
+    # ── Multi-Elo priority overlay ─────────────────────────────────────────────
+    def get_course_lichess_elos(self, repo_name: Optional[str] = None) -> Tuple[Optional[str], List[str]]:
+        """Returns (default_elo, available_elos) for a course. Cheap sqlite3 read, no session needed."""
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+        if not repo_name:
+            repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        if not repo_name:
+            return None, []
+        return get_repertoire_lichess_elos_fast(repo_name)
+
+    def get_active_lichess_elo(self, repo_name: Optional[str] = None) -> Optional[str]:
+        """Effective Elo for this learner: stored choice if still valid, else the course default."""
+        default_elo, available = self.get_course_lichess_elos(repo_name)
+        if not available:
+            return default_elo
+        if not repo_name:
+            repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        chosen = None
+        if self.user_session and repo_name:
+            settings = self._get_repo_user_settings(repo_name)
+            chosen = getattr(settings, 'active_lichess_elo', None) if settings else None
+        if chosen in available:
+            return chosen
+        return default_elo if default_elo in available else available[0]
+
+    def set_active_lichess_elo(self, elo: Optional[str], repo_name: Optional[str] = None) -> None:
+        if not self.user_session:
+            return
+        if not repo_name:
+            repo_name = getattr(self.repertoire_manager, 'active_repertoire_name', None)
+        if not repo_name:
+            return
+        settings = self.user_session.query(UserRepertoireSettings).filter_by(repertoire_name=repo_name).first()
+        if not settings:
+            settings = UserRepertoireSettings(repertoire_name=repo_name, active_lichess_elo=elo)
+            self.user_session.add(settings)
+        else:
+            settings.active_lichess_elo = elo
+        self.user_session.commit()
+        if self._all_user_settings_cache is not None:
+            self._all_user_settings_cache[repo_name] = settings
+        if repo_name == getattr(self.repertoire_manager, 'active_repertoire_name', None):
+            self._user_settings_cache = settings
+            # Priority-dependent caches must be rebuilt; the immutable graph stays cached
+            self._reachable_moves_cache = None
+            self._reachable_keys_cache = None
+            self._norm_reachable_keys_cache = None
+            self._last_stats_cache = None
+            # Re-apply the Elo overlay immediately (cheap in-memory re-score, no graph rebuild)
+            self._apply_priority_overlay()
+
+    def _get_applied_prio_elo(self) -> Optional[str]:
+        sig = self._get_active_repo_graph_sig()
+        if sig is not None and hasattr(self, '_repo_graph_lru'):
+            entry = self._repo_graph_lru.get(sig[0])
+            if entry is not None and entry.get('sig') == sig:
+                return entry.get('prio_elo')
+        return getattr(self, '_prio_elo_local', None)
+
+    def _set_applied_prio_elo(self, elo: Optional[str]) -> None:
+        self._prio_elo_local = elo
+        sig = self._get_active_repo_graph_sig()
+        if sig is not None and hasattr(self, '_repo_graph_lru'):
+            entry = self._repo_graph_lru.get(sig[0])
+            if entry is not None and entry.get('sig') == sig:
+                entry['prio_elo'] = elo
+
+    def _apply_priority_overlay(self) -> None:
+        """
+        Swaps the cached Move.priority_score values to those of the learner's active Elo.
+        Single-Elo / legacy courses are never touched (target is None = DB default state).
+        """
+        if self._forward_moves_cache is None or self._move_by_id_cache is None:
+            return
+        repo_sess = getattr(self.repertoire_manager, 'repo_session', None)
+        if not repo_sess or not isinstance(repo_sess, Session):
+            return
+        try:
+            default_elo, available = self.get_course_lichess_elos()
+            target: Optional[str] = None
+            if len(available) > 1:
+                target = self.get_active_lichess_elo()
+            applied = self._get_applied_prio_elo()
+            if target == applied:
+                return
+
+            conn = repo_sess.connection()
+            if target is None:
+                rows = conn.exec_driver_sql("SELECT id, priority_score FROM moves").fetchall()
+            else:
+                rows = conn.exec_driver_sql(
+                    "SELECT move_id, priority_score FROM move_priorities WHERE elo_range = ?", (target,)
+                ).fetchall()
+                if not rows:
+                    return  # Nothing computed for that Elo; keep current scores
+            score_map = {r[0]: (r[1] or 0.0) for r in rows}
+            for mid, m in self._move_by_id_cache.items():
+                m.priority_score = score_map.get(mid, 0.0)
+            for lst in self._forward_moves_cache.values():
+                lst.sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
+            for lst in (self._move_parent_cache or {}).values():
+                lst.sort(key=lambda m: (m.priority_score or 0.0), reverse=True)
+            self._set_applied_prio_elo(target)
+        except Exception:
+            # Overlay is best-effort; never break training because of Elo switching
+            pass
+
     def _ensure_forward_cache(self):
+        self._ensure_forward_cache_impl()
+        self._apply_priority_overlay()
+
+    def _ensure_forward_cache_impl(self):
         if not self.repertoire_manager.repo_session:
             return
 
@@ -772,6 +884,7 @@ class TrainingManager:
                     return
 
         if self._forward_moves_cache is None or self._move_by_fen_uci_cache is None:
+            self._prio_elo_local = None  # Freshly built caches reflect DB default priorities
             self._forward_moves_cache = {}
             self._pos_cache = {}
             self._move_by_id_cache = {}
@@ -1642,6 +1755,103 @@ class TrainingManager:
         else:
             self.user_session.commit()
             self._has_pending_commit = False
+
+    def capture_move_snapshot(self, move_id):
+        """Captures a move's current SRS state before a mistake so mouse-slip undo can restore it."""
+        if is_free_training_profile(self.profile_name):
+            return None
+        self._ensure_forward_cache()
+        self._ensure_td_cache()
+
+        move = self._move_by_id_cache.get(move_id)
+        if not move:
+            return None
+        pos = self._pos_cache.get(move.from_position_id)
+        if not pos:
+            return None
+        fen = pos.fen
+        repo_name = self.repertoire_manager.active_repertoire_name
+
+        entry = None
+        if self._td_cache is not None:
+            entry = self._td_cache.get((fen, move.uci))
+            if entry is None and getattr(self, '_norm_td_cache', None) is not None:
+                entry = self._norm_td_cache.get((_norm_fen4(fen), move.uci))
+        elif self.user_session:
+            entry = self.user_session.query(TrainingData).filter_by(
+                repertoire_name=repo_name, fen=fen, move_uci=move.uci
+            ).first()
+
+        return {
+            "move_id": move_id,
+            "repertoire_name": repo_name,
+            "fen": fen,
+            "move_uci": move.uci,
+            "existed": entry is not None,
+            "box": entry.box if entry is not None else 0,
+            "streak": entry.streak if entry is not None else 0,
+            "next_due": entry.next_due if entry is not None else None,
+            "last_review": entry.last_review if entry is not None else None,
+        }
+
+    def restore_move_snapshot(self, snapshot, defer_commit=False) -> bool:
+        """Restores a move's pre-mistake SRS state captured by `capture_move_snapshot`."""
+        if not snapshot or is_free_training_profile(self.profile_name):
+            return False
+
+        self._ensure_td_cache()
+        repo_name = snapshot["repertoire_name"]
+        fen = snapshot["fen"]
+        move_uci = snapshot["move_uci"]
+        norm_key = (_norm_fen4(fen), move_uci)
+
+        entry = None
+        if self._td_cache is not None:
+            entry = self._td_cache.get((fen, move_uci))
+            if entry is None and getattr(self, '_norm_td_cache', None) is not None:
+                entry = self._norm_td_cache.get(norm_key)
+        if entry is None and self.user_session:
+            entry = self.user_session.query(TrainingData).filter_by(
+                repertoire_name=repo_name, fen=fen, move_uci=move_uci
+            ).first()
+
+        if snapshot.get("existed"):
+            if entry is None and self.user_session:
+                entry = TrainingData(
+                    repertoire_name=repo_name,
+                    fen=fen,
+                    move_uci=move_uci,
+                )
+                self.user_session.add(entry)
+            if entry is not None:
+                entry.box = snapshot["box"]
+                entry.streak = snapshot["streak"]
+                entry.next_due = snapshot["next_due"]
+                entry.last_review = snapshot["last_review"]
+                if self._td_cache is not None:
+                    self._td_cache[(fen, move_uci)] = entry
+                if getattr(self, '_norm_td_cache', None) is not None:
+                    self._norm_td_cache[norm_key] = entry
+        else:
+            if entry is not None and self.user_session:
+                self.user_session.delete(entry)
+            if self._td_cache is not None:
+                self._td_cache.pop((fen, move_uci), None)
+            if getattr(self, '_norm_td_cache', None) is not None:
+                self._norm_td_cache.pop(norm_key, None)
+
+        self._cached_elo = None
+        self._last_stats_cache = None
+        settings = self._get_rating_settings()
+        if settings:
+            settings.stats_updated_at = None
+
+        if defer_commit:
+            self._has_pending_commit = True
+        elif self.user_session:
+            self.user_session.commit()
+            self._has_pending_commit = False
+        return True
 
     def flush_pending_commits(self):
         if getattr(self, '_settings_dirty', False):

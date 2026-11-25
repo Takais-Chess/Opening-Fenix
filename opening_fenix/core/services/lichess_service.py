@@ -10,10 +10,13 @@ import urllib.error
 from typing import Tuple, Callable, Optional, Dict, List, Set
 
 import chess
-from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData
+from opening_fenix.core.db.models import Position, Move, RepertoireMove, LichessData, MovePriority
 from opening_fenix.core.db.database import DatabaseManager, commit_with_retry
 from opening_fenix.core.db.meta_utils import get_meta, set_meta
-from opening_fenix.core.utils import get_user_dir, get_repertoire_db_path, _update_lichess_delay_config
+from opening_fenix.core.utils import (
+    get_user_dir, get_repertoire_db_path, _update_lichess_delay_config,
+    parse_elo_list, serialize_elo_list, get_elo_display
+)
 from opening_fenix.core.logger import logger
 
 ELO_MAPPING: Dict[str, List[str]] = {
@@ -610,6 +613,22 @@ def sync_lichess_data_from_other_repertoires(
 
     return copied_count
 
+def _record_imported_elo_meta(session, elo_category: str, preserve_primary: bool = False) -> None:
+    """Adds elo_category to lichess_elos metadata and updates primary lichess_elo if appropriate."""
+    existing_elos = parse_elo_list(get_meta(session, "lichess_elos", ""))
+    current_primary = get_meta(session, "lichess_elo")
+    if current_primary and current_primary in ELO_MAPPING and current_primary not in existing_elos:
+        # Only count the previous primary as "carried" if it actually has imported data (legacy single-Elo courses)
+        if session.query(LichessData.id).filter_by(elo_range=current_primary).first() is not None:
+            existing_elos.append(current_primary)
+    if elo_category and elo_category not in existing_elos:
+        existing_elos.append(elo_category)
+    set_meta(session, "lichess_elos", serialize_elo_list(existing_elos))
+    current_valid = bool(current_primary) and current_primary in existing_elos
+    if not preserve_primary or not current_valid:
+        set_meta(session, "lichess_elo", elo_category)
+
+
 def run_lichess_import(
     repo_name: str,
     elo_category: str,
@@ -617,7 +636,8 @@ def run_lichess_import(
     check_cancel: Optional[Callable[[], bool]] = None,
     reuse_other_courses: bool = False,
     max_data_age_days: Optional[int] = 180,
-    batch_size: int = 20
+    batch_size: int = 20,
+    preserve_primary_elo: bool = False,
 ) -> Tuple[bool, str]:
     from opening_fenix.core.db.models import LichessData # local import if needed
     db_path = get_repertoire_db_path(repo_name)
@@ -761,7 +781,7 @@ def run_lichess_import(
         )
 
         if not positions_to_query:
-            set_meta(session, "lichess_elo", elo_category)
+            _record_imported_elo_meta(session, elo_category, preserve_primary=preserve_primary_elo)
             # Invalidate coverage cache to force recalculation with new Elo if changed
             set_meta(session, "cov_cache_count", "-1")
             commit_with_retry(session)
@@ -781,14 +801,19 @@ def run_lichess_import(
         processed_count = 0
         BATCH_SIZE = max(1, batch_size)
 
+        def _commit_on_cancel():
+            if new_data_points_added > 0 or existing_raw_fens:
+                _record_imported_elo_meta(session, elo_category, preserve_primary=preserve_primary_elo)
+            set_meta(session, "cov_cache_count", "-1")
+            commit_with_retry(session)
+
         while remaining_pos_ids:
             if check_cancel and check_cancel():
                 logger.info(
                     f"[Lichess Import] Cancelled for '{repo_name}' at item {processed_count}/{total_pos}. "
                     f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
                 )
-                set_meta(session, "cov_cache_count", "-1")
-                commit_with_retry(session)
+                _commit_on_cancel()
                 return False, "Import abgebrochen."
 
             # Best-First Prioritization: Propagate estimated occurrence probabilities across the frontier
@@ -828,8 +853,7 @@ def run_lichess_import(
                         f"[Lichess Import] Cancelled for '{repo_name}' at item {processed_count}/{total_pos}. "
                         f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
                     )
-                    set_meta(session, "cov_cache_count", "-1")
-                    commit_with_retry(session)
+                    _commit_on_cancel()
                     return False, "Import abgebrochen."
 
                 clean_pos_fen = " ".join(pos.fen.split(" ")[:4])
@@ -888,8 +912,7 @@ def run_lichess_import(
                         f"[Lichess Import] Cancelled while waiting for slot at item {processed_count}/{total_pos}. "
                         f"Total requests: {limiter.total_requests}, 429 hits: {limiter.total_429_hits}."
                     )
-                    set_meta(session, "cov_cache_count", "-1")
-                    commit_with_retry(session)
+                    _commit_on_cancel()
                     return False, "Import abgebrochen."
 
                 # Check if position is beyond Lichess player DB 25-move (50-ply) cap:
@@ -954,8 +977,7 @@ def run_lichess_import(
                                 logger.info(
                                     f"[Lichess Import] Cancelled during boundary fallback at item {processed_count}/{total_pos}."
                                 )
-                                set_meta(session, "cov_cache_count", "-1")
-                                commit_with_retry(session)
+                                _commit_on_cancel()
                                 return False, "Import abgebrochen."
                             m_params = {'variant': 'standard', 'fen': pos.fen, 'moves': 25}
                             m_url = f"https://explorer.lichess.org/masters?{urllib.parse.urlencode(m_params)}"
@@ -1074,8 +1096,7 @@ def run_lichess_import(
                         cooldown_step = 0.5
                         while cooldown_remaining > 0:
                             if check_cancel and check_cancel():
-                                set_meta(session, "cov_cache_count", "-1")
-                                commit_with_retry(session)
+                                _commit_on_cancel()
                                 return False, "Import abgebrochen."
                             if progress_callback:
                                 pct = int(processed_count * 100 / total_pos) if total_pos > 0 else 0
@@ -1159,7 +1180,7 @@ def run_lichess_import(
             f"Rate Limit (429) hits: {limiter.total_429_hits}. "
             f"Final RPM: {limiter.target_rpm:.0f}."
         )
-        set_meta(session, "lichess_elo", elo_category)
+        _record_imported_elo_meta(session, elo_category, preserve_primary=preserve_primary_elo)
         set_meta(session, "cov_cache_count", "-1")
         commit_with_retry(session)
         base_delay = round(60.0 / limiter.target_rpm, 3)
@@ -1178,9 +1199,31 @@ def run_lichess_import(
         db.close()
 
 
+def _finalize_multi_elo_primary(repo_name: str, primary_elo: str) -> None:
+    """After a multi-Elo run: make `primary_elo` the course default and sync Move.priority_score to it."""
+    from opening_fenix.core.services.priority_service import sync_move_priorities_to_default_elo
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return
+    db = DatabaseManager(db_path)
+    session = db.get_session()
+    try:
+        set_meta(session, "lichess_elo", primary_elo)
+        set_meta(session, "elo", primary_elo)
+        sync_move_priorities_to_default_elo(session, primary_elo)
+        set_meta(session, "cov_cache_count", "-1")
+        commit_with_retry(session)
+    except Exception as e:
+        session.rollback()
+        logger.warning(f"[Lichess Import] Could not finalize primary Elo '{primary_elo}': {e}")
+    finally:
+        session.close()
+        db.close()
+
+
 def run_lichess_import_and_calculate_scores(
     repo_name: str,
-    elo_category: str,
+    elo_category,
     progress_callback: Optional[Callable[..., None]] = None,
     check_cancel: Optional[Callable[[], bool]] = None,
     reuse_other_courses: bool = False,
@@ -1188,58 +1231,152 @@ def run_lichess_import_and_calculate_scores(
 ) -> Tuple[bool, str]:
     from opening_fenix.core.services.priority_service import calculate_priority_scores
 
-    def import_progress_wrapper(percent, *args):
-        if progress_callback:
-            scaled_pct = int(percent * 0.95)
-            if args:
-                try:
-                    progress_callback(scaled_pct, *args)
-                except TypeError:
+    # Normalize elo_category into a list of 1+ Elo keys (supports single string, comma-separated string, or list).
+    # The FIRST entry of an explicitly ordered request is the course's primary/default Elo.
+    if isinstance(elo_category, (list, tuple)):
+        requested = [str(e).strip().lower() for e in elo_category if str(e).strip()]
+    elif isinstance(elo_category, str) and "," in elo_category:
+        requested = [p.strip().lower() for p in elo_category.split(",") if p.strip()]
+    else:
+        requested = [str(elo_category).strip().lower()] if elo_category else ["high"]
+    elo_list = parse_elo_list(requested) or ["high"]
+    primary_requested = requested[0] if requested and requested[0] in elo_list else elo_list[0]
+    is_multi = len(elo_list) > 1
+
+    # Single-Elo fast path (exact backwards-compatible behavior)
+    if not is_multi:
+        single_elo = elo_list[0]
+
+        def import_progress_wrapper(percent, *args):
+            if progress_callback:
+                scaled_pct = int(percent * 0.95)
+                if args:
+                    try:
+                        progress_callback(scaled_pct, *args)
+                    except TypeError:
+                        progress_callback(scaled_pct)
+                else:
                     progress_callback(scaled_pct)
-            else:
-                progress_callback(scaled_pct)
 
-    import_success, import_msg = run_lichess_import(
-        repo_name, elo_category,
-        progress_callback=import_progress_wrapper,
-        check_cancel=check_cancel,
-        reuse_other_courses=reuse_other_courses,
-        max_data_age_days=max_data_age_days
-    )
+        import_success, import_msg = run_lichess_import(
+            repo_name, single_elo,
+            progress_callback=import_progress_wrapper,
+            check_cancel=check_cancel,
+            reuse_other_courses=reuse_other_courses,
+            max_data_age_days=max_data_age_days,
+            preserve_primary_elo=False,
+        )
 
-    if not import_success:
-        # If the import was cancelled or stopped, calculate priority scores on partial data so the repertoire is ready to use
-        if "abgebrochen" in import_msg.lower() or "cancel" in import_msg.lower():
+        if not import_success:
+            if "abgebrochen" in import_msg.lower() or "cancel" in import_msg.lower():
+                calculate_priority_scores(
+                    repo_name, single_elo,
+                    progress_callback=None,
+                    check_cancel=None
+                )
+                return False, f"{import_msg} (Prioritäts-Scores für vorhandene Daten wurden berechnet)."
+            return False, import_msg
+
+        if check_cancel and check_cancel():
             calculate_priority_scores(
-                repo_name, elo_category,
+                repo_name, single_elo,
                 progress_callback=None,
                 check_cancel=None
             )
-            return False, f"{import_msg} (Prioritäts-Scores für vorhandene Daten wurden berechnet)."
-        return False, import_msg
+            return False, "Operation abgebrochen (Prioritäts-Scores wurden berechnet)."
 
-    if check_cancel and check_cancel():
-        calculate_priority_scores(
-            repo_name, elo_category,
-            progress_callback=None,
-            check_cancel=None
+        def priority_progress_wrapper(percent):
+            if progress_callback:
+                progress_callback(95 + int(percent * 0.05))
+
+        priority_success, priority_msg = calculate_priority_scores(
+            repo_name, single_elo,
+            progress_callback=priority_progress_wrapper,
+            check_cancel=check_cancel
         )
-        return False, "Operation abgebrochen (Prioritäts-Scores wurden berechnet)."
 
-    def priority_progress_wrapper(percent):
-        if progress_callback:
-            progress_callback(95 + int(percent * 0.05))
+        if not priority_success:
+            return False, f"Lichess import OK, but priority calculation failed: {priority_msg}"
 
-    priority_success, priority_msg = calculate_priority_scores(
-        repo_name, elo_category,
-        progress_callback=priority_progress_wrapper,
-        check_cancel=check_cancel
-    )
+        return True, "Lichess import und Prioritäts-Scores erfolgreich abgeschlossen."
 
-    if not priority_success:
-        return False, f"Lichess import OK, but priority calculation failed: {priority_msg}"
+    # Multi-Elo sequential import & priority calculation
+    total_elos = len(elo_list)
+    messages = []
+    for idx, curr_elo in enumerate(elo_list):
+        if check_cancel and check_cancel():
+            return False, "Operation abgebrochen."
 
-    return True, "Lichess import und Prioritäts-Scores erfolgreich abgeschlossen."
+        elo_label = get_elo_display(curr_elo)
+        slice_start = int(idx * 100 / total_elos)
+        slice_span = 100.0 / total_elos
+
+        def make_import_cb(s_start=slice_start, s_span=slice_span, lbl=elo_label, i=idx):
+            def _cb(percent, *args):
+                if progress_callback:
+                    scaled = int(s_start + (percent * 0.95) * (s_span / 100.0))
+                    prefix = f"[{lbl} {i + 1}/{total_elos}]"
+                    if args:
+                        if len(args) == 1 and isinstance(args[0], str):
+                            try:
+                                progress_callback(scaled, f"{prefix} {args[0]}")
+                            except TypeError:
+                                progress_callback(scaled)
+                        else:
+                            try:
+                                progress_callback(scaled, *args)
+                            except TypeError:
+                                progress_callback(scaled)
+                    else:
+                        try:
+                            progress_callback(scaled, prefix)
+                        except TypeError:
+                            progress_callback(scaled)
+            return _cb
+
+        def make_prio_cb(s_start=slice_start, s_span=slice_span, lbl=elo_label, i=idx):
+            def _cb(percent):
+                if progress_callback:
+                    scaled = int(s_start + (95.0 + percent * 0.05) * (s_span / 100.0))
+                    try:
+                        progress_callback(scaled, f"[{lbl} {i + 1}/{total_elos}] Prioritäten...")
+                    except TypeError:
+                        progress_callback(scaled)
+            return _cb
+
+        import_success, import_msg = run_lichess_import(
+            repo_name, curr_elo,
+            progress_callback=make_import_cb(),
+            check_cancel=check_cancel,
+            reuse_other_courses=reuse_other_courses,
+            max_data_age_days=max_data_age_days,
+            preserve_primary_elo=True,
+        )
+
+        if not import_success:
+            if "abgebrochen" in import_msg.lower() or "cancel" in import_msg.lower():
+                calculate_priority_scores(repo_name, curr_elo, progress_callback=None, check_cancel=None, update_move_column=False)
+                _finalize_multi_elo_primary(repo_name, primary_requested)
+                return False, f"{import_msg} ({elo_label} — Prioritäts-Scores für vorhandene Daten berechnet)."
+            return False, f"{elo_label}: {import_msg}"
+
+        if check_cancel and check_cancel():
+            calculate_priority_scores(repo_name, curr_elo, progress_callback=None, check_cancel=None, update_move_column=False)
+            _finalize_multi_elo_primary(repo_name, primary_requested)
+            return False, "Operation abgebrochen (Prioritäts-Scores wurden berechnet)."
+
+        priority_success, priority_msg = calculate_priority_scores(
+            repo_name, curr_elo,
+            progress_callback=make_prio_cb(),
+            check_cancel=check_cancel,
+            update_move_column=False,
+        )
+        if not priority_success:
+            return False, f"{elo_label}: Lichess import OK, but priority calculation failed: {priority_msg}"
+        messages.append(elo_label)
+
+    _finalize_multi_elo_primary(repo_name, primary_requested)
+    return True, f"Lichess import und Prioritäts-Scores erfolgreich abgeschlossen ({', '.join(messages)})."
 
 def delete_lichess_data(repo_name: str, elo_category: Optional[str] = None) -> Tuple[bool, str]:
     db_path = get_repertoire_db_path(repo_name)
@@ -1250,16 +1387,31 @@ def delete_lichess_data(repo_name: str, elo_category: Optional[str] = None) -> T
     session = db.get_session()
     try:
         query = session.query(LichessData)
+        mp_query = session.query(MovePriority)
         if elo_category is not None:
             query = query.filter_by(elo_range=elo_category)
+            mp_query = mp_query.filter_by(elo_range=elo_category)
         num_deleted = query.delete(synchronize_session=False)
+        mp_query.delete(synchronize_session=False)
 
         if elo_category is not None:
+            existing_elos = [e for e in parse_elo_list(get_meta(session, "lichess_elos", "")) if e != elo_category]
+            remaining_db_elos = [r[0] for r in session.query(LichessData.elo_range).distinct().all() if r[0]]
+            for e in remaining_db_elos:
+                if e not in existing_elos and e in ELO_MAPPING:
+                    existing_elos.append(e)
+            set_meta(session, "lichess_elos", serialize_elo_list(existing_elos) if existing_elos else None)
+
             current_elo = get_meta(session, "lichess_elo")
             if current_elo == elo_category:
-                set_meta(session, "lichess_elo", None)
+                fallback_elo = existing_elos[0] if existing_elos else None
+                set_meta(session, "lichess_elo", fallback_elo)
+                if fallback_elo:
+                    from opening_fenix.core.services.priority_service import sync_move_priorities_to_default_elo
+                    sync_move_priorities_to_default_elo(session, fallback_elo)
         else:
             set_meta(session, "lichess_elo", None)
+            set_meta(session, "lichess_elos", None)
         
         set_meta(session, "cov_cache_count", "-1")
         session.commit()

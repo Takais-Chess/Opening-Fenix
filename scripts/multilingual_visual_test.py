@@ -223,7 +223,7 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
     # ─────────────────────────────────────────────────────────────
     # C. UNIFIED SETTINGS DIALOG (EVERY SINGLE SUB-PAGE)
     # ─────────────────────────────────────────────────────────────
-    print("\n--- [Section C] Unified Settings Dialog (All 15 Pages) ---")
+    print("\n--- [Section C] Unified Settings Dialog (All 14 Pages) ---")
     settings_dlg = None
     try:
         translator.load_language(lang_code)
@@ -246,7 +246,6 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
             ("settings_12_creator_backups", "Settings: Creator - Backups & Restore", settings_dlg.page_cr_backups),
             ("settings_13_creator_tools", "Settings: Creator - Miscellaneous Tools", settings_dlg.page_cr_tools),
             ("settings_14_creator_diagnostics", "Settings: Creator - Database Diagnostics", settings_dlg.page_cr_diag),
-            ("settings_15_creator_maintenance", "Settings: Creator - Batch Maintenance Center", settings_dlg.page_cr_maintenance),
         ]
 
         # Expand all sidebar branches so they look great
@@ -378,9 +377,14 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
     try:
         translator.load_language(lang_code)
         from opening_fenix.gui.dialogs.course_intro_dialog import CourseIntroDialog
+        intro_desc = (
+            "Welcome to this repertoire! Here you will learn all relevant moves and variations for your chess training."
+            if lang_code == "en"
+            else "Willkommen zu diesem Repertoire! Hier lernst du alle relevanten Züge und Varianten für dein Schachtraining."
+        )
         dlg = CourseIntroDialog(repertoire_info={
             "name": chosen_repo,
-            "description": "Willkommen zu diesem Repertoire! Hier lernst du alle relevanten Züge und Varianten für dein Schachtraining."
+            "description": intro_desc
         })
         fname = "dialog_09_course_intro.png"
         capture_widget(dlg, os.path.join(lang_dir, fname), width=720, height=620)
@@ -455,6 +459,34 @@ def capture_all_for_language(lang_code: str, items_manifest: List[Dict[str, Any]
         dlg.deleteLater()
     except Exception as e:
         print(f"     [ERROR] HoleRecommendationSettingsDialog: {e}")
+
+    # D12. Task Center Dialog
+    print("  -> Capturing TaskCenterDialog...")
+    try:
+        translator.load_language(lang_code)
+        from opening_fenix.gui.dialogs.task_center_dialog import TaskCenterDialog
+        dlg = TaskCenterDialog(parent=None, active_repo_name=chosen_repo)
+        fname = "dialog_14_task_center.png"
+        capture_widget(dlg, os.path.join(lang_dir, fname), width=980, height=760, delay_ms=200)
+        record_item("task_center_dialog", "Task & Analysis Center Dialog", "Dialogs", fname)
+        dlg.close()
+        dlg.deleteLater()
+    except Exception as e:
+        print(f"     [ERROR] TaskCenterDialog: {e}")
+
+    # D13. Bug Report & Diagnostics Dialog
+    print("  -> Capturing BugReportDialog...")
+    try:
+        translator.load_language(lang_code)
+        from opening_fenix.gui.dialogs.bug_report_dialog import BugReportDialog
+        dlg = BugReportDialog(parent=None)
+        fname = "dialog_15_bug_report.png"
+        capture_widget(dlg, os.path.join(lang_dir, fname), width=520, height=540)
+        record_item("bug_report_dialog", "Bug Report & Diagnostics Dialog", "Dialogs", fname)
+        dlg.close()
+        dlg.deleteLater()
+    except Exception as e:
+        print(f"     [ERROR] BugReportDialog: {e}")
 
     # Restore original method
     TrainingManager.get_setting = orig_get_setting
@@ -950,7 +982,7 @@ def check_dialog_coverage() -> List[Tuple[str, str]]:
         "CourseImportDialog", "LichessTokenDialog", "MissingTokenPromptDialog",
         "RepertoireStatisticsDialog", "UpdateDialog", "FAQDialog",
         "CourseIntroDialog", "DeleteLevelDialog", "DiagnosticDialog",
-        "HoleRecommendationSettingsDialog", "AddLevelDialog"
+        "HoleRecommendationSettingsDialog", "AddLevelDialog", "TaskCenterDialog", "BugReportDialog"
     }
     uncovered = []
     if os.path.exists(dialogs_dir):

@@ -35,7 +35,7 @@ from PyQt6.QtMultimedia import QSoundEffect
 from sqlalchemy import or_, func, desc, text
 from sqlalchemy.orm import joinedload
 
-from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData
+from opening_fenix.core.models import DatabaseManager, Position, Move, RepertoireMove, RepertoireLevel, Metadata, LichessData, MovePriority
 from opening_fenix.core.db.database import commit_with_retry, DatabaseCorruptedException
 from opening_fenix.core.data_tools import get_base_path, get_user_dir, get_repertoire_analysis_status, calculate_local_priority_scores
 from opening_fenix.core.utils import get_repertoire_db_path, get_repertoire_dir, initialize_repertoire_assets, localize_san, get_elo_display, get_elo_internal, parse_comment, get_multilingual_comment_dict, combine_comments, format_multilingual_comment, get_repertoire_comment_stats, format_move_notation, natural_sort_key, clean_chessbase_annotations, clean_comment_parentheses, extract_eval_symbol, strip_eval_symbol, has_meaningful_comment, get_lang_display_label, EVAL_SYMBOLS, translate_chess_comment
@@ -188,7 +188,7 @@ class CreatorBackend:
             self.session.expire_all()
         try:
             from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
-            CloudSyncManager.instance().schedule_background_push(delay_ms=20000)
+            CloudSyncManager.instance().schedule_background_push(delay_ms=60000, scopes={"repertoires"})
         except Exception:
             pass
 
@@ -654,7 +654,7 @@ class CreatorBackend:
             self._ui_cache.pop("__repo_color__", None)
         try:
             from opening_fenix.core.services.cloud_sync_manager import CloudSyncManager
-            CloudSyncManager.instance().schedule_background_push(delay_ms=20000)
+            CloudSyncManager.instance().schedule_background_push(delay_ms=60000, scopes={"repertoires"})
         except Exception:
             pass
         if key == "color":
@@ -1986,22 +1986,38 @@ class CreatorBackend:
 
     def scan_and_update_metadata(self):
         if not self.session: return
-        elos = ", ".join([e[0] for e in self.session.query(LichessData.elo_range).distinct().all()])
+        from opening_fenix.core.utils import parse_elo_list, serialize_elo_list
+        found = parse_elo_list([e[0] for e in self.session.query(LichessData.elo_range).distinct().all()])
         m = self.session.query(Metadata).filter_by(key="lichess_elo").first()
-        if elos:
+        m_all = self.session.query(Metadata).filter_by(key="lichess_elos").first()
+        if found:
+            if not m_all: m_all = Metadata(key="lichess_elos"); self.session.add(m_all)
+            m_all.value = serialize_elo_list(found)
+            # Keep the primary/default Elo if still valid, otherwise fall back to the first available
             if not m: m = Metadata(key="lichess_elo"); self.session.add(m)
-            m.value = elos
+            if (m.value or "").strip() not in found:
+                m.value = found[0]
+                try:
+                    from opening_fenix.core.services.priority_service import sync_move_priorities_to_default_elo
+                    self.session.flush()
+                    sync_move_priorities_to_default_elo(self.session, found[0])
+                except Exception:
+                    pass
         else:
             if m: self.session.delete(m)
+            if m_all: self.session.delete(m_all)
         self.session.commit()
 
     def delete_lichess_data(self, elo_category=None):
         if not self.session: return False, "No repo."
         try:
             query = self.session.query(LichessData)
+            mp_query = self.session.query(MovePriority)
             if elo_category:
                 query = query.filter_by(elo_range=elo_category)
+                mp_query = mp_query.filter_by(elo_range=elo_category)
             n = query.delete()
+            mp_query.delete()
             self.set_meta("cov_cache_count", "-1")
             self.session.commit()
             self.scan_and_update_metadata()
@@ -3976,6 +3992,8 @@ class CreatorWindow(QMainWindow):
         if st: self.board_widget.set_theme(st)
         shl = self.get_setting("highlight_color")
         if shl: self.board_widget.set_highlight_color(shl)
+        slm = self.get_setting("show_legal_moves")
+        self.board_widget.set_show_legal_moves(True if slm is None else bool(slm))
 
         # Install eventFilter selectively on Creator widgets instead of global QApplication
         self.installEventFilter(self)
@@ -4187,12 +4205,6 @@ class CreatorWindow(QMainWindow):
         top_layout.addWidget(self.toolbar)
 
         top_layout.addStretch()
-
-        # Cloud Sync Status Pill (auto-hidden when Cloud Sync is not configured)
-        from opening_fenix.gui.widgets.cloud_sync_widgets import CloudSyncStatusPill
-        self.cloud_sync_pill = CloudSyncStatusPill(self, compact_height=40, icon_only=False)
-        self.cloud_sync_pill.open_settings_requested.connect(self.open_storage_settings)
-        top_layout.addWidget(self.cloud_sync_pill)
 
         self.custom_title_bar.layout.insertLayout(1, top_layout, 1)
 
@@ -4583,10 +4595,10 @@ class CreatorWindow(QMainWindow):
             self.combo_depth.setCurrentText(saved_depth)
         else:
             self.combo_depth.setCurrentText("20")
-        self.combo_depth.setFixedWidth(scale(34))
         self.combo_depth.view().setMinimumWidth(scale(75))
         self.combo_depth.setProperty("class", "SmallCombo")
         self.repolish(self.combo_depth)
+        self._fit_small_combo(self.combo_depth)
         self.combo_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_depth.lineEdit().installEventFilter(self)
         
@@ -4598,10 +4610,10 @@ class CreatorWindow(QMainWindow):
         max_threads = multiprocessing.cpu_count()
         self.combo_threads.addItems([str(i) for i in range(1, max_threads + 1)])
         self.combo_threads.setCurrentText(str(max(1, min(4, max_threads))))
-        self.combo_threads.setFixedWidth(scale(34))
         self.combo_threads.view().setMinimumWidth(scale(75))
         self.combo_threads.setProperty("class", "SmallCombo")
         self.repolish(self.combo_threads)
+        self._fit_small_combo(self.combo_threads)
         self.combo_threads.lineEdit().installEventFilter(self)
 
         # HASH COMBO
@@ -4612,10 +4624,10 @@ class CreatorWindow(QMainWindow):
         self.combo_hash.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_hash.addItems(["16", "64", "128", "256", "512", "1024", "2048"])
         self.combo_hash.setCurrentText(self.config.get("engine_hash", "256"))
-        self.combo_hash.setFixedWidth(scale(65))
         self.combo_hash.view().setMinimumWidth(scale(75))
         self.combo_hash.setProperty("class", "SmallCombo")
         self.repolish(self.combo_hash)
+        self._fit_small_combo(self.combo_hash, min_width=scale(65))
         self.combo_hash.lineEdit().installEventFilter(self)
         
         self.combo_lines = QComboBox()
@@ -4629,10 +4641,10 @@ class CreatorWindow(QMainWindow):
             self.combo_lines.setCurrentText(saved_lines)
         else:
             self.combo_lines.setCurrentText("3")
-        self.combo_lines.setFixedWidth(scale(34))
         self.combo_lines.view().setMinimumWidth(scale(75))
         self.combo_lines.setProperty("class", "SmallCombo")
         self.repolish(self.combo_lines)
+        self._fit_small_combo(self.combo_lines)
         self.combo_lines.lineEdit().installEventFilter(self)
         
         self.combo_depth.currentTextChanged.connect(self._on_engine_setting_changed)
@@ -4688,8 +4700,8 @@ class CreatorWindow(QMainWindow):
         header_e.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header_e.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         header_e.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.table_engine.setColumnWidth(0, scale(60))
-        self.table_engine.setColumnWidth(1, scale(45))
+        self.table_engine.setColumnWidth(0, scale(84))
+        self.table_engine.setColumnWidth(1, scale(54))
         self.table_engine.setShowGrid(False)
         self.table_engine.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.table_engine.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -4837,7 +4849,7 @@ class CreatorWindow(QMainWindow):
         # Store all possible tabs in a mapping
         self._all_tabs = {
             "DETAILS": (self.tab_details, tr_ui("creator.tab_details", "DETAILS")),
-            "ANALYSIS": (self.tab_analysis, tr_ui("creator.tab_analysis", "ANALYSIS")),
+            "ANALYSIS": (self.tab_analysis, tr_ui("creator.tab_analysis", "ANALYSE")),
             "HOLES": (self.tab_holes, tr_ui("creator.tab_holes", "Such Modus")),
             "KONTROLLE": (self.tab_kontrolle, tr_ui("creator.tab_kontrolle", "Rep. Kontrolle")),
             "TRANSPOSITIONS": (self.tab_transpositions, tr_ui("creator.tab_transpositions", "Transpositionen"))
@@ -4855,7 +4867,7 @@ class CreatorWindow(QMainWindow):
 
         # Ensure "DETAILS" tab is selected by default on initial startup if visible
         for i in range(self.tabs.count()):
-            if self.tabs.tabText(i) == "DETAILS":
+            if self.tabs.widget(i) == self.tab_details:
                 self.tabs.setCurrentIndex(i)
                 break
 
@@ -5788,13 +5800,39 @@ class CreatorWindow(QMainWindow):
                 except:
                     pass
 
+    def _fit_small_combo(self, combo: QComboBox, min_sample: str = "88", min_width: int = 0) -> None:
+        """Sizes a SmallCombo to its widest item using QFontMetrics so digits never clip across DPIs."""
+        le = combo.lineEdit()
+        if le is not None:
+            le.setTextMargins(0, 0, 0, 0)
+        measure_font = QFont("Segoe UI")
+        measure_font.setPixelSize(max(12, scale(14)))
+        fm = QFontMetrics(measure_font)
+        max_text_w = fm.horizontalAdvance(min_sample)
+        for i in range(combo.count()):
+            w = fm.horizontalAdvance(combo.itemText(i))
+            if w > max_text_w:
+                max_text_w = w
+        chrome_pad = max(16, scale(18))
+        floor_w = min_width if min_width > 0 else max(38, scale(40))
+        combo.setFixedWidth(max(floor_w, max_text_w + chrome_pad))
+
     def adjust_engine_columns(self):
         if not hasattr(self, 'table_engine'):
             return
         total_width = self.table_engine.viewport().width()
         if total_width <= 0:
             return
-            
+
+        lbl_score = tr_ui("creator.engine_col_score", "Bewertung")
+        lbl_depth = tr_ui("creator.engine_col_depth", "Tiefe")
+        lbl_move = tr_ui("creator.engine_col_move", "Zug")
+
+        layout_key = (total_width, lbl_score, lbl_depth, lbl_move)
+        if getattr(self, "_engine_col_layout_key", None) == layout_key:
+            return
+        self._engine_col_layout_key = layout_key
+
         # Determine dynamic font size based on width
         if total_width < scale(200):
             fs = 8.5
@@ -5804,35 +5842,46 @@ class CreatorWindow(QMainWindow):
             fs = 10.5
         else:
             fs = 11.5
-            
+
         font = self.table_engine.font()
-        font.setPointSizeF(float(fs))
-        self.table_engine.setFont(font)
-        
+        if font.pointSizeF() != float(fs):
+            font.setPointSizeF(float(fs))
+            self.table_engine.setFont(font)
+
         header = self.table_engine.horizontalHeader()
         header_font = header.font()
-        header_font.setPointSizeF(float(fs))
-        header.setFont(header_font)
-        
-        # Dynamic labels: if narrow, shorten headers
-        if total_width < scale(220):
-            labels = [
-                tr_ui("creator.engine_col_score_short", "Eval"),
-                tr_ui("creator.engine_col_depth_short", "T"),
-                tr_ui("creator.engine_col_move_short", "Zug")
-            ]
-            w_eval = scale(48)
-            w_depth = scale(34)
+        if header_font.pointSizeF() != float(fs):
+            header_font.setPointSizeF(float(fs))
+            header.setFont(header_font)
+
+        # Measure actual bold header text and representative cell values so no language clips
+        bold_header_font = QFont(header_font)
+        bold_header_font.setBold(True)
+        fm_hdr = QFontMetrics(bold_header_font)
+        fm_cell = QFontMetrics(font)
+        col_pad = max(16, scale(22))
+
+        full_w_eval = max(fm_hdr.horizontalAdvance(lbl_score), fm_cell.horizontalAdvance("+12.34")) + col_pad
+        full_w_depth = max(fm_hdr.horizontalAdvance(lbl_depth), fm_cell.horizontalAdvance("99")) + col_pad
+
+        # Automatically switch to compact labels if full localized headers would squeeze the Move column
+        if (full_w_eval + full_w_depth) > int(total_width * 0.60):
+            lbl_score_short = tr_ui("creator.engine_col_score_short", "Eval")
+            lbl_depth_short = tr_ui("creator.engine_col_depth_short", "T")
+            lbl_move_short = tr_ui("creator.engine_col_move_short", "Zug")
+            labels = [lbl_score_short, lbl_depth_short, lbl_move_short]
+            w_eval = max(fm_hdr.horizontalAdvance(lbl_score_short), fm_cell.horizontalAdvance("+12.34")) + col_pad
+            w_depth = max(fm_hdr.horizontalAdvance(lbl_depth_short), fm_cell.horizontalAdvance("99")) + col_pad
         else:
-            labels = [
-                tr_ui("creator.engine_col_score", "Bewertung"),
-                tr_ui("creator.engine_col_depth", "Tiefe"),
-                tr_ui("creator.engine_col_move", "Zug")
-            ]
-            w_eval = scale(62)
-            w_depth = scale(44)
-            
-        current_labels = [self.table_engine.horizontalHeaderItem(i).text() for i in range(3) if self.table_engine.horizontalHeaderItem(i)]
+            labels = [lbl_score, lbl_depth, lbl_move]
+            w_eval = full_w_eval
+            w_depth = full_w_depth
+
+        current_labels = [
+            self.table_engine.horizontalHeaderItem(i).text()
+            for i in range(3)
+            if self.table_engine.horizontalHeaderItem(i)
+        ]
         if current_labels != labels:
             self.table_engine.setHorizontalHeaderLabels(labels)
             for _c in range(3):
@@ -5842,7 +5891,7 @@ class CreatorWindow(QMainWindow):
                         _hi.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
                     else:
                         _hi.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            
+
         header.blockSignals(True)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
@@ -8906,11 +8955,11 @@ class CreatorWindow(QMainWindow):
             self.combo_transpos_depth.setCurrentText(saved_depth)
         else:
             self.combo_transpos_depth.setCurrentText("25")
-        self.combo_transpos_depth.setFixedWidth(scale(34))
         self.combo_transpos_depth.view().setMinimumWidth(scale(75))
         self.combo_transpos_depth.setToolTip(depth_tooltip)
         self.combo_transpos_depth.setProperty("class", "SmallCombo")
         self.repolish(self.combo_transpos_depth)
+        self._fit_small_combo(self.combo_transpos_depth)
         self.combo_transpos_depth.lineEdit().setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_transpos_depth.lineEdit().installEventFilter(self)
         self.combo_transpos_depth.currentTextChanged.connect(self._on_transpos_depth_changed)

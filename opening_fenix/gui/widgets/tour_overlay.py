@@ -132,7 +132,9 @@ class GuidedTourOverlay(QWidget):
                 pass
         self.current_step = 0
         self.show()
+        self.raise_()
         self.update_step()
+        self.btn_next.setFocus()
 
     def update_step(self):
         if not self.steps or self.current_step < 0 or self.current_step >= len(self.steps):
@@ -150,10 +152,23 @@ class GuidedTourOverlay(QWidget):
             self.btn_next.setText(tr_ui("tour.btn_next", "WEITER →"))
             self.btn_skip.setVisible(True)
             
-        # Force layout update and resize to fit content before positioning
-        self.lbl_title.setFixedWidth(self.desc_card.width() - scale(40)) # Account for margins
-        self.lbl_text.setFixedWidth(self.desc_card.width() - scale(40))
-        
+        # Force layout update and compute exact wrapped heights so the last line is never clipped
+        content_w = self.desc_card.width() - scale(40) - 4  # Account for 20px margins + 2px frame border per side
+        self.lbl_title.setFixedWidth(content_w)
+        self.lbl_text.setFixedWidth(content_w)
+        self.lbl_title.setMinimumHeight(0)
+        self.lbl_text.setMinimumHeight(0)
+        self.lbl_title.updateGeometry()
+        self.lbl_text.updateGeometry()
+
+        title_h = self.lbl_title.heightForWidth(content_w)
+        text_h = self.lbl_text.heightForWidth(content_w)
+        if title_h > 0:
+            self.lbl_title.setMinimumHeight(title_h + scale(2))
+        if text_h > 0:
+            self.lbl_text.setMinimumHeight(text_h + scale(6))
+
+        self.desc_card.layout().invalidate()
         self.desc_card.layout().activate()
         self.desc_card.adjustSize()
         

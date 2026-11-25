@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
-from opening_fenix.gui.styles import COLORS
+from opening_fenix.gui.styles import COLORS, get_indicator_style, get_spinbox_button_style
 from opening_fenix.gui.scaling import scale
 from opening_fenix.core.translation import tr_ui
 
@@ -61,7 +61,7 @@ class HoleRecommendationSettingsDialog(QDialog):
                 background-color: {COLORS['white']};
                 border: 1px solid {COLORS['border']};
                 border-radius: {scale(6)}px;
-                padding: {scale(4)}px {scale(8)}px;
+                padding: {scale(4)}px {scale(24)}px {scale(4)}px {scale(8)}px;
                 font-size: {scale(12)}px;
                 color: {COLORS['brown_text']};
                 /* min-width handled per widget */
@@ -81,6 +81,8 @@ class HoleRecommendationSettingsDialog(QDialog):
                 font-size: {scale(12)}px;
                 font-weight: 600;
             }}
+            {get_spinbox_button_style(border_color=COLORS['border'])}
+            {get_indicator_style()}
         """)
 
         self.init_ui()
@@ -133,7 +135,7 @@ class HoleRecommendationSettingsDialog(QDialog):
             spin.setSingleStep(0.1)
             spin.setDecimals(2)
             spin.setSuffix(" %")
-            spin.setMinimumWidth(scale(90))
+            spin.setMinimumWidth(scale(112))
 
             # Default: L1 = 1.0%, L2 = 0.5%, L3 = 0.1%, L4+ = 0.05%
             default_val = 1.0 if order == 1 else (0.5 if order == 2 else (0.1 if order == 3 else 0.05))

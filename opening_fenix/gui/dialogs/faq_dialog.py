@@ -7,7 +7,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor
 
 from opening_fenix.gui.scaling import scale
-from opening_fenix.gui.styles import COLORS, set_consistent_icon
+from opening_fenix.gui.styles import COLORS, set_consistent_icon, get_scrollbar_style
 from opening_fenix.core.translation import tr_ui
 
 def get_faq_items() -> list[tuple[str, str]]:
@@ -35,7 +35,10 @@ def get_faq_items() -> list[tuple[str, str]]:
     if is_public_version():
         faqs.append((
             tr_ui("faq.q4", "Möchtest du Fehler melden oder Änderungen am Programm vorschlagen?"),
-            tr_ui("faq.a4", "Du kannst das auf diesem Discord tun: https://discord.gg/TevW5Wfkc")
+            tr_ui(
+                "faq.a4",
+                "Am schnellsten geht das direkt in der App über das kleine Käfer-Symbol oben rechts in der Titelleiste (neben Minimieren/Schließen) — dort kannst du den Fehler beschreiben und mit einem Klick inklusive bereinigtem Diagnose-Paket absenden.\n\nFür Feature-Wünsche, Fragen oder den Austausch mit anderen Nutzern kannst du auch unserem Discord beitreten: https://discord.gg/TevW5Wfkc"
+            )
         ))
 
     return faqs
@@ -147,5 +150,5 @@ class FAQDialog(QDialog):
         layout.addLayout(btn_layout)
 
         # Apply basic fusion background
-        self.setStyleSheet(f"QDialog {{ background-color: {COLORS['beige']}; }}")
+        self.setStyleSheet(f"QDialog {{ background-color: {COLORS['beige']}; }}\n{get_scrollbar_style()}")
 

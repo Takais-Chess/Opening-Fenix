@@ -167,3 +167,108 @@ def test_training_service_comment_language_all(tmp_path):
 
     ts.user_session.close()
     db.close()
+
+
+def test_repertoire_card_comment_lang_labels_and_tooltip(qtbot, monkeypatch):
+    """Test that RepertoireConfigCard displays clear comment-language labels and tooltip in DE and EN."""
+    from types import SimpleNamespace
+    from opening_fenix.core.translation import translator
+    from opening_fenix.gui.dialogs.unified_settings_dialog import RepertoireConfigCard
+
+    monkeypatch.setattr(
+        "opening_fenix.core.services.repertoire_core_service.get_repertoire_card_meta_fast",
+        lambda repo_name: ([{"order": 1, "name": "Grundlagen", "target_elo": 1500}], ["de", "en", "fr"]),
+    )
+
+    dummy_tm = SimpleNamespace(
+        get_active_level=lambda repo: 1,
+        get_comment_language=lambda repo: "auto",
+    )
+    dummy_parent = SimpleNamespace(
+        main_window=SimpleNamespace(training_manager=dummy_tm),
+        selected_trainer_repo=None,
+    )
+
+    prev_lang = translator.current_lang
+    try:
+        translator.load_language("de")
+        card = RepertoireConfigCard("1... e5 Gus", True, dummy_parent)
+        qtbot.addWidget(card)
+
+        items_de = [(card.combo_lang.itemText(i), card.combo_lang.itemData(i)) for i in range(card.combo_lang.count())]
+        assert items_de == [
+            ("💬 Kommentare: Auto (DE)", "auto"),
+            ("💬 Kommentare: Alle", "all"),
+            ("💬 Kommentare: Deutsch", "de"),
+            ("💬 Kommentare: Englisch", "en"),
+            ("💬 Kommentare: FR", "fr"),
+        ]
+        assert "DE" in card.combo_lang.toolTip()
+        assert "Zugkommentare" in card.combo_lang.toolTip()
+
+        translator.load_language("en")
+        card.populate_comment_languages(prefetched_langs=["de", "en", "fr"])
+        items_en = [(card.combo_lang.itemText(i), card.combo_lang.itemData(i)) for i in range(card.combo_lang.count())]
+        assert items_en == [
+            ("💬 Comments: Auto (EN)", "auto"),
+            ("💬 Comments: All", "all"),
+            ("💬 Comments: German", "de"),
+            ("💬 Comments: English", "en"),
+            ("💬 Comments: FR", "fr"),
+        ]
+        assert "EN" in card.combo_lang.toolTip()
+        assert "move comments" in card.combo_lang.toolTip()
+
+        card.populate_comment_languages(prefetched_langs=[])
+        assert card.combo_lang.itemText(0) == "💬 No comments"
+        assert not card.combo_lang.isEnabled()
+    finally:
+        translator.load_language(prev_lang)
+
+
+def test_resolve_auto_comment_language():
+    """Auto language should fall back to an available course language if app language is missing."""
+    from opening_fenix.core.utils import resolve_auto_comment_language
+
+    # App is German, course only has English comments -> English
+    assert resolve_auto_comment_language("de", ["en"]) == "en"
+    # App is German, course has both German and English -> German
+    assert resolve_auto_comment_language("de", ["de", "en"]) == "de"
+    # App is French, course has Spanish & English with repo_meta_lang='es' -> Spanish
+    assert resolve_auto_comment_language("fr", ["es", "en"], repo_meta_lang="es") == "es"
+    # App is French, course has German & English, no repo_meta_lang -> English
+    assert resolve_auto_comment_language("fr", ["de", "en"], repo_meta_lang="auto") == "en"
+    # App is French, course only has German -> German
+    assert resolve_auto_comment_language("fr", ["de"]) == "de"
+    # Empty available_langs -> falls back to app_lang
+    assert resolve_auto_comment_language("de", []) == "de"
+
+
+def test_main_window_get_effective_comment_language_auto_fallback(monkeypatch):
+    """MainWindow.get_effective_comment_language should fall back to available course language in auto mode."""
+    from types import SimpleNamespace
+    from opening_fenix.core.translation import translator
+    from opening_fenix.gui.main_window import MainWindow
+
+    monkeypatch.setattr(
+        "opening_fenix.core.services.repertoire_core_service.get_repertoire_comment_languages_fast",
+        lambda repo_name: ["en"] if repo_name == "EnglishOnlyCourse" else ["de", "en"],
+    )
+
+    dummy_self = SimpleNamespace(
+        repertoire_manager=SimpleNamespace(active_repertoire_name="EnglishOnlyCourse", repo_session=None),
+        training_manager=SimpleNamespace(
+            get_comment_language=lambda repo: "auto",
+            get_setting=lambda key: "auto" if key == "comment_language" else "de",
+        ),
+    )
+
+    prev_lang = translator.current_lang
+    try:
+        translator.current_lang = "de"
+        assert MainWindow.get_effective_comment_language(dummy_self) == "en"
+
+        dummy_self.repertoire_manager.active_repertoire_name = "BilingualCourse"
+        assert MainWindow.get_effective_comment_language(dummy_self) == "de"
+    finally:
+        translator.current_lang = prev_lang

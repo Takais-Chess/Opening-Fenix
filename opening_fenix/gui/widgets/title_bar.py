@@ -1,13 +1,44 @@
 from PyQt6.QtWidgets import QWidget, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QApplication
-from PyQt6.QtCore import Qt, QPoint, QRect
-from PyQt6.QtGui import QIcon
+from PyQt6.QtCore import Qt, QPoint, QRect, QSize, QByteArray
+from PyQt6.QtGui import QIcon, QPixmap, QPainter
+from PyQt6.QtSvg import QSvgRenderer
 
+from opening_fenix.core.translation import tr_ui
 from opening_fenix.gui.styles import COLORS
 from opening_fenix.gui.scaling import scale
 
 
+def _create_subtle_bug_icon(color_hex: str, size_px: int = 14, stroke_opacity: float = 0.58) -> QIcon:
+    """Creates a crisp monochrome SVG bug icon for the subtle title-bar button."""
+    svg = f"""
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+         stroke="{color_hex}" stroke-opacity="{stroke_opacity}" stroke-width="1.9"
+         stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 2l1.88 1.88"/>
+        <path d="M14.12 3.88L16 2"/>
+        <path d="M9 7.13v-1a3.003 3.003 0 1 1 6 0v1"/>
+        <path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6"/>
+        <path d="M12 20v-9"/>
+        <path d="M6.53 9C4.6 8.8 3 7.1 3 5"/>
+        <path d="M6 13H2"/>
+        <path d="M3 21c0-2.1 1.7-3.9 3.8-4"/>
+        <path d="M20.97 5c0 2.1-1.6 3.8-3.5 4"/>
+        <path d="M22 13h-4"/>
+        <path d="M17.2 17c2.1.1 3.8 1.9 3.8 4"/>
+    </svg>
+    """.strip()
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    px = max(12, scale(size_px))
+    pm = QPixmap(px, px)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pm)
+
+
 class CustomTitleBar(QWidget):
-    def __init__(self, parent=None, title="Opening Fenix"):
+    def __init__(self, parent=None, title="Opening Fenix", show_bug_report=True):
         super().__init__(parent)
         self.parent_window = parent
         self.layout = QHBoxLayout(self)
@@ -39,8 +70,35 @@ class CustomTitleBar(QWidget):
             }}
         """
         
+        self.btn_bug_report = None
+        if show_bug_report:
+            self.btn_bug_report = QPushButton()
+            self.btn_bug_report.setObjectName("BugReportTitleButton")
+            self.btn_bug_report.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.btn_bug_report.setFixedSize(scale(28), scale(25))
+            self.btn_bug_report.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.btn_bug_report.setIcon(_create_subtle_bug_icon(COLORS['brown_text'], 13))
+            self.btn_bug_report.setIconSize(QSize(scale(13), scale(13)))
+            self.btn_bug_report.setToolTip(
+                tr_ui("title_bar.bug_report_tooltip", "Fehler melden / Diagnose exportieren")
+            )
+            self.btn_bug_report.setStyleSheet(f"""
+                QPushButton {{
+                    border: none;
+                    background: transparent;
+                    border-radius: {scale(4)}px;
+                    opacity: 0.6;
+                }}
+                QPushButton:hover {{
+                    background-color: rgba(200, 200, 200, 0.45);
+                }}
+            """)
+            self.btn_bug_report.clicked.connect(self.open_bug_report)
+            self.layout.addWidget(self.btn_bug_report, alignment=Qt.AlignmentFlag.AlignTop)
+
         self.btn_minimize = QPushButton("—")
         self.btn_minimize.setObjectName("MinimizeButton")
+        self.btn_minimize.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_minimize.setFixedSize(scale(40), scale(25))
         self.btn_minimize.setStyleSheet(btn_style)
 
@@ -49,6 +107,7 @@ class CustomTitleBar(QWidget):
         
         self.btn_maximize = QPushButton("🗖")
         self.btn_maximize.setObjectName("MaximizeButton")
+        self.btn_maximize.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_maximize.setFixedSize(scale(40), scale(25))
         self.btn_maximize.setStyleSheet(btn_style)
 
@@ -57,6 +116,7 @@ class CustomTitleBar(QWidget):
         
         self.btn_close = QPushButton("✕")
         self.btn_close.setObjectName("CloseButton")
+        self.btn_close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.btn_close.setFixedSize(scale(40), scale(25))
         self.btn_close.setStyleSheet(btn_style + f"QPushButton:hover {{ background-color: {COLORS['burnt_orange']}; color: white; }}")
 
@@ -156,6 +216,11 @@ class CustomTitleBar(QWidget):
             else:
                 self.parent_window.showMaximized()
                 self.update_maximize_button()
+
+    def open_bug_report(self):
+        from opening_fenix.gui.dialogs.bug_report_dialog import BugReportDialog
+        dlg = BugReportDialog(self.parent_window or self)
+        dlg.exec()
 
     def close_window(self):
         if self.parent_window:

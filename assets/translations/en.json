@@ -142,7 +142,7 @@
     "update_error_msg": "Could not check GitHub for updates:\n{err}",
     "comments_format": "💬 Comments: {stats}",
     "no_comments": "No comments",
-    "storage_title": "☁️ Cloud Synchronization (Multi-PC: Google Drive / OneDrive)",
+    "storage_title": "🔄 Cloud Synchronization (Multi-PC: Google Drive / OneDrive)",
     "storage_desc": "Cloud Sync Folder (for verified snapshots & backups, e.g. in Google Drive or OneDrive):",
     "storage_current_path": "Current Storage Location:",
     "storage_btn_change": "📁 Choose Cloud Folder...",
@@ -297,6 +297,7 @@
     "cloud_opt_settings": "Sync portable app settings (theme, language, audio, Creator tabs — excludes local engine paths)",
     "cloud_opt_dictionary": "Sync custom spellcheck user dictionary (lossless merge)",
     "cloud_opt_engine_cache": "Sync Stockfish engine evaluation cache (optional — may be larger)",
+    "cloud_opt_engine_cache_sized": "Sync Stockfish engine evaluation cache (optional — currently {size})",
     "cloud_inspector_title": "📋 Sync Inspector (Repertoires & Profiles)",
     "cloud_inspector_sub": "Inspect the sync status of individual repertoires & profiles, exclude courses from sync, or force push/pull.",
     "cloud_inspector_refresh": "🔄 Refresh",
@@ -321,7 +322,10 @@
     "cloud_btn_include": "Include",
     "cloud_btn_exclude": "Exclude",
     "cloud_btn_force_push_tip": "Force Local → Cloud upload",
-    "cloud_btn_force_pull_tip": "Force Cloud → Local download (saves safety backup first)"
+    "cloud_btn_force_pull_tip": "Force Cloud → Local download (saves safety backup first)",
+    "show_legal_moves": "Show Legal Move Indicators:",
+    "show_legal_moves_sub": "Displays subtle dots and capture rings for legal target squares when selecting or dragging a piece.",
+    "show_legal_moves_chk": "Enabled"
   },
   "themes": {
     "Dunkel (Modern)": "Dark (Modern)",
@@ -357,7 +361,7 @@
     "q3": "How do I change the training level and when should I do it?",
     "a3": "You can change the level in the Trainer settings under Repertoire Selection. You should increase the level once you are comfortable with the current level and your Elo has exceeded the target Elo for this repertoire level.",
     "q4": "Do you want to report Bugs or suggest Changes to the Program?",
-    "a4": "You can do that on this Discord: https://discord.gg/TevW5Wfkc"
+    "a4": "The fastest way is right inside the app via the small bug icon in the top-right title bar (next to Minimize/Close) — you can describe the issue and send it in one click along with a sanitized diagnostics bundle.\n\nFor feature requests, questions, or community discussion, you can also join our Discord: https://discord.gg/TevW5Wfkc"
   },
   "tour": {
     "btn_next": "NEXT →",
@@ -388,7 +392,9 @@
     "step12_title": "Focused Training",
     "step12_text": "Use the variation filter above to train or learn only specific variations - ideal when learning a new variation and you want to master all its moves before moving on.",
     "step13_title": "Resources",
-    "step13_text": "Here you'll find a folder with additional PGN files useful for the course. You can open them using Lichess or another chess program."
+    "step13_text": "Here you'll find a folder with additional PGN files useful for the course. You can open them using Lichess or another chess program.",
+    "step14_title": "Report a Bug",
+    "step14_text": "If you ever run into a bug, just click this small bug icon in the top-right corner. You can briefly describe the issue and send it directly to the developer in one click along with a sanitized diagnostics bundle."
   },
   "repo_settings": {
     "identity_title": "📋 Repertoire Identity",
@@ -781,6 +787,8 @@
     "lockout_error": "Error: {err}",
     "label_comment_lang": "💬 Comment Language:",
     "label_comment_stats": "💬 Course Comments:",
+    "label_included_elos": "📚 Included Elo ranges:",
+    "tip_included_elos": "Learners can switch between these Elo ranges in the Trainer. Import more ranges in the Task Center.",
     "comment_lang_auto": "Automatic",
     "comment_lang_de": "🇩🇪 German",
     "comment_lang_en": "🇬🇧 English",
@@ -1287,7 +1295,9 @@
     "btn_alt_repertoire": "GOOD MOVE (DIFFERENT REPERTOIRE PATH)",
     "btn_alt_not_repertoire": "GOOD MOVE (NOT IN REPERTOIRE)",
     "menu_setup_open_training": "🎯 Customize Training (Repertoire, Level, Variation)",
-    "menu_switch_profile": "👤 Switch Profile"
+    "menu_switch_profile": "👤 Switch Profile",
+    "btn_mouse_slip": "↩ Mouse-slip?",
+    "mouse_slip_tooltip": "<b>Mouse-slip?</b><br>Undoes the mistake penalty and restores your previous Leitner box."
   },
   "open_training": {
     "dialog_title": "Open Training",
@@ -1302,6 +1312,14 @@
     "comment_lang_en": "English (EN)",
     "comment_lang_de": "German (DE)",
     "no_comments": "(No comments)",
+    "card_comment_lang_auto": "💬 Comments: Auto ({lang})",
+    "card_comment_lang_all": "💬 Comments: All",
+    "card_comment_lang_en": "💬 Comments: English",
+    "card_comment_lang_de": "💬 Comments: German",
+    "card_comment_lang_other": "💬 Comments: {lang}",
+    "card_no_comments": "💬 No comments",
+    "card_comment_lang_tooltip": "Language of move comments for this repertoire.\nAuto follows the app language (currently: {lang}).",
+    "card_prio_elo_tooltip": "Opponent strength used to weight the move order.",
     "no_repos_item": "(No repertoires)",
     "btn_cancel": "Cancel",
     "btn_start": "🚀 Start Training",
@@ -1374,7 +1392,7 @@
     "q3": "How do I change the training level and when should I do it?",
     "a3": "You can change the level in the Trainer settings under Repertoire Selection. You should increase the level once the previous level is solid and your own Elo exceeds the target Elo for that repertoire level.",
     "q4": "Do you want to report Bugs or suggest Changes to the Program?",
-    "a4": "You can do that on this Discord: https://discord.gg/TevW5Wfkc",
+    "a4": "The fastest way is right inside the app via the small bug icon in the top-right title bar (next to Minimize/Close) — you can describe the issue and send it in one click along with a sanitized diagnostics bundle.\n\nFor feature requests, questions, or community discussion, you can also join our Discord: https://discord.gg/TevW5Wfkc",
     "q6": "Will the Lichess import for big courses ever get faster?",
     "a6": "We are limited by the Lichess server (who are absolute heroes for providing the data for free), and they have a limit on how many positions we can get per minute.\n\nIf the program ever gets big, I could set up a server, download the whole Lichess database there, and then the import would take seconds instead of hours. But that would consistently cost money, and then I would need to think about some kind of monetization or subscription, and I am not very interested in that.\n\nFor now, we have to be content with having to keep the program running for a while after a big course import."
   },
@@ -1668,6 +1686,9 @@
     "select_repo": "Target Repertoire:",
     "card_lich_title": "🌐 Lichess Database Import",
     "lbl_elo_category": "Elo Category:",
+    "lbl_extra_elos": "Also:",
+    "tip_extra_elos": "Optionally load more Elo ranges into the same course. Learners can then switch between them.",
+    "tip_batch_extra_elos": "Optionally load this for all selected courses too (existing multi-Elos are always updated automatically).",
     "lbl_max_age": "Max. Data Age:",
     "age_90": "90 Days",
     "age_180": "180 Days (Default)",
@@ -1725,6 +1746,7 @@
     "batch_selected_count": "Selected: {sel} of {tot} repertoires"
   },
   "common": {
+    "close": "Close",
     "browse": "Browse...",
     "cancel": "Cancel",
     "error": "Error",
@@ -1785,5 +1807,34 @@
     "tip_warning": "Cloud Sync notice:\n{details}\nClick for details.",
     "tip_synced": "Safe Cloud Sync active\nLast synced: {rel}{dev}\nFolder: {path}\nClick for Sync & Settings.",
     "menu_open_settings": "⚙️ Cloud Sync Settings..."
+  },
+  "title_bar": {
+    "bug_report_tooltip": "Report a Bug / Export Diagnostics"
+  },
+  "bug_report": {
+    "title": "Report a Bug & Diagnostics",
+    "heading": "Report a Bug & Diagnostics",
+    "intro": "Briefly describe what happened and send the report directly to the developer in one click. Personal API tokens are automatically removed.",
+    "desc_label": "What happened?",
+    "desc_placeholder": "Short description or steps to reproduce...",
+    "chk_include_diag": "Attach diagnostics ZIP (app version, system info & sanitized log)",
+    "btn_send": "🚀 Send Bug Report",
+    "btn_sending": "⏳ Sending...",
+    "btn_export": "📦 Save Diagnostics ZIP...",
+    "btn_export_short": "📦 Save ZIP",
+    "btn_github": "GitHub",
+    "btn_discord": "Discord",
+    "empty_title": "Description Missing",
+    "empty_msg": "Please enter a short description or enable the diagnostics ZIP.",
+    "send_success_title": "Report Sent",
+    "send_success_msg": "Thank you! Your bug report has been submitted successfully.",
+    "send_error_title": "Could Not Send",
+    "send_error_msg": "Could not send the report directly ({error}).\n\nYou can click '📦 Save ZIP' instead and share the file on Discord or GitHub.",
+    "rate_limited": "Too many reports in a short time. Please try again later or save the diagnostics ZIP locally.",
+    "save_dialog_title": "Save Diagnostics ZIP",
+    "export_success_title": "Diagnostics Saved",
+    "export_success_msg": "Diagnostics bundle saved successfully:\n{path}",
+    "export_error_title": "Export Error",
+    "export_error_msg": "Could not create the diagnostics bundle:\n{error}"
   }
 }

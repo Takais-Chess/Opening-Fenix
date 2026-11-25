@@ -53,7 +53,7 @@ from opening_fenix.core.threads import (
 from opening_fenix.gui.widgets.board_widget import (
     THEMES, THEME_FALLBACKS, HIGHLIGHT_COLORS, HIGHLIGHT_COLOR_FALLBACKS, normalize_text_encoding
 )
-from opening_fenix.gui.widgets.common import AutoAdjustButton
+from opening_fenix.gui.widgets.common import AutoAdjustButton, clear_table_safely
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
 from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon
@@ -618,6 +618,8 @@ class RepertoireConfigCard(QFrame):
         self.lbl_name = QLabel(self.repo_name)
         self.lbl_name.setObjectName("RepoName")
         self.lbl_name.setWordWrap(True)
+        self.lbl_name.setMinimumWidth(0)
+        self.lbl_name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         self.info_layout.addWidget(self.lbl_name)
         
         self.levels_elo_map = {}
@@ -656,24 +658,40 @@ class RepertoireConfigCard(QFrame):
         self.populate_comment_languages(prefetched_langs=prefetched_langs)
         self.combo_lang.currentIndexChanged.connect(self.on_lang_changed)
         self.info_layout.addWidget(self.combo_lang)
+
+        # Opponent-Elo switch: only exists for multi-Elo courses, single-Elo cards look unchanged
+        self.combo_prio_elo = NoWheelComboBox()
+        self.combo_prio_elo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.combo_prio_elo.setMinimumWidth(scale(120))
+        self.combo_prio_elo.setFixedHeight(scale(32))
+        self.combo_prio_elo.setToolTip(tr_ui(
+            "open_training.card_prio_elo_tooltip",
+            "Gegner-Stärke, nach der die Zugreihenfolge gewichtet wird."
+        ))
+        self.populate_priority_elos()
+        self.combo_prio_elo.currentIndexChanged.connect(self.on_prio_elo_changed)
+        self.info_layout.addWidget(self.combo_prio_elo)
         
         self.layout.addLayout(self.info_layout, 1)
         
         self.lbl_elo.setVisible(self.is_active)
         self.combo_level.setVisible(self.is_active)
         self.combo_lang.setVisible(self.is_active)
+        self._apply_prio_elo_visibility()
         
-        if self.is_active:
-            self.setMinimumHeight(scale(168))
-            self.setMaximumHeight(scale(198))
-        else:
-            self.setMinimumHeight(scale(78))
-            self.setMaximumHeight(scale(78))
+        self._apply_active_card_height()
         self.adjust_title_font()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.adjust_title_font()
+        if not getattr(self, "_title_font_pending", False):
+            self._title_font_pending = True
+            QTimer.singleShot(0, self._run_deferred_adjust_title_font)
+
+    def _run_deferred_adjust_title_font(self):
+        self._title_font_pending = False
+        if not sip.isdeleted(self):
+            self.adjust_title_font()
 
     def adjust_title_font(self):
         if not hasattr(self, 'lbl_name'):
@@ -750,13 +768,9 @@ class RepertoireConfigCard(QFrame):
         self.lbl_elo.setVisible(self.is_active)
         self.combo_level.setVisible(self.is_active)
         self.combo_lang.setVisible(self.is_active)
+        self._apply_prio_elo_visibility()
         
-        if self.is_active:
-            self.setMinimumHeight(scale(168))
-            self.setMaximumHeight(scale(198))
-        else:
-            self.setMinimumHeight(scale(78))
-            self.setMaximumHeight(scale(78))
+        self._apply_active_card_height()
         self.adjust_title_font()
         
         if self.main_window and hasattr(self.main_window, 'training_manager'):
@@ -767,6 +781,51 @@ class RepertoireConfigCard(QFrame):
         self.clicked.emit()
         self.parent_dlg.refresh_trainer_repertoire_cards()
 
+    def _has_multiple_prio_elos(self) -> bool:
+        return hasattr(self, 'combo_prio_elo') and self.combo_prio_elo.count() > 1
+
+    def _apply_prio_elo_visibility(self):
+        if hasattr(self, 'combo_prio_elo'):
+            self.combo_prio_elo.setVisible(self.is_active and self._has_multiple_prio_elos())
+
+    def _apply_active_card_height(self):
+        extra = scale(40) if (self.is_active and self._has_multiple_prio_elos()) else 0
+        if self.is_active:
+            self.setMinimumHeight(scale(168) + extra)
+            self.setMaximumHeight(scale(198) + extra)
+        else:
+            self.setMinimumHeight(scale(78))
+            self.setMaximumHeight(scale(78))
+
+    def populate_priority_elos(self):
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+        from opening_fenix.core.utils import get_elo_display
+        default_elo, available = get_repertoire_lichess_elos_fast(self.repo_name)
+        tm = getattr(self.main_window, 'training_manager', None)
+        current = default_elo
+        if tm and hasattr(tm, 'get_active_lichess_elo') and len(available) > 1:
+            try:
+                current = tm.get_active_lichess_elo(self.repo_name) or default_elo
+            except Exception:
+                current = default_elo
+        self.combo_prio_elo.blockSignals(True)
+        self.combo_prio_elo.clear()
+        if len(available) > 1:
+            for k in available:
+                self.combo_prio_elo.addItem(f"🎯 {get_elo_display(k)}", k)
+            idx = self.combo_prio_elo.findData(current)
+            self.combo_prio_elo.setCurrentIndex(idx if idx >= 0 else 0)
+        self.combo_prio_elo.blockSignals(False)
+
+    def on_prio_elo_changed(self):
+        elo = self.combo_prio_elo.currentData()
+        tm = getattr(self.main_window, 'training_manager', None)
+        if elo and tm and hasattr(tm, 'set_active_lichess_elo'):
+            tm.set_active_lichess_elo(elo, self.repo_name)
+            if hasattr(self.main_window, 'repertoire_manager') and getattr(self.main_window.repertoire_manager, 'active_repertoire_name', None) == self.repo_name:
+                if hasattr(self.main_window, 'update_notation_display'):
+                    self.main_window.update_notation_display()
+
     def on_level_changed(self):
         level = self.combo_level.currentData()
         if level is not None and self.main_window and hasattr(self.main_window, 'training_manager'):
@@ -775,8 +834,8 @@ class RepertoireConfigCard(QFrame):
 
     def populate_comment_languages(self, prefetched_langs=None):
         from opening_fenix.core.services.repertoire_core_service import get_repertoire_comment_languages_fast
-        from opening_fenix.core.utils import get_lang_display_label
-        from opening_fenix.core.translation import tr_ui
+        from opening_fenix.core.translation import tr_ui, translator
+        from opening_fenix.core.utils import resolve_auto_comment_language
 
         available = prefetched_langs if prefetched_langs is not None else get_repertoire_comment_languages_fast(self.repo_name)
         curr_lang = "auto"
@@ -784,25 +843,38 @@ class RepertoireConfigCard(QFrame):
         if tm and hasattr(tm, 'get_comment_language'):
             curr_lang = tm.get_comment_language(self.repo_name) or "auto"
 
+        raw_app_lang = getattr(translator, "current_lang", None) or "de"
+        app_lang = resolve_auto_comment_language(
+            app_lang=raw_app_lang,
+            available_langs=available,
+        ).upper()
+        self.combo_lang.setToolTip(
+            tr_ui(
+                "open_training.card_comment_lang_tooltip",
+                "Sprache der Zugkommentare für dieses Repertoire.\nAuto folgt der Programmsprache (aktuell: {lang}).",
+            ).format(lang=app_lang)
+        )
+
         self.combo_lang.blockSignals(True)
         self.combo_lang.clear()
 
         if not available:
-            self.combo_lang.addItem(tr_ui("open_training.no_comments", "Keine Kommentare"), "auto")
+            self.combo_lang.addItem(tr_ui("open_training.card_no_comments", "💬 Keine Kommentare"), "auto")
             self.combo_lang.setEnabled(False)
         else:
             self.combo_lang.setEnabled(True)
-            self.combo_lang.addItem(tr_ui("open_training.comment_lang_auto", "Automatisch"), "auto")
+            auto_label = tr_ui("open_training.card_comment_lang_auto", "💬 Kommentare: Auto ({lang})").format(lang=app_lang)
+            self.combo_lang.addItem(auto_label, "auto")
             if len(available) > 1 or curr_lang == "all":
-                self.combo_lang.addItem(tr_ui("open_training.comment_lang_all", "Alle"), "all")
+                self.combo_lang.addItem(tr_ui("open_training.card_comment_lang_all", "💬 Kommentare: Alle"), "all")
             for lang_code in available:
                 code_lower = lang_code.lower()
                 if code_lower == "de":
-                    label = tr_ui("open_training.comment_lang_de", "Deutsch (DE)")
+                    label = tr_ui("open_training.card_comment_lang_de", "💬 Kommentare: Deutsch")
                 elif code_lower == "en":
-                    label = tr_ui("open_training.comment_lang_en", "Englisch (EN)")
+                    label = tr_ui("open_training.card_comment_lang_en", "💬 Kommentare: Englisch")
                 else:
-                    label = f"{get_lang_display_label(code_lower)} ({code_lower.upper()})"
+                    label = tr_ui("open_training.card_comment_lang_other", "💬 Kommentare: {lang}").format(lang=code_lower.upper())
                 self.combo_lang.addItem(label, code_lower)
 
         idx = self.combo_lang.findData(curr_lang)
@@ -1376,6 +1448,7 @@ TRAINER_SETTINGS_KEYS = {
     "auto_delay",
     "theme",
     "highlight_color",
+    "show_legal_moves",
     "anim_speed",
     "master_volume",
     "stop_at_variation_end",
@@ -1442,6 +1515,7 @@ _PAGE_ATTR_MAP = {
     "chk_details": "page_appearance",
     "chk_holes": "page_appearance",
     "chk_kontrolle": "page_appearance",
+    "chk_legal_moves": "page_appearance",
     "chk_spellcheck": "page_appearance",
     "chk_transpositions": "page_appearance",
     "combo_highlight": "page_appearance",
@@ -1847,8 +1921,9 @@ class UnifiedSettingsDialog(QDialog):
                 color: #0f172a;
                 border: 1px solid #cbd5e1;
                 border-radius: {scale(6)}px;
-                padding-left: {scale(8)}px;
+                padding-left: {scale(7)}px;
                 padding-right: {scale(20)}px;
+                font-size: {scale(11)}px;
                 font-weight: 600;
             }}
         """
@@ -1960,6 +2035,14 @@ class UnifiedSettingsDialog(QDialog):
                 self.combo_theme.blockSignals(True)
                 self.combo_theme.setCurrentIndex(idx)
                 self.combo_theme.blockSignals(False)
+
+        if 'chk_legal_moves' in self.__dict__:
+            show_legal = self.get_setting("show_legal_moves", True)
+            if show_legal is None:
+                show_legal = True
+            self.chk_legal_moves.blockSignals(True)
+            self.chk_legal_moves.setChecked(bool(show_legal))
+            self.chk_legal_moves.blockSignals(False)
 
         if 'combo_highlight' in self.__dict__:
             current_hl = self.get_setting("highlight_color", "Gelb (Standard)")
@@ -2709,6 +2792,29 @@ class UnifiedSettingsDialog(QDialog):
         self.add_nav_item(self.sec_creator, tr_ui("settings.nav_creator_diag", "🔍 Datenbank-Diagnose"), self.page_cr_diag, is_creator=True)
         self.pages.setUpdatesEnabled(True)
         self.sidebar_tree.setUpdatesEnabled(True)
+        self._fit_sidebar_width()
+
+    def _fit_sidebar_width(self):
+        """Sizes the sidebar once from bold nav label metrics so items do not elide across languages/DPIs."""
+        if not hasattr(self, "sidebar_panel") or not hasattr(self, "sidebar_tree"):
+            return
+        bold_font = QFont(self.sidebar_tree.font())
+        bold_font.setPixelSize(max(12, scale(13)))
+        bold_font.setBold(True)
+        fm = QFontMetrics(bold_font)
+        max_w = 0
+        root = self.sidebar_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            sec = root.child(i)
+            for j in range(sec.childCount()):
+                txt = sec.child(j).text(0)
+                w = fm.horizontalAdvance(txt)
+                if w > max_w:
+                    max_w = w
+        # Account for panel margins, tree indentation, item padding, selected border, and scrollbar
+        needed_w = max_w + max(84, scale(96))
+        target_w = max(scale(315), min(scale(390), needed_w))
+        self.sidebar_panel.setFixedWidth(target_w)
 
     def add_section_header(self, text: str) -> QTreeWidgetItem:
         header = QTreeWidgetItem(self.sidebar_tree)
@@ -2731,6 +2837,7 @@ class UnifiedSettingsDialog(QDialog):
             idx = self.pages.indexOf(page_widget)
         item = QTreeWidgetItem(parent_header)
         item.setText(0, text)
+        item.setToolTip(0, text)
         item.setData(0, Qt.ItemDataRole.UserRole, idx)
         item.setData(0, Qt.ItemDataRole.UserRole + 1, is_creator)
         return item
@@ -2757,7 +2864,8 @@ class UnifiedSettingsDialog(QDialog):
                 if getattr(self, '_creator_info_dirty', True) or getattr(self, '_loaded_creator_repo', None) != active_name:
                     self.refresh_creator_info()
                 if hasattr(self, 'page_cr_backups') and idx == self.pages.indexOf(self.page_cr_backups):
-                    self.refresh_backups_list()
+                    if getattr(self, '_backups_dirty', True):
+                        self.refresh_backups_list()
             elif hasattr(self, 'page_trainer_repos') and idx == self.pages.indexOf(self.page_trainer_repos):
                 if getattr(self, '_trainer_cards_dirty', False):
                     self._trainer_cards_dirty = False
@@ -2912,6 +3020,16 @@ class UnifiedSettingsDialog(QDialog):
             tr_ui("settings.highlight_color", "Farbe Zug-Hervorhebung:"),
             tr_ui("settings.highlight_color_sub", "Markierungsfarbe für den zuletzt gespielten Zug und ausgewählte Felder."),
             self.combo_highlight
+        ))
+
+        self.chk_legal_moves = QCheckBox(tr_ui("settings.show_legal_moves_chk", "Aktiviert"))
+        curr_legal = self.get_setting("show_legal_moves", True)
+        self.chk_legal_moves.setChecked(True if curr_legal is None else bool(curr_legal))
+        self.chk_legal_moves.toggled.connect(self.on_legal_moves_toggled)
+        v_design.addWidget(self._make_hairline_row(
+            tr_ui("settings.show_legal_moves", "Legale Züge anzeigen:"),
+            tr_ui("settings.show_legal_moves_sub", "Zeigt dezente Punkte und Ringe für mögliche Zielfelder beim Auswählen oder Ziehen einer Figur."),
+            self.chk_legal_moves
         ))
 
         self.spin_anim = NoWheelSpinBox()
@@ -3080,6 +3198,19 @@ class UnifiedSettingsDialog(QDialog):
             self.main_window.apply_theme()
         if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_highlight_color'):
             self.main_window.board_widget.set_highlight_color(color_name)
+
+    def on_legal_moves_toggled(self, checked: bool):
+        self.set_setting("show_legal_moves", bool(checked))
+        if self.main_window and hasattr(self.main_window, 'board_widget') and hasattr(self.main_window.board_widget, 'set_show_legal_moves'):
+            self.main_window.board_widget.set_show_legal_moves(bool(checked))
+        app = QApplication.instance()
+        if app:
+            for w in app.topLevelWidgets():
+                try:
+                    if not sip.isdeleted(w) and hasattr(w, 'board_widget') and hasattr(w.board_widget, 'set_show_legal_moves'):
+                        w.board_widget.set_show_legal_moves(bool(checked))
+                except Exception:
+                    pass
 
     def on_volume_changed(self, value):
         self.lbl_volume.setText(f"{value}%")
@@ -3358,7 +3489,7 @@ class UnifiedSettingsDialog(QDialog):
         ))
 
         # ── Card 1: Cloud Synchronization (Google Drive / OneDrive) ──
-        g_storage = QGroupBox(tr_widget("settings.storage_title", "☁️ Cloud-Synchronisation (Multi-PC: Google Drive / OneDrive)"))
+        g_storage = QGroupBox(tr_widget("settings.storage_title", "🔄 Cloud-Synchronisation (Multi-PC: Google Drive / OneDrive)"))
         v_storage = QVBoxLayout(g_storage)
         v_storage.setSpacing(scale(12))
 
@@ -3551,6 +3682,43 @@ class UnifiedSettingsDialog(QDialog):
             sync_engine_cache=self.chk_sync_engine_cache.isChecked(),
         )
 
+    def _format_engine_cache_checkbox_label(self, local_dir: str, cloud_dir: str | None = None) -> str:
+        size_bytes = 0
+        if local_dir:
+            local_cache_db = os.path.join(local_dir, "cache", "engine_eval_cache.db")
+            for p in (local_cache_db, local_cache_db + "-wal"):
+                try:
+                    if os.path.isfile(p):
+                        size_bytes += os.path.getsize(p)
+                except OSError:
+                    pass
+        if size_bytes <= 0 and cloud_dir:
+            cloud_zip = os.path.join(cloud_dir, "cloud_sync", "engine_eval_cache.fenixsync.zip")
+            try:
+                if os.path.isfile(cloud_zip):
+                    size_bytes = os.path.getsize(cloud_zip)
+            except OSError:
+                pass
+
+        if size_bytes > 0:
+            if size_bytes >= 1024 * 1024 * 1024:
+                sz_text = f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+            elif size_bytes >= 1024 * 1024:
+                sz_text = f"{size_bytes / (1024 * 1024):.1f} MB"
+            elif size_bytes >= 1024:
+                sz_text = f"{size_bytes / 1024:.0f} KB"
+            else:
+                sz_text = f"{size_bytes} B"
+            return tr_ui(
+                "settings.cloud_opt_engine_cache_sized",
+                "Stockfish Engine-Evaluierungs-Cache synchronisieren (optional — aktuell {size})",
+                size=sz_text,
+            )
+        return tr_ui(
+            "settings.cloud_opt_engine_cache",
+            "Stockfish Engine-Evaluierungs-Cache synchronisieren (optional — kann größer sein)",
+        )
+
     def _refresh_cloud_storage_ui(self):
         from opening_fenix.core.services.cloud_sync_service import CloudSyncService, format_relative_time
         status = CloudSyncService.get_sync_status()
@@ -3566,6 +3734,9 @@ class UnifiedSettingsDialog(QDialog):
         # Refresh sync options checkboxes without triggering saves
         opts = CloudSyncService.get_sync_options()
         if hasattr(self, "chk_sync_portable_settings"):
+            self.chk_sync_engine_cache.setText(
+                self._format_engine_cache_checkbox_label(local_dir, cloud_dir)
+            )
             for cb, key in (
                 (self.chk_sync_portable_settings, "sync_portable_settings"),
                 (self.chk_sync_user_dict, "sync_user_dictionary"),
@@ -3662,89 +3833,108 @@ class UnifiedSettingsDialog(QDialog):
         items = CloudSyncService.get_detailed_items_status()
         online = CloudSyncService.is_enabled()
         tbl = self.tbl_cloud_inspector
-        tbl.setRowCount(len(items))
+        tbl.setUpdatesEnabled(False)
+        try:
+            clear_table_safely(tbl, widget_cols=(5,))
+            tbl.setRowCount(len(items))
 
-        state_labels = {
-            "synced": (tr_ui("settings.cloud_item_synced", "✓ Synchron"), "#166534"),
-            "local_changes": (tr_ui("settings.cloud_item_local_changes", "↑ Lokale Änderungen"), "#1d4ed8"),
-            "cloud_newer": (tr_ui("settings.cloud_item_cloud_newer", "↓ Cloud neuer"), "#7c3aed"),
-            "conflict": (tr_ui("settings.cloud_item_conflict", "⚠️ Konflikt"), "#b45309"),
-            "excluded": (tr_ui("settings.cloud_item_excluded", "🚫 Ausgeschlossen"), "#64748b"),
-            "offline": (tr_ui("settings.cloud_item_offline", "🟠 Offline"), "#b45309"),
-            "local_only": (tr_ui("settings.cloud_item_local_only", "💻 Nur lokal"), "#475569"),
-            "cloud_only": (tr_ui("settings.cloud_item_cloud_only", "☁️ Nur in Cloud"), "#0369a1"),
-        }
+            state_labels = {
+                "synced": (tr_ui("settings.cloud_item_synced", "✓ Synchron"), "#166534"),
+                "local_changes": (tr_ui("settings.cloud_item_local_changes", "↑ Lokale Änderungen"), "#1d4ed8"),
+                "cloud_newer": (tr_ui("settings.cloud_item_cloud_newer", "↓ Cloud neuer"), "#7c3aed"),
+                "conflict": (tr_ui("settings.cloud_item_conflict", "⚠️ Konflikt"), "#b45309"),
+                "excluded": (tr_ui("settings.cloud_item_excluded", "🚫 Ausgeschlossen"), "#64748b"),
+                "offline": (tr_ui("settings.cloud_item_offline", "🟠 Offline"), "#b45309"),
+                "local_only": (tr_ui("settings.cloud_item_local_only", "💻 Nur lokal"), "#475569"),
+                "cloud_only": (tr_ui("settings.cloud_item_cloud_only", "☁️ Nur in Cloud"), "#0369a1"),
+            }
 
-        for row_idx, item in enumerate(items):
-            kind = item["kind"]
-            name = item["name"]
-            st_key = item["state"]
-            st_text, st_color = state_labels.get(st_key, (st_key, "#334155"))
-            kind_label = (
-                tr_ui("settings.cloud_type_repo", "📚 Repertoire")
-                if kind == "repertoire"
-                else tr_ui("settings.cloud_type_profile", "👤 Profil")
-            )
-            rel_t = format_relative_time(item.get("updated_at")) if item.get("updated_at") else "—"
-            upd_by = item.get("updated_by") or ""
-            upd_text = f"{rel_t} ({upd_by})" if upd_by and rel_t != "—" else rel_t
+            row_h = scale(38)
+            row_h_computed = False
 
-            sz = item.get("size_bytes") or 0
-            if sz >= 1024 * 1024:
-                sz_text = f"{sz / (1024 * 1024):.1f} MB"
-            elif sz >= 1024:
-                sz_text = f"{sz / 1024:.0f} KB"
-            elif sz > 0:
-                sz_text = f"{sz} B"
-            else:
-                sz_text = "—"
-
-            tbl.setItem(row_idx, 0, QTableWidgetItem(name))
-            tbl.setItem(row_idx, 1, QTableWidgetItem(kind_label))
-
-            st_item = QTableWidgetItem(st_text)
-            st_item.setForeground(QBrush(QColor(st_color)))
-            tbl.setItem(row_idx, 2, st_item)
-
-            tbl.setItem(row_idx, 3, QTableWidgetItem(upd_text))
-            tbl.setItem(row_idx, 4, QTableWidgetItem(sz_text))
-
-            # Action cell widget
-            act_w = QWidget()
-            act_l = QHBoxLayout(act_w)
-            act_l.setContentsMargins(scale(4), scale(2), scale(4), scale(2))
-            act_l.setSpacing(scale(4))
-
-            if kind == "repertoire":
-                is_excl = bool(item.get("excluded"))
-                btn_excl = QPushButton(
-                    tr_ui("settings.cloud_btn_include", "Aktivieren")
-                    if is_excl
-                    else tr_ui("settings.cloud_btn_exclude", "Ausschließen")
+            for row_idx, item in enumerate(items):
+                kind = item["kind"]
+                name = item["name"]
+                st_key = item["state"]
+                st_text, st_color = state_labels.get(st_key, (st_key, "#334155"))
+                kind_label = (
+                    tr_ui("settings.cloud_type_repo", "📚 Repertoire")
+                    if kind == "repertoire"
+                    else tr_ui("settings.cloud_type_profile", "👤 Profil")
                 )
-                btn_excl.setFixedHeight(scale(26))
-                btn_excl.clicked.connect(
-                    lambda _=False, r=name, ex=not is_excl: self._toggle_repertoire_cloud_exclusion(r, ex)
-                )
-                act_l.addWidget(btn_excl)
+                rel_t = format_relative_time(item.get("updated_at")) if item.get("updated_at") else "—"
+                upd_by = item.get("updated_by") or ""
+                upd_text = f"{rel_t} ({upd_by})" if upd_by and rel_t != "—" else rel_t
 
-            if online and not item.get("excluded"):
-                if item.get("local_exists"):
-                    btn_push = QPushButton("↑")
-                    btn_push.setFixedSize(scale(28), scale(26))
-                    btn_push.setToolTip(tr_ui("settings.cloud_btn_force_push_tip", "Lokal → Cloud erzwingen"))
-                    btn_push.clicked.connect(lambda _=False, k=kind, n=name: self._force_sync_item("push", k, n))
-                    act_l.addWidget(btn_push)
-                if item.get("cloud_exists"):
-                    btn_pull = QPushButton("↓")
-                    btn_pull.setFixedSize(scale(28), scale(26))
-                    btn_pull.setToolTip(tr_ui("settings.cloud_btn_force_pull_tip", "Cloud → Lokal erzwingen (mit Sicherheits-Backup)"))
-                    btn_pull.clicked.connect(lambda _=False, k=kind, n=name: self._force_sync_item("pull", k, n))
-                    act_l.addWidget(btn_pull)
+                sz = item.get("size_bytes") or 0
+                if sz >= 1024 * 1024:
+                    sz_text = f"{sz / (1024 * 1024):.1f} MB"
+                elif sz >= 1024:
+                    sz_text = f"{sz / 1024:.0f} KB"
+                elif sz > 0:
+                    sz_text = f"{sz} B"
+                else:
+                    sz_text = "—"
 
-            act_l.addStretch()
-            tbl.setCellWidget(row_idx, 5, act_w)
-            tbl.setRowHeight(row_idx, scale(34))
+                tbl.setItem(row_idx, 0, QTableWidgetItem(name))
+                tbl.setItem(row_idx, 1, QTableWidgetItem(kind_label))
+
+                st_item = QTableWidgetItem(st_text)
+                st_item.setForeground(QBrush(QColor(st_color)))
+                tbl.setItem(row_idx, 2, st_item)
+
+                tbl.setItem(row_idx, 3, QTableWidgetItem(upd_text))
+                tbl.setItem(row_idx, 4, QTableWidgetItem(sz_text))
+
+                # Action cell widget
+                act_w = QWidget()
+                act_l = QHBoxLayout(act_w)
+                act_l.setContentsMargins(scale(4), scale(3), scale(4), scale(3))
+                act_l.setSpacing(scale(5))
+
+                if kind == "repertoire":
+                    is_excl = bool(item.get("excluded"))
+                    btn_excl = QPushButton(
+                        tr_ui("settings.cloud_btn_include", "Aktivieren")
+                        if is_excl
+                        else tr_ui("settings.cloud_btn_exclude", "Ausschließen")
+                    )
+                    btn_excl.setProperty("class", "TableCompactBtn")
+                    btn_excl.setCursor(Qt.CursorShape.PointingHandCursor)
+                    btn_excl.setMinimumHeight(scale(28))
+                    btn_excl.clicked.connect(
+                        lambda _=False, r=name, ex=not is_excl: self._toggle_repertoire_cloud_exclusion(r, ex)
+                    )
+                    act_l.addWidget(btn_excl)
+
+                if online and not item.get("excluded"):
+                    if item.get("local_exists"):
+                        btn_push = QPushButton("↑")
+                        btn_push.setProperty("class", "TableIconBtn")
+                        btn_push.setCursor(Qt.CursorShape.PointingHandCursor)
+                        btn_push.setFixedSize(scale(30), scale(28))
+                        btn_push.setToolTip(tr_ui("settings.cloud_btn_force_push_tip", "Lokal → Cloud erzwingen"))
+                        btn_push.clicked.connect(lambda _=False, k=kind, n=name: self._force_sync_item("push", k, n))
+                        act_l.addWidget(btn_push)
+                    if item.get("cloud_exists"):
+                        btn_pull = QPushButton("↓")
+                        btn_pull.setProperty("class", "TableIconBtn")
+                        btn_pull.setCursor(Qt.CursorShape.PointingHandCursor)
+                        btn_pull.setFixedSize(scale(30), scale(28))
+                        btn_pull.setToolTip(tr_ui("settings.cloud_btn_force_pull_tip", "Cloud → Lokal erzwingen (mit Sicherheits-Backup)"))
+                        btn_pull.clicked.connect(lambda _=False, k=kind, n=name: self._force_sync_item("pull", k, n))
+                        act_l.addWidget(btn_pull)
+
+                act_l.addStretch()
+                if not row_h_computed and act_l.count() > 1:
+                    row_h = max(row_h, act_w.sizeHint().height() + scale(4))
+                    row_h_computed = True
+                tbl.setCellWidget(row_idx, 5, act_w)
+                tbl.setRowHeight(row_idx, row_h)
+
+            tbl.resizeColumnToContents(5)
+        finally:
+            tbl.setUpdatesEnabled(True)
 
     def _toggle_repertoire_cloud_exclusion(self, repo_name: str, excluded: bool):
         from opening_fenix.core.services.cloud_sync_service import CloudSyncService
@@ -4362,69 +4552,106 @@ class UnifiedSettingsDialog(QDialog):
             card.combo_level.setVisible(is_active)
             card.combo_lang.setVisible(is_active)
             if is_active:
-                card.setMinimumHeight(scale(168))
-                card.setMaximumHeight(scale(198))
                 card.populate_levels()
                 card.populate_comment_languages()
-            else:
-                card.setMinimumHeight(scale(78))
-                card.setMaximumHeight(scale(78))
+                card.populate_priority_elos()
+            card._apply_prio_elo_visibility()
+            card._apply_active_card_height()
             card._last_title_font_key = None
             card.adjust_title_font()
+        elif is_active:
+            # Refresh Elo list in-place in case a new Elo was imported while the dialog stayed open
+            card.populate_priority_elos()
+            card._apply_prio_elo_visibility()
+            card._apply_active_card_height()
         card.update_style()
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.Type.Resize:
             scroll_tc = self.__dict__.get("scroll_trainer_cards")
             if scroll_tc is not None and obj == scroll_tc.viewport():
-                self.rearrange_trainer_cards_grid()
+                if not getattr(self, "_trainer_cards_rearrange_pending", False):
+                    self._trainer_cards_rearrange_pending = True
+                    QTimer.singleShot(0, self._run_deferred_trainer_cards_rearrange)
             elif obj == self.__dict__.get("levels_container"):
-                self.rearrange_levels_grid()
+                if not getattr(self, "_levels_rearrange_pending", False):
+                    self._levels_rearrange_pending = True
+                    QTimer.singleShot(0, self._run_deferred_levels_rearrange)
         return False
 
+    def _run_deferred_trainer_cards_rearrange(self):
+        self._trainer_cards_rearrange_pending = False
+        if not sip.isdeleted(self):
+            self.rearrange_trainer_cards_grid()
+
+    def _run_deferred_levels_rearrange(self):
+        self._levels_rearrange_pending = False
+        if not sip.isdeleted(self):
+            self.rearrange_levels_grid()
+
     def rearrange_trainer_cards_grid(self):
+        if getattr(self, "_rearranging_trainer_cards", False):
+            return
         if "scroll_trainer_cards" not in self.__dict__ or "trainer_cards_layout" not in self.__dict__:
             return
-            
-        width = self.scroll_trainer_cards.viewport().width()
+
+        # Use outer scroll area width minus fixed scrollbar allowance so column count
+        # cannot oscillate when the vertical scrollbar toggles visibility.
+        outer_w = self.scroll_trainer_cards.width()
+        width = outer_w - scale(18) if outer_w > scale(30) else self.scroll_trainer_cards.viewport().width()
         if width <= 10:
             return
-            
+
         card_min_width = scale(250)
         spacing = scale(8)
         margins = self.trainer_cards_layout.contentsMargins()
         avail_width = width - (margins.left() + margins.right()) - scale(8)
-        
+
         cols = max(1, avail_width // (card_min_width + spacing))
-        
+
         if hasattr(self, "_current_cols") and self._current_cols == cols:
             return
         self._current_cols = cols
-        
-        cards = []
-        for i in range(self.trainer_cards_layout.count()):
-            item = self.trainer_cards_layout.itemAt(i)
-            if item and item.widget():
-                cards.append(item.widget())
-                
-        for card in cards:
-            self.trainer_cards_layout.removeWidget(card)
-            
-        for c in range(max(cols, 10)):
-            self.trainer_cards_layout.setColumnStretch(c, 1 if c < cols else 0)
 
-        for idx, card in enumerate(cards):
-            r = idx // cols
-            c = idx % cols
-            self.trainer_cards_layout.addWidget(card, r, c, Qt.AlignmentFlag.AlignTop)
+        self._rearranging_trainer_cards = True
+        try:
+            cards = []
+            for i in range(self.trainer_cards_layout.count()):
+                item = self.trainer_cards_layout.itemAt(i)
+                if item and item.widget():
+                    cards.append(item.widget())
+
+            for card in cards:
+                self.trainer_cards_layout.removeWidget(card)
+
+            for c in range(max(cols, 10)):
+                self.trainer_cards_layout.setColumnStretch(c, 1 if c < cols else 0)
+
+            for idx, card in enumerate(cards):
+                r = idx // cols
+                c = idx % cols
+                self.trainer_cards_layout.addWidget(card, r, c, Qt.AlignmentFlag.AlignTop)
+        finally:
+            self._rearranging_trainer_cards = False
 
     def rearrange_levels_grid(self):
+        if getattr(self, "_rearranging_levels", False):
+            return
         if not hasattr(self, "level_pills") or not self.level_pills or "levels_layout" not in self.__dict__:
             return
-        for pill in self.level_pills:
-            self.levels_layout.removeWidget(pill)
-        for pill in self.level_pills:
-            self.levels_layout.addWidget(pill)
+        container = self.__dict__.get("levels_container")
+        cur_w = container.width() if container is not None else 0
+        if getattr(self, "_last_levels_container_w", None) == cur_w:
+            return
+        self._last_levels_container_w = cur_w
+        self._rearranging_levels = True
+        try:
+            for pill in self.level_pills:
+                self.levels_layout.removeWidget(pill)
+            for pill in self.level_pills:
+                self.levels_layout.addWidget(pill)
+        finally:
+            self._rearranging_levels = False
 
     def start_loading_animation(self):
         if not getattr(self, 'loading_timer', None):
@@ -4739,12 +4966,16 @@ class UnifiedSettingsDialog(QDialog):
             "days": tr_ui("common.unit_days", "Tage"),
             "months": tr_ui("common.unit_months", "Monate")
         }
+        spin_font = QFont(self.font())
+        spin_font.setPixelSize(max(12, scale(13)))
+        spin_fm = QFontMetrics(spin_font)
+        box_spin_w = max(92, scale(96), spin_fm.horizontalAdvance("9999") + max(48, scale(52)))
         for box_num in range(1, 8):
             row = (box_num - 1) // 2
             col_offset = ((box_num - 1) % 2) * 3
             lbl_box = QLabel(f"📦 Box {box_num}:")
             lbl_box.setStyleSheet(f"font-weight: 700; color: #0f172a; font-size: {scale(12)}px; border: none; background: transparent;")
-            spin_val = NoWheelSpinBox(); spin_val.setRange(1, 999); spin_val.setFixedWidth(scale(82))
+            spin_val = NoWheelSpinBox(); spin_val.setRange(1, 999); spin_val.setFixedWidth(box_spin_w)
             combo_unit = NoWheelComboBox()
             for uk, uv in unit_labels.items(): combo_unit.addItem(uv, uk)
             combo_unit.setFixedWidth(scale(110))
@@ -5067,6 +5298,19 @@ class UnifiedSettingsDialog(QDialog):
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_db_coverage", "🎯 Positionen mit Prio-Score:")), 1, 2); grid_meta.addWidget(self.lbl_cr_db_cov, 1, 3)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_comment_lang", "💬 Kommentar-Sprache:")), 2, 0); grid_meta.addWidget(self.combo_cr_comment_lang, 2, 1)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_comment_stats", "💬 Kommentare im Kurs:")), 2, 2); grid_meta.addWidget(self.lbl_cr_comment_stats, 2, 3)
+
+        # Multi-Elo summary: only visible if the course carries 2+ Elo brackets
+        self.lbl_cr_elos_caption = QLabel(tr_ui("repo_settings.label_included_elos", "📚 Enthaltene Elo-Stufen:"))
+        self.lbl_cr_elos = QLabel("-")
+        self.lbl_cr_elos.setWordWrap(True)
+        self.lbl_cr_elos.setStyleSheet("font-weight: 700; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 10px;")
+        self.lbl_cr_elos.setToolTip(tr_ui(
+            "repo_settings.tip_included_elos",
+            "Lernende können im Trainer zwischen diesen Elo-Stufen wechseln. Weitere Stufen importierst du im Task-Center."
+        ))
+        grid_meta.addWidget(self.lbl_cr_elos_caption, 3, 0); grid_meta.addWidget(self.lbl_cr_elos, 3, 1, 1, 3)
+        self.lbl_cr_elos_caption.setVisible(False)
+        self.lbl_cr_elos.setVisible(False)
         v_id.addLayout(grid_meta)
 
         # Description
@@ -5247,6 +5491,21 @@ class UnifiedSettingsDialog(QDialog):
             self.combo_cr_elo.setCurrentText(get_elo_display(elo))
             self.combo_cr_elo.blockSignals(False)
 
+            # Multi-Elo summary line (hidden for single-Elo courses)
+            try:
+                from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+                _def_elo, _elos = get_repertoire_lichess_elos_fast(backend.active_repo_name)
+            except Exception:
+                _def_elo, _elos = None, []
+            if 'lbl_cr_elos' in self.__dict__:
+                multi = len(_elos) > 1
+                self.lbl_cr_elos_caption.setVisible(multi)
+                self.lbl_cr_elos.setVisible(multi)
+                if multi:
+                    self.lbl_cr_elos.setText("  ·  ".join(
+                        f"{get_elo_display(e)} ★" if e == _def_elo else get_elo_display(e) for e in _elos
+                    ))
+
             color = backend.get_meta("color", "w")
             self.combo_cr_color.blockSignals(True)
             idx_col = self.combo_cr_color.findData(color)
@@ -5420,6 +5679,12 @@ class UnifiedSettingsDialog(QDialog):
         internal_elo = get_elo_internal(val)
         backend.set_meta("elo", internal_elo)
         backend.set_meta("lichess_elo", internal_elo)
+        try:
+            # Multi-Elo: make Move.priority_score follow the new default (no-op if nothing stored for it yet)
+            from opening_fenix.core.services.priority_service import sync_move_priorities_to_default_elo
+            sync_move_priorities_to_default_elo(backend.session, internal_elo)
+        except Exception:
+            pass
         try:
             backend.session.commit()
         except:
@@ -6626,7 +6891,36 @@ class UnifiedSettingsDialog(QDialog):
         self.tbl_backups.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
         self.tbl_backups.setColumnWidth(0, scale(155))
         self.tbl_backups.setColumnWidth(3, scale(180))
+        self.tbl_backups.horizontalHeader().sectionResized.connect(self._on_backups_header_resized)
         layout.addWidget(self.tbl_backups)
+
+    def _on_backups_header_resized(self, logical_index: int, old_size: int, new_size: int):
+        if logical_index == 1 and old_size != new_size:
+            self._schedule_backups_row_resize()
+
+    def _schedule_backups_row_resize(self):
+        if not getattr(self, "_backups_row_resize_pending", False):
+            self._backups_row_resize_pending = True
+            QTimer.singleShot(0, self._run_deferred_backups_row_resize)
+
+    def _run_deferred_backups_row_resize(self):
+        self._backups_row_resize_pending = False
+        if not sip.isdeleted(self):
+            self._adjust_backups_row_heights()
+
+    def _adjust_backups_row_heights(self, force: bool = False):
+        tbl = getattr(self, "tbl_backups", None)
+        if tbl is None or sip.isdeleted(tbl) or tbl.rowCount() == 0:
+            return
+        col1_w = tbl.columnWidth(1)
+        if not force and getattr(self, "_last_backups_col1_w", None) == col1_w:
+            return
+        self._last_backups_col1_w = col1_w
+        min_row_h = getattr(self, "_backups_min_row_h", scale(85))
+        tbl.resizeRowsToContents()
+        for r in range(tbl.rowCount()):
+            if tbl.rowHeight(r) < min_row_h:
+                tbl.setRowHeight(r, min_row_h)
 
     def refresh_backups_list(self):
         backend = self.ensure_backend_for_active_repo()
@@ -6635,7 +6929,9 @@ class UnifiedSettingsDialog(QDialog):
         backups = list_repertoire_backups(backend.active_repo_name)
         self.tbl_backups.setUpdatesEnabled(False)
         try:
+            clear_table_safely(self.tbl_backups, widget_cols=(3,))
             self.tbl_backups.setRowCount(len(backups))
+            min_row_h = scale(85)
             for row, b in enumerate(backups):
                 dt_str = b["created_at"].strftime("%d.%m.%Y %H:%M:%S")
                 size_mb = f"{b['size_bytes'] / (1024 * 1024):.2f} MB"
@@ -6671,14 +6967,19 @@ class UnifiedSettingsDialog(QDialog):
                 cell_l = QVBoxLayout(cell_w)
                 cell_l.setContentsMargins(scale(4), scale(4), scale(4), scale(4))
                 cell_l.setSpacing(scale(4))
+                cell_l.setAlignment(Qt.AlignmentFlag.AlignVCenter)
                 cell_l.addWidget(btn_restore)
                 cell_l.addWidget(btn_delete)
+                if row == 0:
+                    min_row_h = max(min_row_h, cell_w.sizeHint().height() + scale(8))
                 self.tbl_backups.setCellWidget(row, 3, cell_w)
 
-            self.tbl_backups.resizeRowsToContents()
-            for r in range(self.tbl_backups.rowCount()):
-                if self.tbl_backups.rowHeight(r) < scale(85):
-                    self.tbl_backups.setRowHeight(r, scale(85))
+            self._backups_min_row_h = min_row_h
+            self._last_backups_col1_w = None
+            if self.tbl_backups.isVisible():
+                self._adjust_backups_row_heights(force=True)
+            else:
+                self._schedule_backups_row_resize()
         finally:
             self.tbl_backups.setUpdatesEnabled(True)
 

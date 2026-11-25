@@ -19,8 +19,8 @@ def _set_winmm_timer_period(enable: bool) -> None:
         pass
 
 from PyQt6.QtWidgets import QWidget, QSizePolicy
-from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QIcon, QPixmap, QFont
-from PyQt6.QtCore import Qt, QRect, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QSize, QVariantAnimation, QEasingCurve
+from PyQt6.QtGui import QPainter, QColor, QPen, QBrush, QPolygonF, QPixmap, QFont, QPainterPath, QRegion, QCursor
+from PyQt6.QtCore import Qt, QEvent, QRect, QRectF, pyqtSignal, QPoint, QTimer, QPointF, QVariantAnimation, QEasingCurve
 from PyQt6.QtSvg import QSvgRenderer
 from opening_fenix.core.data_tools import get_base_path
 from opening_fenix.core.logger import logger
@@ -130,6 +130,259 @@ USER_HIGHLIGHT_COLORS = {
 }
 
 
+class _PromotionPieceHandle:
+    """Lightweight handle for a promotion slot (preserves .click() / .geometry() API without child QPushButtons)."""
+
+    def __init__(self, popup: "PromotionPickerPopup", piece_type: int, index: int):
+        self._popup = popup
+        self.piece_type = piece_type
+        self.index = index
+
+    def click(self):
+        self._popup._pick(self.piece_type)
+
+    def geometry(self) -> QRect:
+        return self._popup._slot_rect(self.index)
+
+    def rect(self) -> QRect:
+        s = self._popup._btn_size
+        return QRect(0, 0, s, s)
+
+    def underMouse(self) -> bool:
+        return self._popup._hovered_index == self.index
+
+
+class PromotionPickerPopup(QWidget):
+    """
+    Floating promotion piece chooser anchored directly over the target promotion square.
+
+    Implemented as a single custom-painted popup widget (like QMenu) with direct mouse/hover
+    tracking and pre-baked native-DPR slot pixmaps. Avoiding child QPushButtons and QSS :hover
+    eliminates Qt6/Windows Qt::Popup capture + fractional-DPI hover stickiness and cuts paint
+    events by 3x.
+    """
+    promotion_selected = pyqtSignal(int)
+
+    def __init__(self, board_widget, color: bool, square_size: float, expand_upward: bool = False):
+        super().__init__(board_widget, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setMouseTracking(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setObjectName("PromotionPickerPopup")
+
+        self._btn_size = max(36, int(round(square_size)))
+        self._margin = max(2, scale(2))
+        self._radius = scale(8)
+        self._slot_radius = scale(6)
+        self._icon_dim = max(28, int(self._btn_size * 0.86))
+
+        self._pieces = [chess.QUEEN, chess.KNIGHT, chess.ROOK, chess.BISHOP]
+        if expand_upward:
+            self._pieces = list(reversed(self._pieces))
+
+        self._hovered_index = -1
+        self._pressed_index = None
+
+        self._bg_color = QColor(255, 252, 247)
+        self._border_color = QColor("#b58863")
+        self._hover_color = QColor(217, 119, 6, 56)
+        self._pressed_color = QColor(217, 119, 6, 48)
+        self._fallback_text_color = QColor("#3e2723")
+
+        # Pre-bake normal and hovered slot pixmaps once at native DPR for O(1) 1:1 blits
+        dpr = max(1.0, float(board_widget.devicePixelRatioF()))
+        phys_s = max(1, int(round(self._btn_size * dpr)))
+        pad = (self._btn_size - self._icon_dim) / 2.0
+        icon_rect = QRectF(pad, pad, self._icon_dim, self._icon_dim)
+        slot_rect_f = QRectF(0.0, 0.0, float(self._btn_size), float(self._btn_size))
+        fallback_font = QFont("Segoe UI", max(12, int(self._btn_size * 0.42)), QFont.Weight.Bold)
+
+        self._normal_slots = []
+        self._hover_slots = []
+
+        for pt in self._pieces:
+            key = PIECE_KEY_MAP.get((pt, color))
+            pm = board_widget.piece_pixmaps.get(key) if key else None
+            has_pm = pm is not None and not pm.isNull()
+            pm_src_rect = QRectF(pm.rect()) if has_pm else QRectF()
+            sym = chess.PIECE_SYMBOLS[pt].upper()
+
+            for tint, target_list in (
+                (None, self._normal_slots),
+                (self._hover_color, self._hover_slots),
+            ):
+                slot_pm = QPixmap(phys_s, phys_s)
+                slot_pm.setDevicePixelRatio(dpr)
+                slot_pm.fill(self._bg_color)
+                p = QPainter(slot_pm)
+                if tint is not None:
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(tint)
+                    p.drawRoundedRect(slot_rect_f, self._slot_radius, self._slot_radius)
+                if has_pm:
+                    p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+                    p.drawPixmap(icon_rect, pm, pm_src_rect)
+                else:
+                    p.setFont(fallback_font)
+                    p.setPen(self._fallback_text_color)
+                    p.drawText(slot_rect_f, Qt.AlignmentFlag.AlignCenter, sym)
+                p.end()
+                target_list.append(slot_pm)
+
+        self.piece_buttons = {
+            pt: _PromotionPieceHandle(self, pt, idx)
+            for idx, pt in enumerate(self._pieces)
+        }
+
+        total_w = self._btn_size + 2 * self._margin
+        total_h = self._btn_size * len(self._pieces) + 2 * self._margin
+        self.setFixedSize(total_w, total_h)
+
+        # Crisp rounded popup silhouette without costly Win32 translucent alpha compositing
+        mask_path = QPainterPath()
+        mask_path.addRoundedRect(QRectF(0.0, 0.0, float(total_w), float(total_h)), self._radius, self._radius)
+        self.setMask(QRegion(mask_path.toFillPolygon().toPolygon()))
+
+    def _slot_rect(self, idx: int) -> QRect:
+        return QRect(self._margin, self._margin + idx * self._btn_size, self._btn_size, self._btn_size)
+
+    def _index_at(self, pos: QPointF) -> int:
+        x = pos.x() - self._margin
+        y = pos.y() - self._margin
+        if 0.0 <= x < self._btn_size and 0.0 <= y < self._btn_size * len(self._pieces):
+            idx = int(y // self._btn_size)
+            if 0 <= idx < len(self._pieces):
+                return idx
+        return -1
+
+    def _update_slots(self, *indices: int):
+        dirty = QRect()
+        n = len(self._pieces)
+        for idx in indices:
+            if idx is not None and 0 <= idx < n:
+                dirty = dirty.united(self._slot_rect(idx))
+        if not dirty.isNull():
+            self.update(dirty)
+
+    def _set_hovered_index(self, idx: int):
+        if idx == self._hovered_index:
+            return
+        old = self._hovered_index
+        self._hovered_index = idx
+        self._update_slots(old, idx)
+
+    def _pick(self, piece_type: int):
+        self.promotion_selected.emit(piece_type)
+        self.close()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Immediately highlight the piece under the cursor without waiting for a mouse move
+        local_pos = self.mapFromGlobal(QCursor.pos())
+        self._set_hovered_index(self._index_at(QPointF(local_pos)))
+
+    def event(self, ev):
+        etype = ev.type()
+        if etype in (QEvent.Type.HoverEnter, QEvent.Type.HoverMove):
+            self._set_hovered_index(self._index_at(ev.position()))
+            return True
+        if etype == QEvent.Type.HoverLeave:
+            self._set_hovered_index(-1)
+            return True
+        return super().event(ev)
+
+    def mouseMoveEvent(self, event):
+        self._set_hovered_index(self._index_at(event.position()))
+        event.accept()
+
+    def leaveEvent(self, event):
+        self._set_hovered_index(-1)
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event):
+        pos = event.position()
+        if event.button() == Qt.MouseButton.LeftButton:
+            idx = self._index_at(pos)
+            if idx != -1:
+                old_pressed = self._pressed_index
+                self._pressed_index = idx
+                self._set_hovered_index(idx)
+                self._update_slots(old_pressed, idx)
+                event.accept()
+                return
+            if not self.rect().contains(pos.toPoint()):
+                self.close()
+                event.accept()
+                return
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.close()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pressed = self._pressed_index
+            self._pressed_index = None
+            idx = self._index_at(event.position())
+            self._set_hovered_index(idx)
+            if pressed is not None:
+                self._update_slots(pressed)
+                if idx == pressed and 0 <= idx < len(self._pieces):
+                    self._pick(self._pieces[idx])
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        clip = event.rect()
+        w, h, m = self.width(), self.height(), self._margin
+
+        touches_outer_margin = (
+            clip.left() < m
+            or clip.top() < m
+            or clip.right() >= w - m
+            or clip.bottom() >= h - m
+        )
+        touches_rounded_corner = (
+            touches_outer_margin
+            or clip.top() < self._radius
+            or clip.bottom() >= h - self._radius
+        )
+        if touches_outer_margin:
+            painter.fillRect(clip, self._bg_color)
+
+        for i in range(len(self._pieces)):
+            sr = self._slot_rect(i)
+            if not sr.intersects(clip):
+                continue
+            slot_pm = self._hover_slots[i] if self._hovered_index == i else self._normal_slots[i]
+            painter.drawPixmap(sr.topLeft(), slot_pm)
+            if self._pressed_index == i and self._hovered_index == i:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(self._pressed_color)
+                painter.drawRoundedRect(QRectF(sr), self._slot_radius, self._slot_radius)
+
+        if touches_rounded_corner:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(self._border_color, 2.0))
+            painter.drawRoundedRect(QRectF(1.0, 1.0, float(w) - 2.0, float(h) - 2.0), self._radius, self._radius)
+
+        painter.end()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        super().keyPressEvent(event)
+
+
 class ChessBoardWidget(QWidget):
     move_executed = pyqtSignal(chess.Move)
     piece_slide_finished = pyqtSignal()
@@ -156,6 +409,11 @@ class ChessBoardWidget(QWidget):
 
         self.dragging_piece = None
         self.drag_start_square = None
+        self.selected_square = None
+        self.show_legal_moves = True
+        self._press_was_already_selected = False
+        self._promotion_popup = None
+        self._pending_promotion_click = None
         self.mouse_pos = QPointF()
         self.is_animating = False
         self.last_move = None
@@ -327,6 +585,21 @@ class ChessBoardWidget(QWidget):
         self._needs_full_board_paint = True
         self.update()
 
+    def set_show_legal_moves(self, enabled: bool):
+        enabled = bool(enabled)
+        if self.show_legal_moves != enabled:
+            self.show_legal_moves = enabled
+            self._invalidate_snapshot()
+            self._needs_full_board_paint = True
+            self.update()
+
+    def clear_selection(self):
+        self._pending_promotion_click = None
+        if self.selected_square is not None:
+            self.selected_square = None
+            self._invalidate_snapshot()
+            self.update()
+
     def load_pieces(self):
         pieces = ['P', 'N', 'B', 'R', 'Q', 'K']
         colors = ['w', 'b']
@@ -362,6 +635,7 @@ class ChessBoardWidget(QWidget):
 
     def set_fen(self, fen):
         self.board.set_fen(fen)
+        self._pending_promotion_click = None
         self.last_move = None
         self.hint_arrow = None
         self.solution_arrow = None
@@ -518,22 +792,50 @@ class ChessBoardWidget(QWidget):
                 self.update()
             return
 
-        # Left-click: Make move or clear existing drawings
+        # Left-click: Make move (click-to-move or drag-and-drop) or clear existing drawings
         if event.button() == Qt.MouseButton.LeftButton:
+            if self._promotion_popup is not None:
+                try:
+                    self._promotion_popup.close()
+                except Exception:
+                    pass
+                self._promotion_popup = None
+                return
+
             square = self.get_square_from_pos(event.position())
             # In ChessBase/Lichess: Left-clicking on an empty square or outside clears user drawings
             if self.user_arrows or self.user_highlights:
                 if square is None or self.board.piece_at(square) is None:
                     self.clear_user_drawings()
                     self.update()
+
+            # Validate existing selection against current board state
+            active_sel = self._get_active_selection_square(include_drag=False)
+
+            # Click-to-move: if a friendly piece is already selected, try moving it to the clicked square
+            if active_sel is not None and square is not None and square != active_sel:
+                if self._attempt_user_move(active_sel, square, defer_promotion=True):
+                    return
+
             if square is not None:
                 piece = self.board.piece_at(square)
                 if piece and piece.color == self.board.turn:
+                    self._press_was_already_selected = (active_sel == square)
+                    self.selected_square = square
                     self.dragging_piece = piece
                     self.drag_start_square = square
                     self.mouse_pos = event.position()
+                    self._invalidate_snapshot()
                     self._last_drag_dirty_rect = self._get_drag_dirty_rect()
                     self.update()
+                    return
+
+            # Clicked empty non-target square, opponent non-capture piece, or outside board -> deselect
+            self._press_was_already_selected = False
+            if self.selected_square is not None:
+                self.selected_square = None
+                self._invalidate_snapshot()
+                self.update()
 
     def mouseMoveEvent(self, event):
         if self.is_drawing:
@@ -585,35 +887,159 @@ class ChessBoardWidget(QWidget):
                 self.drawings_changed.emit()
             return
 
+        if event.button() == Qt.MouseButton.LeftButton and self._pending_promotion_click is not None:
+            from_sq, to_sq, color = self._pending_promotion_click
+            self._pending_promotion_click = None
+            self._show_promotion_picker(from_sq, to_sq, color)
+            return
+
         if self.dragging_piece:
             end_square = self.get_square_from_pos(event.position())
             drag_start = self.drag_start_square
-            dragging = self.dragging_piece
-            
+            was_already_selected = self._press_was_already_selected
+            self._press_was_already_selected = False
+
             # Clear dragging state immediately so any repaint inside the signal handler knows the drag is done
             self.dragging_piece = None
             self.drag_start_square = None
             self._last_drag_dirty_rect = None
-            
+
             if end_square is not None and drag_start is not None:
-                move = None
-                if dragging.piece_type == chess.KING:
-                    target = self.board.piece_at(end_square)
-                    if target and target.color == dragging.color and target.piece_type == chess.ROOK:
-                        for cand in self.board.legal_moves:
-                            if self.board.is_castling(cand):
-                                if chess.square_file(end_square) > chess.square_file(drag_start):
-                                    if self.board.is_kingside_castling(cand): move = cand; break
-                                elif chess.square_file(end_square) < chess.square_file(drag_start):
-                                    if self.board.is_queenside_castling(cand): move = cand; break
-                if move is None:
-                    is_promo = (dragging.piece_type == chess.PAWN and (chess.square_rank(end_square) in [0, 7]))
-                    promotion = chess.QUEEN if is_promo else None
-                    move = chess.Move(drag_start, end_square, promotion=promotion)
-                if move in self.board.legal_moves: 
-                    self.clear_user_drawings()
-                    self.move_executed.emit(move)
+                if end_square == drag_start:
+                    # Click-and-release on the same square: toggle click-to-move selection
+                    self.selected_square = None if was_already_selected else drag_start
+                else:
+                    self._attempt_user_move(drag_start, end_square)
+                    self.selected_square = None
+            else:
+                self.selected_square = None
+
+            self._invalidate_snapshot()
             self.update()
+
+    def _get_active_selection_square(self, include_drag: bool = True):
+        """Returns the currently selected/dragged square if it still holds a friendly piece."""
+        sq = self.drag_start_square if (include_drag and self.dragging_piece is not None) else self.selected_square
+        if sq is None:
+            return None
+        piece = self.board.piece_at(sq)
+        if piece is None or piece.color != self.board.turn:
+            self.selected_square = None
+            return None
+        return sq
+
+    def _resolve_castling_move(self, from_sq, to_sq, moving_piece):
+        """Supports ChessBase/Lichess-style castling by dragging/clicking the King onto its own Rook."""
+        if moving_piece is None or moving_piece.piece_type != chess.KING:
+            return None
+        target = self.board.piece_at(to_sq)
+        if target and target.color == moving_piece.color and target.piece_type == chess.ROOK:
+            for cand in self.board.legal_moves:
+                if self.board.is_castling(cand):
+                    if chess.square_file(to_sq) > chess.square_file(from_sq) and self.board.is_kingside_castling(cand):
+                        return cand
+                    if chess.square_file(to_sq) < chess.square_file(from_sq) and self.board.is_queenside_castling(cand):
+                        return cand
+        return None
+
+    def _attempt_user_move(self, from_sq, to_sq, defer_promotion: bool = False) -> bool:
+        """
+        Attempts to execute a move from `from_sq` to `to_sq`.
+        Opens the promotion picker for pawn promotions (deferred until mouse release for
+        click-to-move so Qt::Popup never opens mid-press and splits Win32 mouse capture);
+        otherwise emits `move_executed` if legal.
+        Returns True if the move was legal (or opened/queued the promotion picker), False otherwise.
+        """
+        moving_piece = self.board.piece_at(from_sq)
+        if moving_piece is None or moving_piece.color != self.board.turn:
+            return False
+
+        # 1. King-onto-Rook castling shortcut
+        castle_move = self._resolve_castling_move(from_sq, to_sq, moving_piece)
+        if castle_move is not None and castle_move in self.board.legal_moves:
+            self.selected_square = None
+            self.clear_user_drawings()
+            self._invalidate_snapshot()
+            self.move_executed.emit(castle_move)
+            self.update()
+            return True
+
+        # 2. Pawn promotion (offer Queen / Knight / Rook / Bishop picker)
+        if moving_piece.piece_type == chess.PAWN and chess.square_rank(to_sq) in (0, 7):
+            promo_moves = [
+                m for m in self.board.legal_moves
+                if m.from_square == from_sq and m.to_square == to_sq and m.promotion is not None
+            ]
+            if promo_moves:
+                self.selected_square = None
+                self._invalidate_snapshot()
+                self.update()
+                if defer_promotion:
+                    self._pending_promotion_click = (from_sq, to_sq, moving_piece.color)
+                else:
+                    self._show_promotion_picker(from_sq, to_sq, moving_piece.color)
+                return True
+
+        # 3. Standard legal move
+        move = chess.Move(from_sq, to_sq)
+        if move in self.board.legal_moves:
+            self.selected_square = None
+            self.clear_user_drawings()
+            self._invalidate_snapshot()
+            self.move_executed.emit(move)
+            self.update()
+            return True
+
+        return False
+
+    def _show_promotion_picker(self, from_sq, to_sq, color: bool):
+        """Displays a floating promotion piece picker anchored over the target square."""
+        if self._promotion_popup is not None:
+            try:
+                self._promotion_popup.close()
+            except Exception:
+                pass
+            self._promotion_popup = None
+
+        _, square_size, x_offset, y_offset = self.get_metrics()
+        self._update_pixmap_cache(square_size)
+
+        f = chess.square_file(to_sq)
+        r = chess.square_rank(to_sq)
+        col = 7 - f if self.flipped else f
+        row = r if self.flipped else 7 - r
+        expand_upward = (row >= 4)
+
+        popup = PromotionPickerPopup(self, color, square_size, expand_upward=expand_upward)
+        self._promotion_popup = popup
+
+        def _on_picked(piece_type: int):
+            self._promotion_popup = None
+            move = chess.Move(from_sq, to_sq, promotion=piece_type)
+            if move in self.board.legal_moves:
+                self.clear_user_drawings()
+                self._invalidate_snapshot()
+                self.move_executed.emit(move)
+                self.update()
+
+        def _on_destroyed(*_args):
+            if self._promotion_popup is popup:
+                self._promotion_popup = None
+
+        popup.promotion_selected.connect(_on_picked)
+        popup.destroyed.connect(_on_destroyed)
+
+        sq_x = x_offset + col * square_size
+        sq_y = y_offset + row * square_size
+        margin = popup._margin
+        if expand_upward:
+            local_pt = QPoint(int(round(sq_x)) - margin, int(round(sq_y + square_size)) - popup.height() + margin)
+        else:
+            local_pt = QPoint(int(round(sq_x)) - margin, int(round(sq_y)) - margin)
+
+        global_pt = self.mapToGlobal(local_pt)
+        popup.move(global_pt)
+        popup.show()
 
     def _draw_arrow(self, painter, start, end, color, square_size):
         f1, r1 = chess.square_file(start), chess.square_rank(start)
@@ -867,7 +1293,9 @@ class ChessBoardWidget(QWidget):
                 f, r = chess.square_file(sq), chess.square_rank(sq)
                 rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
                 painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+        self._paint_selected_square(painter, square_size)
         self._paint_pieces(painter, square_size, skip_square=skip_square, skip_squares=skip_squares)
+        self._paint_legal_move_dots(painter, square_size)
         self._paint_circles(painter, square_size, include_live_preview=False)
         self._paint_arrows(painter, square_size, include_live_preview=False)
         painter.end()
@@ -876,7 +1304,63 @@ class ChessBoardWidget(QWidget):
         self._snapshot_size = self.size()
         self._snapshot_phase = (round(rem_dx_phys, 4), round(rem_dy_phys, 4))
         self._snapshot_skip_sq = skip_square
+        self._snapshot_selected_sq = self._get_active_selection_square(include_drag=True)
+        self._snapshot_show_legal = self.show_legal_moves
         return snapshot
+
+    def _paint_selected_square(self, painter, square_size):
+        """Highlights the currently selected or dragged piece square."""
+        active_sq = self._get_active_selection_square(include_drag=True)
+        if active_sq is None:
+            return
+        f, r = chess.square_file(active_sq), chess.square_rank(active_sq)
+        rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._highlight_brush)
+        painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+        painter.restore()
+
+    def _paint_legal_move_dots(self, painter, square_size):
+        """Draws Lichess/Chess.com-style legal move dots (empty squares) and capture rings."""
+        if not self.show_legal_moves or self.is_animating:
+            return
+        active_sq = self._get_active_selection_square(include_drag=True)
+        if active_sq is None:
+            return
+
+        targets = {}  # target_sq -> is_capture
+        for move in self.board.legal_moves:
+            if move.from_square == active_sq:
+                if move.to_square not in targets:
+                    targets[move.to_square] = self.board.is_capture(move)
+
+        if not targets:
+            return
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        dot_color = QColor(0, 0, 0, 62)
+        ring_color = QColor(0, 0, 0, 68)
+        dot_radius = square_size * 0.16
+        ring_radius = square_size * 0.42
+        ring_width = max(2.5, square_size * 0.085)
+
+        for target_sq, is_cap in targets.items():
+            f, r = chess.square_file(target_sq), chess.square_rank(target_sq)
+            rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
+            cx = (cd + 0.5) * square_size
+            cy = (rd + 0.5) * square_size
+            if is_cap:
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.setPen(QPen(ring_color, ring_width))
+                painter.drawEllipse(QPointF(cx, cy), ring_radius, ring_radius)
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(dot_color)
+                painter.drawEllipse(QPointF(cx, cy), dot_radius, dot_radius)
+
+        painter.restore()
 
     def _paint_arrows(self, painter, square_size, include_live_preview=True):
         """Draws all arrows (hint, solution, explorer, user)."""
@@ -950,11 +1434,14 @@ class ChessBoardWidget(QWidget):
                 self.animating_piece_data['from_square'] if is_anim else (self.drag_start_square if is_drag else None)
             )
 
+            expected_selected_sq = self._get_active_selection_square(include_drag=True)
             if (self._board_snapshot is None or
                 getattr(self, '_snapshot_flipped', None) != self.flipped or
                 getattr(self, '_snapshot_size', None) != self.size() or
                 getattr(self, '_snapshot_phase', None) != phase_key or
-                getattr(self, '_snapshot_skip_sq', None) != expected_skip_sq):
+                getattr(self, '_snapshot_skip_sq', None) != expected_skip_sq or
+                getattr(self, '_snapshot_selected_sq', None) != expected_selected_sq or
+                getattr(self, '_snapshot_show_legal', None) != self.show_legal_moves):
                 self._board_snapshot = self._build_board_snapshot(rem_dx_phys, rem_dy_phys)
 
             if self._board_snapshot is not None:
@@ -1022,8 +1509,10 @@ class ChessBoardWidget(QWidget):
                     f, r = chess.square_file(sq), chess.square_rank(sq)
                     rd, cd = (r if self.flipped else 7 - r), (7 - f if self.flipped else f)
                     painter.drawRect(QRectF(cd * square_size, rd * square_size, square_size, square_size))
+            self._paint_selected_square(painter, square_size)
             self._paint_coordinates(painter, square_size)
             self._paint_pieces(painter, square_size, skip_square=None)
+            self._paint_legal_move_dots(painter, square_size)
             self._paint_circles(painter, square_size)
             self._paint_arrows(painter, square_size)
 

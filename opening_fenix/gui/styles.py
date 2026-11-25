@@ -331,6 +331,43 @@ def get_scrollbar_style():
     }}
     """
 
+def get_spinbox_button_style(border_color=None, divider_color="#f1f5f9", hover_bg="rgba(211, 84, 0, 0.10)"):
+    """Returns consistent stacked up/down arrow styling for QSpinBox and QDoubleSpinBox."""
+    b_col = border_color or "#e2e8f0"
+    return f"""
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: {scale(20)}px;
+        border-left: 1px solid {b_col};
+        border-bottom: 1px solid {divider_color};
+        border-top-right-radius: {scale(6)}px;
+        background: rgba(15, 23, 42, 0.03);
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: {scale(20)}px;
+        border-left: 1px solid {b_col};
+        border-bottom-right-radius: {scale(6)}px;
+        background: rgba(15, 23, 42, 0.03);
+    }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+    QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {{
+        background: {hover_bg};
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url("{get_chevron_up_icon_path()}");
+        width: {scale(8)}px;
+        height: {scale(8)}px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url("{get_chevron_icon_path()}");
+        width: {scale(8)}px;
+        height: {scale(8)}px;
+    }}
+    """
+
 def get_tooltip_style():
     """Consistent, sharp tooltip styling across the entire application to prevent blacked-out OS dark mode glitches."""
     return f"""
@@ -1124,6 +1161,41 @@ def get_bw_glass_style():
     }}
     QPushButton[class="Danger"]:pressed {{
         background-color: #fecaca;
+    }}
+    QPushButton[class="TableIconBtn"] {{
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: {scale(6)}px;
+        padding: 0px;
+        min-width: 0px;
+        min-height: 0px;
+        font-size: {scale(13)}px;
+        font-weight: 700;
+        color: #0f172a;
+    }}
+    QPushButton[class="TableIconBtn"]:hover {{
+        background-color: #f1f5f9;
+        border-color: #94a3b8;
+    }}
+    QPushButton[class="TableIconBtn"]:pressed {{
+        background-color: #e2e8f0;
+    }}
+    QPushButton[class="TableCompactBtn"] {{
+        background-color: #ffffff;
+        border: 1px solid #cbd5e1;
+        border-radius: {scale(6)}px;
+        padding: {scale(2)}px {scale(10)}px;
+        min-height: 0px;
+        font-size: {scale(11)}px;
+        font-weight: 600;
+        color: #0f172a;
+    }}
+    QPushButton[class="TableCompactBtn"]:hover {{
+        background-color: #f8fafc;
+        border-color: #94a3b8;
+    }}
+    QPushButton[class="TableCompactBtn"]:pressed {{
+        background-color: #f1f5f9;
     }}
     
     QLineEdit, QSpinBox, QDoubleSpinBox, QPlainTextEdit {{ 

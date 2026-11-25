@@ -13,8 +13,8 @@ from opening_fenix.core.db.models import Base, UserBase
 
 _db_init_lock = threading.RLock()
 _verified_db_keys: set[tuple[str, int]] = set()
-_REPO_SCHEMA_VERSION = 2
-_USER_SCHEMA_VERSION = 2
+_REPO_SCHEMA_VERSION = 3
+_USER_SCHEMA_VERSION = 3
 
 def commit_with_retry(session: Session, max_retries: int = 15, initial_delay: float = 0.1) -> None:
     """
@@ -283,6 +283,18 @@ class DatabaseManager:
                     if ld_columns and 'fetched_at' not in ld_columns:
                         conn.execute(text("ALTER TABLE lichess_data ADD COLUMN fetched_at DATETIME"))
 
+                    # Ensure move_priorities table and index exist for multi-Elo support
+                    conn.execute(text(
+                        "CREATE TABLE IF NOT EXISTS move_priorities ("
+                        "id INTEGER PRIMARY KEY, "
+                        "move_id INTEGER NOT NULL REFERENCES moves(id) ON DELETE CASCADE, "
+                        "elo_range VARCHAR NOT NULL, "
+                        "priority_score FLOAT DEFAULT 0.0, "
+                        "CONSTRAINT _move_elo_prio_uc UNIQUE (move_id, elo_range))"
+                    ))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_move_priorities_elo_range ON move_priorities (elo_range)"))
+                    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_move_priorities_elo_move ON move_priorities (elo_range, move_id)"))
+
                     conn.execute(text(f"PRAGMA user_version = {_REPO_SCHEMA_VERSION}"))
                     conn.commit()
                 
@@ -292,6 +304,8 @@ class DatabaseManager:
                     if urs_columns:
                         if 'comment_language' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN comment_language VARCHAR DEFAULT 'auto'"))
+                        if 'active_lichess_elo' not in urs_columns:
+                            conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN active_lichess_elo VARCHAR"))
                         if 'rating' not in urs_columns:
                             conn.execute(text("ALTER TABLE user_repertoire_settings ADD COLUMN rating FLOAT DEFAULT 800.0"))
                         if 'last_rating_update' not in urs_columns:

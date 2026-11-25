@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QAbstractItemView, QFormLayout
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QFont, QCursor
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QCursor
 
 from opening_fenix.core.services.task_manager_service import (
     get_task_manager, LichessJob, EngineScanJob, CombinedSyncJob,
@@ -22,7 +22,7 @@ from opening_fenix.core.threads import RepertoireStatsWorker
 from opening_fenix.core.utils import get_elo_display, get_elo_internal, ELO_DISPLAY_MAP, get_repertoire_db_path
 from opening_fenix.core.services.update_service import get_config_dict
 from opening_fenix.gui.scaling import scale
-from opening_fenix.gui.styles import set_consistent_icon
+from opening_fenix.gui.styles import set_consistent_icon, get_spinbox_button_style, get_indicator_style, get_scrollbar_style, get_chevron_icon_path
 from opening_fenix.core.translation import tr_ui, tr_widget
 
 
@@ -193,6 +193,24 @@ class TaskCenterDialog(QDialog):
                 color: #0f172a;
                 font-size: {scale(13)}px;
             }}
+            QComboBox {{
+                padding-right: {scale(24)}px;
+            }}
+            QComboBox::drop-down {{
+                subcontrol-origin: border;
+                subcontrol-position: center right;
+                width: {scale(22)}px;
+                border: none;
+                background: transparent;
+            }}
+            QComboBox::down-arrow {{
+                image: url("{get_chevron_icon_path()}");
+                width: {scale(10)}px;
+                height: {scale(10)}px;
+            }}
+            QSpinBox {{
+                padding-right: {scale(24)}px;
+            }}
             QComboBox:hover, QSpinBox:hover {{
                 border-color: #94a3b8;
             }}
@@ -248,6 +266,9 @@ class TaskCenterDialog(QDialog):
                 font-weight: 500;
                 background: transparent;
             }}
+            {get_spinbox_button_style(border_color="#cbd5e1", hover_bg="rgba(2, 132, 199, 0.10)")}
+            {get_indicator_style(accent_color="#0284c7")}
+            {get_scrollbar_style()}
         """)
 
     def _init_ui(self):
@@ -264,13 +285,13 @@ class TaskCenterDialog(QDialog):
         v_titles = QVBoxLayout()
         v_titles.setSpacing(scale(2))
         lbl_title = QLabel(tr_ui("task_center.header_title", "<b>Hintergrund-Aufgaben & Daten-Synchronisation</b>"))
-        lbl_title.setStyleSheet("font-size: 15px; color: #0f172a;")
+        lbl_title.setStyleSheet(f"font-size: {scale(15)}px; color: #0f172a;")
         lbl_sub = QLabel(tr_ui("task_center.header_subtitle", "Lichess-Daten laden und Stockfish-Alternativen im Hintergrund berechnen."))
-        lbl_sub.setStyleSheet("font-size: 11px; color: #64748b;")
+        lbl_sub.setWordWrap(True)
+        lbl_sub.setStyleSheet(f"font-size: {scale(11)}px; color: #64748b;")
         v_titles.addWidget(lbl_title)
         v_titles.addWidget(lbl_sub)
-        h_layout.addLayout(v_titles)
-        h_layout.addStretch()
+        h_layout.addLayout(v_titles, 1)
 
         self.lbl_active_job_pill = QLabel(tr_ui("task_center.status_idle", "Bereit"))
         self.lbl_active_job_pill.setFixedHeight(scale(28))
@@ -302,45 +323,45 @@ class TaskCenterDialog(QDialog):
         bottom_bar = QHBoxLayout()
         bottom_bar.setContentsMargins(0, scale(4), 0, 0)
         self.lbl_footer_info = QLabel(tr_ui("task_center.footer_info", "💡 Aufgaben laufen im Hintergrund weiter. Du kannst dieses Fenster minimieren oder schließen."))
-        self.lbl_footer_info.setStyleSheet("color: #64748b; font-size: 11px;")
-        bottom_bar.addWidget(self.lbl_footer_info)
-        bottom_bar.addStretch()
+        self.lbl_footer_info.setWordWrap(True)
+        self.lbl_footer_info.setStyleSheet(f"color: #64748b; font-size: {scale(11)}px;")
+        bottom_bar.addWidget(self.lbl_footer_info, 1)
 
         btn_minimize = QPushButton(tr_ui("task_center.btn_minimize", "🗕 Minimieren"))
         btn_minimize.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_minimize.setStyleSheet("""
-            QPushButton {
+        btn_minimize.setStyleSheet(f"""
+            QPushButton {{
                 background-color: #ffffff;
                 color: #334155;
                 border: 1px solid #cbd5e1;
-                border-radius: 6px;
-                padding: 7px 16px;
+                border-radius: {scale(6)}px;
+                padding: {scale(7)}px {scale(16)}px;
                 font-weight: 600;
-                font-size: 12px;
-            }
-            QPushButton:hover {
+                font-size: {scale(12)}px;
+            }}
+            QPushButton:hover {{
                 background-color: #f1f5f9;
                 border-color: #94a3b8;
-            }
+            }}
         """)
         btn_minimize.clicked.connect(self.showMinimized)
         bottom_bar.addWidget(btn_minimize)
 
         btn_close = QPushButton(tr_ui("task_center.btn_run_in_background", "✕ Im Hintergrund ausführen"))
         btn_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_close.setStyleSheet("""
-            QPushButton {
+        btn_close.setStyleSheet(f"""
+            QPushButton {{
                 background-color: #0284c7;
                 color: #ffffff;
                 border: 1px solid #0284c7;
-                border-radius: 6px;
-                padding: 7px 18px;
+                border-radius: {scale(6)}px;
+                padding: {scale(7)}px {scale(18)}px;
                 font-weight: bold;
-                font-size: 12px;
-            }
-            QPushButton:hover {
+                font-size: {scale(12)}px;
+            }}
+            QPushButton:hover {{
                 background-color: #0369a1;
-            }
+            }}
         """)
         btn_close.clicked.connect(self.close)
         bottom_bar.addWidget(btn_close)
@@ -393,7 +414,7 @@ class TaskCenterDialog(QDialog):
         h_sel = QHBoxLayout(sel_card)
         h_sel.setContentsMargins(scale(12), scale(6), scale(12), scale(6))
         lbl_repo = QLabel(tr_ui("task_center.select_repo", "<b>Ziel-Repertoire:</b>"))
-        lbl_repo.setStyleSheet("color: #0f172a; font-size: 13px; font-weight: bold;")
+        lbl_repo.setStyleSheet(f"color: #0f172a; font-size: {scale(13)}px; font-weight: bold;")
         self.combo_repo = QComboBox()
         self.combo_repo.setFixedHeight(scale(32))
         self.combo_repo.setMinimumWidth(scale(300))
@@ -419,7 +440,7 @@ class TaskCenterDialog(QDialog):
 
         h_lich_opts = QHBoxLayout()
         lbl_elo = QLabel(tr_ui("task_center.lbl_elo_category", "Elo-Kategorie:"))
-        lbl_elo.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
+        lbl_elo.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; font-weight: 500;")
         h_lich_opts.addWidget(lbl_elo)
         self.combo_elo = QComboBox()
         self.combo_elo.setFixedHeight(scale(28))
@@ -429,7 +450,7 @@ class TaskCenterDialog(QDialog):
         h_lich_opts.addWidget(self.combo_elo, 1)
 
         lbl_age = QLabel(tr_ui("task_center.lbl_max_age", "Max. Datenalter:"))
-        lbl_age.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
+        lbl_age.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; font-weight: 500;")
         h_lich_opts.addWidget(lbl_age)
         self.combo_max_age = QComboBox()
         self.combo_max_age.setFixedHeight(scale(28))
@@ -441,6 +462,21 @@ class TaskCenterDialog(QDialog):
         h_lich_opts.addWidget(self.combo_max_age, 1)
         l_lich.addLayout(h_lich_opts)
 
+        # Optional extra Elo brackets (multi-Elo courses). Collapsed to a single quiet row; default = none.
+        from opening_fenix.gui.widgets.elo_pills import EloPills
+        h_lich_extra = QHBoxLayout()
+        lbl_extra = QLabel(tr_ui("task_center.lbl_extra_elos", "Zusätzlich:"))
+        lbl_extra.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; font-weight: 500;")
+        lbl_extra.setToolTip(tr_ui(
+            "task_center.tip_extra_elos",
+            "Optional weitere Elo-Stufen im selben Kurs mitladen. Lernende können dann zwischen ihnen wechseln."
+        ))
+        h_lich_extra.addWidget(lbl_extra)
+        self.pills_extra_elos = EloPills(keys=["low", "mid", "high", "masters"])
+        h_lich_extra.addWidget(self.pills_extra_elos, 1)
+        l_lich.addLayout(h_lich_extra)
+        self.combo_elo.currentIndexChanged.connect(self._sync_extra_elo_pills)
+        self._on_repo_selection_changed(self.combo_repo.currentText())
         self.chk_lich_reuse = QCheckBox(tr_ui("task_center.reuse_courses", "Daten aus anderen Kursen wiederverwenden"))
         self.chk_lich_reuse.setChecked(True)
         l_lich.addWidget(self.chk_lich_reuse)
@@ -456,7 +492,7 @@ class TaskCenterDialog(QDialog):
         h_lich_prog = QHBoxLayout()
         h_lich_prog.setSpacing(scale(10))
         self.lbl_single_lich_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
-        self.lbl_single_lich_status.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500;")
+        self.lbl_single_lich_status.setStyleSheet(f"color: #475569; font-size: {scale(11)}px; font-weight: 500;")
         self.lbl_single_lich_status.setMinimumWidth(scale(180))
         self.pb_single_lich = QProgressBar()
         self.pb_single_lich.setRange(0, 100)
@@ -476,11 +512,14 @@ class TaskCenterDialog(QDialog):
 
         h_eng_opts = QHBoxLayout()
         lbl_depth = QLabel(tr_ui("task_center.lbl_search_depth", "Suchtiefe:"))
-        lbl_depth.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
+        lbl_depth.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; font-weight: 500;")
         h_eng_opts.addWidget(lbl_depth)
         self.spin_depth = QSpinBox()
         self.spin_depth.setFixedHeight(scale(28))
-        self.spin_depth.setMinimumWidth(scale(80))
+        _sd_font = QFont(self.font())
+        _sd_font.setPixelSize(max(12, scale(13)))
+        _sd_w = max(96, scale(104), QFontMetrics(_sd_font).horizontalAdvance("888") + max(52, scale(56)))
+        self.spin_depth.setMinimumWidth(_sd_w)
         self.spin_depth.setRange(8, 30)
         try:
             depth_val = int(self.config.get("engine_depth", 18))
@@ -491,7 +530,7 @@ class TaskCenterDialog(QDialog):
 
         h_eng_opts.addSpacing(scale(14))
         lbl_threads = QLabel(tr_ui("task_center.lbl_cpu_threads", "CPU-Threads:"))
-        lbl_threads.setStyleSheet("color: #334155; font-size: 12px; font-weight: 500;")
+        lbl_threads.setStyleSheet(f"color: #334155; font-size: {scale(12)}px; font-weight: 500;")
         h_eng_opts.addWidget(lbl_threads)
         self.combo_threads = QComboBox()
         self.combo_threads.setFixedHeight(scale(28))
@@ -519,7 +558,7 @@ class TaskCenterDialog(QDialog):
         h_eng_prog = QHBoxLayout()
         h_eng_prog.setSpacing(scale(10))
         self.lbl_single_eng_status = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
-        self.lbl_single_eng_status.setStyleSheet("color: #475569; font-size: 11px; font-weight: 500;")
+        self.lbl_single_eng_status.setStyleSheet(f"color: #475569; font-size: {scale(11)}px; font-weight: 500;")
         self.lbl_single_eng_status.setMinimumWidth(scale(180))
         self.pb_single_eng = QProgressBar()
         self.pb_single_eng.setRange(0, 100)
@@ -537,7 +576,8 @@ class TaskCenterDialog(QDialog):
         l_comb.setContentsMargins(scale(12), scale(8), scale(12), scale(8))
         l_comb.setSpacing(scale(6))
         lbl_comb_desc = QLabel(tr_ui("task_center.comb_desc", "Führt Lichess-Import und Stockfish-Analyse gleichzeitig im Hintergrund aus."))
-        lbl_comb_desc.setStyleSheet("color: #475569; font-size: 12px;")
+        lbl_comb_desc.setWordWrap(True)
+        lbl_comb_desc.setStyleSheet(f"color: #475569; font-size: {scale(12)}px;")
         l_comb.addWidget(lbl_comb_desc)
 
         self.btn_start_comb = QPushButton(tr_ui("task_center.btn_start_comb", "⚡ Vollständiges Update starten"))
@@ -557,8 +597,8 @@ class TaskCenterDialog(QDialog):
                 color: white;
                 font-weight: bold;
                 border: none;
-                border-radius: 6px;
-                font-size: 13px;
+                border-radius: {scale(6)}px;
+                font-size: {scale(13)}px;
             }}
             QPushButton:hover {{
                 background-color: {hover};
@@ -620,6 +660,22 @@ class TaskCenterDialog(QDialog):
         v_tasks.addWidget(self.chk_b_transpos)
         v_tasks.addWidget(self.chk_b_lich)
         v_tasks.addLayout(h_lich_opts)
+
+        from opening_fenix.gui.widgets.elo_pills import EloPills
+        h_b_extra = QHBoxLayout()
+        h_b_extra.setContentsMargins(scale(22), 0, 0, 0)
+        h_b_extra.setSpacing(scale(8))
+        self.lbl_batch_extra_elos = QLabel(tr_ui("task_center.lbl_extra_elos", "Zusätzlich:"))
+        self.lbl_batch_extra_elos.setStyleSheet(f"color: #334155; font-size: {scale(11)}px; font-weight: 500;")
+        self.lbl_batch_extra_elos.setToolTip(tr_ui(
+            "task_center.tip_batch_extra_elos",
+            "Optional zusätzlich bei allen ausgewählten Kursen mitladen (bereits vorhandene Multi-Elos werden immer mit aktualisiert)."
+        ))
+        self.pills_batch_extra_elos = EloPills(keys=["low", "mid", "high", "masters"])
+        h_b_extra.addWidget(self.lbl_batch_extra_elos)
+        h_b_extra.addWidget(self.pills_batch_extra_elos, 1)
+        v_tasks.addLayout(h_b_extra)
+
         v_tasks.addWidget(self.chk_b_cleanup)
         v_tasks.addWidget(self.chk_b_stats)
         v_tasks.addStretch()
@@ -634,17 +690,24 @@ class TaskCenterDialog(QDialog):
         f_eng = QFormLayout()
         f_eng.setSpacing(scale(6))
 
+        _moves_unit = tr_ui('repo_settings.moves_unit', 'Züge')
+        _bs_font = QFont(self.font())
+        _bs_font.setPixelSize(max(12, scale(13)))
+        _bs_w = max(124, scale(134), QFontMetrics(_bs_font).horizontalAdvance(f"50 {_moves_unit}") + max(54, scale(58)))
+
         self.spin_b_engine_depth = QSpinBox()
         self.spin_b_engine_depth.setFixedHeight(scale(26))
+        self.spin_b_engine_depth.setMinimumWidth(_bs_w)
         self.spin_b_engine_depth.setRange(10, 50)
         self.spin_b_engine_depth.setValue(18)
-        self.spin_b_engine_depth.setSuffix(f" {tr_ui('repo_settings.moves_unit', 'Züge')}")
+        self.spin_b_engine_depth.setSuffix(f" {_moves_unit}")
 
         self.spin_b_transpos_depth = QSpinBox()
         self.spin_b_transpos_depth.setFixedHeight(scale(26))
+        self.spin_b_transpos_depth.setMinimumWidth(_bs_w)
         self.spin_b_transpos_depth.setRange(10, 50)
         self.spin_b_transpos_depth.setValue(25)
-        self.spin_b_transpos_depth.setSuffix(f" {tr_ui('repo_settings.moves_unit', 'Züge')}")
+        self.spin_b_transpos_depth.setSuffix(f" {_moves_unit}")
 
         self.combo_b_threads = QComboBox()
         self.combo_b_threads.setFixedHeight(scale(26))
@@ -662,7 +725,7 @@ class TaskCenterDialog(QDialog):
         v_engine.addLayout(f_eng)
 
         lbl_threads_hint = QLabel(tr_ui("repo_settings.engine_threads_hint", "Standard: 25% der CPU-Kerne ({threads} von {max} Threads)", threads=default_threads, max=max_cpu))
-        lbl_threads_hint.setStyleSheet("color: #64748b; font-size: 11px;")
+        lbl_threads_hint.setStyleSheet(f"color: #64748b; font-size: {scale(11)}px;")
         v_engine.addWidget(lbl_threads_hint)
         v_engine.addStretch()
         h_config.addWidget(self.grp_b_engine, 1)
@@ -673,6 +736,9 @@ class TaskCenterDialog(QDialog):
             lich_on = self.chk_b_lich.isChecked()
             self.chk_batch_reuse.setEnabled(lich_on)
             self.combo_batch_max_age.setEnabled(lich_on and self.chk_batch_reuse.isChecked())
+            if hasattr(self, 'pills_batch_extra_elos'):
+                self.pills_batch_extra_elos.setEnabled(lich_on)
+                self.lbl_batch_extra_elos.setEnabled(lich_on)
 
             eng_on = self.chk_b_eng.isChecked()
             trans_on = self.chk_b_transpos.isChecked()
@@ -692,18 +758,18 @@ class TaskCenterDialog(QDialog):
         h_tbl_ctrl = QHBoxLayout()
         h_tbl_ctrl.setContentsMargins(0, scale(2), 0, 0)
         self.lbl_b_repo_count = QLabel()
-        self.lbl_b_repo_count.setStyleSheet("font-weight: 600; color: #475569; font-size: 12px;")
+        self.lbl_b_repo_count.setStyleSheet(f"font-weight: 600; color: #475569; font-size: {scale(12)}px;")
         h_tbl_ctrl.addWidget(self.lbl_b_repo_count)
         h_tbl_ctrl.addStretch()
 
         btn_all = QPushButton(tr_ui("task_center.btn_select_all", "Alle auswählen"))
         btn_all.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_all.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 5px; padding: 4px 10px; font-weight: 500; font-size: 11px;")
+        btn_all.setStyleSheet(f"background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: {scale(5)}px; padding: {scale(4)}px {scale(10)}px; font-weight: 500; font-size: {scale(11)}px;")
         btn_all.clicked.connect(lambda: self._set_all_batch_checked(True))
 
         btn_none = QPushButton(tr_ui("task_center.btn_select_none", "Keine auswählen"))
         btn_none.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        btn_none.setStyleSheet("background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: 5px; padding: 4px 10px; font-weight: 500; font-size: 11px;")
+        btn_none.setStyleSheet(f"background-color: #ffffff; border: 1px solid #cbd5e1; border-radius: {scale(5)}px; padding: {scale(4)}px {scale(10)}px; font-weight: 500; font-size: {scale(11)}px;")
         btn_none.clicked.connect(lambda: self._set_all_batch_checked(False))
 
         h_tbl_ctrl.addWidget(btn_all)
@@ -754,7 +820,7 @@ class TaskCenterDialog(QDialog):
         v_batch_prog = QVBoxLayout()
         v_batch_prog.setSpacing(scale(3))
         self.lbl_batch_overall = QLabel(tr_ui("repo_settings.status_ready", "Bereit"))
-        self.lbl_batch_overall.setStyleSheet("font-weight: 600; color: #0f172a; font-size: 12px;")
+        self.lbl_batch_overall.setStyleSheet(f"font-weight: 600; color: #0f172a; font-size: {scale(12)}px;")
         self.pb_batch_overall = QProgressBar()
         self.pb_batch_overall.setRange(0, 100)
         self.pb_batch_overall.setValue(0)
@@ -821,10 +887,15 @@ class TaskCenterDialog(QDialog):
             item_name.setFlags(item_name.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.table_batch.setItem(row, 1, item_name)
 
-            # Col 2: Target Elo (reused from meta without opening a 2nd SQLite connection)
-            raw_elo = (meta.get("lichess_elo") or meta.get("elo") or "high") if meta else "high"
-            repo_elo = get_elo_internal(str(raw_elo).strip())
-            elo_disp = get_elo_display(repo_elo)
+            # Col 2: Target Elo(s)
+            from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+            _def_elo, _avail_elos = get_repertoire_lichess_elos_fast(r_name)
+            if len(_avail_elos) > 1:
+                elo_disp = " · ".join(get_elo_display(e) for e in _avail_elos)
+            else:
+                raw_elo = (meta.get("lichess_elo") or meta.get("elo") or "high") if meta else "high"
+                repo_elo = get_elo_internal(str(raw_elo).strip())
+                elo_disp = get_elo_display(repo_elo)
             item_elo = QTableWidgetItem(elo_disp)
             item_elo.setToolTip(elo_disp)
             item_elo.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -964,11 +1035,11 @@ class TaskCenterDialog(QDialog):
         l_curr.setSpacing(scale(8))
 
         self.lbl_curr_title = QLabel(tr_ui("task_center.no_active_job", "Keine aktive Aufgabe"))
-        self.lbl_curr_title.setStyleSheet("font-weight: bold; color: #0f172a; font-size: 14px;")
+        self.lbl_curr_title.setStyleSheet(f"font-weight: bold; color: #0f172a; font-size: {scale(14)}px;")
         l_curr.addWidget(self.lbl_curr_title)
 
         self.lbl_curr_status = QLabel(tr_ui("task_center.waiting_for_start", "Warte auf Start..."))
-        self.lbl_curr_status.setStyleSheet("color: #64748b; font-size: 12px;")
+        self.lbl_curr_status.setStyleSheet(f"color: #64748b; font-size: {scale(12)}px;")
         l_curr.addWidget(self.lbl_curr_status)
 
         self.pb_curr = QProgressBar()
@@ -987,14 +1058,14 @@ class TaskCenterDialog(QDialog):
         h_st_lich = QHBoxLayout()
         lbl_st_lich_icon = QLabel("🌐 Lichess:")
         lbl_st_lich_icon.setFixedWidth(scale(85))
-        lbl_st_lich_icon.setStyleSheet("font-weight: 600; font-size: 12px; color: #0284c7;")
+        lbl_st_lich_icon.setStyleSheet(f"font-weight: 600; font-size: {scale(12)}px; color: #0284c7;")
         self.pb_curr_lich = QProgressBar()
         self.pb_curr_lich.setRange(0, 100)
         self.pb_curr_lich.setValue(0)
         self.pb_curr_lich.setFixedHeight(scale(16))
         self.lbl_curr_lich_st = QLabel("-")
         self.lbl_curr_lich_st.setMinimumWidth(scale(180))
-        self.lbl_curr_lich_st.setStyleSheet("font-size: 11px; color: #475569;")
+        self.lbl_curr_lich_st.setStyleSheet(f"font-size: {scale(11)}px; color: #475569;")
         h_st_lich.addWidget(lbl_st_lich_icon)
         h_st_lich.addWidget(self.pb_curr_lich, 1)
         h_st_lich.addWidget(self.lbl_curr_lich_st)
@@ -1003,14 +1074,14 @@ class TaskCenterDialog(QDialog):
         h_st_eng = QHBoxLayout()
         lbl_st_eng_icon = QLabel("🤖 Engine:")
         lbl_st_eng_icon.setFixedWidth(scale(85))
-        lbl_st_eng_icon.setStyleSheet("font-weight: 600; font-size: 12px; color: #2563eb;")
+        lbl_st_eng_icon.setStyleSheet(f"font-weight: 600; font-size: {scale(12)}px; color: #2563eb;")
         self.pb_curr_eng = QProgressBar()
         self.pb_curr_eng.setRange(0, 100)
         self.pb_curr_eng.setValue(0)
         self.pb_curr_eng.setFixedHeight(scale(16))
         self.lbl_curr_eng_st = QLabel("-")
         self.lbl_curr_eng_st.setMinimumWidth(scale(180))
-        self.lbl_curr_eng_st.setStyleSheet("font-size: 11px; color: #475569;")
+        self.lbl_curr_eng_st.setStyleSheet(f"font-size: {scale(11)}px; color: #475569;")
         h_st_eng.addWidget(lbl_st_eng_icon)
         h_st_eng.addWidget(self.pb_curr_eng, 1)
         h_st_eng.addWidget(self.lbl_curr_eng_st)
@@ -1050,7 +1121,7 @@ class TaskCenterDialog(QDialog):
 
         # Queue & History List
         lbl_q = QLabel(tr_ui("task_center.queue_title", "Warteschlange & Verlauf:"))
-        lbl_q.setStyleSheet("font-weight: bold; color: #0f172a; font-size: 13px;")
+        lbl_q.setStyleSheet(f"font-weight: bold; color: #0f172a; font-size: {scale(13)}px;")
         layout.addWidget(lbl_q)
 
         self.table_queue = QTableWidget()
@@ -1088,7 +1159,31 @@ class TaskCenterDialog(QDialog):
             self.combo_elo.blockSignals(True)
             self.combo_elo.setCurrentIndex(idx)
             self.combo_elo.blockSignals(False)
+        if hasattr(self, 'pills_extra_elos'):
+            try:
+                from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+                _default, existing = get_repertoire_lichess_elos_fast(repo_name)
+            except Exception:
+                existing = []
+            self.pills_extra_elos.set_selected([e for e in existing if e != elo_key])
+            self._sync_extra_elo_pills()
         self._update_single_tab_for_current_job()
+
+    def _sync_extra_elo_pills(self, *_args):
+        """The primary Elo is chosen in the combo; hide it from the extras so it can't be picked twice."""
+        if not hasattr(self, 'pills_extra_elos'):
+            return
+        primary = self.combo_elo.currentData()
+        for k in ["low", "mid", "high", "masters"]:
+            self.pills_extra_elos.set_key_hidden(k, k == primary)
+
+    def _selected_import_elos(self) -> str:
+        """Primary Elo first, followed by checked extras, as a comma-separated string ('high' for single-Elo)."""
+        primary = self.combo_elo.currentData()
+        extras = []
+        if hasattr(self, 'pills_extra_elos'):
+            extras = [e for e in self.pills_extra_elos.selected() if e != primary]
+        return ",".join([primary] + extras) if primary else primary
 
     def set_active_repertoire(self, repo_name: str):
         if not repo_name:
@@ -1128,7 +1223,7 @@ class TaskCenterDialog(QDialog):
         if not proceed:
             return
 
-        elo = self.combo_elo.currentData()
+        elo = self._selected_import_elos()
         max_age = self.combo_max_age.currentData()
         reuse = self.chk_lich_reuse.isChecked()
 
@@ -1199,7 +1294,7 @@ class TaskCenterDialog(QDialog):
         if not ep:
             return
 
-        elo = self.combo_elo.currentData()
+        elo = self._selected_import_elos()
         max_age = self.combo_max_age.currentData()
         depth = self.spin_depth.value()
         threads = int(self.combo_threads.currentText())
@@ -1272,9 +1367,15 @@ class TaskCenterDialog(QDialog):
             except Exception:
                 pass
 
+        from opening_fenix.core.services.repertoire_core_service import get_repertoire_lichess_elos_fast
+        from opening_fenix.core.utils import parse_elo_list
+        extra_batch_elos = self.pills_batch_extra_elos.selected() if (tasks['lichess'] and hasattr(self, 'pills_batch_extra_elos')) else []
         repo_configs = []
         for name in selected_repos:
-            repo_configs.append({"name": name, "elo": get_repertoire_elo(name)})
+            primary = get_repertoire_elo(name)
+            _, existing_elos = get_repertoire_lichess_elos_fast(name)
+            merged_elos = parse_elo_list([primary] + list(existing_elos) + list(extra_batch_elos))
+            repo_configs.append({"name": name, "elo": primary, "elos": merged_elos})
 
         eng_settings = {
             "path": ep or "",

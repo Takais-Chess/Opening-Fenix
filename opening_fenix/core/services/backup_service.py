@@ -9,8 +9,16 @@ import shutil
 from datetime import datetime, timedelta, timezone
 
 from opening_fenix.core.utils import get_user_dir, get_base_path, get_custom_data_dir, get_local_workspace_dir, get_repertoire_db_path, get_repertoire_dir, get_repertoire_comment_stats, get_multilingual_comment_dict, has_meaningful_comment
-from opening_fenix.core.services.cloud_sync_service import verify_sqlite_db
+from opening_fenix.core.services.cloud_sync_service import (
+    verify_sqlite_db,
+    _is_syncable_repo_asset,
+    _ALREADY_COMPRESSED_EXTS,
+)
 from opening_fenix.core.logger import logger
+
+# Subdirectories excluded from rotating historical backups (e.g. static import archives already preserved in Cloud Sync)
+_BACKUP_EXCLUDED_DIRS = frozenset({"original pgns"})
+_BACKUP_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 
 def get_backups_base_dir() -> str:
@@ -62,6 +70,23 @@ def is_resource_pgn_file(file_name: str, repo_name: str = "", is_root: bool = Fa
     return True
 
 
+def is_backup_asset_file(file_name: str, repo_name: str = "", is_root: bool = False) -> bool:
+    """
+    Strict allowlist for non-DB repertoire files included in historical backup zips:
+    - Must pass cloud_sync's `_is_syncable_repo_asset` (excludes corrupted/malformed/tmp/sidecars/exports).
+    - Allows resource PGNs (Model Games, Typical Motives, Tactics, Introductions, etc.) and cover images.
+    - Excludes stray exports (.pdf, .html), ChessBase sidecars (.ini, .pgi), README/txt, and other noise.
+    """
+    if not _is_syncable_repo_asset(file_name, repo_name=repo_name, is_root=is_root):
+        return False
+    f_lower = file_name.lower()
+    if f_lower.endswith(".pgn"):
+        return is_resource_pgn_file(file_name, repo_name, is_root)
+    if is_root and f_lower.startswith("cover.") and f_lower.endswith(_BACKUP_IMAGE_EXTS):
+        return True
+    return False
+
+
 def compute_repertoire_checksum(repo_name: str) -> str:
     """
     Computes a composite SHA256 hash of the positions data and PGN files
@@ -103,12 +128,13 @@ def compute_repertoire_checksum(repo_name: str) -> str:
             except Exception:
                 pass
             
-    # 2. Hash all resource PGN files & cover images
+    # 2. Hash all resource PGN files & cover images (excluding static Original PGNs archive)
     if os.path.exists(repo_dir):
         for root, dirs, files in os.walk(repo_dir):
+            dirs[:] = sorted(d for d in dirs if d.lower() not in _BACKUP_EXCLUDED_DIRS)
             is_root = (root == repo_dir)
             for file in sorted(files):
-                if is_resource_pgn_file(file, repo_name, is_root) or file.lower().startswith("cover."):
+                if is_backup_asset_file(file, repo_name, is_root):
                     fp = os.path.join(root, file)
                     try:
                         hasher.update(file.encode("utf-8"))
@@ -163,6 +189,8 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
                         if member.lower().endswith(".pgn"):
                             parts = member.replace("\\", "/").split("/")
                             is_root = (len(parts) == 1)
+                            if not is_root and parts[0].lower() in _BACKUP_EXCLUDED_DIRS:
+                                continue
                             fname = parts[-1]
                             if is_resource_pgn_file(fname, repo_name, is_root):
                                 if not is_root:
@@ -237,6 +265,7 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
                     "tactics": "Tactics"
                 }
                 for root, dirs, files in os.walk(repo_dir):
+                    dirs[:] = sorted(d for d in dirs if d.lower() not in _BACKUP_EXCLUDED_DIRS)
                     is_root = (root == repo_dir)
                     for file in sorted(files):
                         if is_resource_pgn_file(file, repo_name, is_root):
@@ -370,34 +399,32 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             )
             return None
 
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            # 1. Add DB file
-            zf.write(db_source_for_zip, os.path.basename(db_path))
-            
-            # 2. Add resource PGN files (Model Games, Typical Motives, Tactics, etc.) & cover images
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            # 1. Add DB file with LZMA compression (matches Cloud Sync v2 for ~25-35% smaller backups)
+            zf.write(db_source_for_zip, os.path.basename(db_path), compress_type=zipfile.ZIP_LZMA)
+
+            # 2. Add only allowlisted resource PGNs & cover images (skip Original PGNs/, corrupted DBs, exports, sidecars)
             if os.path.exists(repo_dir):
                 for root, dirs, files in os.walk(repo_dir):
+                    dirs[:] = sorted(d for d in dirs if d.lower() not in _BACKUP_EXCLUDED_DIRS)
                     is_root = (root == repo_dir)
-                    for file in files:
-                        f_lower = file.lower()
-                        # Skip database and SQLite runtime/sidecar files
-                        if f_lower.endswith((".db", ".db-wal", ".db-shm", ".db-journal", "-wal", "-shm", "-journal")):
-                            continue  # Already added main DB at root; never pack temporary SQLite files
-                        if f_lower.endswith(".pgn"):
-                            if not is_resource_pgn_file(file, repo_name, is_root):
-                                continue
+                    for file in sorted(files):
+                        if not is_backup_asset_file(file, repo_name, is_root):
+                            continue
                         full_p = os.path.join(root, file)
                         if not os.path.isfile(full_p):
                             continue
                         rel_p = os.path.relpath(full_p, repo_dir)
+                        ext = os.path.splitext(file)[1].lower()
+                        comp = zipfile.ZIP_STORED if ext in _ALREADY_COMPRESSED_EXTS else zipfile.ZIP_LZMA
                         try:
-                            zf.write(full_p, rel_p)
+                            zf.write(full_p, rel_p, compress_type=comp)
                         except Exception as file_err:
                             logger.warning(f"Skipped backing up resource file {full_p}: {file_err}")
-                        
+
             # 3. Add manifest.json
             manifest_json = json.dumps(manifest_data, indent=2, ensure_ascii=False)
-            zf.writestr("manifest.json", manifest_json)
+            zf.writestr("manifest.json", manifest_json, compress_type=zipfile.ZIP_DEFLATED)
             
         logger.info(f"Successfully created repertoire backup: {zip_path} (trigger: {trigger_type})")
         
@@ -601,9 +628,15 @@ def restore_repertoire_from_backup(repo_name: str, backup_zip_path: str) -> bool
                 if member == "manifest.json":
                     continue
                 
-                # Never extract SQLite WAL/SHM runtime files from legacy backups
+                # Never extract SQLite WAL/SHM runtime files or corrupted/malformed DB leftovers from legacy backups
                 m_norm = member.lower().replace(chr(92), "/")
-                if m_norm.endswith(("-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal")):
+                m_base = os.path.basename(m_norm)
+                if (
+                    m_norm.endswith(("-wal", "-shm", "-journal", ".db-wal", ".db-shm", ".db-journal", ".empty", ".malformed", ".tmp"))
+                    or ".corrupted" in m_base
+                    or ".malformed" in m_base
+                    or m_base == "dump.sql"
+                ):
                     continue
 
                 if member.endswith(".db") and "/" not in member and chr(92) not in member:
