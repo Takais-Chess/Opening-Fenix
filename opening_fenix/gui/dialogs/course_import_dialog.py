@@ -1,5 +1,7 @@
 import os
+import shutil
 import sys
+import tempfile
 from typing import Optional, Dict, List
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
@@ -25,7 +27,8 @@ from opening_fenix.core.services.course_import_service import (
     CATEGORY_MODEL,
     CATEGORY_INTRO,
     CATEGORY_IGNORE,
-    resolve_game_target
+    resolve_game_target,
+    extract_pgns_from_zip,
 )
 from opening_fenix.core.threads import CourseImportThread, CourseAnalysisThread
 from opening_fenix.gui.styles import get_login_dialog_style, COLORS, set_consistent_icon, get_chevron_icon_path
@@ -636,7 +639,9 @@ class CourseImportDialog(QDialog):
         self._details_expanded = False
         self._taskbar_filter = None
         self._has_initially_positioned = False
+        self._temp_zip_dirs: List[str] = []
 
+        self.setAcceptDrops(True)
         self.init_ui()
         self._install_taskbar_close_filter()
 
@@ -797,7 +802,7 @@ class CourseImportDialog(QDialog):
         f_layout.addWidget(self.btn_browse)
         v_file_box.addLayout(f_layout)
 
-        self.lbl_file_hint = QLabel(tr_ui("course_import.file_hint", "Wähle eine oder mehrere PGN-Dateien aus (z. B. Part 1.pgn, Part 2.pgn), um die Analyse zu starten."))
+        self.lbl_file_hint = QLabel(tr_ui("course_import.file_hint", "Wähle eine oder mehrere PGN- oder ZIP-Dateien aus (oder ziehe sie per Drag & Drop hierher), um die Analyse zu starten."))
         self.lbl_file_hint.setStyleSheet(f"font-size: {scale(11)}px; color: #7f8c8d; font-style: italic; border: none; background: transparent; padding-left: {scale(2)}px;")
         v_file_box.addWidget(self.lbl_file_hint)
 
@@ -1336,18 +1341,76 @@ class CourseImportDialog(QDialog):
         # Initially hide the bottom section until a PGN course is selected
         self.bottom_container.setVisible(False)
 
+    def _extract_valid_drop_paths(self, mime_data) -> List[str]:
+        from opening_fenix.gui.widgets.common import extract_dropped_files
+        return extract_dropped_files(mime_data, (".pgn", ".zip"))
+
+    def dragEnterEvent(self, event):
+        if self._extract_valid_drop_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._extract_valid_drop_paths(event.mimeData())
+        if paths:
+            event.acceptProposedAction()
+            self.load_files(paths, sync=False)
+        else:
+            super().dropEvent(event)
+
+    def _cleanup_temp_zip_dirs(self):
+        for tmp_dir in getattr(self, "_temp_zip_dirs", []):
+            if tmp_dir and os.path.exists(tmp_dir):
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+        self._temp_zip_dirs = []
+
     def on_browse_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            tr_ui("course_import.btn_select_file", "PGN-Dateien auswählen (Mehrfachauswahl möglich)"),
+            tr_ui("course_import.btn_select_file", "PGN- oder ZIP-Dateien auswählen (Mehrfachauswahl möglich)"),
             "",
-            tr_ui("creator.dlg_select_pgn_file_filter", "PGN-Dateien (*.pgn)")
+            tr_ui("creator.dlg_select_pgn_or_zip_filter", "PGN & ZIP Dateien (*.pgn *.zip);;PGN-Dateien (*.pgn);;ZIP-Archive (*.zip)")
         )
         if paths:
             self.load_files(paths, sync=False)
 
     def load_files(self, paths: List[str], sync: bool = True):
-        self.selected_paths = [p for p in paths if os.path.exists(p)]
+        expanded_pgns: List[str] = []
+        empty_zips: List[str] = []
+        for p in paths:
+            if not p or not os.path.exists(p):
+                continue
+            if p.lower().endswith(".zip"):
+                tmp_dir = tempfile.mkdtemp(prefix="opening_fenix_zip_")
+                self._temp_zip_dirs.append(tmp_dir)
+                try:
+                    pgns = extract_pgns_from_zip(p, tmp_dir)
+                    if pgns:
+                        expanded_pgns.extend(pgns)
+                    else:
+                        empty_zips.append(os.path.basename(p))
+                except Exception as e:
+                    QMessageBox.warning(
+                        self,
+                        tr_ui("creator.dlg_import_error_title", "Fehler"),
+                        tr_ui("course_import.zip_extract_error", "ZIP-Archiv '{name}' konnte nicht gelesen werden:\n{err}", name=os.path.basename(p), err=str(e)),
+                    )
+            elif p.lower().endswith(".pgn"):
+                expanded_pgns.append(p)
+
+        if empty_zips and not expanded_pgns:
+            QMessageBox.warning(
+                self,
+                tr_ui("course_import.dlg_warning_title", "Import mit Hinweisen"),
+                tr_ui("course_import.zip_no_pgns", "In '{names}' wurden keine PGN-Dateien gefunden.", names=", ".join(empty_zips)),
+            )
+            return
+
+        self.selected_paths = expanded_pgns
         if not self.selected_paths:
             return
 
@@ -2081,19 +2144,23 @@ class CourseImportDialog(QDialog):
     def _handle_taskbar_close(self):
         self._uninstall_taskbar_close_filter()
         self._cancel_and_cleanup_thread()
+        self._cleanup_temp_zip_dirs()
         self.reject()
 
     def closeEvent(self, event):
         self._cancel_and_cleanup_thread()
+        self._cleanup_temp_zip_dirs()
         self._uninstall_taskbar_close_filter()
         super().closeEvent(event)
 
     def reject(self):
         self._cancel_and_cleanup_thread()
+        self._cleanup_temp_zip_dirs()
         self._uninstall_taskbar_close_filter()
         super().reject()
 
     def accept(self):
         self._cancel_and_cleanup_thread()
+        self._cleanup_temp_zip_dirs()
         self._uninstall_taskbar_close_filter()
         super().accept()

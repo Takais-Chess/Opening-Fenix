@@ -109,3 +109,47 @@ def test_flash_widget_logic(qtbot, mock_user_dir):
     # Wait for reset
     qtbot.waitUntil(lambda: "border: 4px solid #e74c3c" not in target.styleSheet(), timeout=1500)
     assert "border: 4px solid #e74c3c" not in target.styleSheet()
+
+def test_repertoire_selection_soft_tint_styling(qtbot, mock_user_dir):
+    """Verify soft tinted selection + accent border on repertoire and language buttons, keeping solid CTA."""
+    from opening_fenix.gui.styles import COLORS
+
+    dialog = RepertoireSelectionDialog()
+    qtbot.addWidget(dialog)
+
+    btn = RepertoireButton("Tarrasch Example Course")
+    qtbot.addWidget(btn)
+
+    # Unchecked state uses neutral fill and no checkmark prefix
+    assert COLORS["burnt_orange"] not in btn.styleSheet() or "rgba(211, 84, 0, 0.45)" in btn.styleSheet()
+    assert f"background-color: {COLORS['burnt_orange']}" not in btn.styleSheet()
+    assert not btn.text().startswith("✓")
+
+    # Checked state uses soft warm tint, burnt orange border, and checkmark prefix while preserving repo_name
+    btn.setChecked(True)
+    checked_ss = btn.styleSheet()
+    assert "background-color: #fde8d3" in checked_ss
+    assert f"border: 2px solid {COLORS['burnt_orange']}" in checked_ss
+    assert f"background-color: {COLORS['burnt_orange']}" not in checked_ss
+    assert btn.text().startswith("✓  ")
+    assert btn.repo_name == "Tarrasch Example Course"
+
+    # Unchecking restores neutral style and removes prefix
+    btn.setChecked(False)
+    unchecked_ss = btn.styleSheet()
+    assert "background-color: #fde8d3" not in unchecked_ss
+    assert "rgba(255, 255, 255, 0.48)" in unchecked_ss
+    assert not btn.text().startswith("✓")
+
+    # Language selection buttons use soft tint for :checked, not solid burnt orange fill
+    for obj_name in ("LangBtn_en", "LangBtn_de"):
+        lang_btn = dialog.findChild(QPushButton, obj_name)
+        assert lang_btn is not None
+        ss = lang_btn.styleSheet()
+        assert "background-color: #fde8d3" in ss
+        assert f"border: 2px solid {COLORS['burnt_orange']}" in ss
+        assert f"background-color: {COLORS['burnt_orange']}" not in ss
+
+    # Primary CTA retains solid burnt orange
+    assert f"background-color: {COLORS['burnt_orange']}" in dialog.btn_ok.styleSheet()
+

@@ -1,5 +1,20 @@
 from PyQt6.QtWidgets import QTextBrowser, QFrame, QSizePolicy
 from PyQt6.QtCore import Qt, QSize
+import os
+
+
+def extract_dropped_files(mime_data, extensions=(".pgn", ".zip")) -> list[str]:
+    """Extracts existing local file paths matching `extensions` from a Qt drag/drop QMimeData."""
+    if not mime_data or not mime_data.hasUrls():
+        return []
+    paths = []
+    exts = tuple(e.lower() for e in extensions)
+    for url in mime_data.urls():
+        if url.isLocalFile():
+            lp = os.path.normpath(url.toLocalFile())
+            if os.path.isfile(lp) and lp.lower().endswith(exts):
+                paths.append(lp)
+    return paths
 
 class ZoomableTextBrowser(QTextBrowser):
     def wheelEvent(self, event):
@@ -223,18 +238,22 @@ class _HorizontalEdgeFadeOverlay(QWidget):
             return
 
         painter = QPainter(self)
-        transparent = QColor(self._fade_color.red(), self._fade_color.green(), self._fade_color.blue(), 0)
+        c_opaque = QColor(self._fade_color.red(), self._fade_color.green(), self._fade_color.blue(), 255)
+        c_mid = QColor(self._fade_color.red(), self._fade_color.green(), self._fade_color.blue(), 190)
+        c_trans = QColor(self._fade_color.red(), self._fade_color.green(), self._fade_color.blue(), 0)
 
         if show_left:
             grad_l = QLinearGradient(0, 0, fw, 0)
-            grad_l.setColorAt(0.0, self._fade_color)
-            grad_l.setColorAt(1.0, transparent)
+            grad_l.setColorAt(0.0, c_opaque)
+            grad_l.setColorAt(0.45, c_mid)
+            grad_l.setColorAt(1.0, c_trans)
             painter.fillRect(0, 0, fw, h, grad_l)
 
         if show_right:
             grad_r = QLinearGradient(w - fw, 0, w, 0)
-            grad_r.setColorAt(0.0, transparent)
-            grad_r.setColorAt(1.0, self._fade_color)
+            grad_r.setColorAt(0.0, c_trans)
+            grad_r.setColorAt(0.55, c_mid)
+            grad_r.setColorAt(1.0, c_opaque)
             painter.fillRect(w - fw, 0, fw, h, grad_r)
 
         painter.end()
@@ -245,8 +264,8 @@ class FadingScrollArea(QScrollArea):
 
     def __init__(self, parent=None, fade_color: QColor = None, fade_width: int = None):
         super().__init__(parent)
-        color = fade_color if fade_color is not None else QColor(248, 245, 240, 245)
-        fw = fade_width if fade_width is not None else scale(26)
+        color = fade_color if fade_color is not None else QColor(249, 245, 237, 255)
+        fw = fade_width if fade_width is not None else scale(44)
         self._fade_overlay = _HorizontalEdgeFadeOverlay(self, color, fw)
         sb = self.horizontalScrollBar()
         sb.valueChanged.connect(self._fade_overlay.update)
@@ -254,6 +273,10 @@ class FadingScrollArea(QScrollArea):
 
     def setWidget(self, widget):
         super().setWidget(widget)
+        self._sync_fade_overlay()
+
+    def showEvent(self, event):
+        super().showEvent(event)
         self._sync_fade_overlay()
 
     def resizeEvent(self, event):

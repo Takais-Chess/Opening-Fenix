@@ -295,46 +295,26 @@ def get_repertoire_detail_stats(db_path: str, repo_dir: str, zip_path: str = Non
     }
 
 
-def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str | None:
-    """
-    Creates a timestamped .zip backup of the repertoire database and PGN resources.
-    Returns the backup zip path if created, or None if skipped (deduplicated / unchanged).
-    """
-    if not repo_name:
-        return None
-
-    db_path = get_repertoire_db_path(repo_name)
+def _write_repertoire_zip(
+    repo_name: str,
+    db_path: str,
+    repo_dir: str,
+    out_zip_path: str,
+    trigger_type: str = "manual",
+    checksum: str | None = None,
+) -> bool:
+    """Writes an atomic SQLite + allowlisted assets + manifest ZIP archive to `out_zip_path`."""
     if not os.path.exists(db_path):
-        logger.warning(f"Cannot backup repertoire '{repo_name}': DB file does not exist at {db_path}")
-        return None
+        return False
 
     if not verify_sqlite_db(db_path):
         logger.error(
-            f"Aborting backup for '{repo_name}': database failed integrity check ({db_path}). "
-            f"Refusing to overwrite healthy backups with a corrupted DB."
+            f"Aborting backup for '{repo_name}': database failed integrity check ({db_path})."
         )
-        return None
-
-    repo_dir = get_repertoire_dir(repo_name)
-    backup_dir = get_repertoire_backup_dir(repo_name)
-    
-    current_checksum = compute_repertoire_checksum(repo_name)
-    
-    # Check latest backup manifest for deduplication
-    existing_backups = list_repertoire_backups(repo_name)
-    if existing_backups:
-        latest = existing_backups[0]
-        logger.info(f"DEDUP CHECK: latest_checksum='{latest.get('checksum')}' vs current_checksum='{current_checksum}'")
-        if latest.get("checksum") == current_checksum and trigger_type == "auto":
-            logger.info(f"Backup skipped for '{repo_name}': contents unchanged since last backup ({latest['filename']})")
-            return None
+        return False
 
     now = datetime.now()
-    timestamp_str = now.strftime("%Y-%m-%d_%H-%M-%S_%f")[:23].replace(".", "-")
-    zip_name = f"backup_{repo_name}_{timestamp_str}.zip"
-    zip_path = os.path.join(backup_dir, zip_name)
-
-    # Gather detailed repertoire statistics & metadata
+    current_checksum = checksum if checksum is not None else compute_repertoire_checksum(repo_name)
     details = get_repertoire_detail_stats(db_path, repo_dir, repo_name=repo_name)
 
     manifest_data = {
@@ -346,12 +326,11 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
         "de_comments": details["de_comments"],
         "levels_info": details["levels_info"],
         "total_moves": details["total_moves"],
-        "pgn_resources": details["pgn_resources"]
+        "pgn_resources": details["pgn_resources"],
     }
 
     temp_backup_db = None
     try:
-        # Attempt safe online SQLite backup to ensure WAL pages are included atomically without locking writers
         db_source_for_zip = db_path
         try:
             import tempfile
@@ -378,7 +357,6 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             db_source_for_zip = temp_backup_db
         except Exception as bk_err:
             logger.debug(f"SQLite online backup fallback ({repo_name}): {bk_err}")
-            # Fallback: passive checkpoint
             chk_conn = None
             try:
                 chk_conn = sqlite3.connect(db_path, timeout=5)
@@ -397,13 +375,12 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
             logger.error(
                 f"Aborting backup for '{repo_name}': snapshot database failed integrity check ({db_source_for_zip})."
             )
-            return None
+            return False
 
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            # 1. Add DB file with LZMA compression (matches Cloud Sync v2 for ~25-35% smaller backups)
+        os.makedirs(os.path.dirname(os.path.abspath(out_zip_path)), exist_ok=True)
+        with zipfile.ZipFile(out_zip_path, "w") as zf:
             zf.write(db_source_for_zip, os.path.basename(db_path), compress_type=zipfile.ZIP_LZMA)
 
-            # 2. Add only allowlisted resource PGNs & cover images (skip Original PGNs/, corrupted DBs, exports, sidecars)
             if os.path.exists(repo_dir):
                 for root, dirs, files in os.walk(repo_dir):
                     dirs[:] = sorted(d for d in dirs if d.lower() not in _BACKUP_EXCLUDED_DIRS)
@@ -422,32 +399,217 @@ def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str 
                         except Exception as file_err:
                             logger.warning(f"Skipped backing up resource file {full_p}: {file_err}")
 
-            # 3. Add manifest.json
             manifest_json = json.dumps(manifest_data, indent=2, ensure_ascii=False)
             zf.writestr("manifest.json", manifest_json, compress_type=zipfile.ZIP_DEFLATED)
-            
-        logger.info(f"Successfully created repertoire backup: {zip_path} (trigger: {trigger_type})")
-        
-        # Run retention pruning after backup creation (reuse existing list + new entry to avoid re-reading all zips)
-        new_entry = {
-            "filename": zip_name,
-            "path": zip_path,
-            "created_at": now,
-            "trigger_type": trigger_type,
-        }
-        prune_repertoire_backups(repo_name, preloaded_backups=[new_entry] + (existing_backups or []))
-        return zip_path
 
+        return True
     except Exception as e:
-        logger.error(f"Failed to create backup for '{repo_name}': {e}", exc_info=True)
-        if os.path.exists(zip_path):
-            try: os.remove(zip_path)
-            except: pass
-        return None
+        logger.error(f"Failed writing repertoire zip '{out_zip_path}': {e}", exc_info=True)
+        if os.path.exists(out_zip_path):
+            try:
+                os.remove(out_zip_path)
+            except Exception:
+                pass
+        return False
     finally:
         if temp_backup_db and os.path.exists(temp_backup_db):
-            try: os.remove(temp_backup_db)
-            except Exception: pass
+            try:
+                os.remove(temp_backup_db)
+            except Exception:
+                pass
+
+
+def create_repertoire_backup(repo_name: str, trigger_type: str = "auto") -> str | None:
+    """
+    Creates a timestamped .zip backup of the repertoire database and PGN resources.
+    Returns the backup zip path if created, or None if skipped (deduplicated / unchanged).
+    """
+    if not repo_name:
+        return None
+
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        logger.warning(f"Cannot backup repertoire '{repo_name}': DB file does not exist at {db_path}")
+        return None
+
+    if not verify_sqlite_db(db_path):
+        logger.error(
+            f"Aborting backup for '{repo_name}': database failed integrity check ({db_path}). "
+            f"Refusing to overwrite healthy backups with a corrupted DB."
+        )
+        return None
+
+    repo_dir = get_repertoire_dir(repo_name)
+    backup_dir = get_repertoire_backup_dir(repo_name)
+    current_checksum = compute_repertoire_checksum(repo_name)
+
+    existing_backups = list_repertoire_backups(repo_name)
+    if existing_backups:
+        latest = existing_backups[0]
+        logger.info(f"DEDUP CHECK: latest_checksum='{latest.get('checksum')}' vs current_checksum='{current_checksum}'")
+        if latest.get("checksum") == current_checksum and trigger_type == "auto":
+            logger.info(f"Backup skipped for '{repo_name}': contents unchanged since last backup ({latest['filename']})")
+            return None
+
+    now = datetime.now()
+    timestamp_str = now.strftime("%Y-%m-%d_%H-%M-%S_%f")[:23].replace(".", "-")
+    zip_name = f"backup_{repo_name}_{timestamp_str}.zip"
+    zip_path = os.path.join(backup_dir, zip_name)
+
+    ok = _write_repertoire_zip(
+        repo_name=repo_name,
+        db_path=db_path,
+        repo_dir=repo_dir,
+        out_zip_path=zip_path,
+        trigger_type=trigger_type,
+        checksum=current_checksum,
+    )
+    if not ok:
+        return None
+
+    logger.info(f"Successfully created repertoire backup: {zip_path} (trigger: {trigger_type})")
+    new_entry = {
+        "filename": zip_name,
+        "path": zip_path,
+        "created_at": now,
+        "trigger_type": trigger_type,
+    }
+    prune_repertoire_backups(repo_name, preloaded_backups=[new_entry] + (existing_backups or []))
+    return zip_path
+
+
+def export_portable_backup_zip(repo_name: str, output_zip_path: str) -> bool:
+    """Exports a standalone, portable backup `.zip` (DB + resources + manifest) to a user-chosen path."""
+    if not repo_name or not output_zip_path:
+        return False
+    db_path = get_repertoire_db_path(repo_name)
+    if not os.path.exists(db_path):
+        return False
+    repo_dir = get_repertoire_dir(repo_name)
+    return _write_repertoire_zip(
+        repo_name=repo_name,
+        db_path=db_path,
+        repo_dir=repo_dir,
+        out_zip_path=output_zip_path,
+        trigger_type="portable_export",
+    )
+
+
+def validate_backup_zip(zip_path: str) -> tuple[bool, str, dict]:
+    """
+    Validates an external repertoire backup `.zip` file:
+    - Verifies valid ZIP archive and rejects path-traversal members.
+    - Verifies a top-level `.db` exists, passes `verify_sqlite_db()`, and has a `positions` table.
+    - Returns `(True, "", info_dict)` or `(False, error_message, {})`.
+    """
+    if not zip_path or not os.path.isfile(zip_path):
+        return False, "Backup file does not exist.", {}
+    if not zipfile.is_zipfile(zip_path):
+        return False, "The selected file is not a valid ZIP archive.", {}
+
+    import tempfile
+    temp_db_path = None
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = zf.namelist()
+            for member in members:
+                norm = member.replace("\\", "/")
+                parts = [p for p in norm.split("/") if p]
+                if os.path.isabs(member) or ".." in parts:
+                    return False, f"Unsafe path inside archive: {member}", {}
+
+            db_members = [
+                m for m in members
+                if "/" not in m.replace("\\", "/")
+                and m.lower().endswith(".db")
+                and not m.lower().endswith((".corrupted", ".malformed", ".empty", ".tmp"))
+            ]
+            if not db_members:
+                return False, "Archive does not contain a repertoire database (.db) at root level.", {}
+
+            db_member = db_members[0]
+            fd, temp_db_path = tempfile.mkstemp(suffix=".db")
+            os.close(fd)
+            with open(temp_db_path, "wb") as f_out, zf.open(db_member) as z_in:
+                shutil.copyfileobj(z_in, f_out, 1024 * 1024)
+
+            if not verify_sqlite_db(temp_db_path):
+                return False, "The database inside the backup archive is corrupted or unreadable.", {}
+
+            conn = None
+            try:
+                conn = sqlite3.connect(f"file:{os.path.abspath(temp_db_path)}?mode=ro", uri=True, timeout=5.0)
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='positions'")
+                if not cur.fetchone():
+                    return False, "The database inside the archive is not a valid Opening Fenix repertoire.", {}
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            manifest = {}
+            if "manifest.json" in members:
+                try:
+                    manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+                except Exception:
+                    manifest = {}
+
+        details = get_repertoire_detail_stats(temp_db_path, "", zip_path=zip_path)
+        suggested_name = (manifest.get("repertoire_name") or "").strip() or os.path.splitext(os.path.basename(db_member))[0]
+        en_cnt = manifest.get("en_comments", details.get("en_comments", 0))
+        de_cnt = manifest.get("de_comments", details.get("de_comments", 0))
+        total_moves = manifest.get("total_moves", details.get("total_moves", 0))
+        levels_info = manifest.get("levels_info", details.get("levels_info", []))
+        pgn_resources = manifest.get("pgn_resources", details.get("pgn_resources", {}))
+
+        info = {
+            "repertoire_name": suggested_name,
+            "created_at": manifest.get("created_at", ""),
+            "size_bytes": os.path.getsize(zip_path),
+            "en_comments": en_cnt,
+            "de_comments": de_cnt,
+            "total_moves": total_moves,
+            "levels_info": levels_info,
+            "pgn_resources": pgn_resources,
+            "db_member": db_member,
+        }
+        return True, "", info
+    except Exception as e:
+        return False, str(e), {}
+    finally:
+        if temp_db_path and os.path.exists(temp_db_path):
+            try:
+                os.remove(temp_db_path)
+            except Exception:
+                pass
+
+
+def import_repertoire_from_external_zip(zip_path: str, target_repo_name: str, overwrite: bool = False) -> tuple[bool, str]:
+    """
+    Validates an external backup `.zip` and imports/restores it into `target_repo_name`.
+    Returns `(True, "")` on success, or `(False, error_code_or_msg)`.
+    """
+    clean_name = (target_repo_name or "").strip()
+    if not clean_name or any(ch in clean_name for ch in '\\/:*?"<>|'):
+        return False, "invalid_name"
+
+    ok, err, _info = validate_backup_zip(zip_path)
+    if not ok:
+        return False, err
+
+    target_db = get_repertoire_db_path(clean_name)
+    if os.path.exists(target_db) and not overwrite:
+        return False, "exists"
+
+    repo_dir = get_repertoire_dir(clean_name)
+    os.makedirs(repo_dir, exist_ok=True)
+    restored = restore_repertoire_from_backup(clean_name, zip_path)
+    if not restored:
+        return False, "Failed to extract backup archive."
+    return True, ""
 
 
 def list_repertoire_backups(repo_name: str) -> list[dict]:

@@ -40,7 +40,8 @@ from opening_fenix.core.services.repertoire_core_service import (
     get_repertoire_levels_fast, get_repertoire_meta_fast, invalidate_repertoire_levels_cache
 )
 from opening_fenix.core.services.backup_service import (
-    create_repertoire_backup, list_repertoire_backups, restore_repertoire_from_backup
+    create_repertoire_backup, list_repertoire_backups, restore_repertoire_from_backup,
+    export_portable_backup_zip, import_repertoire_from_external_zip, validate_backup_zip,
 )
 from opening_fenix.core.services.maintenance_service import list_all_repertoires
 from opening_fenix.core.services.update_service import (
@@ -56,7 +57,7 @@ from opening_fenix.gui.widgets.board_widget import (
 from opening_fenix.gui.widgets.common import AutoAdjustButton, clear_table_safely
 from opening_fenix.gui.dialogs.export_dialog import ExportDialog
 from opening_fenix.gui.dialogs.update_dialog import UpdateDialog
-from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon
+from opening_fenix.gui.styles import COLORS, get_bw_glass_style, set_consistent_icon, bring_window_to_front
 from opening_fenix.gui.scaling import scale
 
 
@@ -843,17 +844,26 @@ class RepertoireConfigCard(QFrame):
         if tm and hasattr(tm, 'get_comment_language'):
             curr_lang = tm.get_comment_language(self.repo_name) or "auto"
 
-        raw_app_lang = getattr(translator, "current_lang", None) or "de"
-        app_lang = resolve_auto_comment_language(
+        raw_app_lang = (getattr(translator, "current_lang", None) or "de").lower()
+        app_lang_upper = raw_app_lang.upper()
+        resolved_lang = resolve_auto_comment_language(
             app_lang=raw_app_lang,
             available_langs=available,
         ).upper()
-        self.combo_lang.setToolTip(
-            tr_ui(
-                "open_training.card_comment_lang_tooltip",
-                "Sprache der Zugkommentare für dieses Repertoire.\nAuto folgt der Programmsprache (aktuell: {lang}).",
-            ).format(lang=app_lang)
-        )
+        if available and resolved_lang != app_lang_upper:
+            self.combo_lang.setToolTip(
+                tr_ui(
+                    "open_training.card_comment_lang_tooltip_fallback",
+                    "Sprache der Zugkommentare für dieses Repertoire.\nAuto folgt der Programmsprache ({app_lang}), nutzt aber {resolved_lang}, da keine {app_lang}-Kommentare vorhanden sind.",
+                ).format(app_lang=app_lang_upper, resolved_lang=resolved_lang)
+            )
+        else:
+            self.combo_lang.setToolTip(
+                tr_ui(
+                    "open_training.card_comment_lang_tooltip",
+                    "Sprache der Zugkommentare für dieses Repertoire.\nAuto folgt der Programmsprache (aktuell: {lang}).",
+                ).format(lang=resolved_lang)
+            )
 
         self.combo_lang.blockSignals(True)
         self.combo_lang.clear()
@@ -863,7 +873,7 @@ class RepertoireConfigCard(QFrame):
             self.combo_lang.setEnabled(False)
         else:
             self.combo_lang.setEnabled(True)
-            auto_label = tr_ui("open_training.card_comment_lang_auto", "💬 Kommentare: Auto ({lang})").format(lang=app_lang)
+            auto_label = tr_ui("open_training.card_comment_lang_auto", "💬 Kommentare: Auto ({lang})").format(lang=resolved_lang)
             self.combo_lang.addItem(auto_label, "auto")
             if len(available) > 1 or curr_lang == "all":
                 self.combo_lang.addItem(tr_ui("open_training.card_comment_lang_all", "💬 Kommentare: Alle"), "all")
@@ -939,7 +949,7 @@ class DiagnosticDialog(QDialog):
         super().__init__(parent)
         set_consistent_icon(self)
         self.setWindowTitle(tr_ui("repo_settings.diag_title", "Datenbank-Diagnose"))
-        self.setMinimumWidth(scale(500))
+        self.setMinimumSize(scale(540), scale(420))
         self.backend = backend
         self.setStyleSheet(get_bw_glass_style())
         self.init_ui()
@@ -956,7 +966,10 @@ class DiagnosticDialog(QDialog):
         
         self.txt_results = QTextEdit()
         self.txt_results.setReadOnly(True)
-        self.txt_results.setStyleSheet("background-color: white; border-radius: 8px; border: 1px solid rgba(0,0,0,0.1); padding: 10px;")
+        self.txt_results.setMinimumHeight(scale(290))
+        self.txt_results.setStyleSheet(
+            f"QTextEdit {{ background-color: white; border-radius: {scale(8)}px; border: 1px solid rgba(0,0,0,0.1); padding: {scale(10)}px; }}"
+        )
         layout.addWidget(self.txt_results)
         
         h_btn = QHBoxLayout()
@@ -997,8 +1010,18 @@ class DiagnosticDialog(QDialog):
         else:
             msg += tr_ui("repo_settings.diag_dups_ok", "<p style='color: #27ae60;'><b>✅ Eindeutigkeit</b><br>Keine FEN-Duplikate gefunden.</p>")
             
-        if self.issues.get('orphans', 0) > 0:
-            msg += tr_ui("repo_settings.diag_orphans_info", "<p style='color: #f39c12;'><b>ℹ️ Isolierte Stellungen</b><br>{count} Stellungen sind nicht erreichbar.</p>", count=self.issues['orphans'])
+        orphans = self.issues.get('orphans', 0)
+        if orphans == 1:
+            msg += tr_ui(
+                "repo_settings.diag_orphans_info_single",
+                "<p style='color: #f39c12;'><b>ℹ️ Isolierte Stellungen</b><br>1 Stellung ist nicht erreichbar.</p>"
+            )
+        elif orphans > 1:
+            msg += tr_ui(
+                "repo_settings.diag_orphans_info",
+                "<p style='color: #f39c12;'><b>ℹ️ Isolierte Stellungen</b><br>{count} Stellungen sind nicht erreichbar.</p>",
+                count=orphans
+            )
         else:
             msg += tr_ui("repo_settings.diag_orphans_ok", "<p style='color: #27ae60;'><b>✅ Erreichbarkeit</b><br>Alle Stellungen sind verknüpft.</p>")
 
@@ -1344,6 +1367,8 @@ class DeleteLevelDialog(QDialog):
         self.combo_del.currentIndexChanged.connect(self._update_target_combo)
         self._update_target_combo()
 
+        layout.addStretch()
+
         h_btn = QHBoxLayout()
         h_btn.addStretch()
         btn_cancel = QPushButton(tr_widget("login.cancel", "Abbrechen"))
@@ -1354,6 +1379,7 @@ class DeleteLevelDialog(QDialog):
         h_btn.addWidget(btn_cancel)
         h_btn.addWidget(btn_ok)
         layout.addLayout(h_btn)
+        self.adjustSize()
 
     def _on_mode_toggled(self):
         self.combo_target.setEnabled(not self.radio_delete_moves.isChecked())
@@ -1373,6 +1399,7 @@ class DeleteLevelDialog(QDialog):
             if lvl['order'] != del_order:
                 self.combo_target.addItem(f"Lvl {lvl['order']}: {lvl['name']}", lvl['order'])
         self._on_mode_toggled()
+        self.adjustSize()
 
     def get_selection(self):
         del_order = self.combo_del.currentData()
@@ -1681,6 +1708,140 @@ _PAGE_ATTR_MAP = {
 }
 
 
+def run_external_backup_import_flow(
+    parent,
+    zip_path: str | None = None,
+    active_repo: str | None = None,
+    close_sessions_fn=None,
+) -> str | None:
+    """
+    Interactive helper to validate and import/restore an external repertoire `.zip` backup.
+    Returns the target repertoire name on success, or None if cancelled/failed.
+    """
+    if not zip_path:
+        zip_path, _ = QFileDialog.getOpenFileName(
+            parent,
+            tr_ui("repo_settings.dlg_import_backup_title", "Externes Backup importieren (.zip)"),
+            "",
+            "ZIP Archive (*.zip)",
+        )
+    if not zip_path:
+        return None
+
+    ok_val, err_val, info = validate_backup_zip(zip_path)
+    if not ok_val:
+        QMessageBox.warning(
+            parent,
+            tr_ui("repo_settings.dlg_import_backup_invalid_title", "Ungültiges Backup"),
+            tr_ui(
+                "repo_settings.dlg_import_backup_invalid_msg",
+                "Die ausgewählte Datei ist kein gültiges Opening-Fenix-Backup:\n{err}",
+                err=err_val,
+            ),
+        )
+        return None
+
+    suggested_name = info.get("repertoire_name") or "ImportedRepertoire"
+    summary = tr_ui(
+        "repo_settings.dlg_import_backup_summary",
+        "Backup-Inhalt: '{name}' ({moves} Züge, {en} EN / {de} DE Kommentare)",
+        name=suggested_name,
+        moves=info.get("total_moves", 0),
+        en=info.get("en_comments", 0),
+        de=info.get("de_comments", 0),
+    )
+
+    target_repo = None
+    overwrite = False
+    if active_repo:
+        box = QMessageBox(parent)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(tr_ui("repo_settings.dlg_import_backup_mode_title", "Backup importieren"))
+        box.setText(
+            summary
+            + "\n\n"
+            + tr_ui(
+                "repo_settings.dlg_import_backup_mode_msg",
+                "Möchtest du das Backup als neues Repertoire importieren oder das aktive Repertoire '{active}' überschreiben?",
+                active=active_repo,
+            )
+        )
+        btn_new = box.addButton(
+            tr_ui("repo_settings.btn_import_as_new", "Als neues Repertoire"),
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        btn_overwrite = box.addButton(
+            tr_ui("repo_settings.btn_overwrite_active", "Aktives überschreiben"),
+            QMessageBox.ButtonRole.DestructiveRole,
+        )
+        btn_cancel = box.addButton(tr_ui("login.cancel", "Abbrechen"), QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked == btn_cancel or clicked is None:
+            return None
+        if clicked == btn_overwrite:
+            target_repo = active_repo
+            overwrite = True
+
+    if target_repo is None:
+        candidate = suggested_name
+        suffix_idx = 2
+        while os.path.exists(get_repertoire_db_path(candidate)):
+            candidate = f"{suggested_name} ({suffix_idx})"
+            suffix_idx += 1
+
+        new_name, accepted = QInputDialog.getText(
+            parent,
+            tr_ui("repo_settings.dlg_import_backup_name_title", "Name für importiertes Repertoire"),
+            summary + "\n\n" + tr_ui("repo_settings.dlg_import_backup_name_prompt", "Repertoire-Name:"),
+            text=candidate,
+        )
+        if not accepted or not new_name.strip():
+            return None
+        target_repo = new_name.strip()
+        if os.path.exists(get_repertoire_db_path(target_repo)):
+            confirm = QMessageBox.question(
+                parent,
+                tr_ui("repo_settings.dlg_restore_confirm_title", "Wiederherstellen bestätigen"),
+                tr_ui(
+                    "repo_settings.dlg_import_backup_overwrite_existing",
+                    "Das Repertoire '{repo}' existiert bereits. Möchtest du es mit diesem Backup überschreiben?",
+                    repo=target_repo,
+                ),
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return None
+            overwrite = True
+
+    if callable(close_sessions_fn):
+        close_sessions_fn(target_repo)
+
+    ok_imp, err_imp = import_repertoire_from_external_zip(zip_path, target_repo, overwrite=overwrite)
+    if ok_imp:
+        QMessageBox.information(
+            parent,
+            tr_ui("repo_settings.dlg_import_backup_success_title", "Backup importiert"),
+            tr_ui(
+                "repo_settings.dlg_import_backup_success_msg",
+                "Das Repertoire '{repo}' wurde erfolgreich aus dem Backup importiert.",
+                repo=target_repo,
+            ),
+        )
+        return target_repo
+
+    QMessageBox.warning(
+        parent,
+        tr_ui("repo_settings.dlg_error", "Fehler"),
+        tr_ui(
+            "repo_settings.dlg_import_backup_error_msg",
+            "Import fehlgeschlagen: {err}",
+            err=err_imp,
+        ),
+    )
+    return None
+
+
 class UnifiedSettingsDialog(QDialog):
     """
     Central, consolidated settings dialog with a hierarchical, collapsible sidebar navigation.
@@ -1819,7 +1980,7 @@ class UnifiedSettingsDialog(QDialog):
                 background-color: #ffffff;
                 color: #0f172a;
                 font-weight: 700;
-                border-left: 3px solid #0f172a;
+                border: 1px solid #cbd5e1;
             }}
             QWidget#ContentContainer {{
                 background-color: #f8fafc;
@@ -2229,9 +2390,7 @@ class UnifiedSettingsDialog(QDialog):
                 self.task_center_dialog.set_active_repertoire(active_repo)
         if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
             self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
-        self.task_center_dialog.show()
-        self.task_center_dialog.raise_()
-        self.task_center_dialog.activateWindow()
+        bring_window_to_front(self.task_center_dialog)
 
     def _select_all_maintenance_repos(self, checked):
         self._select_all_maintenance(checked)
@@ -2350,7 +2509,7 @@ class UnifiedSettingsDialog(QDialog):
 
         return hdr
 
-    def _make_hairline_row(self, title: str, subtitle: str, control: QWidget, is_last: bool = False) -> QFrame:
+    def _make_hairline_row(self, title: str, subtitle: str, control: QWidget, is_last: bool = False, control_stretch: int = 0) -> QFrame:
         """Creates a Concept 2 two-column scannable row with title + muted description on left, control on right, and 1px hairline divider."""
         row = QFrame()
         row.setObjectName("HairlineRowLast" if is_last else "HairlineRow")
@@ -2375,7 +2534,10 @@ class UnifiedSettingsDialog(QDialog):
 
         h_lay.addLayout(v_left, 1)
         if control is not None:
-            h_lay.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if control_stretch > 0:
+                h_lay.addWidget(control, control_stretch, Qt.AlignmentFlag.AlignVCenter)
+            else:
+                h_lay.addWidget(control, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return row
 
     # ─── UI Architecture ────────────────────────────────────────────────────
@@ -2979,19 +3141,42 @@ class UnifiedSettingsDialog(QDialog):
         # Quick Theme Swatch Pills
         h_swatches = QHBoxLayout()
         h_swatches.setSpacing(scale(8))
+        swatch_px = max(12, scale(12))
         for t_key, t_colors in list(THEMES.items())[:5]:
             btn_sw = QPushButton(tr_ui(f"themes.{t_key}", t_key).split(" ")[0])
             btn_sw.setCursor(Qt.CursorShape.PointingHandCursor)
             btn_sw.setFixedHeight(scale(26))
-            c_dark = t_colors[1] if isinstance(t_colors, (tuple, list)) and len(t_colors) >= 2 else (t_colors.get("dark", "#b58863") if isinstance(t_colors, dict) else "#b58863")
-            if isinstance(c_dark, QColor):
-                c_dark = c_dark.name()
+            if isinstance(t_colors, (tuple, list)) and len(t_colors) >= 2:
+                raw_light, raw_dark = t_colors[0], t_colors[1]
+            elif isinstance(t_colors, dict):
+                raw_light, raw_dark = t_colors.get("light", "#f0d9b5"), t_colors.get("dark", "#b58863")
+            else:
+                raw_light, raw_dark = "#f0d9b5", "#b58863"
+            c_light = raw_light if isinstance(raw_light, QColor) else QColor(str(raw_light))
+            c_dark = raw_dark if isinstance(raw_dark, QColor) else QColor(str(raw_dark))
+
+            sw_pix = QPixmap(swatch_px * 2, swatch_px * 2)
+            sw_pix.fill(Qt.GlobalColor.transparent)
+            sw_pix.setDevicePixelRatio(2)
+            painter = QPainter(sw_pix)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            clip_path = QPainterPath()
+            clip_path.addRoundedRect(QRectF(0.5, 0.5, swatch_px - 1, swatch_px - 1), 3.0, 3.0)
+            painter.setClipPath(clip_path)
+            painter.fillRect(QRectF(0, 0, swatch_px / 2.0, swatch_px), c_light)
+            painter.fillRect(QRectF(swatch_px / 2.0, 0, swatch_px / 2.0, swatch_px), c_dark)
+            painter.setClipping(False)
+            painter.setPen(QColor(15, 23, 42, 46))
+            painter.drawRoundedRect(QRectF(0.5, 0.5, swatch_px - 1, swatch_px - 1), 3.0, 3.0)
+            painter.end()
+
+            btn_sw.setIcon(QIcon(sw_pix))
+            btn_sw.setIconSize(QSize(swatch_px, swatch_px))
             btn_sw.setStyleSheet(f"""
                 QPushButton {{
                     background-color: #ffffff;
                     color: #334155;
                     border: 1px solid #cbd5e1;
-                    border-left: 6px solid {c_dark};
                     border-radius: {scale(6)}px;
                     padding: {scale(2)}px {scale(10)}px;
                     font-size: {scale(11)}px;
@@ -2999,7 +3184,6 @@ class UnifiedSettingsDialog(QDialog):
                 }}
                 QPushButton:hover {{
                     border-color: #0f172a;
-                    border-left: 6px solid {c_dark};
                     background-color: #f8fafc;
                 }}
             """)
@@ -3136,7 +3320,7 @@ class UnifiedSettingsDialog(QDialog):
         self.chk_details = QCheckBox(tr_widget("repo_settings.tab_details", "📋 Details (Position-Infos)"))
         self.chk_analysis = QCheckBox(tr_widget("repo_settings.tab_analysis", "🧠 Analyse (Engine & Lichess)"))
         self.chk_transpositions = QCheckBox(tr_widget("repo_settings.tab_transpositions", "🔄 Transpositionen"))
-        self.chk_holes = QCheckBox(tr_widget("repo_settings.tab_search_mode", "🕳️ Such Modus (Lücken)"))
+        self.chk_holes = QCheckBox(tr_widget("repo_settings.tab_search_mode", "🕳️ Suchmodus (Lücken)"))
         self.chk_kontrolle = QCheckBox(tr_widget("repo_settings.tab_control", "✅ Kontrolle (Varianten-Filter)"))
 
         grid_tabs = QGridLayout()
@@ -3316,7 +3500,8 @@ class UnifiedSettingsDialog(QDialog):
         v_engine.setSpacing(0)
 
         self.txt_engine_path = QLineEdit(self.get_config().get("engine_path", ""))
-        self.txt_engine_path.setMinimumWidth(scale(260))
+        self.txt_engine_path.setMinimumWidth(scale(240))
+        self.txt_engine_path.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.txt_engine_path.textChanged.connect(lambda t: self.set_setting("engine_path", t))
         btn_browse = QPushButton(tr_widget("common.browse", "Durchsuchen..."))
         btn_browse.clicked.connect(self.browse_engine_path)
@@ -3328,14 +3513,15 @@ class UnifiedSettingsDialog(QDialog):
         h_epath = QHBoxLayout(w_epath)
         h_epath.setContentsMargins(0, 0, 0, 0)
         h_epath.setSpacing(scale(8))
-        h_epath.addWidget(self.txt_engine_path)
+        h_epath.addWidget(self.txt_engine_path, 1)
         h_epath.addWidget(btn_browse)
         h_epath.addWidget(btn_download)
 
         v_engine.addWidget(self._make_hairline_row(
             tr_ui("settings.engine_path", "Engine Pfad (.exe):"),
             tr_ui("settings.engine_path_sub", "Pfad zur lokalen Stockfish-Binärdatei oder automatischer 1-Klick-Download."),
-            w_epath
+            w_epath,
+            control_stretch=2
         ))
 
         self.combo_engine_threads = NoWheelComboBox()
@@ -4161,6 +4347,41 @@ class UnifiedSettingsDialog(QDialog):
             self.lbl_current_version
         ))
 
+        from opening_fenix.core.utils import is_store_version
+        if is_store_version():
+            lbl_store_status = QLabel(tr_ui("settings.store_updates_badge", "Automatisch (Microsoft Store)"))
+            lbl_store_status.setStyleSheet(f"""
+                background-color: #ecfdf5;
+                color: #065f46;
+                border: 1px solid #a7f3d0;
+                border-radius: {scale(8)}px;
+                padding: {scale(4)}px {scale(12)}px;
+                font-weight: 700;
+                font-size: {scale(13)}px;
+            """)
+            v_updates.addWidget(self._make_hairline_row(
+                tr_ui("settings.store_updates_row_title", "Microsoft Store Updates:"),
+                tr_ui("settings.store_updates_row_sub", "Updates für Opening Fenix Chess werden automatisch über den Microsoft Store installiert."),
+                lbl_store_status
+            ))
+
+            btn_open_store = QPushButton(tr_widget("settings.btn_open_ms_store", "🏪 Im Microsoft Store öffnen"))
+            def _open_ms_store():
+                from PyQt6.QtGui import QDesktopServices
+                from PyQt6.QtCore import QUrl
+                QDesktopServices.openUrl(QUrl("ms-windows-store://pdp/?ProductId=9MVN5X4QZ1KL"))
+            btn_open_store.clicked.connect(_open_ms_store)
+            v_updates.addWidget(self._make_hairline_row(
+                tr_ui("settings.store_open_row_title", "Microsoft Store:"),
+                tr_ui("settings.store_open_row_sub", "Öffne die App-Seite im Microsoft Store, um manuell nach Updates zu suchen."),
+                btn_open_store,
+                is_last=True
+            ))
+
+            layout.addWidget(g_updates)
+            layout.addStretch()
+            return
+
         self.lbl_last_check = QLabel("-")
         self.lbl_last_check.setStyleSheet(f"font-weight: 600; color: #334155; font-size: {scale(13)}px;")
         v_updates.addWidget(self._make_hairline_row(
@@ -4970,6 +5191,8 @@ class UnifiedSettingsDialog(QDialog):
         spin_font.setPixelSize(max(12, scale(13)))
         spin_fm = QFontMetrics(spin_font)
         box_spin_w = max(92, scale(96), spin_fm.horizontalAdvance("9999") + max(48, scale(52)))
+        max_unit_w = max(spin_fm.horizontalAdvance(lbl) for lbl in unit_labels.values())
+        unit_combo_w = max(scale(136), max_unit_w + scale(54))
         for box_num in range(1, 8):
             row = (box_num - 1) // 2
             col_offset = ((box_num - 1) % 2) * 3
@@ -4978,7 +5201,7 @@ class UnifiedSettingsDialog(QDialog):
             spin_val = NoWheelSpinBox(); spin_val.setRange(1, 999); spin_val.setFixedWidth(box_spin_w)
             combo_unit = NoWheelComboBox()
             for uk, uv in unit_labels.items(): combo_unit.addItem(uv, uk)
-            combo_unit.setFixedWidth(scale(110))
+            combo_unit.setFixedWidth(unit_combo_w)
 
             b_data = custom_saved.get(str(box_num)) or custom_saved.get(box_num)
             if isinstance(b_data, dict): v, u = int(b_data.get("value", 1)), b_data.get("unit", "days")
@@ -5292,7 +5515,7 @@ class UnifiedSettingsDialog(QDialog):
         self.lbl_cr_comment_stats = QLabel("-")
         self.lbl_cr_comment_stats.setStyleSheet("font-weight: 700; color: #0f172a; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 4px 10px;")
 
-        grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_prio_elo", "🎯 Prio Score ELO:")), 0, 0); grid_meta.addWidget(self.combo_cr_elo, 0, 1)
+        grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_prio_elo", "🎯 Prio-Score ELO:")), 0, 0); grid_meta.addWidget(self.combo_cr_elo, 0, 1)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_color", "🎨 Deine Farbe:")), 0, 2); grid_meta.addWidget(self.combo_cr_color, 0, 3)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_analysis_status", "🔍 Analyse-Status:")), 1, 0); grid_meta.addWidget(self.lbl_cr_ana_status, 1, 1)
         grid_meta.addWidget(QLabel(tr_ui("repo_settings.label_db_coverage", "🎯 Positionen mit Prio-Score:")), 1, 2); grid_meta.addWidget(self.lbl_cr_db_cov, 1, 3)
@@ -5620,7 +5843,7 @@ class UnifiedSettingsDialog(QDialog):
             if translator.current_lang == "en":
                 cov_str = f"{covered:,} / {total:,} ({cov:.1f}%)"
             else:
-                cov_str = f"{covered:,} / {total:,} ({cov:.1f}%)".replace(",", ".")
+                cov_str = f"{covered:,} / {total:,}".replace(",", ".") + f" ({cov:.1f}%)".replace(".", ",")
             self.lbl_cr_db_cov.setText(cov_str)
 
     def update_creator_cover_preview(self, name):
@@ -6869,9 +7092,20 @@ class UnifiedSettingsDialog(QDialog):
         ))
 
         h_bar = QHBoxLayout()
+        h_bar.setSpacing(scale(8))
         btn_now = QPushButton(tr_widget("repo_settings.btn_create_backup_now", "📸 Manuelles Backup jetzt erstellen"))
         btn_now.clicked.connect(self.create_manual_backup)
-        h_bar.addWidget(btn_now); h_bar.addStretch()
+        h_bar.addWidget(btn_now)
+
+        self.btn_export_backup_zip = QPushButton(tr_widget("repo_settings.btn_export_backup_zip", "📤 Backup exportieren (.zip)..."))
+        self.btn_export_backup_zip.clicked.connect(self.export_external_backup_zip)
+        h_bar.addWidget(self.btn_export_backup_zip)
+
+        self.btn_import_backup_zip = QPushButton(tr_widget("repo_settings.btn_import_backup_zip", "📥 Backup importieren (.zip)..."))
+        self.btn_import_backup_zip.clicked.connect(lambda: self.import_external_backup_zip())
+        h_bar.addWidget(self.btn_import_backup_zip)
+
+        h_bar.addStretch()
         layout.addLayout(h_bar)
 
         self.tbl_backups = QTableWidget()
@@ -7058,6 +7292,90 @@ class UnifiedSettingsDialog(QDialog):
 
     restore_backup_selected = restore_backup
 
+    def export_external_backup_zip(self):
+        """Exports a portable `.zip` backup of the currently active repertoire to a user-chosen path."""
+        backend = self.ensure_backend_for_active_repo()
+        if not backend or not backend.active_repo_name:
+            return
+        repo_name = backend.active_repo_name
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_repo = re.sub(r'[\\/:*?"<>|]', "_", repo_name)
+        default_dir = os.path.expanduser("~/Desktop")
+        if not os.path.isdir(default_dir):
+            default_dir = get_user_dir()
+        suggested = os.path.join(default_dir, f"{safe_repo}_backup_{stamp}.zip")
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            tr_ui("repo_settings.dlg_export_backup_title", "Portables Backup exportieren (.zip)"),
+            suggested,
+            "ZIP Archive (*.zip)",
+        )
+        if not out_path:
+            return
+        if not out_path.lower().endswith(".zip"):
+            out_path += ".zip"
+
+        ok = export_portable_backup_zip(repo_name, out_path)
+        if ok:
+            QMessageBox.information(
+                self,
+                tr_ui("repo_settings.dlg_export_backup_success_title", "Backup exportiert"),
+                tr_ui(
+                    "repo_settings.dlg_export_backup_success_msg",
+                    "Portables Repertoire-Backup wurde gespeichert:\n{path}",
+                    path=out_path,
+                ),
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                tr_ui("repo_settings.dlg_error", "Fehler"),
+                tr_ui(
+                    "repo_settings.dlg_export_backup_error_msg",
+                    "Das Backup konnte nicht exportiert werden.",
+                ),
+            )
+
+    def import_external_backup_zip(self, zip_path: str | None = None):
+        """Imports or restores an external repertoire `.zip` backup archive."""
+        backend = self.ensure_backend_for_active_repo()
+        active_repo = backend.active_repo_name if (backend and getattr(backend, "active_repo_name", None)) else None
+
+        def _close_sessions(target_repo: str):
+            if backend and getattr(backend, "active_repo_name", None) == target_repo:
+                backend.close()
+            if self.main_window and hasattr(self.main_window, "repertoire_manager"):
+                if getattr(self.main_window.repertoire_manager, "active_repertoire_name", None) == target_repo:
+                    self.main_window.repertoire_manager.close()
+
+        imported_target = run_external_backup_import_flow(
+            self,
+            zip_path=zip_path,
+            active_repo=active_repo,
+            close_sessions_fn=_close_sessions,
+        )
+        if imported_target is None:
+            return
+
+        if backend and active_repo:
+            backend.load_repertoire(active_repo)
+        self.refresh_creator_info()
+        self.refresh_backups_list()
+
+        if self.main_window:
+            if hasattr(self.main_window, "sorted_repo_names"):
+                self.main_window.sorted_repo_names = None
+            if hasattr(self.main_window, "refresh_repertoire_buttons"):
+                self.main_window.refresh_repertoire_buttons()
+            if hasattr(self.main_window, "repertoire_manager"):
+                if getattr(self.main_window.repertoire_manager, "active_repertoire_name", None) == imported_target:
+                    self.main_window.repertoire_manager.load_repertoire(imported_target)
+                    if hasattr(self.main_window, "change_repertoire"):
+                        self.main_window.change_repertoire(imported_target, clear_persistent_stats=True)
+            if hasattr(self.main_window, "load_repertoire") and active_repo == imported_target:
+                self.main_window.load_repertoire(imported_target)
+
     # ─── PAGE 4.5: Different Tools (Creator) ────────────────────────────────
 
     def init_page_creator_tools(self, page):
@@ -7098,19 +7416,19 @@ class UnifiedSettingsDialog(QDialog):
             btn_parens,
             is_last=False
         ))
-        btn_trans = QPushButton(tr_widget("repo_settings.btn_transfer_comments", "🌐 Kommentare übertragen..."))
+        btn_trans = QPushButton(tr_widget("repo_settings.btn_transfer_comments", "🌐 Kommentare kopieren..."))
         btn_trans.clicked.connect(self.open_transfer_dialog)
         v_clean.addWidget(self._make_hairline_row(
             tr_ui("repo_settings.lbl_transfer_row", "Kommentare zwischen Sprachen kopieren / verschieben"),
-            tr_ui("repo_settings.lbl_transfer_sub", "Überträgt vorhandene Kommentare von einer Sprachspalte (z. B. DE) in eine andere (z. B. EN)."),
+            tr_ui("repo_settings.lbl_transfer_sub", "Kopiert vorhandene Kommentare von einer Sprachspalte (z. B. DE) in eine andere (z. B. EN)."),
             btn_trans,
             is_last=False
         ))
-        btn_trans_var = QPushButton(tr_widget("repo_settings.btn_transfer_variations", "🏷️ Variantennamen übertragen..."))
+        btn_trans_var = QPushButton(tr_widget("repo_settings.btn_transfer_variations", "🏷️ Variantennamen kopieren..."))
         btn_trans_var.clicked.connect(self.open_variation_transfer_dialog)
         v_clean.addWidget(self._make_hairline_row(
             tr_ui("repo_settings.lbl_transfer_var_row", "Variantennamen zwischen Sprachen kopieren / verschieben"),
-            tr_ui("repo_settings.lbl_transfer_var_sub", "Überträgt alle Variantennamen (V1, V2, V3) von einer Sprache (z. B. DE) in eine andere (z. B. EN)."),
+            tr_ui("repo_settings.lbl_transfer_var_sub", "Kopiert alle Variantennamen (V1, V2, V3) von einer Sprache (z. B. DE) in eine andere (z. B. EN)."),
             btn_trans_var,
             is_last=True
         ))
@@ -7418,23 +7736,30 @@ class UnifiedSettingsDialog(QDialog):
     def open_transfer_dialog(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        dlg = QDialog(self); dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_title", "Kommentare übertragen"))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_title", "Kommentare kopieren"))
+        dlg.setMinimumWidth(scale(340))
         v = QVBoxLayout(dlg)
         f = QFormLayout()
         c_s = NoWheelComboBox(); c_s.addItems(["DE", "EN", "ES", "FR", "IT", "RU"]); c_s.setCurrentText("DE")
         c_t = NoWheelComboBox(); c_t.addItems(["EN", "DE", "ES", "FR", "IT", "RU"]); c_t.setCurrentText("EN")
         f.addRow(tr_ui("repo_settings.dlg_transfer_source", "Quelle:"), c_s); f.addRow(tr_ui("repo_settings.dlg_transfer_target", "Ziel:"), c_t)
         v.addLayout(f)
-        chk_o = QCheckBox(tr_widget("repo_settings.dlg_transfer_overwrite", "Überschreiben")); v.addWidget(chk_o)
-        chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Verschieben")); v.addWidget(chk_r)
-        btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Übertragen")); btn.setProperty("class", "Primary")
-        btn.clicked.connect(lambda: (copy_repertoire_comments(backend.active_repo_name, c_s.currentText().lower(), c_t.currentText().lower(), chk_o.isChecked(), chk_r.isChecked()), dlg.accept(), self.refresh_creator_info(), QMessageBox.information(self, "Erfolg", "Kommentare übertragen.")))
+        chk_o = QCheckBox(tr_widget("repo_settings.dlg_transfer_overwrite", "Vorhandene überschreiben")); v.addWidget(chk_o)
+        chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Quelle nach Kopieren löschen (Verschieben)")); v.addWidget(chk_r)
+        btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Kopieren")); btn.setProperty("class", "Primary")
+        chk_r.toggled.connect(lambda checked: btn.setText(
+            tr_ui("repo_settings.dlg_transfer_btn_move", "Verschieben") if checked else tr_ui("repo_settings.dlg_transfer_btn", "Kopieren")
+        ))
+        btn.clicked.connect(lambda: (copy_repertoire_comments(backend.active_repo_name, c_s.currentText().lower(), c_t.currentText().lower(), chk_o.isChecked(), chk_r.isChecked()), dlg.accept(), self.refresh_creator_info(), QMessageBox.information(self, "Erfolg", "Kommentare kopiert.")))
         v.addWidget(btn); dlg.exec()
 
     def open_variation_transfer_dialog(self):
         backend = self.ensure_backend_for_active_repo()
         if not backend or not backend.active_repo_name: return
-        dlg = QDialog(self); dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_var_title", "Variantennamen übertragen"))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(tr_ui("repo_settings.dlg_transfer_var_title", "Variantennamen kopieren"))
+        dlg.setMinimumWidth(scale(340))
         v = QVBoxLayout(dlg)
         f = QFormLayout()
         c_s = NoWheelComboBox(); c_s.addItems(["DE", "EN", "ES", "FR", "IT", "RU"]); c_s.setCurrentText("DE")
@@ -7442,12 +7767,15 @@ class UnifiedSettingsDialog(QDialog):
         f.addRow(tr_ui("repo_settings.dlg_transfer_source", "Quelle:"), c_s)
         f.addRow(tr_ui("repo_settings.dlg_transfer_target", "Ziel:"), c_t)
         v.addLayout(f)
-        chk_o = QCheckBox(tr_widget("repo_settings.dlg_transfer_overwrite", "Überschreiben"))
+        chk_o = QCheckBox(tr_widget("repo_settings.dlg_transfer_overwrite", "Vorhandene überschreiben"))
         v.addWidget(chk_o)
-        chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Verschieben"))
+        chk_r = QCheckBox(tr_widget("repo_settings.dlg_transfer_move", "Quelle nach Kopieren löschen (Verschieben)"))
         v.addWidget(chk_r)
-        btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Übertragen"))
+        btn = QPushButton(tr_widget("repo_settings.dlg_transfer_btn", "Kopieren"))
         btn.setProperty("class", "Primary")
+        chk_r.toggled.connect(lambda checked: btn.setText(
+            tr_ui("repo_settings.dlg_transfer_btn_move", "Verschieben") if checked else tr_ui("repo_settings.dlg_transfer_btn", "Kopieren")
+        ))
         def _exec():
             btn.setEnabled(False)
             from PyQt6.QtWidgets import QApplication

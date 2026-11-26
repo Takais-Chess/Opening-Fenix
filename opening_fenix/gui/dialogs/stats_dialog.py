@@ -10,13 +10,25 @@ from PyQt6.QtGui import QFont, QColor, QPainter, QPainterPath
 
 from opening_fenix.gui.scaling import scale
 from opening_fenix.gui.styles import COLORS, set_consistent_icon, get_chevron_icon_path
-from opening_fenix.core.translation import tr_ui, tr_widget
+from opening_fenix.core.translation import tr_ui, tr_widget, translator
 from opening_fenix.core.services.statistics_service import (
     calculate_repertoire_statistics,
     get_available_profiles,
     get_profile_box_statistics
 )
 from opening_fenix.core.utils import get_elo_display, get_last_active_profile_name
+
+
+def _fmt_int(value: int) -> str:
+    """Formats an integer with locale-appropriate thousands separators."""
+    s = f"{int(value):,}"
+    return s.replace(",", ".") if translator.current_lang == "de" else s
+
+
+def _fmt_float(value: float, decimals: int = 1) -> str:
+    """Formats a float with locale-appropriate decimal separator."""
+    s = f"{float(value):.{decimals}f}"
+    return s.replace(".", ",") if translator.current_lang == "de" else s
 
 
 class BoxDistributionBar(QWidget):
@@ -444,7 +456,8 @@ class RepertoireStatisticsDialog(QDialog):
 
         self.combo_level = QComboBox()
         self.combo_level.setFixedHeight(scale(32))
-        self.combo_level.setMinimumWidth(scale(165))
+        self.combo_level.setMinimumWidth(scale(210))
+        self.combo_level.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.combo_level.setCursor(Qt.CursorShape.PointingHandCursor)
         self.combo_level.setStyleSheet(f"""
             QComboBox {{
@@ -883,15 +896,15 @@ class RepertoireStatisticsDialog(QDialog):
 
         # KPI labels
         if hasattr(self, 'lbl_stat_elo'):
-            self.lbl_stat_elo.setText(f"🎓 {tr_ui('stats.stat_elo', 'Elo:')} <b>{rating:,}</b>")
+            self.lbl_stat_elo.setText(f"🎓 {tr_ui('stats.stat_elo', 'Elo:')} <b>{_fmt_int(rating)}</b>")
         self.lbl_stat_learned.setText(
-            f"🎯 {tr_ui('stats.stat_learned', 'Gelernt:')} <b>{tot_learned:,}</b> / {tot_trainable:,} ({learned_pct:.1f}%)"
+            f"🎯 {tr_ui('stats.stat_learned', 'Gelernt:')} <b>{_fmt_int(tot_learned)}</b> / {_fmt_int(tot_trainable)} ({_fmt_float(learned_pct)}%)"
         )
         self.lbl_stat_due.setText(
-            f"⏳ {tr_ui('stats.stat_due', 'Fällig:')} <b>{tot_due:,}</b>"
+            f"⏳ {tr_ui('stats.stat_due', 'Fällig:')} <b>{_fmt_int(tot_due)}</b>"
         )
         self.lbl_stat_unlearned.setText(
-            f"⚪ {tr_ui('stats.stat_unlearned', 'Ungelernt:')} <b>{tot_unlearned:,}</b>"
+            f"⚪ {tr_ui('stats.stat_unlearned', 'Ungelernt:')} <b>{_fmt_int(tot_unlearned)}</b>"
         )
 
         # Update tiles 1..7
@@ -904,9 +917,9 @@ class RepertoireStatisticsDialog(QDialog):
                 interval_str = box_intervals_short.get(b, "")
                 if interval_str:
                     lbl_int.setText(interval_str)
-                lbl_cnt.setText(f"{cnt:,}")
+                lbl_cnt.setText(_fmt_int(cnt))
                 if due > 0:
-                    lbl_due.setText(f"{due:,} {due_suffix}")
+                    lbl_due.setText(f"{_fmt_int(due)} {due_suffix}")
                     lbl_due.setStyleSheet(f"font-size: {scale(10)}px; font-weight: 600; color: #d97706; border: none; background: transparent;")
                 else:
                     lbl_due.setText(f"0 {due_suffix}")
@@ -967,9 +980,10 @@ class RepertoireStatisticsDialog(QDialog):
         is_spec = scope.get("is_specialized", False)
 
         if is_spec:
+            freq_str = _fmt_float(freq) if isinstance(freq, (int, float)) else str(freq)
             self.lbl_scope.setText(
                 f"🎯 <b>{tr_ui('stats.scope_focus', 'Eröffnungs-Fokus:')}</b> {scope_name} "
-                f"<span style='color: #64748b; font-size: {scale(11)}px;'>• {tr_ui('stats.all_games_fmt', '{freq}% aller Lichess-Partien', freq=freq)}</span>"
+                f"<span style='color: #64748b; font-size: {scale(11)}px;'>• {tr_ui('stats.all_games_fmt', '{freq}% aller Lichess-Partien', freq=freq_str)}</span>"
             )
         else:
             self.lbl_scope.setText(f"🌐 <b>{tr_ui('stats.scope_focus', 'Repertoire-Umfang:')}</b> {scope_name}")
@@ -977,7 +991,7 @@ class RepertoireStatisticsDialog(QDialog):
         # 2. Metric Badges
         eff = data.get("effectiveness", {})
         win_rate = eff.get("win_rate", 50.0)
-        self.lbl_eff_val.setText(f"{win_rate:.1f}%")
+        self.lbl_eff_val.setText(f"{_fmt_float(win_rate)}%")
         self.lbl_eff_sub.setText(f"{tr_ui('stats.expected_score', 'Erwartete Punktzahl')} (Lichess)")
 
         # 3. Levels Breakdown (Dynamic Tiles + Summary footer)
@@ -997,7 +1011,7 @@ class RepertoireStatisticsDialog(QDialog):
             for lvl_item in levels_list:
                 display_name = lvl_item.get("display_name", f"Level {lvl_item.get('order', 1)}")
                 tile, lbl_val = self._create_level_tile(display_name)
-                lbl_val.setText(f"{lvl_item.get('count', 0):,} {pos_str}")
+                lbl_val.setText(f"{_fmt_int(lvl_item.get('count', 0))} {pos_str}")
                 self.tiles_layout.addWidget(tile)
         else:
             l1 = lvls.get("level_1", 0)
@@ -1009,12 +1023,12 @@ class RepertoireStatisticsDialog(QDialog):
                 (3, tr_ui("repo_settings.level_default_3", "Nachschlagewerk und Erklärungen"), l3)
             ]:
                 tile, lbl_val = self._create_level_tile(f"Level {order} (\"{name}\")")
-                lbl_val.setText(f"{cnt:,} {pos_str}")
+                lbl_val.setText(f"{_fmt_int(cnt)} {pos_str}")
                 self.tiles_layout.addWidget(tile)
 
         self.lbl_total_summary.setText(
-            f"📦 <b>{tr_ui('stats.total_positions', 'Gesamt-Stellungen:')}</b> {tot_pos:,} {pos_str}  "
-            f"<span style='color: #64748b;'>({tot_moves:,} {tr_ui('stats.active_moves', 'aktive Züge')})</span>"
+            f"📦 <b>{tr_ui('stats.total_positions', 'Gesamt-Stellungen:')}</b> {_fmt_int(tot_pos)} {pos_str}  "
+            f"<span style='color: #64748b;'>({_fmt_int(tot_moves)} {tr_ui('stats.active_moves', 'aktive Züge')})</span>"
         )
 
         # 4. Profile Box Stats (if included and not superseded by a newer selection)

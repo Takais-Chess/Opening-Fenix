@@ -90,6 +90,22 @@ def set_consistent_icon(window):
     else:
         logger.error("Failed to load any application icon!")
 
+
+def bring_window_to_front(window):
+    """Restores a minimized window/dialog and brings it to the front and activates it."""
+    if window is None:
+        return
+    from PyQt6.QtCore import Qt
+    if window.isMinimized() or (window.windowState() & Qt.WindowState.WindowMinimized):
+        window.setWindowState(
+            (window.windowState() & ~Qt.WindowState.WindowMinimized)
+            | Qt.WindowState.WindowActive
+        )
+    window.show()
+    window.raise_()
+    window.activateWindow()
+
+
 # Centralized Color Palette
 
 COLORS = {
@@ -290,7 +306,7 @@ def get_scrollbar_style():
         margin: 0px;
     }}
     QScrollBar::handle:vertical {{
-        background: rgba(0, 0, 0, 0.15);
+        background: rgba(15, 23, 42, 0.28);
         min-height: {scale(30)}px;
         border-radius: {scale(4)}px;
     }}
@@ -315,7 +331,7 @@ def get_scrollbar_style():
         margin: 0px;
     }}
     QScrollBar::handle:horizontal {{
-        background: rgba(0, 0, 0, 0.15);
+        background: rgba(15, 23, 42, 0.28);
         min-width: {scale(30)}px;
         border-radius: {scale(4)}px;
     }}
@@ -626,7 +642,7 @@ def get_creator_window_style():
     QTreeWidget::item:hover {{
         background-color: rgba(211, 84, 0, 0.2);
     }}
-    QTreeWidget::item:selected {{
+    QTreeWidget::item:selected, QTreeWidget::item:selected:!active {{
         background-color: {COLORS['burnt_orange']};
         color: white;
         border-radius: {scale(4)}px;
@@ -700,7 +716,7 @@ def get_creator_window_style():
         border: none;
         border-bottom: {scale(2)}px solid {COLORS['glass_border']};
     }}
-    QTreeWidget::item:selected {{
+    QTreeWidget::item:selected, QTreeWidget::item:selected:!active {{
         background-color: {COLORS['burnt_orange']};
         color: {COLORS['white']};
     }}
@@ -1001,11 +1017,12 @@ def get_export_dialog_style():
     QGroupBox::title {{ subcontrol-origin: margin; left: {scale(10)}px; padding: 0 {scale(5)}px; }}
     
     QPushButton {{ 
-        background-color: {COLORS['glass_bg']}; 
-        border: 1px solid {COLORS['glass_border']}; 
-        border-radius: {scale(20)}px; 
-        padding: {scale(8)}px {scale(15)}px; 
+        background-color: rgba(255, 255, 255, 0.78); 
+        border: 1px solid {COLORS['border']}; 
+        border-radius: {scale(8)}px; 
+        padding: {scale(8)}px {scale(18)}px; 
         font-weight: bold; 
+        color: {COLORS['brown_text']};
     }}
     QPushButton:hover {{ 
         background-color: rgba(211, 84, 0, 0.1); 
@@ -1015,7 +1032,7 @@ def get_export_dialog_style():
     QPushButton#PrimaryButton {{
         background-color: {COLORS['burnt_orange']};
         color: white;
-        border: none;
+        border: 1px solid {COLORS['burnt_orange']};
     }}
     QPushButton#PrimaryButton:hover {{
         background-color: #e67e22;
@@ -1081,8 +1098,7 @@ def get_bw_glass_style():
     QListWidget#Sidebar::item:selected {{ 
         background-color: #ffffff;
         color: #0f172a;
-        border: 1px solid #e2e8f0;
-        border-left: {scale(3)}px solid {COLORS['burnt_orange']};
+        border: 1px solid #cbd5e1;
     }}
     
     QGroupBox {{ 

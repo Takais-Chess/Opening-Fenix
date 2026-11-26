@@ -14,9 +14,165 @@ from opening_fenix.core.utils import get_repertoire_db_path, CASTLING_ALT, CASTL
 from opening_fenix.core.services.engine_cache_service import EngineCacheService
 from opening_fenix.core.logger import logger
 
+def get_lichess_data_coverage(session: Session, elo_range: str = "high") -> Dict[str, Any]:
+    """
+    Computes how many active reachable repertoire positions have cached Lichess Explorer data.
+    Used by Hole Finder UI to warn users before scanning an un-fetched repertoire.
+    """
+    if not session:
+        return {
+            "total_positions": 0,
+            "covered_positions": 0,
+            "coverage_pct": 100.0,
+            "has_requested_elo": True,
+            "effective_elo": elo_range,
+        }
+
+    id_to_fen = dict(session.query(Position.id, Position.fen).all())
+    sp = session.query(Position.id).filter(
+        Position.fen.like("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR%")
+    ).first()
+
+    if sp:
+        root_id = sp[0]
+        rep_edges = (
+            session.query(Move.from_position_id, Move.to_position_id)
+            .join(RepertoireMove, Move.id == RepertoireMove.move_id)
+            .filter(RepertoireMove.is_active == True)
+            .all()
+        )
+        adj = collections.defaultdict(list)
+        for fid, tid in rep_edges:
+            if tid:
+                adj[fid].append(tid)
+
+        visited = {root_id}
+        q = collections.deque([root_id])
+        while q:
+            pid = q.popleft()
+            for nxt in adj.get(pid, []):
+                if nxt not in visited:
+                    visited.add(nxt)
+                    q.append(nxt)
+        active_fens = {" ".join(id_to_fen[pid].split()[:4]) for pid in visited if id_to_fen.get(pid)}
+    else:
+        active_fens = {" ".join(f.split()[:4]) for f in id_to_fen.values() if f}
+
+    total_positions = len(active_fens)
+    if total_positions == 0:
+        return {
+            "total_positions": 0,
+            "covered_positions": 0,
+            "coverage_pct": 100.0,
+            "has_requested_elo": True,
+            "effective_elo": elo_range,
+        }
+
+    req_fens = {
+        " ".join(row[0].split()[:4])
+        for row in session.query(LichessData.fen).filter_by(elo_range=elo_range).all()
+        if row[0]
+    }
+    has_requested_elo = len(req_fens) > 0
+    effective_elo = elo_range if has_requested_elo else None
+    effective_fens = req_fens
+
+    if not effective_fens:
+        meta_elo = session.query(Metadata).filter(Metadata.key.in_(["elo", "lichess_elo"])).all()
+        for m_e in meta_elo:
+            cand_elo = m_e.value.strip() if m_e.value else ""
+            if cand_elo and cand_elo != elo_range:
+                cand_fens = {
+                    " ".join(row[0].split()[:4])
+                    for row in session.query(LichessData.fen).filter_by(elo_range=cand_elo).all()
+                    if row[0]
+                }
+                if cand_fens:
+                    effective_elo = cand_elo
+                    effective_fens = cand_fens
+                    break
+        if not effective_fens:
+            first_ld = session.query(LichessData.elo_range).first()
+            if first_ld and first_ld[0]:
+                effective_elo = first_ld[0]
+                effective_fens = {
+                    " ".join(row[0].split()[:4])
+                    for row in session.query(LichessData.fen).filter_by(elo_range=effective_elo).all()
+                    if row[0]
+                }
+
+    covered_positions = len(active_fens & effective_fens)
+    coverage_pct = round((covered_positions / total_positions) * 100.0, 1)
+    return {
+        "total_positions": total_positions,
+        "covered_positions": covered_positions,
+        "coverage_pct": coverage_pct,
+        "has_requested_elo": has_requested_elo,
+        "effective_elo": effective_elo,
+    }
+
+
+def _tag_matches_variation(raw_val: Optional[str], target: str) -> bool:
+    """Matches a variation column value against either a raw string or a localized name inside JSON."""
+    if not raw_val or not target:
+        return False
+    if raw_val == target:
+        return True
+    try:
+        from opening_fenix.core.utils import get_multilingual_variation_dict
+        v_dict = get_multilingual_variation_dict(raw_val)
+        return target in v_dict.values()
+    except Exception:
+        return False
+
+
+def _resolve_variation_allowed_pids(session: Session, variation_filter) -> Optional[set[int]]:
+    """
+    Resolves a hierarchical variation filter `(v1, v2)` or string `v1` to the set of matching Position IDs.
+    Returns None when no variation filter is active.
+    """
+    if not variation_filter or not session:
+        return None
+
+    if isinstance(variation_filter, (list, tuple)):
+        fv1 = variation_filter[0] if len(variation_filter) > 0 else None
+        fv2 = variation_filter[1] if len(variation_filter) > 1 else None
+    else:
+        fv1, fv2 = variation_filter, None
+
+    if not fv1 and not fv2:
+        return None
+
+    rows = session.query(
+        Position.id,
+        Position.variation_1,
+        Position.variation_2,
+        Position.variation_3,
+        Position.cached_v1,
+        Position.cached_v2,
+        Position.cached_v3,
+    ).all()
+
+    allowed = set()
+    for pid, v1, v2, v3, cv1, cv2, cv3 in rows:
+        tags = [t for t in (v1, v2, v3, cv1, cv2, cv3) if t]
+        if fv1:
+            if fv1 == "Sonstiges":
+                has_v1 = bool(v1 or cv1)
+                if has_v1 and not any(_tag_matches_variation(t, fv1) for t in tags):
+                    continue
+            elif not any(_tag_matches_variation(t, fv1) for t in tags):
+                continue
+        if fv2 and not any(_tag_matches_variation(t, fv2) for t in tags):
+            continue
+        allowed.add(pid)
+    return allowed
+
+
 def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                         engine_path=None, threads_count=1, item_callback=None, cancel_check=None, engine=None,
-                        depth=18, progress_callback=None, recheck_unadded: bool = False, hash_size: Optional[int] = None):
+                        depth=18, progress_callback=None, recheck_unadded: bool = False, hash_size: Optional[int] = None,
+                        variation_filter=None, max_ply: Optional[int] = None):
     """
     Stand-alone task to find repertoire holes or priority mismatches.
     Creates its own DB session for thread safety.
@@ -36,6 +192,8 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 item_callback=item_callback,
                 cancel_check=cancel_check,
                 hash_size=hash_size,
+                variation_filter=variation_filter,
+                max_ply=max_ply,
             )
         elif mode == "unanswered":
             return find_unanswered_moves(
@@ -43,10 +201,17 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 threshold=threshold,
                 cancel_check=cancel_check,
                 item_callback=item_callback,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                variation_filter=variation_filter,
+                max_ply=max_ply,
             )
         elif mode == "level_check":
-            return find_level_mismatches(session, cancel_check=cancel_check)
+            return find_level_mismatches(
+                session,
+                cancel_check=cancel_check,
+                variation_filter=variation_filter,
+                max_ply=max_ply,
+            )
         elif mode == "transpositions":
             return find_repertoire_transpositions(
                 session,
@@ -62,7 +227,15 @@ def run_hole_finder_task(repo_name, is_test, threshold, elo_range, mode="holes",
                 hash_size=hash_size,
             )
         else:
-            return find_priority_mismatches(session, level, threshold, find_rare=find_rare, cancel_check=cancel_check)
+            return find_priority_mismatches(
+                session,
+                level,
+                threshold,
+                find_rare=find_rare,
+                cancel_check=cancel_check,
+                variation_filter=variation_filter,
+                max_ply=max_ply,
+            )
     finally:
         session.close()
         db_manager.close()
@@ -76,9 +249,12 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                           cancel_check: Optional[Callable[[], bool]] = None,
                           engine: Optional[Any] = None,
                           cache_service: Optional[EngineCacheService] = None,
-                          hash_size: Optional[int] = None):
+                          hash_size: Optional[int] = None,
+                          variation_filter=None,
+                          max_ply: Optional[int] = None):
     """Ported logic from CreatorBackend.find_repertoire_holes"""
     threshold_val = threshold / 100.0
+    allowed_pids = _resolve_variation_allowed_pids(session, variation_filter)
     
     # Get Repertoire Color
     m = session.query(Metadata).filter_by(key="color").first()
@@ -169,12 +345,14 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
     # 4. Propagation
     holes = []
     for d, depth_list in enumerate(pos_by_depth):
+        within_depth = (max_ply is None or (d + 1) <= max_ply)
         for pid in depth_list:
             p_reach = reach_probs.get(pid, 0.0)
             fen = id_to_fen.get(pid)
             if not fen: continue
             clean_fen = " ".join(fen.split(" ")[:4])
             is_exempt = clean_fen in exempt_fens
+            pos_matches_filter = within_depth and (allowed_pids is None or pid in allowed_pids)
 
             parts = clean_fen.split(" ")
             is_user = len(parts) > 1 and parts[1] == user_turn_char
@@ -183,7 +361,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
             # --- FEATURE: REPERTOIRE GAP DETECTION (User turn but no moves) ---
             # These should show up regardless of threshold_val when user gaps are requested
             if is_user and not rep_moves:
-                if include_user_gaps and not is_exempt:
+                if include_user_gaps and not is_exempt and pos_matches_filter:
                     holes.append({
                         "fen": clean_fen,
                         "move_san": "—",
@@ -198,7 +376,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
             if is_user:
                 if not rep_moves:
                     # User candidate logic (Lichess suggestions)
-                    if include_user_gaps and not is_exempt:
+                    if include_user_gaps and not is_exempt and pos_matches_filter:
                         lichess_moves = lichess_cache.get(clean_fen, {})
                         total_games = sum(v.get('total', 0) for v in lichess_moves.values())
                         if total_games > 0:
@@ -256,7 +434,7 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
                                     reach_probs[m.to_position_id] = max(reach_probs.get(m.to_position_id, 0.0), p_total)
                                 break
                     else:
-                        if p_total >= threshold_val and not is_exempt:
+                        if p_total >= threshold_val and not is_exempt and pos_matches_filter:
                             move_san = stats.get('san')
                             if not move_san:
                                 try:
@@ -449,12 +627,15 @@ def find_repertoire_holes(session: Session, threshold: float, elo_range: str = "
 def find_unanswered_moves(session: Session, threshold: float = 0.0,
                           cancel_check: Optional[Callable[[], bool]] = None,
                           item_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
-                          progress_callback: Optional[Callable[[int, int, str], None]] = None) -> List[Dict[str, Any]]:
+                          progress_callback: Optional[Callable[[int, int, str], None]] = None,
+                          variation_filter=None,
+                          max_ply: Optional[int] = None) -> List[Dict[str, Any]]:
     """
     Finds positions where it is our turn and we have no move in the repertoire
     (unanswered branches where our response is missing).
     """
     threshold_val = threshold / 100.0 if threshold > 0 else 0.0
+    allowed_pids = _resolve_variation_allowed_pids(session, variation_filter)
 
     m = session.query(Metadata).filter_by(key="color").first()
     user_turn_char = m.value[0].lower() if (m and m.value) else 'w'
@@ -533,9 +714,13 @@ def find_unanswered_moves(session: Session, threshold: float = 0.0,
 
     results = []
     for d, depth_list in enumerate(pos_by_depth):
+        if max_ply is not None and d > max_ply:
+            break
         for pid in depth_list:
             if cancel_check and cancel_check():
                 break
+            if allowed_pids is not None and pid not in allowed_pids:
+                continue
             fen = id_to_fen.get(pid)
             if not fen:
                 continue
@@ -587,7 +772,8 @@ def find_unanswered_moves(session: Session, threshold: float = 0.0,
 
     return results
 
-def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], bool]] = None):
+def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], bool]] = None,
+                          variation_filter=None, max_ply: Optional[int] = None):
     """
     Finds:
     1. Level Mismatches (Gaps): Positions reached at Path Level L where ALL user moves are Level > L.
@@ -595,6 +781,7 @@ def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], 
     """
     if cancel_check and cancel_check():
         return []
+    allowed_pids = _resolve_variation_allowed_pids(session, variation_filter)
 
     m = session.query(Metadata).filter_by(key="color").first()
     player_color = m.value if m else 'w'
@@ -666,6 +853,8 @@ def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], 
         if curr_norm not in path_lvl: continue
         lvl = path_lvl[curr_norm]
         pos_depth = depth_map.get(curr_norm, 0)
+        if max_ply is not None and (pos_depth + 1) > max_ply:
+            continue
         
         parts = curr_fen.split(" ")
         is_user_turn = len(parts) > 1 and parts[1] == player_color
@@ -679,6 +868,8 @@ def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], 
             
             if all_higher:
                 for move, rm in out_moves:
+                    if allowed_pids is not None and curr_id not in allowed_pids and move.to_position_id not in allowed_pids:
+                        continue
                     key = (curr_norm, move.san, "level_mismatch")
                     if key not in seen_mismatches:
                         seen_mismatches.add(key)
@@ -693,6 +884,8 @@ def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], 
                         })
         
         for move, rm in out_moves:
+            if allowed_pids is not None and curr_id not in allowed_pids and move.to_position_id not in allowed_pids:
+                continue
             if rm.level < lvl and lvl > 0:
                 key = (curr_norm, move.san, "orphaned_move")
                 if key not in seen_mismatches:
@@ -709,12 +902,14 @@ def find_level_mismatches(session: Session, cancel_check: Optional[Callable[[], 
 
     return mismatches
 
-def find_priority_mismatches(session: Session, level: int, threshold_pct: float, find_rare: bool = False, only_opponent: bool = True, cancel_check: Optional[Callable[[], bool]] = None):
+def find_priority_mismatches(session: Session, level: int, threshold_pct: float, find_rare: bool = False, only_opponent: bool = True, cancel_check: Optional[Callable[[], bool]] = None,
+                             variation_filter=None, max_ply: Optional[int] = None):
     """Ported logic from CreatorBackend.find_priority_mismatches with pre-simulated impact and cancellation check."""
     if cancel_check and cancel_check():
         return []
 
     threshold = threshold_pct / 100.0
+    allowed_pids = _resolve_variation_allowed_pids(session, variation_filter)
     
     # Get Repertoire Color (level changes only occur on opponent moves)
     m = session.query(Metadata).filter_by(key="color").first()
@@ -871,6 +1066,11 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
             return []
         if move.from_position_id not in reachable_pos_ids:
             continue
+        if allowed_pids is not None and move.from_position_id not in allowed_pids and move.to_position_id not in allowed_pids:
+            continue
+        from_depth = get_depth_to_pos(move.from_position_id)
+        if max_ply is not None and (from_depth + 1) > max_ply:
+            continue
         if only_opponent:
             if not move.from_position or not move.from_position.fen:
                 continue
@@ -898,7 +1098,7 @@ def find_priority_mismatches(session: Session, level: int, threshold_pct: float,
             "type": "priority_check",
             "popularity": (move.priority_score or 0.0) * 100,
             "path": get_path_to_pos(move.from_position_id),
-            "ply_depth": get_depth_to_pos(move.from_position_id),
+            "ply_depth": from_depth,
         })
     
     return sorted(mismatches, key=lambda x: x['popularity'], reverse=True)

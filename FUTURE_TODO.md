@@ -38,6 +38,13 @@ When navigating deep into opening theory, the active database (especially Liches
    - `≥ 100 Games`: Automatically hidden so the interface remains clean when sample size is sufficient.
 3. **Contextual Tooltip**: On hover, inform the user that statistics are based on a limited game count in the active database.
 
+### 🧠 31. Human-Move Prediction Prior for Low-Sample Priority Scores (< 100 Games)
+**Concept:**
+Use a human-move prediction model (e.g., **Maia-2** via `onnxruntime` or **Maia-1** via Lc0) as a Bayesian prior when calculating priority scores for opponent turns in positions with sparse or missing Lichess data (< 100 games):
+1. **Smooth Blending**: Instead of a hard cutoff at 100 games or falling back to an even split at 0 games, blend observed Lichess counts with model probabilities: `weight(m) = lichess_games(m) + N_prior * P_maia(m | pos, elo)` (e.g., `N_prior ≈ 50–100`).
+2. **Creator / Course Baking vs. Local**: Evaluate whether to run only in Creator (baking `MovePriority` into exported courses) to avoid bloating the end-user installer, or ship a lightweight ONNX model with local SQLite caching.
+3. **Elo Suitability**: Most impactful for `low` and `mid` Elos (`400`–`1800`) where Lichess data thins out early; less relevant for `masters`.
+
 
 
 

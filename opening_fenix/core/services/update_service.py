@@ -11,7 +11,7 @@ from typing import Optional, Dict, Any, Tuple, List
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
 from opening_fenix.core.version import APP_VERSION
-from opening_fenix.core.utils import get_user_dir, safe_urlopen
+from opening_fenix.core.utils import get_user_dir, safe_urlopen, is_store_version
 from opening_fenix.core.logger import logger
 from opening_fenix.core.translation import tr_ui
 
@@ -152,6 +152,9 @@ def should_check_for_updates(manual: bool = False, current_version: str = APP_VE
     """
     Checks whether update checking should proceed based on user settings and snooze timers.
     """
+    if is_store_version():
+        return False
+
     if manual:
         return True
 
@@ -223,6 +226,10 @@ class UpdateCheckWorker(QThread):
 
     def run(self):
         try:
+            if is_store_version():
+                logger.info("UpdateCheckWorker: Microsoft Store build detected; updates are managed by the Microsoft Store.")
+                self.no_update_found.emit()
+                return
             if not self.manual and not should_check_for_updates(manual=False):
                 return
             logger.info(f"UpdateCheckWorker: Checking GitHub releases for updates (manual={self.manual})...")

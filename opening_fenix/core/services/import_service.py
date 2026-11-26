@@ -345,6 +345,9 @@ def import_pgn_to_db(pgn_path: str, repo_name: str, side: str, level_name: str, 
 
             set_meta(session, "ana_cache_count", "-1")
             set_meta(session, "cov_cache_count", "-1")
+            if new_moves_count > 0 or comments_to_append:
+                from opening_fenix.core.services.repertoire_core_service import clear_repertoire_comment_languages_meta
+                clear_repertoire_comment_languages_meta(session, repo_name)
             session.commit()
             return True, tr_ui("creator.msg_import_success", "{count} Züge erfolgreich importiert.", count=new_moves_count)
         else:

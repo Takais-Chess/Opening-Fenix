@@ -30,7 +30,7 @@ from typing import Optional, Callable, Dict, List, Tuple, Any
 import chess
 import chess.svg
 
-from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment, localize_san, parse_variation_name
+from opening_fenix.core.utils import parse_chessbase_annotations, parse_comment, localize_san, parse_variation_name, get_real_temp_dir
 from opening_fenix.core.logger import logger
 
 # ─── TINTENSPAR-PALETTE (Minimal Ink Consumption) ───────────────────────────
@@ -119,10 +119,11 @@ def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, t
     (--headless=new, --headless=old, --headless) to guarantee generation on any Chromium version.
     """
     file_uri = pathlib.Path(html_path).resolve().as_uri()
-    user_data_dir = tempfile.mkdtemp(prefix="fenix_edge_")
+    real_tmp = get_real_temp_dir()
+    user_data_dir = tempfile.mkdtemp(prefix="fenix_edge_", dir=real_tmp)
     creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
-    temp_render_pdf = os.path.join(tempfile.gettempdir(), f"fenix_render_{uuid.uuid4().hex}.pdf")
+    temp_render_pdf = os.path.join(real_tmp, f"fenix_render_{uuid.uuid4().hex}.pdf")
     temp_render_pdf_arg = temp_render_pdf.replace("\\", "/")
     user_data_dir_arg = user_data_dir.replace("\\", "/")
 
@@ -172,7 +173,7 @@ def _run_chromium_pdf(browser_path: str, html_path: str, output_pdf_path: str, t
                     timeout=timeout,
                     creationflags=creationflags,
                     env=clean_env,
-                    cwd=tempfile.gettempdir(),
+                    cwd=real_tmp,
                     stdin=subprocess.DEVNULL,
                 )
                 last_res = res
@@ -2217,7 +2218,7 @@ def export_repertoire_book(
                         "Bitte schließen Sie die Datei in Ihrem PDF-Programm (z. B. Edge, Acrobat oder Browser) und versuchen Sie es erneut."
                     )
 
-            temp_dir = tempfile.gettempdir()
+            temp_dir = get_real_temp_dir()
             html_temp_path = os.path.join(temp_dir, f"fenix_book_{uuid.uuid4().hex}.html")
 
             try:

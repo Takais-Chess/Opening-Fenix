@@ -219,6 +219,13 @@ def test_repertoire_card_comment_lang_labels_and_tooltip(qtbot, monkeypatch):
         assert "EN" in card.combo_lang.toolTip()
         assert "move comments" in card.combo_lang.toolTip()
 
+        card.populate_comment_languages(prefetched_langs=["de"])
+        assert card.combo_lang.itemText(0) == "💬 Comments: Auto (DE)"
+        assert "EN" in card.combo_lang.toolTip()
+        assert "DE" in card.combo_lang.toolTip()
+        assert "no EN comments" in card.combo_lang.toolTip()
+        assert "currently: DE" not in card.combo_lang.toolTip()
+
         card.populate_comment_languages(prefetched_langs=[])
         assert card.combo_lang.itemText(0) == "💬 No comments"
         assert not card.combo_lang.isEnabled()
@@ -272,3 +279,63 @@ def test_main_window_get_effective_comment_language_auto_fallback(monkeypatch):
         assert MainWindow.get_effective_comment_language(dummy_self) == "de"
     finally:
         translator.current_lang = prev_lang
+
+
+def test_stale_comment_languages_cache_repairs_automatically(tmp_path, monkeypatch):
+    """Legacy pre-v2 available_comment_languages metadata without version marker self-heals on read."""
+    from opening_fenix.core.services.repertoire_core_service import (
+        get_repertoire_card_meta_fast,
+        _levels_cache,
+    )
+
+    db_file = str(tmp_path / "stale_cache_repo.db")
+    monkeypatch.setattr("opening_fenix.core.services.repertoire_core_service.get_repertoire_db_path", lambda name: db_file)
+
+    db = DatabaseManager(db_file, base=Base)
+    session = db.get_session()
+    session.add(Position(
+        fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        comment=json.dumps({"de": "Königsbauer", "en": "King's pawn"}),
+    ))
+    session.add(Metadata(key="available_comment_languages", value=json.dumps(["de"])))
+    session.commit()
+    session.close()
+    db.close()
+
+    invalidate_repertoire_comment_languages_cache("stale_cache_repo")
+    _levels_cache.clear()
+
+    _, langs = get_repertoire_card_meta_fast("stale_cache_repo")
+    assert sorted(langs) == ["de", "en"]
+
+    with sqlite3.connect(db_file) as conn:
+        meta = dict(conn.execute("SELECT key, value FROM metadata").fetchall())
+        assert sorted(json.loads(meta["available_comment_languages"])) == ["de", "en"]
+        assert meta.get("available_comment_languages_ver") == "2"
+
+
+def test_copy_repertoire_comments_invalidates_comment_lang_cache(tmp_path, monkeypatch):
+    """Copying comments to a new language immediately updates cached available_comment_languages."""
+    from opening_fenix.core.services.repertoire_core_service import copy_repertoire_comments
+
+    db_file = str(tmp_path / "copy_langs_repo.db")
+    monkeypatch.setattr("opening_fenix.core.services.repertoire_core_service.get_repertoire_db_path", lambda name: db_file)
+    monkeypatch.setattr("opening_fenix.core.utils.get_repertoire_db_path", lambda name: db_file)
+
+    db = DatabaseManager(db_file, base=Base)
+    session = db.get_session()
+    session.add(Position(
+        fen="rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1",
+        comment="Solider Zug.",
+    ))
+    session.commit()
+    session.close()
+    db.close()
+
+    invalidate_repertoire_comment_languages_cache("copy_langs_repo")
+    assert get_repertoire_comment_languages_fast("copy_langs_repo") == ["de"]
+
+    ok, _, count = copy_repertoire_comments("copy_langs_repo", "de", "en")
+    assert ok is True
+    assert count == 1
+    assert get_repertoire_comment_languages_fast("copy_langs_repo") == ["de", "en"]

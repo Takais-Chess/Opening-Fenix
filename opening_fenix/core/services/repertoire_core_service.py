@@ -47,6 +47,7 @@ def invalidate_all_repertoires_cache() -> None:
     _cached_all_repos_mtime = None
 
 _comment_languages_cache: Dict[Tuple[str, str], Tuple[Tuple[int, int, int, int], List[str]]] = {}
+_COMMENT_LANGS_CACHE_VER = "2"
 
 def invalidate_repertoire_comment_languages_cache(repo_name: Optional[str] = None) -> None:
     """Clears cached comment languages for a specific repertoire or all repertoires."""
@@ -55,6 +56,18 @@ def invalidate_repertoire_comment_languages_cache(repo_name: Optional[str] = Non
             _comment_languages_cache.pop(k, None)
     else:
         _comment_languages_cache.clear()
+
+def clear_repertoire_comment_languages_meta(session: Optional[Session], repo_name: Optional[str] = None) -> None:
+    """Clears persisted and in-memory cached comment languages for a repertoire."""
+    if session is not None:
+        try:
+            from opening_fenix.core.db.models import Metadata
+            session.query(Metadata).filter(
+                Metadata.key.in_(["available_comment_languages", "available_comment_languages_ver"])
+            ).delete(synchronize_session=False)
+        except Exception as e:
+            logger.warning(f"Failed clearing available_comment_languages metadata: {e}")
+    invalidate_repertoire_comment_languages_cache(repo_name)
 
 def invalidate_repertoire_meta_cache(repo_name: Optional[str] = None) -> None:
     """Clears cached fast metadata for a specific repertoire or all repertoires."""
@@ -100,12 +113,12 @@ def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
 
     def _query(conn):
         c = conn.cursor()
-        # 1. Check if metadata already has available_comment_languages cached
-        c.execute("SELECT value FROM metadata WHERE key = 'available_comment_languages'")
-        row = c.fetchone()
-        if row and row[0]:
+        # 1. Check if metadata already has current-version available_comment_languages cached
+        c.execute("SELECT key, value FROM metadata WHERE key IN ('available_comment_languages', 'available_comment_languages_ver')")
+        meta_map = dict(c.fetchall())
+        if meta_map.get("available_comment_languages_ver") == _COMMENT_LANGS_CACHE_VER and meta_map.get("available_comment_languages"):
             try:
-                langs = json.loads(row[0])
+                langs = json.loads(meta_map["available_comment_languages"])
                 if isinstance(langs, list):
                     return sorted(set(l.lower() for l in langs if l))
             except Exception:
@@ -135,6 +148,7 @@ def get_repertoire_comment_languages_fast(repo_name: str) -> List[str]:
         try:
             val_json = json.dumps(sorted_langs)
             c.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('available_comment_languages', ?)", (val_json,))
+            c.execute("INSERT OR REPLACE INTO metadata (key, value) VALUES ('available_comment_languages_ver', ?)", (_COMMENT_LANGS_CACHE_VER,))
             conn.commit()
         except Exception:
             pass
@@ -252,12 +266,12 @@ def get_repertoire_card_meta_fast(repo_name: str) -> tuple[List[Dict[str, Any]],
         c = conn.cursor()
         c.execute('SELECT id, name, "order", target_elo FROM repertoire_levels ORDER BY "order"')
         levels = [{"id": row[0], "name": row[1], "order": row[2], "target_elo": row[3]} for row in c.fetchall()]
-        c.execute("SELECT value FROM metadata WHERE key = 'available_comment_languages'")
-        row = c.fetchone()
+        c.execute("SELECT key, value FROM metadata WHERE key IN ('available_comment_languages', 'available_comment_languages_ver')")
+        meta_map = dict(c.fetchall())
         langs = None
-        if row and row[0]:
+        if meta_map.get("available_comment_languages_ver") == _COMMENT_LANGS_CACHE_VER and meta_map.get("available_comment_languages"):
             try:
-                parsed = json.loads(row[0])
+                parsed = json.loads(meta_map["available_comment_languages"])
                 if isinstance(parsed, list):
                     langs = sorted(set(l.lower() for l in parsed if l))
             except Exception:
@@ -1023,6 +1037,7 @@ def copy_repertoire_comments(repo_name: str, src_lang: str, target_lang: str, ov
                     count += 1
                     
         if count > 0:
+            clear_repertoire_comment_languages_meta(session, repo_name)
             commit_with_retry(session)
             
         session.close()
@@ -1115,12 +1130,12 @@ def copy_repertoire_variations(repo_name: str, src_lang: str, target_lang: str, 
         if remove_source:
             msg = tr_ui("repo_settings.msg_transfer_var_move_success", "{count} Variantennamen von '{src}' nach '{target}' verschoben.", count=count, src=src_key.upper(), target=target_key.upper())
         else:
-            msg = tr_ui("repo_settings.msg_transfer_var_success", "{count} Variantennamen von '{src}' nach '{target}' übertragen.", count=count, src=src_key.upper(), target=target_key.upper())
+            msg = tr_ui("repo_settings.msg_transfer_var_success", "{count} Variantennamen von '{src}' nach '{target}' kopiert.", count=count, src=src_key.upper(), target=target_key.upper())
         return True, msg, count
     except Exception as e:
         session.rollback()
         session.close()
         db.close()
-        return False, tr_ui("repo_settings.msg_transfer_var_error", "Fehler beim Übertragen der Variantennamen: {error}", error=str(e)), 0
+        return False, tr_ui("repo_settings.msg_transfer_var_error", "Fehler beim Kopieren der Variantennamen: {error}", error=str(e)), 0
 
 

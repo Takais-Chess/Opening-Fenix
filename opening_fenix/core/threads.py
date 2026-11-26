@@ -283,7 +283,7 @@ class HoleFinderThread(QThread):
     
     def __init__(self, repo_name, is_test, threshold, elo_range, mode="holes", level=None, find_rare=False,
                  engine_path=None, threads_count=1, engine=None, depth=18, recheck_unadded: bool = False,
-                 hash_size: Optional[int] = None):
+                 hash_size: Optional[int] = None, variation_filter=None, max_ply: Optional[int] = None):
         super().__init__()
         self.repo_name = repo_name
         self.is_test = is_test
@@ -298,6 +298,8 @@ class HoleFinderThread(QThread):
         self.depth = depth
         self.recheck_unadded = recheck_unadded
         self.hash_size = hash_size
+        self.variation_filter = variation_filter
+        self.max_ply = max_ply
         self._stop_requested = False
 
     def stop(self):
@@ -334,6 +336,8 @@ class HoleFinderThread(QThread):
                 progress_callback=on_progress,
                 recheck_unadded=self.recheck_unadded,
                 hash_size=self.hash_size,
+                variation_filter=self.variation_filter,
+                max_ply=self.max_ply,
             )
             if not self.isInterruptionRequested() and not self._stop_requested:
                 self.finished_signal.emit(results, self.mode)

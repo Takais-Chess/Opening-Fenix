@@ -2,6 +2,7 @@ import os
 import io
 import re
 import shutil
+import zipfile
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple, Callable, Any
 import chess
@@ -1411,11 +1412,9 @@ def execute_course_import(
 
         set_meta(session, "ana_cache_count", "-1")
         set_meta(session, "cov_cache_count", "-1")
-        set_meta(session, "available_comment_languages", None)
+        from opening_fenix.core.services.repertoire_core_service import clear_repertoire_comment_languages_meta
+        clear_repertoire_comment_languages_meta(session, repo_name)
         session.commit()
-
-        from opening_fenix.core.services.repertoire_core_service import invalidate_repertoire_comment_languages_cache
-        invalidate_repertoire_comment_languages_cache(repo_name)
 
         if progress_callback:
             progress_callback(100, tr_ui("course_import.status_done", "Fertiggestellt!"))
@@ -1494,3 +1493,61 @@ def execute_course_import(
     finally:
         session.close()
         db.close()
+
+
+def is_repertoire_backup_zip(zip_path: str) -> bool:
+    """Returns True if `zip_path` is a valid ZIP archive containing a top-level repertoire `.db` file."""
+    if not zip_path or not os.path.isfile(zip_path):
+        return False
+    try:
+        if not zipfile.is_zipfile(zip_path):
+            return False
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for member in zf.namelist():
+                norm = member.replace("\\", "/")
+                if norm.startswith("__MACOSX/") or os.path.basename(norm).startswith("._"):
+                    continue
+                if "/" not in norm and norm.lower().endswith(".db"):
+                    return True
+    except Exception:
+        return False
+    return False
+
+
+def extract_pgns_from_zip(zip_path: str, dest_dir: str) -> List[str]:
+    """
+    Safely extracts all `.pgn` files from `zip_path` into `dest_dir`.
+    Rejects path-traversal entries (zip-slip) and skips macOS `__MACOSX/` / `._*` metadata files.
+    """
+    if not zip_path or not os.path.isfile(zip_path):
+        raise FileNotFoundError(f"ZIP file not found: {zip_path}")
+
+    os.makedirs(dest_dir, exist_ok=True)
+    base_real = os.path.realpath(dest_dir)
+    extracted: List[str] = []
+
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for member in sorted(zf.namelist()):
+            norm = member.replace("\\", "/")
+            if norm.endswith("/"):
+                continue
+            parts = [p for p in norm.split("/") if p]
+            if os.path.isabs(member) or ".." in parts:
+                raise ValueError(f"Unsafe path in archive: {member!r}")
+
+            out_path = os.path.realpath(os.path.join(base_real, *parts))
+            if os.path.commonpath([base_real, out_path]) != base_real:
+                raise ValueError(f"Unsafe path in archive: {member!r}")
+
+            base_name = parts[-1] if parts else ""
+            if (parts and parts[0] == "__MACOSX") or base_name.startswith("._"):
+                continue
+            if not base_name.lower().endswith(".pgn"):
+                continue
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "wb") as f_out, zf.open(member) as z_in:
+                shutil.copyfileobj(z_in, f_out, 1024 * 1024)
+            extracted.append(out_path)
+
+    return extracted

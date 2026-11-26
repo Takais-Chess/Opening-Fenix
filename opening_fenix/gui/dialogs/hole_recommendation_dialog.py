@@ -9,12 +9,12 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QGroupBox, QFormLayout, QDoubleSpinBox, QCheckBox, QFrame, QSizePolicy
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QLocale
 from PyQt6.QtGui import QFont
 
 from opening_fenix.gui.styles import COLORS, get_indicator_style, get_spinbox_button_style
 from opening_fenix.gui.scaling import scale
-from opening_fenix.core.translation import tr_ui
+from opening_fenix.core.translation import tr_ui, translator
 
 
 class HoleRecommendationSettingsDialog(QDialog):
@@ -126,11 +126,14 @@ class HoleRecommendationSettingsDialog(QDialog):
 
         saved_threshs = self.current_rules.get("level_thresholds", {})
 
+        spin_locale = QLocale(QLocale.Language.German, QLocale.Country.Germany) if translator.current_lang == "de" else QLocale.c()
+
         for lvl in sorted(levels, key=lambda x: x.get("order", 1)):
             order = lvl.get("order", 1)
             name = lvl.get("name", f"Level {order}")
 
             spin = QDoubleSpinBox()
+            spin.setLocale(spin_locale)
             spin.setRange(0.01, 100.0)
             spin.setSingleStep(0.1)
             spin.setDecimals(2)
@@ -168,6 +171,7 @@ class HoleRecommendationSettingsDialog(QDialog):
         row_thresh.setSpacing(scale(8))
         lbl_loss_thresh = QLabel(tr_ui("creator.hole_rec_loss_thresh", "Schwellenwert für Verlust:"))
         self.spin_loss = QDoubleSpinBox()
+        self.spin_loss.setLocale(spin_locale)
         self.spin_loss.setRange(0.10, 10.00)
         self.spin_loss.setSingleStep(0.1)
         self.spin_loss.setDecimals(2)
@@ -182,7 +186,7 @@ class HoleRecommendationSettingsDialog(QDialog):
         lbl_info = QLabel(
             tr_ui(
                 "creator.hole_rec_loss_info",
-                "💡 Züge mit großem Verlust (z.B. ≥ 2.00 Bauern) sind taktische Fehler oder schwache Nebenvarianten. Sie werden automatisch für das höchste Level empfohlen, um die Kernlevel kompakt zu halten."
+                "💡 Züge mit großem Verlust (z.B. ≥ 2,00 Bauern) sind taktische Fehler oder schwache Nebenvarianten. Sie werden automatisch für das höchste Level empfohlen, um die Kernlevel kompakt zu halten."
             )
         )
         lbl_info.setStyleSheet(f"color: {COLORS['light_text']}; font-style: italic; font-size: {scale(10)}px;")

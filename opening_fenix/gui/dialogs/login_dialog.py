@@ -30,6 +30,7 @@ class RepertoireButton(QPushButton):
         self.setToolTip(name)
         self.setCheckable(True)
         self.setChecked(False)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedHeight(scale(50))
         self.setMinimumWidth(scale(180))
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)
@@ -37,49 +38,63 @@ class RepertoireButton(QPushButton):
 
         self.toggled.connect(self.update_style)
 
+    def _update_elided_text(self):
+        prefix = "✓  " if self.isChecked() else ""
+        if self.width() < self.minimumWidth():
+            self.setText(f"{prefix}{self.repo_name}")
+            return
+        fm = QFontMetrics(self.font())
+        prefix_w = fm.horizontalAdvance(prefix)
+        avail = max(scale(40), self.width() - prefix_w - scale(24))
+        elided = fm.elidedText(self.repo_name, Qt.TextElideMode.ElideRight, avail)
+        self.setText(f"{prefix}{elided}")
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        fm = QFontMetrics(self.font())
-        avail = max(scale(40), self.width() - scale(20))
-        self.setText(fm.elidedText(self.repo_name, Qt.TextElideMode.ElideRight, avail))
+        self._update_elided_text()
 
     def update_style(self):
         checked = self.isChecked()
-        key = (checked, scale(12), scale(13), scale(2), scale(8))
+        key = (checked, scale(12), scale(13), scale(2), scale(10))
         style = RepertoireButton._STYLE_CACHE.get(key)
         if style is None:
             if checked:
                 style = f"""
                 QPushButton {{
-                    background-color: {COLORS['burnt_orange']};
-                    color: white;
-                    border: 2px solid #e67e22;
+                    background-color: #fde8d3;
+                    color: #9a3412;
+                    border: 2px solid {COLORS['burnt_orange']};
                     border-radius: {scale(12)}px;
                     font-size: {scale(13)}px;
                     font-weight: bold;
-                    padding: {scale(2)}px {scale(8)}px;
+                    padding: {scale(2)}px {scale(10)}px;
+                }}
+                QPushButton:hover {{
+                    background-color: #fbdcc0;
                 }}
                 {get_tooltip_style()}
             """
             else:
                 style = f"""
                 QPushButton {{
-                    background-color: rgba(255, 255, 255, 0.3);
-                    color: black;
-                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    background-color: rgba(255, 255, 255, 0.48);
+                    color: {COLORS['brown_text']};
+                    border: 1px solid rgba(62, 39, 35, 0.16);
                     border-radius: {scale(12)}px;
                     font-size: {scale(13)}px;
                     font-weight: bold;
-                    padding: {scale(2)}px {scale(8)}px;
+                    padding: {scale(2)}px {scale(10)}px;
                 }}
 
                 QPushButton:hover {{
-                    background-color: rgba(255, 255, 255, 0.2);
+                    background-color: rgba(255, 255, 255, 0.78);
+                    border: 1px solid rgba(211, 84, 0, 0.45);
                 }}
                 {get_tooltip_style()}
             """
             RepertoireButton._STYLE_CACHE[key] = style
         self.setStyleSheet(style)
+        self._update_elided_text()
 
 class RepertoireSelectionDialog(QDialog):
     def __init__(self, parent=None):
@@ -133,6 +148,7 @@ class RepertoireSelectionDialog(QDialog):
         scroll_widget.setObjectName("RepoScrollWidget")
         scroll_widget.setStyleSheet("#RepoScrollWidget { background: transparent; }")
         self.grid_layout = QGridLayout(scroll_widget)
+        self.grid_layout.setContentsMargins(0, 0, scale(4), scale(8))
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setColumnStretch(0, 1)
         self.grid_layout.setColumnStretch(1, 1)
@@ -154,13 +170,18 @@ class RepertoireSelectionDialog(QDialog):
         self.grid_layout.setRowStretch(self.grid_layout.rowCount(), 1)
         self.scroll_area.setWidget(scroll_widget)
         layout.addWidget(self.scroll_area)
-        
-        layout.addSpacing(scale(20))
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background-color: rgba(62, 39, 35, 0.14); border: none; max-height: 1px;")
+        layout.addWidget(sep)
+        layout.addSpacing(scale(14))
 
         # Notation Language Selection
         lang_layout = QHBoxLayout()
-        lbl_lang = QLabel(tr_ui("login.notation_language", "Notation Sprache:"))
-        lbl_lang.setStyleSheet(f"font-size: {scale(16)}px; color: black; font-weight: bold;")
+        lbl_lang = QLabel(tr_ui("login.notation_language", "Notationssprache:"))
+        lbl_lang.setStyleSheet(f"font-size: {scale(16)}px; color: {COLORS['brown_text']}; font-weight: bold;")
         
         self.lang_group = QButtonGroup(self)
         btn_en = QPushButton("English (EN)")
@@ -175,30 +196,38 @@ class RepertoireSelectionDialog(QDialog):
             btn.setMinimumWidth(scale(140))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             
-            # Apply similar style to RepertoireButton
+            # Soft tinted selection + accent border to match RepertoireButton
             style = f"""
                 QPushButton {{
-                    background-color: rgba(255, 255, 255, 0.3);
-                    color: black;
-                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    background-color: rgba(255, 255, 255, 0.48);
+                    color: {COLORS['brown_text']};
+                    border: 1px solid rgba(62, 39, 35, 0.16);
                     border-radius: {scale(12)}px;
                     font-size: {scale(16)}px;
                     font-weight: bold;
                     padding: {scale(2)}px {scale(15)}px;
                 }}
                 QPushButton:checked {{
-                    background-color: {COLORS['burnt_orange']};
-                    color: white;
-                    border: 2px solid #e67e22;
+                    background-color: #fde8d3;
+                    color: #9a3412;
+                    border: 2px solid {COLORS['burnt_orange']};
+                }}
+                QPushButton:checked:hover {{
+                    background-color: #fbdcc0;
                 }}
                 QPushButton:hover:!checked {{
-                    background-color: rgba(255, 255, 255, 0.2);
+                    background-color: rgba(255, 255, 255, 0.78);
+                    border: 1px solid rgba(211, 84, 0, 0.45);
                 }}
             """
             btn.setStyleSheet(style)
             self.lang_group.addButton(btn)
             lang_layout.addWidget(btn)
-            
+
+        from opening_fenix.core.translation import translator
+        default_lang = "de" if getattr(translator, "current_lang", None) == "de" else "en"
+        (btn_de if default_lang == "de" else btn_en).setChecked(True)
+
         self.lang_group.buttonClicked.connect(self.validate_selection)
         
         lang_layout.insertWidget(0, lbl_lang)
@@ -210,6 +239,23 @@ class RepertoireSelectionDialog(QDialog):
         self.btn_ok = QPushButton("✔  " + tr_ui("login.create", "Profil erstellen"))
         self.btn_ok.setObjectName("PrimaryAction")
         self.btn_ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_ok.setFixedHeight(scale(48))
+        self.btn_ok.setStyleSheet(f"""
+            QPushButton#PrimaryAction {{
+                background-color: {COLORS['burnt_orange']};
+                color: white;
+                border: none;
+                border-radius: {scale(12)}px;
+                font-size: {scale(15)}px;
+                font-weight: bold;
+            }}
+            QPushButton#PrimaryAction:hover {{
+                background-color: #e67e22;
+            }}
+            QPushButton#PrimaryAction:pressed {{
+                background-color: #ba4a00;
+            }}
+        """)
         self.btn_ok.setEnabled(True) # Always enabled, validate on click
         self.btn_ok.clicked.connect(self.on_accept)
         layout.addWidget(self.btn_ok)

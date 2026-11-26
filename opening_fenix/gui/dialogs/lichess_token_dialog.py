@@ -386,6 +386,7 @@ class MissingTokenPromptDialog(QDialog):
         layout.addWidget(self.chk_dont_ask)
 
         layout.addSpacing(scale(6))
+        layout.addStretch()
 
         h_buttons = QHBoxLayout()
         h_buttons.setSpacing(scale(10))
@@ -421,6 +422,7 @@ class MissingTokenPromptDialog(QDialog):
         h_buttons.addWidget(btn_setup)
 
         layout.addLayout(h_buttons)
+        self.adjustSize()
 
     def _on_continue(self):
         self.selected_action = self.ACTION_CONTINUE

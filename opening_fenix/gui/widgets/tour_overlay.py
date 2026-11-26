@@ -63,6 +63,8 @@ class GuidedTourOverlay(QWidget):
         self.lbl_text = QLabel("Beschreibung...")
         self.lbl_text.setStyleSheet(f"color: {COLORS['brown_text']}; font-size: {scale(15)}px;")
         self.lbl_text.setWordWrap(True)
+        self.lbl_text.setOpenExternalLinks(True)
+        self.lbl_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.lbl_text.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.lbl_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
         

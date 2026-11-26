@@ -39,7 +39,7 @@ from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
 CreatorWindow = None
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon, get_settings_gear_icon
+from opening_fenix.gui.styles import get_main_window_style, COLORS, set_consistent_icon, get_settings_gear_icon, bring_window_to_front
 
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale
@@ -418,9 +418,11 @@ class MainWindow(QMainWindow):
 
         self.tour.finished.connect(self.on_tour_finished)
         self.tour.start_tour()
+        self._sync_board_click_to_start()
 
     def on_tour_finished(self):
         """Mark the tour as shown, show the FAQ dialog, then proceed to course intro if needed."""
+        self._sync_board_click_to_start()
         self.training_manager.set_setting("guide_shown", True)
         from opening_fenix.gui.dialogs.faq_dialog import FAQDialog
         FAQDialog(self).exec()
@@ -596,6 +598,7 @@ class MainWindow(QMainWindow):
         board_inner_layout.setContentsMargins(0, 0, 0, 0)
         self.board_widget = ChessBoardWidget(self)
         self.board_widget.move_executed.connect(self.check_user_move)
+        self.board_widget.board_clicked.connect(self.on_board_click_start)
         board_inner_layout.addWidget(self.board_widget)
         
         # Board Container to provide the visual gap to the right (matching Creator style)
@@ -749,9 +752,7 @@ class MainWindow(QMainWindow):
                 self.task_center_dialog.set_active_repertoire(active_repo)
         if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
             self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
-        self.task_center_dialog.show()
-        self.task_center_dialog.raise_()
-        self.task_center_dialog.activateWindow()
+        bring_window_to_front(self.task_center_dialog)
 
     def scroll_tabs_left(self):
         sb = self.repo_scroll.horizontalScrollBar()
@@ -1351,6 +1352,7 @@ class MainWindow(QMainWindow):
             self.current_move_obj = None
             self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
             self.btn_smart.setEnabled(False)
+            self._sync_board_click_to_start()
             return
 
         # Try to use preloaded challenge
@@ -1373,6 +1375,7 @@ class MainWindow(QMainWindow):
                         self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
                         self.btn_smart.setEnabled(False)
                         self.current_move_obj = None
+                        self._sync_board_click_to_start()
                         return
 
                     if self.training_manager.get_setting("stop_at_variation_end"):
@@ -1410,6 +1413,7 @@ class MainWindow(QMainWindow):
                     self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
                     self.btn_smart.setEnabled(False)
                     self.current_move_obj = None
+                    self._sync_board_click_to_start()
                     return
 
                 if self.training_manager.get_setting("stop_at_variation_end"):
@@ -1425,6 +1429,7 @@ class MainWindow(QMainWindow):
             self.current_move_obj = None
             self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
             self.btn_smart.setEnabled(False)
+            self._sync_board_click_to_start()
             return
 
         self._load_new_challenge_sequence(path_to_animate)
@@ -1436,6 +1441,7 @@ class MainWindow(QMainWindow):
             if self._is_training_limit_reached():
                 self.btn_smart.setText(tr_ui("main_window.btn_limit_reached", "🎯 ZIEL ERREICHT!"))
                 self.btn_smart.setEnabled(False)
+                self._sync_board_click_to_start()
                 return
             pre_start = None
             with self._preload_lock:
@@ -1462,6 +1468,7 @@ class MainWindow(QMainWindow):
         else:
             self.btn_smart.setText(tr_ui("main_window.btn_done", "🎉 FERTIG!"))
             self.btn_smart.setEnabled(False)
+            self._sync_board_click_to_start()
             if is_free_training_profile(self.profile_name):
                 QTimer.singleShot(400, self.open_free_training_setup)
 
@@ -1547,6 +1554,28 @@ class MainWindow(QMainWindow):
             self.btn_smart.setText(tr_ui("main_window.btn_wrong", "FALSCH! LÖSUNG ANZEIGEN")); self.btn_smart.setEnabled(True)
             if hasattr(self, 'btn_mouse_slip') and self.btn_mouse_slip:
                 self.btn_mouse_slip.setVisible(True)
+        self._sync_board_click_to_start()
+
+    def _sync_board_click_to_start(self):
+        if hasattr(self, "board_widget") and self.board_widget and hasattr(self, "btn_smart"):
+            tour_active = bool(getattr(self, "tour", None) and self.tour.isVisible())
+            can_start = (
+                getattr(self, "button_state", None) == "start"
+                and self.btn_smart.isEnabled()
+                and not tour_active
+            )
+            self.board_widget.set_click_to_start_enabled(can_start)
+
+    def on_board_click_start(self):
+        tour_active = bool(getattr(self, "tour", None) and self.tour.isVisible())
+        if (
+            getattr(self, "button_state", None) == "start"
+            and hasattr(self, "btn_smart")
+            and self.btn_smart.isEnabled()
+            and not self.board_widget.is_animating
+            and not tour_active
+        ):
+            self.on_smart_click()
 
     def on_smart_click(self):
         self._cancel_auto_continue()
@@ -1859,9 +1888,7 @@ class MainWindow(QMainWindow):
         else:
             if hasattr(self.settings_dialog, 'on_reopen'):
                 self.settings_dialog.on_reopen()
-        self.settings_dialog.show()
-        self.settings_dialog.raise_()
-        self.settings_dialog.activateWindow()
+        bring_window_to_front(self.settings_dialog)
 
     def open_storage_settings(self):
         self.open_settings()

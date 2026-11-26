@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import tempfile
 import difflib
 import threading
 import functools
@@ -320,6 +321,15 @@ def get_default_user_dir():
         cached = _FROZEN_DEFAULT_DIR_CACHE.get(exe_dir)
         if cached is not None:
             return cached
+
+        pfn = get_msix_package_family_name()
+        if pfn:
+            local_appdata = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+            user_dir = os.path.join(local_appdata, "Packages", pfn, "LocalCache", "Roaming", "Opening Fenix")
+            os.makedirs(user_dir, exist_ok=True)
+            _FROZEN_DEFAULT_DIR_CACHE[exe_dir] = user_dir
+            return user_dir
+
         # Never store user data inside Program Files even if elevated/writable!
         is_program_files = False
         try:
@@ -943,6 +953,82 @@ def is_public_version() -> bool:
     # Check for marker file in user_dir
     if os.path.exists(os.path.join(get_user_dir(), "PUBLIC_VERSION")) or os.path.exists(os.path.join(get_user_dir(), "public.flag")):
         return True
+
+    return False
+
+
+def get_msix_package_family_name() -> Optional[str]:
+    """
+    Returns the Windows MSIX Package Family Name (e.g. 'TakaisChess.OpeningFenixChess_re6rtymtb0s24')
+    if the current process is running inside an MSIX package, else None.
+    """
+    if sys.platform != 'win32':
+        return None
+
+    try:
+        import ctypes
+        length = ctypes.c_uint32(0)
+        rc = ctypes.windll.kernel32.GetCurrentPackageFamilyName(ctypes.byref(length), None)
+        # ERROR_INSUFFICIENT_BUFFER (122) means the process has a package family name
+        if rc == 122 and length.value > 0:
+            buf = ctypes.create_unicode_buffer(length.value)
+            rc2 = ctypes.windll.kernel32.GetCurrentPackageFamilyName(ctypes.byref(length), buf)
+            if rc2 == 0 and buf.value:
+                return buf.value
+    except Exception:
+        pass
+
+    return None
+
+
+def get_real_temp_dir() -> str:
+    """
+    Returns a non-virtualized physical temp directory suitable for passing paths to
+    external processes (e.g. headless Edge/Chrome) when running inside MSIX.
+    Falls back to tempfile.gettempdir() outside MSIX or on error.
+    """
+    try:
+        pfn = get_msix_package_family_name()
+        if pfn:
+            local_appdata = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
+            real_tmp = os.path.join(local_appdata, "Packages", pfn, "LocalCache", "Local", "Temp")
+            os.makedirs(real_tmp, exist_ok=True)
+            return real_tmp
+    except Exception:
+        pass
+
+    return tempfile.gettempdir()
+
+
+def is_store_version() -> bool:
+    """
+    Returns True if running as a Microsoft Store (MSIX) package.
+    Checks:
+    1. Environment variable FENIX_STORE_BUILD == '1'
+    2. Bundled 'STORE_VERSION' or 'store.flag' file in base path or exe path
+    3. Windows MSIX package identity via GetCurrentPackageFullName
+    """
+    if os.environ.get('FENIX_STORE_BUILD') == '1':
+        return True
+
+    bundle_dirs = [get_base_path()]
+    if getattr(sys, 'frozen', False):
+        bundle_dirs.append(os.path.dirname(sys.executable))
+    for dir_path in bundle_dirs:
+        if os.path.exists(os.path.join(dir_path, "STORE_VERSION")) or os.path.exists(os.path.join(dir_path, "store.flag")):
+            return True
+
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            length = ctypes.c_uint32(0)
+            # ERROR_INSUFFICIENT_BUFFER (122) means the process has a package identity (MSIX)
+            # APPMODEL_ERROR_NO_PACKAGE (15700) means it does not
+            rc = ctypes.windll.kernel32.GetCurrentPackageFullName(ctypes.byref(length), None)
+            if rc in (0, 122):
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -1850,10 +1936,17 @@ def get_repertoire_comment_stats(session) -> str:
         return no_comments
         
     total = sum(counts.values())
+    try:
+        from opening_fenix.core.translation import translator
+        is_de = (translator.current_lang == "de")
+    except Exception:
+        is_de = False
+
     parts = []
     for lang_code, cnt in sorted(counts.items(), key=lambda x: x[1], reverse=True):
         pct = int(round((cnt / total) * 100))
-        parts.append(f"{cnt:,} {lang_code} ({pct}%)")
+        cnt_str = f"{cnt:,}".replace(",", ".") if is_de else f"{cnt:,}"
+        parts.append(f"{cnt_str} {lang_code} ({pct}%)")
         
     return ", ".join(parts)
 

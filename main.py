@@ -12,7 +12,7 @@ gc.set_threshold(50000, 50, 50)
 
 from PyQt6.QtGui import QIcon
 
-from opening_fenix.core.utils import get_base_path, get_user_dir
+from opening_fenix.core.utils import get_base_path, get_user_dir, is_store_version
 from opening_fenix.core.version import APP_VERSION
 from opening_fenix.gui.styles import set_consistent_icon, setup_light_palette
 from opening_fenix.gui.window_manager import WindowManager
@@ -123,11 +123,12 @@ if __name__ == "__main__":
         except Exception:
             pass
             
-        myappid = f'OpeningFenix.Lab.V{APP_VERSION}' 
-        try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-        except (AttributeError, OSError):
-             pass
+        if not is_store_version():
+            myappid = f'OpeningFenix.Lab.V{APP_VERSION}'
+            try:
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            except (AttributeError, OSError):
+                 pass
 
     try:
         logger.info(f"Opening Fenix starting (v{APP_VERSION})...")

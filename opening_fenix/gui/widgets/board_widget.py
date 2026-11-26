@@ -388,6 +388,7 @@ class ChessBoardWidget(QWidget):
     piece_slide_finished = pyqtSignal()
     skip_all_animations_requested = pyqtSignal()
     drawings_changed = pyqtSignal()
+    board_clicked = pyqtSignal()
     def __init__(self, main_window=None, parent=None):
         super().__init__(parent)
         self.main_window = main_window
@@ -411,6 +412,7 @@ class ChessBoardWidget(QWidget):
         self.drag_start_square = None
         self.selected_square = None
         self.show_legal_moves = True
+        self.click_to_start_enabled = False
         self._press_was_already_selected = False
         self._promotion_popup = None
         self._pending_promotion_click = None
@@ -593,6 +595,12 @@ class ChessBoardWidget(QWidget):
             self._needs_full_board_paint = True
             self.update()
 
+    def set_click_to_start_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        if self.click_to_start_enabled != enabled:
+            self.click_to_start_enabled = enabled
+            self.setCursor(Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ArrowCursor)
+
     def clear_selection(self):
         self._pending_promotion_click = None
         if self.selected_square is not None:
@@ -759,6 +767,7 @@ class ChessBoardWidget(QWidget):
         return serialize_chessbase_annotations(self.user_arrows, self.user_highlights)
 
     def mousePressEvent(self, event):
+        was_animating = bool(self.is_animating)
         if self.is_animating:
             self.skip_all_animations_requested.emit()
             if self.is_animating: # Fallback if no skip handler is connected
@@ -800,6 +809,11 @@ class ChessBoardWidget(QWidget):
                 except Exception:
                     pass
                 self._promotion_popup = None
+                return
+
+            if not was_animating and self.click_to_start_enabled and not self.is_animating:
+                self.clear_selection()
+                self.board_clicked.emit()
                 return
 
             square = self.get_square_from_pos(event.position())

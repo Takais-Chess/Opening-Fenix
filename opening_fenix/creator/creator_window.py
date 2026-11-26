@@ -54,7 +54,7 @@ from opening_fenix.core.logger import logger
 from opening_fenix.core.version import APP_VERSION
 
 # Import centralized styles
-from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style, get_settings_gear_icon
+from opening_fenix.gui.styles import get_creator_window_style, get_creator_toolbar_style, COLORS, set_consistent_icon, get_bw_glass_style, setup_light_palette, get_chevron_icon_path, get_tooltip_style, get_settings_gear_icon, bring_window_to_front
 from opening_fenix.gui.widgets.title_bar import CustomTitleBar
 from opening_fenix.gui.scaling import scale, scaler, get_available_geometry
 from opening_fenix.core.translation import tr_ui
@@ -425,11 +425,13 @@ class CreatorBackend:
         v3 = var3 if var3 else None
 
         names_changed = (pos.variation_1 != v1) or (pos.variation_2 != v2) or (pos.variation_3 != v3)
+        old_comment = pos.comment or ""
 
         if append and comment:
             pos.comment = combine_comments(pos.comment, comment, default_lang=target_lang)
         else:
             pos.comment = combine_comments("", comment, default_lang=target_lang) if comment else ""
+        comment_changed = (pos.comment or "") != old_comment
         pos.variation_1 = v1
         pos.variation_2 = v2
         pos.variation_3 = v3
@@ -442,6 +444,10 @@ class CreatorBackend:
         if names_changed:
             self._update_cached_names_recursive(pos)
             self._reachable_ids_cache = {}
+
+        if comment_changed:
+            from opening_fenix.core.services.repertoire_core_service import clear_repertoire_comment_languages_meta
+            clear_repertoire_comment_languages_meta(self.session, self.active_repo_name)
 
         commit_with_retry(self.session)
         self.clear_cache(graph_changed=False)
@@ -3928,6 +3934,8 @@ class CreatorWindow(QMainWindow):
         self._transposition_highlight_move = None
         self._search_highlight_fen = None
         self._search_highlight_move = None
+        self._pending_back_select_uci = None
+        self._pending_back_select_fen = None
 
 
         cp = os.path.join(get_user_dir(), "config.json")
@@ -4049,6 +4057,71 @@ class CreatorWindow(QMainWindow):
 
         # Delayed Fair Play check on Creator startup (2.5 seconds delay)
         QTimer.singleShot(2500, self.trigger_lichess_lockout_check)
+
+        # Start the Creator onboarding tour if not shown yet for this profile
+        QTimer.singleShot(600, self.check_for_creator_onboarding)
+
+        # Support dropping .pgn / .zip files onto the Creator window
+        self.setAcceptDrops(True)
+
+    def check_for_creator_onboarding(self):
+        """Show the Creator onboarding tour once per profile when first opening the Creator."""
+        import sys
+        from opening_fenix.core.utils import is_free_training_profile
+        if "pytest" in sys.modules or "PYTEST_CURRENT_TEST" in os.environ or getattr(self, "is_test", False):
+            return
+        if sip.isdeleted(self) or getattr(self, "_is_closing", False) or not self.isVisible():
+            return
+        if self.training_manager and is_free_training_profile(getattr(self.training_manager, "profile_name", "")):
+            return
+        if not self.get_setting("creator_guide_shown"):
+            self.start_creator_tour()
+
+    def start_creator_tour(self):
+        """Initializes and starts the step-by-step guided tour for the Creator."""
+        from opening_fenix.gui.widgets.tour_overlay import GuidedTourOverlay
+
+        self.creator_tour = GuidedTourOverlay(self)
+
+        self.creator_tour.add_step(
+            None,
+            tr_ui("tour.creator_step1_title", "Willkommen im Repertoire Creator!"),
+            tr_ui(
+                "tour.creator_step1_text",
+                "Hier kannst du deine eigenen Schach-Repertoires erstellen, bearbeiten und strukturieren – Züge hinzufügen, Varianten benennen, Kommentare schreiben sowie Stellungen mit der Engine und Lichess-Daten analysieren.",
+            ),
+        )
+        self.creator_tour.add_step(
+            getattr(self, "btn_load_repo", None),
+            tr_ui("tour.creator_step2_title", "Repertoires laden & erstellen"),
+            tr_ui(
+                "tour.creator_step2_text",
+                "Wechsle hier zwischen deinen Repertoires oder erstelle ein neues. In den Einstellungen daneben findest du PGN-Import/Export, Engine-Tools und Kursoptionen.",
+            ),
+        )
+        self.creator_tour.add_step(
+            getattr(self, "board_panel", None),
+            tr_ui("tour.creator_step3_title", "Züge am Brett aufbauen"),
+            tr_ui(
+                "tour.creator_step3_text",
+                "Spiele Züge direkt auf dem Brett, um sie zu deinem Repertoire hinzuzufügen. Über den Variantenbaum und die Tabs rechts verwaltest du Varianten, Kommentare sowie Engine- und Lichess-Vorschläge.",
+            ),
+        )
+        self.creator_tour.add_step(
+            None,
+            tr_ui("tour.creator_step4_title", "Video-Anleitung: Repertoire erstellen"),
+            tr_ui(
+                "tour.creator_step4_text",
+                'Du möchtest Schritt für Schritt sehen, wie man in Opening Fenix ein Schach-Repertoire erstellt?<br><br>Schau dir das Video auf YouTube an:<br><a href="https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s">https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s</a>',
+            ),
+        )
+
+        self.creator_tour.finished.connect(self.on_creator_tour_finished)
+        self.creator_tour.start_tour()
+
+    def on_creator_tour_finished(self):
+        """Mark the Creator onboarding tour as shown for the current profile."""
+        self.set_setting("creator_guide_shown", True)
 
     def check_for_updates(self):
         import sys
@@ -4573,7 +4646,7 @@ class CreatorWindow(QMainWindow):
         # Left Column: Engine (GlassPill)
         engine_container = QFrame()
         engine_container.setObjectName("EngineAnalysisPill")
-        engine_container.setMinimumWidth(scale(190))
+        engine_container.setMinimumWidth(scale(250))
         self.repolish(engine_container)
         evl = QVBoxLayout(engine_container)
         evl.setContentsMargins(scale(4), scale(12), scale(4), scale(12))
@@ -4654,10 +4727,13 @@ class CreatorWindow(QMainWindow):
         
         lbl_depth = QLabel(tr_ui("creator.engine_depth_label", "Tiefe:"))
         lbl_depth.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']};")
+        lbl_depth.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         lbl_threads = QLabel(tr_ui("creator.engine_cores_label", "Kerne:"))
-        lbl_threads.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(6)}px;")
+        lbl_threads.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(3)}px;")
+        lbl_threads.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         lbl_lines = QLabel(tr_ui("creator.engine_lines_label", "Züge:"))
-        lbl_lines.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(6)}px;")
+        lbl_lines.setStyleSheet(f"font-size: {scale(13)}px; font-weight: 600; color: {COLORS['brown_text']}; margin-left: {scale(3)}px;")
+        lbl_lines.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         
         h_eng_settings.addWidget(lbl_depth)
         h_eng_settings.addWidget(self.combo_depth)
@@ -4831,7 +4907,7 @@ class CreatorWindow(QMainWindow):
         self.analysis_splitter.addWidget(common_container)
         self.analysis_splitter.setStretchFactor(0, 1)
         self.analysis_splitter.setStretchFactor(1, 1)
-        self.analysis_splitter.setSizes([scale(180), scale(260)])
+        self.analysis_splitter.setSizes([scale(260), scale(280)])
         al.addWidget(self.analysis_splitter)
         
         # Rep. Loch Finder Tab
@@ -4848,9 +4924,9 @@ class CreatorWindow(QMainWindow):
         
         # Store all possible tabs in a mapping
         self._all_tabs = {
-            "DETAILS": (self.tab_details, tr_ui("creator.tab_details", "DETAILS")),
-            "ANALYSIS": (self.tab_analysis, tr_ui("creator.tab_analysis", "ANALYSE")),
-            "HOLES": (self.tab_holes, tr_ui("creator.tab_holes", "Such Modus")),
+            "DETAILS": (self.tab_details, tr_ui("creator.tab_details", "Details")),
+            "ANALYSIS": (self.tab_analysis, tr_ui("creator.tab_analysis", "Analyse")),
+            "HOLES": (self.tab_holes, tr_ui("creator.tab_holes", "Suchmodus")),
             "KONTROLLE": (self.tab_kontrolle, tr_ui("creator.tab_kontrolle", "Rep. Kontrolle")),
             "TRANSPOSITIONS": (self.tab_transpositions, tr_ui("creator.tab_transpositions", "Transpositionen"))
         }
@@ -4906,9 +4982,7 @@ class CreatorWindow(QMainWindow):
                 self.task_center_dialog.set_active_repertoire(active_repo)
         if initial_tab is not None and not isinstance(initial_tab, bool) and hasattr(self.task_center_dialog, 'tabs'):
             self.task_center_dialog.tabs.setCurrentIndex(int(initial_tab))
-        self.task_center_dialog.show()
-        self.task_center_dialog.raise_()
-        self.task_center_dialog.activateWindow()
+        bring_window_to_front(self.task_center_dialog)
 
     def _on_background_task_finished(self, job, success, message):
         if success and getattr(self, 'active_repo_name', None) == job.repo_name:
@@ -4918,6 +4992,10 @@ class CreatorWindow(QMainWindow):
                 self.update_structure_tree()
             if hasattr(self, 'refresh_creator_info'):
                 self.refresh_creator_info()
+            if hasattr(self, 'update_hole_variation_combo'):
+                self.update_hole_variation_combo()
+            if hasattr(self, 'update_hole_data_warning'):
+                self.update_hole_data_warning()
 
     def _on_splitter_moved(self, pos=None, index=None):
         self._auto_size_board = False
@@ -4964,7 +5042,9 @@ class CreatorWindow(QMainWindow):
             QTimer.singleShot(0, self.adjust_engine_columns)
         if widget == self.tab_holes:
             self.update_hole_level_combo()
+            self.update_hole_variation_combo()
             self.on_hole_mode_change()
+            self.update_hole_data_warning()
         if widget == self.tab_kontrolle:
             levels = self.backend.get_repertoire_levels() if self.backend else []
             current_combo_levels = [
@@ -5006,9 +5086,7 @@ class CreatorWindow(QMainWindow):
             self.repo_settings_dialog.select_course(active_repo)
 
         self.repo_settings_dialog.sidebar.setCurrentRow(1) # Design & Audio page containing tab settings
-        self.repo_settings_dialog.show()
-        self.repo_settings_dialog.raise_()
-        self.repo_settings_dialog.activateWindow()
+        bring_window_to_front(self.repo_settings_dialog)
 
 
 
@@ -5732,6 +5810,8 @@ class CreatorWindow(QMainWindow):
         # Refresh the UI for current FEN
         if hasattr(self, 'update_ui_from_fen'):
             self.update_ui_from_fen()
+        if hasattr(self, 'update_hole_data_warning'):
+            self.update_hole_data_warning()
 
         # Trigger enrichment for current position with new Elo category
         if hasattr(self, 'board_widget') and self.board_widget and hasattr(self.board_widget, 'board') and self.board_widget.board:
@@ -6112,6 +6192,51 @@ class CreatorWindow(QMainWindow):
         self.enrichment_threads.append(t)
         t.start(QThread.Priority.LowPriority)
 
+    def _build_back_parents_menu(self, parents):
+        """Build the transposition Back menu, placing and highlighting the incoming move first."""
+        last_move_uci = None
+        prev_fen_4 = None
+        if getattr(self, "board_widget", None) and getattr(self.board_widget, "board", None) and self.board_widget.board.move_stack:
+            last_move_uci = self.board_widget.board.peek().uci()
+            board_copy = self.board_widget.board.copy(stack=True)
+            board_copy.pop()
+            prev_fen_4 = " ".join(board_copy.fen().strip().split()[:4])
+
+        def _is_current_parent(parent):
+            if not last_move_uci:
+                return False
+            p_uci = parent.get("move_uci")
+            p_fen_4 = " ".join((parent.get("parent_fen") or "").strip().split()[:4])
+            return p_uci == last_move_uci and (not prev_fen_4 or p_fen_4 == prev_fen_4)
+
+        ordered_parents = sorted(parents, key=lambda p: 0 if _is_current_parent(p) else 1)
+        notation_lang = self.get_notation_lang() if hasattr(self, "get_notation_lang") else "en"
+
+        menu = QMenu(self)
+        menu.setStyleSheet(self.styleSheet())
+        for parent in ordered_parents:
+            p_fen = parent['parent_fen']
+            p_san = parent['move_san']
+            p_uci = parent.get('move_uci')
+            disp_san = localize_san(p_san, notation_lang)
+
+            if _is_current_parent(parent):
+                label = tr_ui("creator.back_menu_move_from_current", "✓ Zug aus: {move} (aktuell)", move=disp_san)
+                action = menu.addAction(label)
+                font = action.font()
+                font.setBold(True)
+                action.setFont(font)
+                action.setData("current")
+                menu.setDefaultAction(action)
+                action.triggered.connect(lambda checked=False: self.go_back())
+            else:
+                label = tr_ui("creator.back_menu_move_from", "Zug aus: {move}", move=disp_san)
+                action = menu.addAction(label)
+                action.triggered.connect(
+                    lambda checked=False, p=p_fen, s=p_san, u=p_uci: self._on_back_action_triggered(p, s, u)
+                )
+        return menu
+
     def on_back_button_clicked(self):
         self.save_current_details_now()
         current_fen = self.board_widget.board.fen()
@@ -6121,21 +6246,17 @@ class CreatorWindow(QMainWindow):
             self.go_back()
         elif len(parents) == 1:
             parent = parents[0]
+            self._pending_back_select_uci = parent.get('move_uci')
+            self._pending_back_select_fen = " ".join(parent['parent_fen'].strip().split()[:4])
             self.play_sound("capture" if 'x' in parent['move_san'] else "move")
             self.set_board_to_fen(parent['parent_fen'])
         else:
-            menu = QMenu(self)
-            menu.setStyleSheet(self.styleSheet())
-            for parent in parents:
-                action = menu.addAction(f"Zug aus: {parent['move_san']}")
-                # Capture values in lambda
-                p_fen = parent['parent_fen']
-                p_san = parent['move_san']
-                action.triggered.connect(lambda checked=False, p=p_fen, s=p_san: self._on_back_action_triggered(p, s))
-            
+            menu = self._build_back_parents_menu(parents)
             menu.exec(self.btn_back.mapToGlobal(QPoint(0, self.btn_back.height())))
 
-    def _on_back_action_triggered(self, parent_fen, move_san):
+    def _on_back_action_triggered(self, parent_fen, move_san, move_uci=None):
+        self._pending_back_select_uci = move_uci
+        self._pending_back_select_fen = " ".join(parent_fen.strip().split()[:4])
         self.play_sound("capture" if 'x' in move_san else "move")
         self.set_board_to_fen(parent_fen)
 
@@ -6143,8 +6264,11 @@ class CreatorWindow(QMainWindow):
         self.save_current_details_now()
         if len(self.board_widget.board.move_stack) > 0:
             last_move = self.board_widget.board.peek()
+            undone_uci = last_move.uci()
             is_cap = self.board_widget.board.is_capture(last_move)
             self.board_widget.board.pop()
+            self._pending_back_select_uci = undone_uci
+            self._pending_back_select_fen = " ".join(self.board_widget.board.fen().strip().split()[:4])
             self.board_widget.update()
             self.play_sound("capture" if is_cap else "move")
             self.update_ui_from_fen()
@@ -6254,6 +6378,9 @@ class CreatorWindow(QMainWindow):
                 self.board_widget.last_move = self.board_widget.board.peek()
             else:
                 self.board_widget.last_move = None
+        if hasattr(self.board_widget, "_invalidate_snapshot"):
+            self.board_widget._invalidate_snapshot()
+        self.board_widget.update()
         
         # Auto-mark for overhaul if session is active and NOT paused
         if self.overhaul_active and not self.overhaul_paused:
@@ -6488,6 +6615,21 @@ class CreatorWindow(QMainWindow):
                         
                 self.tree_widget.addTopLevelItem(it)
             self.tree_widget.sortItems(1, Qt.SortOrder.DescendingOrder)
+
+            pending_uci = getattr(self, "_pending_back_select_uci", None)
+            pending_fen = getattr(self, "_pending_back_select_fen", None)
+            self._pending_back_select_uci = None
+            self._pending_back_select_fen = None
+            if pending_uci and (not pending_fen or pending_fen == clean_f):
+                target_uci = pending_uci.strip().lower()
+                for idx_row in range(self.tree_widget.topLevelItemCount()):
+                    item = self.tree_widget.topLevelItem(idx_row)
+                    item_uci = item.data(0, Qt.ItemDataRole.UserRole)
+                    if isinstance(item_uci, str) and item_uci.strip().lower() == target_uci:
+                        self.tree_widget.setCurrentItem(item)
+                        item.setSelected(True)
+                        self.tree_widget.scrollToItem(item)
+                        break
         finally:
             self.tree_widget.setUpdatesEnabled(True)
         
@@ -7199,9 +7341,7 @@ class CreatorWindow(QMainWindow):
         if hasattr(self.repo_settings_dialog, 'select_course') and active_repo:
             self.repo_settings_dialog.select_course(active_repo)
         
-        self.repo_settings_dialog.show()
-        self.repo_settings_dialog.raise_()
-        self.repo_settings_dialog.activateWindow()
+        bring_window_to_front(self.repo_settings_dialog)
 
     def _on_settings_closed(self):
         # Restore backend to creator's active repo if settings dialog switched it
@@ -7444,6 +7584,87 @@ class CreatorWindow(QMainWindow):
     def import_pgn_drawings_file_dialog(self):
         """Opens a file dialog to import only drawings from a PGN file."""
         self.import_pgn_file_dialog(drawings_only_default=True)
+
+    def _extract_valid_drop_paths(self, mime_data) -> List[str]:
+        from opening_fenix.gui.widgets.common import extract_dropped_files
+        return extract_dropped_files(mime_data, (".pgn", ".zip"))
+
+    def dragEnterEvent(self, event):
+        if self._extract_valid_drop_paths(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        paths = self._extract_valid_drop_paths(event.mimeData())
+        if paths:
+            event.acceptProposedAction()
+            QTimer.singleShot(0, lambda p=paths: self._handle_dropped_files(p))
+        else:
+            super().dropEvent(event)
+
+    def _handle_dropped_files(self, paths: List[str]):
+        """Routes dropped `.pgn` and `.zip` files to single-PGN import, CourseImportDialog, or Backup import."""
+        from opening_fenix.core.services.course_import_service import is_repertoire_backup_zip
+        valid = [p for p in paths if os.path.isfile(p) and p.lower().endswith((".pgn", ".zip"))]
+        if not valid:
+            return
+
+        backup_zips = [p for p in valid if p.lower().endswith(".zip") and is_repertoire_backup_zip(p)]
+        if backup_zips:
+            from opening_fenix.gui.dialogs.unified_settings_dialog import run_external_backup_import_flow
+            active_repo = self.backend.active_repo_name if getattr(self, "backend", None) else None
+            main_windows_to_reload = []
+
+            def _close_sessions(target_repo: str):
+                if getattr(self, "backend", None) and getattr(self.backend, "active_repo_name", None) == target_repo:
+                    self.backend.close()
+                for w in QApplication.topLevelWidgets():
+                    rm = getattr(w, "repertoire_manager", None)
+                    if rm and getattr(rm, "active_repertoire_name", None) == target_repo:
+                        main_windows_to_reload.append(w)
+                        try:
+                            rm.close()
+                        except Exception:
+                            pass
+
+            target_repo = run_external_backup_import_flow(
+                self,
+                zip_path=backup_zips[0],
+                active_repo=active_repo,
+                close_sessions_fn=_close_sessions,
+            )
+            if target_repo:
+                self.load_repertoire(target_repo)
+                self.set_board_to_fen(chess.STARTING_FEN)
+                for w in QApplication.topLevelWidgets():
+                    if hasattr(w, "sorted_repo_names"):
+                        w.sorted_repo_names = None
+                    if hasattr(w, "refresh_repertoire_buttons"):
+                        try:
+                            w.refresh_repertoire_buttons()
+                        except Exception:
+                            pass
+                for w in main_windows_to_reload:
+                    try:
+                        if hasattr(w, "change_repertoire"):
+                            w.change_repertoire(target_repo, clear_persistent_stats=True)
+                    except Exception:
+                        pass
+            return
+
+        if len(valid) == 1 and valid[0].lower().endswith(".pgn") and getattr(self.backend, "active_repo_name", None):
+            self._start_pgn_import(valid[0])
+            return
+
+        from opening_fenix.gui.dialogs.course_import_dialog import CourseImportDialog
+        dlg = CourseImportDialog(self)
+        dlg.load_files(valid, sync=False)
+        if dlg.exec() == QDialog.DialogCode.Accepted and getattr(dlg, "imported_repo_name", None):
+            self.load_repertoire(dlg.imported_repo_name)
+            self.set_board_to_fen(chess.STARTING_FEN)
+            if getattr(self, "training_manager", None):
+                self.training_manager.set_repo_visibility(dlg.imported_repo_name, True)
 
     def paste_pgn_dialog(self, drawings_only_default: bool = False):
         """Opens a multi-line input dialog to paste PGN text."""
@@ -7775,6 +7996,8 @@ class CreatorWindow(QMainWindow):
             self.overhaul_paused = True
 
         self.init_management_slots(preserve_current=False)
+        self.update_hole_variation_combo()
+        self.update_hole_data_warning()
         self.setWindowTitle(f"Creator - {repo_name}")
         self.board_widget.flipped = (self.backend.get_repertoire_color() == 'b')
         self.board_widget.update()
@@ -8164,6 +8387,75 @@ class CreatorWindow(QMainWindow):
         toolbar_row2.addStretch()
         
         main_layout.addLayout(toolbar_row2)
+
+        # Row 3: Variation & Max-Depth Filters
+        toolbar_row3 = QHBoxLayout()
+        toolbar_row3.setSpacing(scale(10))
+
+        self.lbl_hole_variation = QLabel(tr_ui("creator.hole_label_variation", "Variante:"))
+        self.lbl_hole_variation.setWordWrap(False)
+        self.combo_hole_variation = QComboBox()
+        self.combo_hole_variation.setMinimumWidth(scale(140))
+        self.combo_hole_variation.addItem(tr_ui("creator.overhaul_variation_all", "Alle Varianten"), userData=None)
+        toolbar_row3.addWidget(self.lbl_hole_variation)
+        toolbar_row3.addWidget(self.combo_hole_variation, 1)
+
+        self.lbl_hole_max_ply = QLabel(tr_ui("creator.hole_label_max_depth", "Max. Tiefe:"))
+        self.lbl_hole_max_ply.setWordWrap(False)
+        self.combo_hole_max_ply = QComboBox()
+        self.combo_hole_max_ply.setMinimumWidth(scale(140))
+        self.combo_hole_max_ply.addItem(tr_ui("creator.hole_depth_all", "Alle Züge"), userData=None)
+        for moves_num in (5, 8, 10, 12, 15, 20):
+            ply_num = moves_num * 2
+            self.combo_hole_max_ply.addItem(
+                tr_ui("creator.hole_depth_moves_opt", "≤ {moves} Züge ({plies} Halbzüge)", moves=moves_num, plies=ply_num),
+                userData=ply_num,
+            )
+        toolbar_row3.addWidget(self.lbl_hole_max_ply)
+        toolbar_row3.addWidget(self.combo_hole_max_ply)
+        main_layout.addLayout(toolbar_row3)
+
+        # Lichess Data Coverage Warning Banner (shown when Lichess cache is empty/incomplete)
+        self.hole_data_warning_banner = QFrame()
+        self.hole_data_warning_banner.setObjectName("HoleDataWarningBanner")
+        self.hole_data_warning_banner.setStyleSheet(f"""
+            QFrame#HoleDataWarningBanner {{
+                background-color: #fef3c7;
+                border: 1px solid #d97706;
+                border-radius: {scale(8)}px;
+            }}
+        """)
+        warn_layout = QHBoxLayout(self.hole_data_warning_banner)
+        warn_layout.setContentsMargins(scale(10), scale(7), scale(10), scale(7))
+        warn_layout.setSpacing(scale(10))
+
+        self.lbl_hole_data_warning = QLabel("")
+        self.lbl_hole_data_warning.setWordWrap(True)
+        self.lbl_hole_data_warning.setStyleSheet(f"color: #92400e; font-size: {scale(12)}px; font-weight: 600; background: transparent; border: none;")
+        warn_layout.addWidget(self.lbl_hole_data_warning, 1)
+
+        self.btn_hole_fetch_lichess = QPushButton(tr_ui("creator.hole_btn_fetch_lichess", "🌐 Lichess-Daten laden"))
+        self.btn_hole_fetch_lichess.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_hole_fetch_lichess.setFixedHeight(scale(28))
+        self.btn_hole_fetch_lichess.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #d97706;
+                color: white;
+                border: none;
+                border-radius: {scale(6)}px;
+                padding: 0 {scale(10)}px;
+                font-weight: bold;
+                font-size: {scale(11)}px;
+            }}
+            QPushButton:hover {{
+                background-color: #b45309;
+            }}
+        """)
+        self.btn_hole_fetch_lichess.clicked.connect(lambda: self.open_task_center(0))
+        warn_layout.addWidget(self.btn_hole_fetch_lichess, 0)
+
+        self.hole_data_warning_banner.setVisible(False)
+        main_layout.addWidget(self.hole_data_warning_banner)
         
         # --- SUBTITLE & STATUS ROW ---
         status_row = QHBoxLayout()
@@ -8365,6 +8657,12 @@ class CreatorWindow(QMainWindow):
         if hasattr(self, "combo_hole_level") and self.combo_hole_level:
             self.combo_hole_level.setVisible(is_prio_or_down)
 
+        show_var_depth_filters = (mode != "transpositions")
+        for attr in ("lbl_hole_variation", "combo_hole_variation", "lbl_hole_max_ply", "combo_hole_max_ply"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.setVisible(show_var_depth_filters)
+
         if is_prio_or_down:
             self.update_hole_level_combo()
 
@@ -8383,6 +8681,88 @@ class CreatorWindow(QMainWindow):
 
         if mode_changed:
             self._set_hole_table_headers_for_mode(mode)
+        self.update_hole_data_warning()
+
+    def update_hole_variation_combo(self):
+        """Populates combo_hole_variation with hierarchical V1 -> V2 structure from active repertoire."""
+        combo = getattr(self, "combo_hole_variation", None)
+        if combo is None:
+            return
+        prev_data = combo.currentData()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItem(tr_ui("creator.overhaul_variation_all", "Alle Varianten"), userData=None)
+        if self.backend and self.backend.session:
+            lang = self.get_notation_lang() if hasattr(self, "get_notation_lang") else None
+            structure = self.backend.get_variation_structure(lang=lang)
+            for v1, v2_list in structure.items():
+                combo.addItem(v1, userData=(v1, None))
+                for v2 in v2_list:
+                    combo.addItem(f"  └ {v2}", userData=(v1, v2))
+        if prev_data is not None:
+            for i in range(combo.count()):
+                if combo.itemData(i) == prev_data:
+                    combo.setCurrentIndex(i)
+                    break
+        combo.blockSignals(False)
+
+    def update_hole_data_warning(self):
+        """Checks cached Lichess Explorer coverage for the active repo and updates the Hole Finder warning banner."""
+        banner = getattr(self, "hole_data_warning_banner", None)
+        lbl = getattr(self, "lbl_hole_data_warning", None)
+        if banner is None or lbl is None:
+            return
+
+        mode = self.combo_hole_mode.currentData() if hasattr(self, "combo_hole_mode") and self.combo_hole_mode else None
+        if not self.backend or not self.backend.session or not self.backend.active_repo_name or mode not in ("holes", "priority", "level_down"):
+            banner.setVisible(False)
+            return
+
+        elo = self.combo_lichess_cat.currentText() if hasattr(self, "combo_lichess_cat") and self.combo_lichess_cat else "high"
+        try:
+            from opening_fenix.core.services.hole_finder_service import get_lichess_data_coverage
+            cov = get_lichess_data_coverage(self.backend.session, elo_range=elo)
+        except Exception:
+            banner.setVisible(False)
+            return
+
+        total = cov.get("total_positions", 0)
+        covered = cov.get("covered_positions", 0)
+        pct = cov.get("coverage_pct", 100.0)
+        has_req = cov.get("has_requested_elo", True)
+        eff_elo = cov.get("effective_elo")
+
+        if total > 0 and covered == 0:
+            lbl.setText(
+                tr_ui(
+                    "creator.hole_warn_no_lichess_data",
+                    "⚠️ Noch keine Lichess-Daten geladen. Ohne Lichess-Statistiken kann der Such-Modus keine fehlenden Züge finden."
+                )
+            )
+            banner.setVisible(True)
+        elif total > 0 and pct < 50.0:
+            lbl.setText(
+                tr_ui(
+                    "creator.hole_warn_partial_lichess_data",
+                    "⚠️ Nur {covered} von {total} Stellungen ({pct}%) haben Lichess-Daten. Unanalysierte Stellungen werden übersprungen.",
+                    covered=covered,
+                    total=total,
+                    pct=f"{pct:.0f}",
+                )
+            )
+            banner.setVisible(True)
+        elif not has_req and eff_elo:
+            lbl.setText(
+                tr_ui(
+                    "creator.hole_warn_fallback_elo",
+                    "ℹ️ Für '{req}' sind noch keine Lichess-Daten geladen — es wird vorübergehend auf '{eff}' ausgewichen.",
+                    req=get_elo_display(elo),
+                    eff=get_elo_display(eff_elo),
+                )
+            )
+            banner.setVisible(True)
+        else:
+            banner.setVisible(False)
 
     def stop_hole_scan(self, silent: bool = False):
         """Stops the active hole/search scan thread, resets button state and timer safely."""
@@ -8479,11 +8859,15 @@ class CreatorWindow(QMainWindow):
         self._transposition_highlight_move = None
         self._search_highlight_fen = None
         self._search_highlight_move = None
+        self._pending_back_select_uci = None
+        self._pending_back_select_fen = None
         if hasattr(self, "board_widget") and self.board_widget:
             if len(self.board_widget.board.move_stack) > 0:
                 self.board_widget.last_move = self.board_widget.board.peek()
             else:
                 self.board_widget.last_move = None
+            if hasattr(self.board_widget, "_invalidate_snapshot"):
+                self.board_widget._invalidate_snapshot()
             self.board_widget.update()
 
     def update_hole_level_combo(self):
@@ -9739,7 +10123,7 @@ class CreatorWindow(QMainWindow):
                 no_moves_text = (
                     tr_ui("creator.transpositions_no_moves", "Keine direkten Überleitungen aus dieser Stellung")
                     + "\n"
-                    + tr_ui("creator.transpositions_no_moves_sub", "(Tipp: 'Tiefe Suche starten' für mehrzügige Überleitungen)")
+                    + tr_ui("creator.transpositions_no_moves_sub", "(Tipp: 'Tiefensuche' für mehrzügige Überleitungen)")
                 )
                 item = QTableWidgetItem(no_moves_text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -9978,7 +10362,7 @@ class CreatorWindow(QMainWindow):
         elif self._bfs_start_fen is None:
             # Not yet started for this position
             self.btn_deep_transpos.setEnabled(True)
-            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_btn_start", "🔍 Tiefe Suche starten"))
+            self.btn_deep_transpos.setText(tr_ui("creator.transpositions_btn_start", "🔍 Tiefensuche"))
         else:
             # Completed at least one depth level
             next_d = self._bfs_next_depth
@@ -11535,6 +11919,10 @@ class CreatorWindow(QMainWindow):
 
         self._hole_cached_levels = self.backend.get_repertoire_levels() if self.backend else []
         self._hole_cached_rules = self.get_hole_recommendation_rules()
+        self.update_hole_data_warning()
+
+        var_filter = self.combo_hole_variation.currentData() if hasattr(self, "combo_hole_variation") and self.combo_hole_variation else None
+        max_ply = self.combo_hole_max_ply.currentData() if hasattr(self, "combo_hole_max_ply") and self.combo_hole_max_ply else None
 
         hash_val = int(self.config.get("engine_hash", "256"))
         self.hole_thread = HoleFinderThread(
@@ -11550,6 +11938,8 @@ class CreatorWindow(QMainWindow):
             threads_count=threads,
             recheck_unadded=recheck,
             hash_size=hash_val,
+            variation_filter=var_filter,
+            max_ply=max_ply,
         )
         self.hole_thread.item_found_signal.connect(self._on_hole_item_found)
         self.hole_thread.finished_signal.connect(self._on_hole_scan_finished)
