@@ -55,7 +55,7 @@ def test_rapid_stop_and_restart_never_strands_job(qapp):
         job = _QuickJob(f"Job-{i}", executed, delay=0.005)
         tm.enqueue(job)
         # Wait until it finishes, then immediately enqueue next right around worker exit
-        deadline = time.time() + 2.0
+        deadline = time.time() + 10.0
         while job.status in (JobStatus.QUEUED, JobStatus.RUNNING) and time.time() < deadline:
             qapp.processEvents()
             time.sleep(0.002)

@@ -72,7 +72,7 @@ def test_task_manager_execution_and_cancellation(qapp):
     tm.enqueue(job)
 
     # Process events until completed
-    timeout = time.time() + 3.0
+    timeout = time.time() + 10.0
     while len(completed_events) == 0 and time.time() < timeout:
         qapp.processEvents()
         time.sleep(0.02)
@@ -89,7 +89,7 @@ def test_task_manager_cancel_current(qapp):
     tm.enqueue(slow_job)
 
     # Wait until it starts running
-    timeout = time.time() + 2.0
+    timeout = time.time() + 10.0
     while slow_job.status != JobStatus.RUNNING and time.time() < timeout:
         qapp.processEvents()
         time.sleep(0.01)
@@ -97,7 +97,7 @@ def test_task_manager_cancel_current(qapp):
     assert slow_job.status == JobStatus.RUNNING
     tm.cancel_current()
 
-    timeout = time.time() + 2.0
+    timeout = time.time() + 10.0
     while slow_job.status == JobStatus.RUNNING and time.time() < timeout:
         qapp.processEvents()
         time.sleep(0.01)

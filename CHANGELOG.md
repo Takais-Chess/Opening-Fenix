@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.4.0] - 2026-11-26
+
+### Added & Improved
+- **Microsoft Store Distribution & MSIX Packaging**: Added MSIX packaging (`scripts/build_msix.py`, `installer/AppxManifest.template.xml`, `installer/msix_config.json`) for **Opening Fenix Chess**, `PRIVACY.md`, automatic Store-mode detection (`is_store_version()`), Store-native Software Updates UI, and automated Store publishing support (`scripts/publish_msstore.py`) in `/release-version`.
+- **Creator, Hole Finder & Backup UX**: Added click-on-board quick start, Creator back-navigation return-move and incoming transposition highlighting, Hole Finder coverage warnings and filters, ZIP course import with ZipSlip protection and drag-and-drop filtering, portable backup export/validation/external import, and reliable window foreground activation.
+
+### Fixed
+- **MSIX File & PDF Export Compatibility**: Resolved real unvirtualized MSIX `LocalCache` paths in `get_default_user_dir()` and `get_real_temp_dir()` so Explorer folder actions (Resources, Repertoires, Profiles, Course Share), downloaded engines, and headless Chromium PDF textbook exports work reliably inside Microsoft Store packages, and skipped overriding the native MSIX taskbar AppUserModelID.
+
 ## [1.3.16] - 2026-11-25
 
 ### Added & Improved

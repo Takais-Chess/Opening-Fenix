@@ -2310,10 +2310,15 @@ class MainWindow(QMainWindow):
                 self.update_checker.wait(200)
             except Exception: pass
 
+        preload_t = getattr(self, '_challenge_preload_thread', None)
+        if preload_t is not None and preload_t.is_alive():
+            try:
+                preload_t.join(timeout=2.0)
+            except Exception:
+                pass
         with self._preload_lock:
-            pass
-        if self.training_manager:
-            self.training_manager.close()
-        if self.repertoire_manager:
-            self.repertoire_manager.close()
+            if self.training_manager:
+                self.training_manager.close()
+            if self.repertoire_manager:
+                self.repertoire_manager.close()
         super().closeEvent(event)

@@ -52,14 +52,17 @@ class CloudSyncManager(QObject):
 
     @classmethod
     def instance(cls) -> "CloudSyncManager":
-        if cls._instance is None:
+        from PyQt6 import sip
+        if cls._instance is None or sip.isdeleted(cls._instance):
             cls._instance = cls()
         return cls._instance
 
     @classmethod
     def reset_instance(cls) -> None:
+        from PyQt6 import sip
         if cls._instance is not None:
-            cls._instance.stop()
+            if not sip.isdeleted(cls._instance):
+                cls._instance.stop()
             cls._instance = None
 
     def start_heartbeat(self) -> None:
