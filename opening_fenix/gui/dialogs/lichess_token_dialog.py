@@ -485,3 +485,42 @@ def prompt_lichess_token_if_missing(parent, config: dict) -> Tuple[bool, bool]:
 
     return False, False
 
+
+def has_configured_lichess_token() -> bool:
+    """Returns True if a valid Lichess API token is set via environment or config.json."""
+    if is_valid_token_string(os.environ.get("LICHESS_TOKEN", "")):
+        return True
+    from opening_fenix.core.services.update_service import get_config_dict
+
+    cfg = get_config_dict() or {}
+    return bool(is_valid_token_string(cfg.get("lichess_token", "")))
+
+
+def add_lichess_token_tour_step_if_missing(tour, parent_window, target_widget=None) -> bool:
+    """Appends an interactive Lichess API token setup step to a guided tour if no token is configured."""
+    if has_configured_lichess_token():
+        return False
+
+    from opening_fenix.core.services.update_service import get_config_dict
+
+    def _open_token_setup() -> bool:
+        current = (get_config_dict() or {}).get("lichess_token", "")
+        dlg = LichessTokenDialog(parent_window, current_token=current, allow_skip=True)
+        if dlg.exec() == QDialog.DialogCode.Accepted and not dlg.skip_chosen:
+            return is_valid_token_string(dlg.get_token())
+        return False
+
+    tour.add_step(
+        widget=target_widget,
+        title=tr_ui("tour.lichess_token_title", "Lichess API-Token (Empfohlen)"),
+        text=tr_ui(
+            "tour.lichess_token_text",
+            "Für den Download von Lichess-Eröffnungsstatistiken ohne strenge Abfragelimits wird ein kostenloses Lichess API-Token empfohlen. Du kannst es jetzt direkt einrichten oder später jederzeit in den Einstellungen hinterlegen.",
+        ),
+        action_text=tr_ui("tour.lichess_token_btn", "🔑 Lichess API-Token einrichten"),
+        action_callback=_open_token_setup,
+        action_done_text=tr_ui("tour.lichess_token_saved", "✓ Lichess API-Token eingerichtet"),
+    )
+    return True
+
+

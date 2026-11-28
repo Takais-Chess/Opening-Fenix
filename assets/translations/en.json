@@ -40,7 +40,12 @@
     "cloud_btn_sync": "☁️ Cloud Sync ✓",
     "cloud_tip_active": "Connected to: {path}\nClick to refresh profiles & repertoires from the cloud now.",
     "cloud_btn_connect": "☁️ Connect Cloud Folder",
-    "cloud_tip_connect": "Connect Google Drive / OneDrive to load your profiles & repertoires from another PC immediately."
+    "cloud_tip_connect": "Connect Google Drive / OneDrive to load your profiles & repertoires from another PC immediately.",
+    "no_repertoires_hint": "No repertoires available yet.\nCreate a new empty repertoire below to set up your profile.",
+    "btn_create_empty_repo": "Create Empty Repertoire",
+    "empty_repo_exists_title": "Repertoire Already Exists",
+    "empty_repo_exists_msg": "A repertoire named '{name}' already exists. Please choose a different name.",
+    "empty_repo_invalid_name_msg": "The repertoire name is invalid or reserved. Please choose a different name."
   },
   "settings": {
     "lang_change_title": "Language Change",
@@ -408,7 +413,11 @@
     "creator_step3_title": "Build Moves on the Board",
     "creator_step3_text": "Play moves directly on the board to add them to your repertoire. Use the variation tree and tabs on the right to manage lines, comments, and engine/Lichess suggestions.",
     "creator_step4_title": "Video Tutorial: Creating a Repertoire",
-    "creator_step4_text": "Want a step-by-step walkthrough on how to create a chess repertoire in Opening Fenix?<br><br>Watch the tutorial on YouTube:<br><a href=\"https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s\">https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s</a>"
+    "creator_step4_text": "Want a step-by-step walkthrough on how to create a chess repertoire in Opening Fenix?<br><br>Watch the tutorial on YouTube:<br><a href=\"https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s\">https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s</a>",
+    "lichess_token_title": "Lichess API Token (Recommended)",
+    "lichess_token_text": "A free Lichess API token is recommended for downloading Lichess opening statistics without strict rate limits. You can set it up right now or configure it later anytime in Settings.",
+    "lichess_token_btn": "🔑 Set up Lichess API Token",
+    "lichess_token_saved": "✓ Lichess API Token Saved"
   },
   "repo_settings": {
     "identity_title": "📋 Repertoire Identity",

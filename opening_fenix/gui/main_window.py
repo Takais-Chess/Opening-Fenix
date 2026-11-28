@@ -416,6 +416,9 @@ class MainWindow(QMainWindow):
                 ),
             )
 
+        from opening_fenix.gui.dialogs.lichess_token_dialog import add_lichess_token_tour_step_if_missing
+        add_lichess_token_tour_step_if_missing(self.tour, self, target_widget=getattr(self, "btn_settings", None))
+
         self.tour.finished.connect(self.on_tour_finished)
         self.tour.start_tour()
         self._sync_board_click_to_start()

@@ -40,7 +40,12 @@
     "cloud_btn_sync": "☁️ Cloud Sync ✓",
     "cloud_tip_active": "Verbunden mit: {path}\nKlicken, um jetzt Profile & Repertoires aus der Cloud zu aktualisieren.",
     "cloud_btn_connect": "☁️ Cloud-Ordner verbinden",
-    "cloud_tip_connect": "Verbinde Google Drive / OneDrive, um deine Profile & Repertoires von einem anderen PC sofort zu laden."
+    "cloud_tip_connect": "Verbinde Google Drive / OneDrive, um deine Profile & Repertoires von einem anderen PC sofort zu laden.",
+    "no_repertoires_hint": "Noch keine Repertoires vorhanden.\nErstelle unten ein neues leeres Repertoire, um dein Profil anzulegen.",
+    "btn_create_empty_repo": "Neues leeres Repertoire erstellen",
+    "empty_repo_exists_title": "Repertoire existiert bereits",
+    "empty_repo_exists_msg": "Ein Repertoire mit dem Namen '{name}' existiert bereits. Bitte wähle einen anderen Namen.",
+    "empty_repo_invalid_name_msg": "Der Repertoire-Name ist ungültig oder reserviert. Bitte wähle einen anderen Namen."
   },
   "settings": {
     "lang_change_title": "Sprachwechsel",
@@ -408,7 +413,11 @@
     "creator_step3_title": "Züge am Brett aufbauen",
     "creator_step3_text": "Spiele Züge direkt auf dem Brett, um sie zu deinem Repertoire hinzuzufügen. Über den Variantenbaum und die Tabs rechts verwaltest du Varianten, Kommentare sowie Engine- und Lichess-Vorschläge.",
     "creator_step4_title": "Video-Anleitung: Repertoire erstellen",
-    "creator_step4_text": "Du möchtest Schritt für Schritt sehen, wie man in Opening Fenix ein Schach-Repertoire erstellt?<br><br>Schau dir das Video auf YouTube an:<br><a href=\"https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s\">https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s</a>"
+    "creator_step4_text": "Du möchtest Schritt für Schritt sehen, wie man in Opening Fenix ein Schach-Repertoire erstellt?<br><br>Schau dir das Video auf YouTube an:<br><a href=\"https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s\">https://www.youtube.com/watch?v=uw5ULoCOrCU&t=5s</a>",
+    "lichess_token_title": "Lichess API-Token (Empfohlen)",
+    "lichess_token_text": "Für den Download von Lichess-Eröffnungsstatistiken ohne strenge Abfragelimits wird ein kostenloses Lichess API-Token empfohlen. Du kannst es jetzt direkt einrichten oder später jederzeit in den Einstellungen hinterlegen.",
+    "lichess_token_btn": "🔑 Lichess API-Token einrichten",
+    "lichess_token_saved": "✓ Lichess API-Token eingerichtet"
   },
   "repo_settings": {
     "identity_title": "📋 Repertoire Identität",

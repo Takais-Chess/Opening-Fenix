@@ -55,6 +55,7 @@ class GuidedTourOverlay(QWidget):
         
         layout = QVBoxLayout(self.desc_card)
         layout.setContentsMargins(scale(20), scale(20), scale(20), scale(20))
+        layout.setSpacing(scale(10))
         
         self.lbl_title = QLabel("Titel")
         self.lbl_title.setStyleSheet(f"color: {COLORS['burnt_orange']}; font-size: {scale(20)}px; font-weight: bold;")
@@ -67,6 +68,13 @@ class GuidedTourOverlay(QWidget):
         self.lbl_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction | Qt.TextInteractionFlag.LinksAccessibleByMouse)
         self.lbl_text.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.lbl_text.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
+
+        self.btn_action = QPushButton("")
+        self.btn_action.setObjectName("TourActionBtn")
+        self.btn_action.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_action.setVisible(False)
+        self._apply_action_button_style(completed=False)
+        self.btn_action.clicked.connect(self._on_action_clicked)
         
         # Footer with Buttons
         footer = QHBoxLayout()
@@ -117,11 +125,61 @@ class GuidedTourOverlay(QWidget):
         
         layout.addWidget(self.lbl_title)
         layout.addWidget(self.lbl_text, 1)
+        layout.addWidget(self.btn_action)
         layout.addLayout(footer)
 
-    def add_step(self, widget, title, text):
+    def _apply_action_button_style(self, completed=False):
+        if completed:
+            self.btn_action.setStyleSheet(f"""
+                QPushButton#TourActionBtn {{
+                    background-color: #e8f8f0;
+                    color: #1e8449;
+                    border: 1.5px solid #27ae60;
+                    border-radius: {scale(10)}px;
+                    font-size: {scale(13)}px;
+                    font-weight: bold;
+                    padding: {scale(9)}px {scale(14)}px;
+                }}
+            """)
+        else:
+            self.btn_action.setStyleSheet(f"""
+                QPushButton#TourActionBtn {{
+                    background-color: #34495e;
+                    color: white;
+                    border: none;
+                    border-radius: {scale(10)}px;
+                    font-size: {scale(13)}px;
+                    font-weight: bold;
+                    padding: {scale(9)}px {scale(14)}px;
+                }}
+                QPushButton#TourActionBtn:hover {{ background-color: #2c3e50; }}
+                QPushButton#TourActionBtn:pressed {{ background-color: #1f2d3a; }}
+            """)
+
+    def add_step(self, widget, title, text, action_text=None, action_callback=None, action_done_text=None):
         """Adds a step to the tour. widget can be None for a global welcome."""
-        self.steps.append({'widget': widget, 'title': title, 'text': text})
+        self.steps.append({
+            'widget': widget,
+            'title': title,
+            'text': text,
+            'action_text': action_text,
+            'action_callback': action_callback,
+            'action_done_text': action_done_text,
+            'action_done': False,
+        })
+
+    def _on_action_clicked(self):
+        if not self.steps or self.current_step < 0 or self.current_step >= len(self.steps):
+            return
+        step = self.steps[self.current_step]
+        cb = step.get('action_callback')
+        if callable(cb):
+            res = cb()
+            if res is True:
+                step['action_done'] = True
+                self.update_step()
+        if self.isVisible():
+            self.raise_()
 
     def start_tour(self):
         if not self.steps: 
@@ -153,6 +211,17 @@ class GuidedTourOverlay(QWidget):
         else:
             self.btn_next.setText(tr_ui("tour.btn_next", "WEITER →"))
             self.btn_skip.setVisible(True)
+
+        action_text = step.get('action_text')
+        if action_text:
+            is_done = bool(step.get('action_done'))
+            label = (step.get('action_done_text') or action_text) if is_done else action_text
+            self.btn_action.setText(label)
+            self.btn_action.setEnabled(not is_done)
+            self._apply_action_button_style(completed=is_done)
+            self.btn_action.setVisible(True)
+        else:
+            self.btn_action.setVisible(False)
             
         # Force layout update and compute exact wrapped heights so the last line is never clipped
         content_w = self.desc_card.width() - scale(40) - 4  # Account for 20px margins + 2px frame border per side

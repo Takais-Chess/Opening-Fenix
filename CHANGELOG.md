@@ -2,6 +2,15 @@
  
 All notable changes to this project will be documented in this file.
 
+## [1.4.1] - 2026-11-28
+
+### Added & Improved
+- **Create Empty Repertoire During Profile Setup**: Added a `+ Create Empty Repertoire` action directly inside `RepertoireSelectionDialog` (backed by `create_empty_repertoire()`), allowing users to create and auto-select an empty repertoire with chosen color and default levels even when no courses exist yet.
+- **Lichess API Token Prompt in Guided Tours**: Extended `GuidedTourOverlay` with optional action buttons and added an interactive Lichess API token setup step to both the Trainer and Creator onboarding walkthroughs whenever no valid token is configured yet.
+
+### Fixed
+- **Public & Microsoft Store Example Course Packaging**: Fixed `build_installer.py` (`build_public`) and `build_msix.py` (`prepare_clean_public_store_bundle`) to freshly stage `Tarrasch Example Course` from the project root and fail fast if no example `.db` is bundled; updated `sync_cloud_repertoires.py` to merge Cloud Sync v2 `.assets.fenixsync.zip` archives into their corresponding repertoire folders and remove legacy `*.assets` folders.
+
 ## [1.4.0] - 2026-11-26
 
 ### Added & Improved

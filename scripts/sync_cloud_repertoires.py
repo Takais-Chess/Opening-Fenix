@@ -39,6 +39,7 @@ DEFAULT_CLOUD_SOURCE = (
     r"\Schach\Programme\Opening Fenix\cloud_sync\repertoires"
 )
 ARCHIVE_SUFFIX = ".fenixsync.zip"
+ASSETS_ARCHIVE_SUFFIX = ".assets.fenixsync.zip"
 
 
 def _safe_rmtree(path: Path) -> None:
@@ -102,14 +103,17 @@ def _extract_zip_safely(zip_path: Path, dest_dir: Path) -> None:
 
 
 def _sync_single_archive(
-    zip_path: Path, target_dir: Path, dry_run: bool = False
+    zip_path: Path,
+    target_dir: Path,
+    dry_run: bool = False,
+    assets_zip_path: Path | None = None,
 ) -> str:
-    """Sync one `<Name>.fenixsync.zip` into `target_dir/<Name>`.
+    """Sync one `<Name>.fenixsync.zip` (plus optional `<Name>.assets.fenixsync.zip`) into `target_dir/<Name>`.
 
     Returns 'added' or 'updated'.
     """
     filename = zip_path.name
-    if not filename.lower().endswith(ARCHIVE_SUFFIX):
+    if not filename.lower().endswith(ARCHIVE_SUFFIX) or filename.lower().endswith(ASSETS_ARCHIVE_SUFFIX):
         raise ValueError(f"Unexpected archive name: {filename}")
 
     repo_name = filename[: -len(ARCHIVE_SUFFIX)].strip()
@@ -127,6 +131,8 @@ def _sync_single_archive(
     backup_dir: Path | None = None
     try:
         _extract_zip_safely(zip_path, staging_dir)
+        if assets_zip_path is not None and assets_zip_path.is_file():
+            _extract_zip_safely(assets_zip_path, staging_dir)
 
         if existed:
             backup_dir = Path(
@@ -146,6 +152,11 @@ def _sync_single_archive(
 
         if backup_dir is not None and backup_dir.exists():
             _safe_rmtree(backup_dir)
+
+        # Clean up any stray local `<Name>.assets` directory left by older split-sync runs
+        legacy_assets_dir = target_dir / f"{repo_name}.assets"
+        if legacy_assets_dir.is_dir():
+            _safe_rmtree(legacy_assets_dir)
     finally:
         if staging_dir.exists():
             _safe_rmtree(staging_dir)
@@ -178,11 +189,18 @@ def sync_cloud_repertoires(
         )
         return 2
 
-    archives = sorted(
+    all_entries = sorted(p for p in source_dir.iterdir() if p.is_file())
+    assets_archives = {
+        p.name[: -len(ASSETS_ARCHIVE_SUFFIX)].strip().lower(): p
+        for p in all_entries
+        if p.name.lower().endswith(ASSETS_ARCHIVE_SUFFIX)
+    }
+    archives = [
         p
-        for p in source_dir.iterdir()
-        if p.is_file() and p.name.lower().endswith(ARCHIVE_SUFFIX)
-    )
+        for p in all_entries
+        if p.name.lower().endswith(ARCHIVE_SUFFIX)
+        and not p.name.lower().endswith(ASSETS_ARCHIVE_SUFFIX)
+    ]
     if not archives:
         print(
             "[CLOUD_SYNC_WARNING] No '*.fenixsync.zip' archives found in cloud sync directory. "
@@ -198,9 +216,12 @@ def sync_cloud_repertoires(
     failed: list[tuple[str, str]] = []
 
     for zip_path in archives:
-        repo_name = zip_path.name[: -len(ARCHIVE_SUFFIX)]
+        repo_name = zip_path.name[: -len(ARCHIVE_SUFFIX)].strip()
+        assets_zip = assets_archives.get(repo_name.lower())
         try:
-            action = _sync_single_archive(zip_path, target_dir, dry_run=dry_run)
+            action = _sync_single_archive(
+                zip_path, target_dir, dry_run=dry_run, assets_zip_path=assets_zip
+            )
             if action == "added":
                 added.append(repo_name)
                 print(f"  [+ ADDED]   {repo_name}")

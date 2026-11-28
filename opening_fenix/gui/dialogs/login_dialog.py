@@ -106,6 +106,7 @@ class RepertoireSelectionDialog(QDialog):
         self.selected_language = None
 
         self.repo_buttons = []
+        self.empty_repos_label = None
         
         # Reuse Login Style for consistency
         self.setStyleSheet(get_login_dialog_style())
@@ -144,32 +145,47 @@ class RepertoireSelectionDialog(QDialog):
             }
         """)
         
-        scroll_widget = QWidget()
-        scroll_widget.setObjectName("RepoScrollWidget")
-        scroll_widget.setStyleSheet("#RepoScrollWidget { background: transparent; }")
-        self.grid_layout = QGridLayout(scroll_widget)
+        self.scroll_widget = QWidget()
+        self.scroll_widget.setObjectName("RepoScrollWidget")
+        self.scroll_widget.setStyleSheet("#RepoScrollWidget { background: transparent; }")
+        self.grid_layout = QGridLayout(self.scroll_widget)
         self.grid_layout.setContentsMargins(0, 0, scale(4), scale(8))
         self.grid_layout.setSpacing(scale(15))
         self.grid_layout.setColumnStretch(0, 1)
         self.grid_layout.setColumnStretch(1, 1)
 
-        
-        from opening_fenix.core.services.repertoire_core_service import RepertoireService
-        repo_names = RepertoireService().get_all_repertoires()
-        
-        row, col = 0, 0
-        for name in sorted(repo_names):
-            btn = RepertoireButton(name)
-            self.repo_buttons.append(btn)
-            self.grid_layout.addWidget(btn, row, col)
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
-                        
-        self.grid_layout.setRowStretch(self.grid_layout.rowCount(), 1)
-        self.scroll_area.setWidget(scroll_widget)
+        self._populate_repertoires()
+        self.scroll_area.setWidget(self.scroll_widget)
         layout.addWidget(self.scroll_area)
+
+        layout.addSpacing(scale(10))
+        self.btn_create_empty_repo = QPushButton(
+            "+  " + tr_ui("login.btn_create_empty_repo", "Neues leeres Repertoire erstellen")
+        )
+        self.btn_create_empty_repo.setObjectName("CreateEmptyRepoBtn")
+        self.btn_create_empty_repo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_create_empty_repo.setFixedHeight(scale(42))
+        self.btn_create_empty_repo.setStyleSheet(f"""
+            QPushButton#CreateEmptyRepoBtn {{
+                background-color: rgba(255, 255, 255, 0.55);
+                color: #9a3412;
+                border: 1.5px dashed {COLORS['burnt_orange']};
+                border-radius: {scale(10)}px;
+                font-size: {scale(14)}px;
+                font-weight: bold;
+                padding: 0 {scale(16)}px;
+            }}
+            QPushButton#CreateEmptyRepoBtn:hover {{
+                background-color: #fde8d3;
+                border: 1.5px solid {COLORS['burnt_orange']};
+            }}
+            QPushButton#CreateEmptyRepoBtn:pressed {{
+                background-color: #fbdcc0;
+            }}
+        """)
+        self.btn_create_empty_repo.clicked.connect(self.create_empty_repertoire_dialog)
+        layout.addWidget(self.btn_create_empty_repo)
+        layout.addSpacing(scale(12))
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -260,6 +276,99 @@ class RepertoireSelectionDialog(QDialog):
         self.btn_ok.clicked.connect(self.on_accept)
         layout.addWidget(self.btn_ok)
 
+    def _populate_repertoires(self, auto_select_names=None):
+        """Populates or refreshes the repertoire grid while preserving checked selections."""
+        checked_names = {btn.repo_name for btn in self.repo_buttons if btn.isChecked()}
+        if auto_select_names:
+            checked_names.update(auto_select_names)
+
+        for r in range(self.grid_layout.rowCount()):
+            self.grid_layout.setRowStretch(r, 0)
+
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+        self.repo_buttons = []
+        self.empty_repos_label = None
+
+        from opening_fenix.core.services.repertoire_core_service import RepertoireService
+        repo_names = RepertoireService().get_all_repertoires()
+
+        if not repo_names:
+            self.empty_repos_label = QLabel(
+                tr_ui(
+                    "login.no_repertoires_hint",
+                    "Noch keine Repertoires vorhanden.\nErstelle unten ein neues leeres Repertoire, um dein Profil anzulegen.",
+                )
+            )
+            self.empty_repos_label.setObjectName("EmptyReposHint")
+            self.empty_repos_label.setWordWrap(True)
+            self.empty_repos_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.empty_repos_label.setStyleSheet(
+                f"color: #795548; font-size: {scale(14)}px; padding: {scale(24)}px; background: transparent;"
+            )
+            self.grid_layout.addWidget(self.empty_repos_label, 0, 0, 1, 2, Qt.AlignmentFlag.AlignCenter)
+            self.grid_layout.setRowStretch(1, 1)
+            return
+
+        row, col = 0, 0
+        for name in sorted(repo_names):
+            btn = RepertoireButton(name)
+            if name in checked_names:
+                btn.setChecked(True)
+            self.repo_buttons.append(btn)
+            self.grid_layout.addWidget(btn, row, col)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
+
+        self.grid_layout.setRowStretch(self.grid_layout.rowCount(), 1)
+
+    def create_empty_repertoire_dialog(self):
+        """Prompts to create a new empty repertoire, initializes it, and selects it automatically."""
+        from opening_fenix.creator.repo_selection_dialog import NewRepertoireDialog
+        from opening_fenix.core.services.repertoire_core_service import create_empty_repertoire
+
+        dlg = NewRepertoireDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return None
+
+        name, color = dlg.get_data()
+        try:
+            created = create_empty_repertoire(name, color)
+        except FileExistsError:
+            QMessageBox.warning(
+                self,
+                tr_ui("login.empty_repo_exists_title", "Repertoire existiert bereits"),
+                tr_ui(
+                    "login.empty_repo_exists_msg",
+                    "Ein Repertoire mit dem Namen '{name}' existiert bereits. Bitte wähle einen anderen Namen.",
+                    name=name,
+                ),
+            )
+            return None
+        except ValueError:
+            QMessageBox.warning(
+                self,
+                tr_ui("creator.new_repo_invalid_name_title", "Ungültiger Name"),
+                tr_ui(
+                    "login.empty_repo_invalid_name_msg",
+                    "Der Repertoire-Name ist ungültig oder reserviert. Bitte wähle einen anderen Namen.",
+                ),
+            )
+            return None
+        except Exception as e:
+            QMessageBox.critical(self, tr_ui("common.error", "Fehler"), str(e))
+            return None
+
+        self._populate_repertoires(auto_select_names={created})
+        return created
+
     def flash_widget(self, widget):
         """Creates a bold red flash effect to draw attention."""
         original_style = widget.styleSheet()
@@ -294,6 +403,8 @@ class RepertoireSelectionDialog(QDialog):
         if not selected_repos:
             # Flash the scroll area or buttons
             self.flash_widget(self.scroll_area)
+            if not self.repo_buttons:
+                self.flash_widget(self.btn_create_empty_repo)
             has_error = True
             
         if not checked_lang:

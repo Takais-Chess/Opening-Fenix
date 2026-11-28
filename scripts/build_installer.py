@@ -104,7 +104,7 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                 shutil.copytree('repertoires', dst, ignore=shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock', '*.db-shm', '*.db-wal'))
                 print(f" -> Synced repertoires to {dst}")
 
-    # Remove example/sample repertoires (private installer only ships non-example repos)
+    # Remove example/sample repertoires and stray .assets folders (private installer only ships non-example repos)
     for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
         for d in dirs:
             if d.lower() == 'repertoires':
@@ -112,15 +112,62 @@ def build_private(dist_dir, iscc_exe, iss_file, app_version):
                 for item in os.listdir(repo_dir):
                     item_path = os.path.join(repo_dir, item)
                     item_lower = item.lower()
-                    if os.path.isdir(item_path) and ("example" in item_lower or "sample" in item_lower):
+                    if os.path.isdir(item_path) and (
+                        "example" in item_lower
+                        or "sample" in item_lower
+                        or item_lower.endswith(".assets")
+                    ):
                         safe_rmtree(item_path)
                         safe_item = item.encode('ascii', errors='replace').decode('ascii')
-                        print(f" -> Removed example repertoire '{safe_item}' from '{repo_dir}'")
+                        print(f" -> Removed non-private repertoire '{safe_item}' from '{repo_dir}'")
 
     res = _run_iscc(iscc_exe, iss_file, app_version, 'Private')
     if res.returncode != 0:
         print("ERROR: Private Inno Setup compilation failed.")
         sys.exit(res.returncode)
+
+
+def _sync_example_repertoires(src_repertoires_dir, target_bases):
+    """Copy ONLY example/sample repertoires freshly into target repertoire roots and verify a .db exists."""
+    ignore_fn = shutil.ignore_patterns('*.pgi', '*.tmp', '*.lock', '*.db-shm', '*.db-wal')
+    staged_roots = []
+
+    for target_base in target_bases:
+        if not os.path.exists(target_base):
+            continue
+        dst_repo_root = os.path.join(target_base, 'repertoires')
+        safe_rmtree(dst_repo_root)
+        os.makedirs(dst_repo_root, exist_ok=True)
+        staged_roots.append(dst_repo_root)
+
+        if os.path.isdir(src_repertoires_dir):
+            gitkeep = os.path.join(src_repertoires_dir, '.gitkeep')
+            if os.path.isfile(gitkeep):
+                shutil.copy2(gitkeep, os.path.join(dst_repo_root, '.gitkeep'))
+
+            for item in sorted(os.listdir(src_repertoires_dir)):
+                src_item = os.path.join(src_repertoires_dir, item)
+                item_lower = item.lower()
+                if (
+                    os.path.isdir(src_item)
+                    and ("example" in item_lower or "sample" in item_lower)
+                    and not item_lower.endswith(".assets")
+                ):
+                    shutil.copytree(src_item, os.path.join(dst_repo_root, item), ignore=ignore_fn)
+                    safe_item = item.encode('ascii', errors='replace').decode('ascii')
+                    print(f" -> Synced example repertoire '{safe_item}' to '{dst_repo_root}'")
+
+    check_root = next(
+        (r for r in staged_roots if os.path.basename(os.path.dirname(r)) == '_internal'),
+        staged_roots[0] if staged_roots else None,
+    )
+    has_db = False
+    if check_root and os.path.isdir(check_root):
+        for _, _, files in os.walk(check_root):
+            if any(f.lower().endswith('.db') for f in files):
+                has_db = True
+                break
+    return has_db
 
 
 def build_public(dist_dir, iscc_exe, iss_file, app_version):
@@ -135,19 +182,10 @@ def build_public(dist_dir, iscc_exe, iss_file, app_version):
                 f.write('1')
             print(f" -> Placed PUBLIC_VERSION marker at {pub_marker}")
 
-    # Clean repertoires across the entire bundle, keeping ONLY example/sample folders
-    for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):
-        for d in dirs:
-            if d.lower() == 'repertoires':
-                repo_dir = os.path.join(root_dir_path, d)
-                for item in os.listdir(repo_dir):
-                    item_path = os.path.join(repo_dir, item)
-                    item_lower = item.lower()
-                    if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
-                        safe_rmtree(item_path)
-                        safe_item = item.encode('ascii', errors='replace').decode('ascii')
-                        print(f" -> Removed non-example repertoire '{safe_item}' from '{repo_dir}'")
-    print(" -> Synced example repertoires to public bundle")
+    # Freshly sync ONLY example/sample repertoires from project root (build_private may have removed them from dist_dir)
+    if not _sync_example_repertoires('repertoires', [dist_dir, os.path.join(dist_dir, '_internal')]):
+        print("ERROR: No example/sample repertoire .db found for PUBLIC installer bundle.")
+        sys.exit(1)
 
     # Remove any profiles from the bundle (profiles are user-created only)
     for root_dir_path, dirs, _ in os.walk(dist_dir, topdown=False):

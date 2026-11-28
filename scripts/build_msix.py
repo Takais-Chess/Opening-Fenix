@@ -124,7 +124,7 @@ def generate_store_assets(logo_path, assets_out_dir):
     print(f" -> Generated {len(specs)} Store logo assets in {assets_out_dir}")
 
 
-def prepare_clean_public_store_bundle(src_dist_dir, staged_app_dir):
+def prepare_clean_public_store_bundle(src_dist_dir, staged_app_dir, project_root=None):
     """Copy PyInstaller bundle into staging and sanitize for Public Microsoft Store distribution."""
     shutil.copytree(src_dist_dir, staged_app_dir)
 
@@ -135,19 +135,55 @@ def prepare_clean_public_store_bundle(src_dist_dir, staged_app_dir):
                 with open(os.path.join(marker_dir, marker), "w", encoding="utf-8") as f:
                     f.write("1")
 
-    # Keep only example/sample repertoires; remove profiles and engines
+    # Remove profiles and engines from the bundle
     for root_dir, dirs, _ in os.walk(staged_app_dir, topdown=False):
         for d in dirs:
-            d_lower = d.lower()
-            full_path = os.path.join(root_dir, d)
-            if d_lower in ("profiles", "engines"):
-                safe_rmtree(full_path)
-            elif d_lower == "repertoires":
-                for item in os.listdir(full_path):
-                    item_path = os.path.join(full_path, item)
-                    item_lower = item.lower()
-                    if os.path.isdir(item_path) and not ("example" in item_lower or "sample" in item_lower):
-                        safe_rmtree(item_path)
+            if d.lower() in ("profiles", "engines"):
+                safe_rmtree(os.path.join(root_dir, d))
+
+    # Freshly stage ONLY example/sample repertoires from project_root/repertoires
+    # (dist_dir may have been stripped by an earlier build_private run)
+    src_repertoires = os.path.join(project_root or os.getcwd(), "repertoires")
+    ignore_fn = shutil.ignore_patterns("*.pgi", "*.tmp", "*.lock", "*.db-shm", "*.db-wal")
+    staged_repo_roots = []
+
+    for target_base in [staged_app_dir, os.path.join(staged_app_dir, "_internal")]:
+        if not os.path.exists(target_base):
+            continue
+        dst_repo_root = os.path.join(target_base, "repertoires")
+        safe_rmtree(dst_repo_root)
+        os.makedirs(dst_repo_root, exist_ok=True)
+        staged_repo_roots.append(dst_repo_root)
+
+        if os.path.isdir(src_repertoires):
+            gitkeep = os.path.join(src_repertoires, ".gitkeep")
+            if os.path.isfile(gitkeep):
+                shutil.copy2(gitkeep, os.path.join(dst_repo_root, ".gitkeep"))
+
+            for item in sorted(os.listdir(src_repertoires)):
+                src_item = os.path.join(src_repertoires, item)
+                item_lower = item.lower()
+                if (
+                    os.path.isdir(src_item)
+                    and ("example" in item_lower or "sample" in item_lower)
+                    and not item_lower.endswith(".assets")
+                ):
+                    shutil.copytree(src_item, os.path.join(dst_repo_root, item), ignore=ignore_fn)
+
+    check_root = next(
+        (r for r in staged_repo_roots if os.path.basename(os.path.dirname(r)) == "_internal"),
+        staged_repo_roots[0] if staged_repo_roots else None,
+    )
+    has_db = False
+    if check_root and os.path.isdir(check_root):
+        for _, _, files in os.walk(check_root):
+            if any(f.lower().endswith(".db") for f in files):
+                has_db = True
+                break
+    if not has_db:
+        raise RuntimeError(
+            f"No example/sample repertoire .db was staged from '{src_repertoires}' into '{check_root}'."
+        )
 
     print(f" -> Staged clean Public + Store bundle at {staged_app_dir}")
 
@@ -209,7 +245,7 @@ def main():
     safe_rmtree(staging_dir)
     os.makedirs(staging_dir, exist_ok=True)
 
-    prepare_clean_public_store_bundle(dist_dir, os.path.join(staging_dir, "app"))
+    prepare_clean_public_store_bundle(dist_dir, os.path.join(staging_dir, "app"), project_root=project_root)
 
     logo_path = os.path.join(project_root, "assets", "Logo", "Logo.png")
     generate_store_assets(logo_path, os.path.join(staging_dir, "Assets"))

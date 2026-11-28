@@ -130,3 +130,143 @@ def test_check_for_onboarding_logic(qtbot, monkeypatch, tmp_path):
     mw.training_manager.get_setting.return_value = None
     real_func(mw)
     mw.start_guided_tour.assert_not_called()
+
+
+def test_tour_action_button_visibility_and_completion(qtbot, tour_overlay):
+    """Action button appears only on action steps, triggers callback, and marks completed when callback returns True."""
+    calls = []
+
+    def _on_action():
+        calls.append("clicked")
+        return True
+
+    tour_overlay.add_step(None, "Step 0", "Plain step before")
+    tour_overlay.add_step(
+        None,
+        "Step 1",
+        "Action step description",
+        action_text="Set up Token",
+        action_callback=_on_action,
+        action_done_text="Token Saved",
+    )
+    tour_overlay.add_step(None, "Step 2", "Plain step after")
+
+    tour_overlay.start_tour()
+    assert tour_overlay.current_step == 0
+    assert not tour_overlay.btn_action.isVisible()
+
+    qtbot.mouseClick(tour_overlay.btn_next, Qt.MouseButton.LeftButton)
+    assert tour_overlay.current_step == 1
+    assert tour_overlay.btn_action.isVisible()
+    assert tour_overlay.btn_action.isEnabled()
+    assert tour_overlay.btn_action.text() == "Set up Token"
+
+    qtbot.mouseClick(tour_overlay.btn_action, Qt.MouseButton.LeftButton)
+    assert calls == ["clicked"]
+    assert tour_overlay.btn_action.text() == "Token Saved"
+    assert not tour_overlay.btn_action.isEnabled()
+
+    qtbot.mouseClick(tour_overlay.btn_next, Qt.MouseButton.LeftButton)
+    assert tour_overlay.current_step == 2
+    assert not tour_overlay.btn_action.isVisible()
+
+
+def test_lichess_token_tour_step_conditional(qtbot, parent_widget, tmp_path, monkeypatch):
+    """Lichess token step is added to the tour only when no valid Lichess API token is configured."""
+    import json
+    import opening_fenix.gui.dialogs.lichess_token_dialog as ltd_mod
+    from PyQt6.QtWidgets import QDialog
+
+    monkeypatch.delenv("LICHESS_TOKEN", raising=False)
+    monkeypatch.setattr("opening_fenix.core.utils.get_user_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("opening_fenix.core.services.update_service.get_user_dir", lambda: str(tmp_path))
+    monkeypatch.setattr("opening_fenix.gui.dialogs.lichess_token_dialog.get_user_dir", lambda: str(tmp_path))
+
+    # Case 1: No config.json -> step is added and action opens LichessTokenDialog
+    tour1 = GuidedTourOverlay(parent_widget)
+    tour1.setGeometry(parent_widget.rect())
+    added = ltd_mod.add_lichess_token_tour_step_if_missing(tour1, parent_widget)
+    assert added is True
+    assert len(tour1.steps) == 1
+    assert tour1.steps[0]["action_text"]
+
+    class StubTokenDialog:
+        def __init__(self, parent=None, current_token=None, allow_skip=False):
+            assert allow_skip is True
+            self.skip_chosen = False
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def get_token(self):
+            return "lip_validtoken12345"
+
+    monkeypatch.setattr(ltd_mod, "LichessTokenDialog", StubTokenDialog)
+    tour1.start_tour()
+    assert tour1.btn_action.isVisible()
+    assert tour1.btn_action.isEnabled()
+    qtbot.mouseClick(tour1.btn_action, Qt.MouseButton.LeftButton)
+    assert not tour1.btn_action.isEnabled()
+
+    # Case 2: Valid token already configured in config.json -> step is omitted
+    with open(tmp_path / "config.json", "w", encoding="utf-8") as f:
+        json.dump({"lichess_token": "lip_existingtoken12345"}, f)
+
+    tour2 = GuidedTourOverlay(parent_widget)
+    tour2.setGeometry(parent_widget.rect())
+    added2 = ltd_mod.add_lichess_token_tour_step_if_missing(tour2, parent_widget)
+    assert added2 is False
+    assert len(tour2.steps) == 0
+
+
+def test_main_window_empty_repertoire_and_tour_lichess_step(qapp, mock_user_dir, monkeypatch):
+    """MainWindow opens cleanly with a single empty repertoire and adds Lichess token step to tour only when missing."""
+    import os
+    import json
+    from opening_fenix.core.services.repertoire_core_service import (
+        create_empty_repertoire,
+        invalidate_all_repertoires_cache,
+    )
+    from opening_fenix.core.models import DatabaseManager, UserBase, UserRepertoireSettings
+
+    monkeypatch.delenv("LICHESS_TOKEN", raising=False)
+    monkeypatch.setattr("opening_fenix.core.services.update_service.get_user_dir", lambda: mock_user_dir)
+    monkeypatch.setattr("opening_fenix.gui.dialogs.lichess_token_dialog.get_user_dir", lambda: mock_user_dir)
+    monkeypatch.setattr("opening_fenix.gui.main_window.MainWindow.play_sound", lambda *args: None)
+
+    invalidate_all_repertoires_cache()
+    repo_name = create_empty_repertoire("EmptySoloRepo", "b")
+
+    profile_db = DatabaseManager(os.path.join(mock_user_dir, "profiles", "EmptyUser.db"), base=UserBase)
+    sess = profile_db.get_session()
+    try:
+        sess.add(UserRepertoireSettings(repertoire_name=repo_name, active_level=1))
+        sess.commit()
+    finally:
+        sess.close()
+        profile_db.close()
+
+    win = MainWindow(profile_name="EmptyUser")
+    try:
+        assert win.repertoire_manager.active_repertoire_name == repo_name
+        assert win.board_widget.flipped is True
+
+        # No config.json -> tour includes Lichess API token setup step at the end
+        win.start_guided_tour()
+        assert any(step.get("action_text") for step in win.tour.steps)
+        assert win.tour.steps[-1].get("action_text") is not None
+        win.tour.hide()
+        win.tour._detach_event_filter()
+
+        # Valid token present -> tour omits Lichess API token step
+        with open(os.path.join(mock_user_dir, "config.json"), "w", encoding="utf-8") as f:
+            json.dump({"lichess_token": "lip_existingtoken12345"}, f)
+
+        win.start_guided_tour()
+        assert not any(step.get("action_text") for step in win.tour.steps)
+        win.tour.hide()
+        win.tour._detach_event_filter()
+    finally:
+        win.close()
+
+

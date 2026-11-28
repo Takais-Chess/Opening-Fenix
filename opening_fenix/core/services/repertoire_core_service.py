@@ -8,7 +8,12 @@ from typing import List, Dict, Any, Optional, Tuple, Set
 from opening_fenix.core.db.models import RepertoireLevel, Base, Move, RepertoireMove, Position, LichessData
 from opening_fenix.core.db.database import DatabaseManager
 from opening_fenix.core.db.meta_utils import get_meta, set_meta, delete_repertoire_db
-from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path, get_user_dir
+from opening_fenix.core.utils import (
+    get_repertoire_dir,
+    get_repertoire_db_path,
+    get_user_dir,
+    initialize_repertoire_assets,
+)
 from opening_fenix.core.services.analysis_service import get_repertoire_analysis_status
 from opening_fenix.core.services.profile_service import update_repertoire_name_globally
 from opening_fenix.core.logger import logger
@@ -45,6 +50,65 @@ def invalidate_all_repertoires_cache() -> None:
     global _cached_all_repos, _cached_all_repos_mtime
     _cached_all_repos = None
     _cached_all_repos_mtime = None
+
+
+_FORBIDDEN_REPERTOIRE_CHARS = set('\\/:*?"<>|')
+
+
+def create_empty_repertoire(repo_name: str, color: str = "w") -> str:
+    """Create and initialize a new empty repertoire with default levels and color metadata."""
+    clean_name = (repo_name or "").strip()
+    if (
+        not clean_name
+        or clean_name in (".", "..")
+        or clean_name.lower() == "test"
+        or any(c in _FORBIDDEN_REPERTOIRE_CHARS for c in clean_name)
+    ):
+        raise ValueError("Invalid repertoire name")
+
+    db_path = get_repertoire_db_path(clean_name)
+    if os.path.exists(db_path):
+        raise FileExistsError(clean_name)
+
+    repo_base = os.path.join(get_user_dir(), "repertoires")
+    if os.path.exists(repo_base):
+        existing_dirs = []
+        try:
+            with os.scandir(repo_base) as it:
+                existing_dirs = [entry.name for entry in it if entry.is_dir()]
+        except OSError:
+            existing_dirs = []
+        for dir_name in existing_dirs:
+            if dir_name.lower() == clean_name.lower():
+                raise FileExistsError(clean_name)
+
+    norm_color = "b" if str(color).strip().lower() == "b" else "w"
+    repo_dir = get_repertoire_dir(clean_name)
+    initialize_repertoire_assets(repo_dir)
+
+    db = DatabaseManager(db_path, base=Base)
+    session = db.get_session()
+    try:
+        if session.query(RepertoireLevel).count() == 0:
+            defaults = [
+                tr_ui("repo_settings.level_default_1", "Grundlagen"),
+                tr_ui("repo_settings.level_default_2", "Tiefe Theorie"),
+                tr_ui("repo_settings.level_default_3", "Nachschlagewerk und Erklärungen"),
+            ]
+            for i, level_name in enumerate(defaults, 1):
+                session.add(RepertoireLevel(name=level_name, order=i, target_elo=1500))
+        set_meta(session, "color", norm_color)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        db.close()
+
+    invalidate_all_repertoires_cache()
+    invalidate_repertoire_levels_cache(clean_name, clear_comment_languages=True)
+    return clean_name
 
 _comment_languages_cache: Dict[Tuple[str, str], Tuple[Tuple[int, int, int, int], List[str]]] = {}
 _COMMENT_LANGS_CACHE_VER = "2"

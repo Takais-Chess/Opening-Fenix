@@ -4116,6 +4116,9 @@ class CreatorWindow(QMainWindow):
             ),
         )
 
+        from opening_fenix.gui.dialogs.lichess_token_dialog import add_lichess_token_tour_step_if_missing
+        add_lichess_token_tour_step_if_missing(self.creator_tour, self, target_widget=None)
+
         self.creator_tour.finished.connect(self.on_creator_tour_finished)
         self.creator_tour.start_tour()
 

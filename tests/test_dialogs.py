@@ -153,3 +153,101 @@ def test_repertoire_selection_soft_tint_styling(qtbot, mock_user_dir):
     # Primary CTA retains solid burnt orange
     assert f"background-color: {COLORS['burnt_orange']}" in dialog.btn_ok.styleSheet()
 
+
+def test_create_empty_repertoire_service(mock_user_dir):
+    """Verify create_empty_repertoire initializes assets, 3 default levels, color metadata, and validation."""
+    from opening_fenix.core.services.repertoire_core_service import (
+        RepertoireService,
+        create_empty_repertoire,
+        invalidate_all_repertoires_cache,
+    )
+    from opening_fenix.core.utils import get_repertoire_dir, get_repertoire_db_path
+    from opening_fenix.core.db.database import DatabaseManager
+    from opening_fenix.core.db.models import RepertoireLevel
+    from opening_fenix.core.db.meta_utils import get_meta
+
+    invalidate_all_repertoires_cache()
+
+    white_name = create_empty_repertoire("My White Course", "w")
+    black_name = create_empty_repertoire("My Black Course", "b")
+    assert white_name == "My White Course"
+    assert black_name == "My Black Course"
+
+    repos = RepertoireService().get_all_repertoires()
+    assert "My White Course" in repos
+    assert "My Black Course" in repos
+
+    for repo_name, expected_color in [("My White Course", "w"), ("My Black Course", "b")]:
+        repo_dir = get_repertoire_dir(repo_name)
+        db_path = get_repertoire_db_path(repo_name)
+        assert os.path.exists(db_path)
+        assert os.path.exists(os.path.join(repo_dir, "Model Games.pgn"))
+        assert os.path.exists(os.path.join(repo_dir, "Typical Motives.pgn"))
+        assert os.path.exists(os.path.join(repo_dir, "Tactics", "Tactics.pgn"))
+
+        db = DatabaseManager(db_path)
+        session = db.get_session()
+        try:
+            levels = session.query(RepertoireLevel).order_by(RepertoireLevel.order).all()
+            assert len(levels) == 3
+            assert [lvl.order for lvl in levels] == [1, 2, 3]
+            assert get_meta(session, "color") == expected_color
+        finally:
+            session.close()
+            db.close()
+
+    # Duplicate checks (exact and case-insensitive)
+    with pytest.raises(FileExistsError):
+        create_empty_repertoire("My White Course", "w")
+    with pytest.raises(FileExistsError):
+        create_empty_repertoire("my white course", "b")
+
+    # Invalid / reserved name checks
+    for bad_name in ("", "   ", ".", "..", "test", "bad/name", "bad:name"):
+        with pytest.raises(ValueError):
+            create_empty_repertoire(bad_name, "w")
+
+
+def test_repertoire_selection_create_empty_repertoire_flow(qtbot, mock_user_dir, monkeypatch):
+    """When 0 repertoires exist, users can create an empty repertoire directly in profile creation."""
+    from opening_fenix.core.services.repertoire_core_service import invalidate_all_repertoires_cache
+
+    invalidate_all_repertoires_cache()
+
+    dialog = RepertoireSelectionDialog()
+    qtbot.addWidget(dialog)
+
+    assert len(dialog.repo_buttons) == 0
+    assert dialog.empty_repos_label is not None
+    assert dialog.btn_create_empty_repo is not None
+
+    class StubNewRepertoireDialog:
+        def __init__(self, parent=None):
+            pass
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def get_data(self):
+            return "My First Opening", "b"
+
+    monkeypatch.setattr(
+        "opening_fenix.creator.repo_selection_dialog.NewRepertoireDialog",
+        StubNewRepertoireDialog,
+    )
+
+    created = dialog.create_empty_repertoire_dialog()
+    assert created == "My First Opening"
+    assert dialog.empty_repos_label is None
+    assert len(dialog.repo_buttons) == 1
+    assert dialog.repo_buttons[0].repo_name == "My First Opening"
+    assert dialog.repo_buttons[0].isChecked() is True
+
+    de_btn = dialog.findChild(QPushButton, "LangBtn_de")
+    if de_btn:
+        de_btn.setChecked(True)
+
+    dialog.on_accept()
+    assert dialog.selected_repos == ["My First Opening"]
+
+
